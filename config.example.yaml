@@ -1,0 +1,91 @@
+# commandcenter 설정 예시. config.yaml로 복사한 뒤 사용자 비밀번호 해시를 채우세요.
+listen: ":8081"
+baseURL: "http://localhost:8081"   # 클라이언트가 접속하는 주소
+dataDir: "/data"
+memoryLimitMiB: 80
+# maxUploadMiB: 1024               # 업로드 본문 최대 크기(MiB). 기본 1024, 1..1048576. 초과하면 413
+anonymousRead: true                # 익명 다운로드 허용 (저장소별 anonymousRead로 덮어쓰기 가능)
+
+users:
+  - name: admin
+    passwordHash: "<commandcenter hash-password 출력값>"
+    roles: [admin]
+  - name: ci
+    passwordHash: "<commandcenter hash-password 출력값>"
+    roles: [deployer]
+
+roles:
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted"] }
+
+repositories:
+  - name: maven-central
+    format: maven
+    type: proxy
+    remote: "https://repo1.maven.org/maven2/"
+    metadataMaxAge: "24h"
+  - name: maven-releases
+    format: maven
+    type: hosted
+    versionPolicy: release
+    writePolicy: allow_once
+  - name: maven-snapshots
+    format: maven
+    type: hosted
+    versionPolicy: snapshot
+    writePolicy: allow
+  - name: maven-public
+    format: maven
+    type: group
+    members: [maven-releases, maven-snapshots, maven-central]
+  - name: npm-proxy
+    format: npm
+    type: proxy
+    remote: "https://registry.npmjs.org/"
+    metadataMaxAge: "1h"
+  - name: npm-hosted
+    format: npm
+    type: hosted
+  - name: npm-all
+    format: npm
+    type: group
+    members: [npm-hosted, npm-proxy]
+    writeMember: npm-hosted
+  - name: pypi-proxy
+    format: pypi
+    type: proxy
+    remote: "https://pypi.org/"
+    metadataMaxAge: "1h"
+  - name: pypi-hosted
+    format: pypi
+    type: hosted
+  - name: pypi-all
+    format: pypi
+    type: group
+    members: [pypi-hosted, pypi-proxy]
+    writeMember: pypi-hosted
+  - name: go-proxy
+    format: go
+    type: proxy
+    remote: "https://proxy.golang.org/"
+    metadataMaxAge: "1h"
+  - name: go-hosted
+    format: go
+    type: hosted
+  - name: go-all
+    format: go
+    type: group
+    members: [go-hosted, go-proxy]
+    writeMember: go-hosted
+  - name: cargo-proxy
+    format: cargo
+    type: proxy
+    remote: "https://index.crates.io/"
+    metadataMaxAge: "1h"
+  - name: cargo-hosted
+    format: cargo
+    type: hosted
+  - name: cargo-all
+    format: cargo
+    type: group
+    members: [cargo-hosted, cargo-proxy]
+    writeMember: cargo-hosted

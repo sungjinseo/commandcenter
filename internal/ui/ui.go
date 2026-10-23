@@ -1,0 +1,243 @@
+// Package ui serves the web UI: a JSON API under /-/api/ and an embedded
+// single-page app under /ui/.
+package ui
+
+import (
+	"context"
+	"crypto/sha256"
+	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"commandcenter/internal/auth"
+	"commandcenter/internal/config"
+	"commandcenter/internal/logring"
+	"commandcenter/internal/logsafe"
+	"commandcenter/internal/meta"
+	"commandcenter/internal/repo"
+	"commandcenter/internal/tasks"
+)
+
+//go:embed static
+var staticFiles embed.FS
+
+const csp = "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'"
+
+// UI holds what the UI handlers need. Auth.Sessions must be set.
+type UI struct {
+	Repos   *repo.Registry // live repository definitions; read a Snapshot once per request
+	Auth    *auth.Authenticator
+	DB      *meta.DB
+	Store   *repo.Store   // live blob stores (the name→store map) and routing; nil disables the blob-store API
+	BaseURL func() string // the live baseURL setting, without trailing slash; nil reads the auth snapshot
+	Version string
+	Started time.Time
+	Tasks   *tasks.Service // scheduled tasks and runs; nil serves 501
+	Log     *slog.Logger
+	Events  repo.EventSink // activity events; nil records none
+	Logs    *logring.Ring  // recent log records for the log viewer; nil serves none
+	Mail    Mailer         // synchronous sender for the SMTP test; nil serves 501
+
+	Config     *config.Config          // read-only; never serialised wholesale
+	DataDir    string                  // blob root, for the health and filestore checks
+	FetchSlots func() (inUse, max int) // nil skips the fetch-slot check
+
+	smtpTest       smtpTestState              // rate limit of the SMTP test send
+	settingsLoaded func()                     // test hook: runs between putSettings' read and its write
+	accessMu       sync.Mutex                 // serialises access changes: load, lockout check, write, reload (final review I3)
+	accessChecked  func()                     // test hook: runs after an access change passed its lockout check, before the write
+	memReader      func() (used, limit int64) // test hook; nil reads the runtime
+	blobChecker    func() (bool, string)      // test hook; nil runs checkBlobStore
+	blobBusy       atomic.Bool                // a blob check goroutine is still running
+
+	// Heavy queries (search, stats) share heavySlots slots and the stats are
+	// cached; the function fields and now are test hooks.
+	slotsOnce      sync.Once
+	slots          chan struct{}
+	repoCache      ttlCache[map[string]meta.RepoStat]
+	blobCache      ttlCache[blobTotals]
+	repoStatsQuery func(context.Context) (map[string]meta.RepoStat, error)
+	blobStatsQuery func(context.Context) (int64, int64, error)
+	now            func() time.Time
+}
+
+// Routes registers "/", "GET /ui/" and "/-/api/" handlers on mux.
+func (u *UI) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("/{$}", u.root)
+	mux.Handle("GET /ui/", u.static())
+	mux.Handle("/-/api/", u.apiHandler())
+}
+
+// root redirects to the UI. Only GET and HEAD are redirected; other methods
+// keep the 404 that "/" answered before the UI existed.
+func (u *UI) root(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, "/ui/", http.StatusFound)
+}
+
+func securityHeaders(h http.Header) {
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "same-origin")
+}
+
+// static serves the embedded files. Unknown paths serve index.html: routing
+// is hash-based, so this only matters for typos.
+func (u *UI) static() http.Handler {
+	sub, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		panic(err) // the embed directive guarantees the directory
+	}
+	files := http.FileServerFS(sub)
+	etags := staticETags(sub) // computed once; the files are embedded and never change
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		securityHeaders(h)
+		h.Set("Content-Security-Policy", csp)
+		h.Set("X-Frame-Options", "DENY")
+		name := r.URL.Path[len("/ui/"):]
+		if name != "" {
+			if st, err := fs.Stat(sub, name); err != nil || st.IsDir() || !fs.ValidPath(name) {
+				name = ""
+			}
+		}
+		r2 := new(http.Request)
+		*r2 = *r
+		u2 := *r.URL
+		u2.Path, u2.RawPath = "/"+name, ""
+		r2.URL = &u2
+		key := name
+		if key == "" {
+			key = "index.html"
+		}
+		// no-cache + ETag: browsers revalidate (cheap 304) and pick up new JS after an upgrade.
+		h.Set("Cache-Control", "no-cache")
+		if tag := etags[key]; tag != "" {
+			h.Set("ETag", tag)
+		}
+		files.ServeHTTP(w, r2)
+	})
+}
+
+// apiHandler serves /-/api/ from its own mux so that unknown paths and
+// wrong methods still answer JSON, with the API headers.
+func (u *UI) apiHandler() http.Handler {
+	api := http.NewServeMux()
+	u.apiRoutes(api)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		securityHeaders(h)
+		h.Set("Cache-Control", "no-store")
+		handler, pattern := api.Handler(r)
+		if pattern == "" {
+			// The mux's own 404 or 405: capture its status and Allow header.
+			c := &catcher{h: http.Header{}}
+			handler.ServeHTTP(c, r)
+			if c.status >= 300 && c.status < 400 {
+				api.ServeHTTP(w, r) // path-cleaning redirect: let the mux answer it
+				return
+			}
+			if allow := c.h.Get("Allow"); allow != "" {
+				h.Set("Allow", allow)
+			}
+			status := c.status
+			if status == 0 || status == http.StatusOK {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, http.StatusText(status))
+			return
+		}
+		api.ServeHTTP(w, r)
+	})
+}
+
+// catcher records a response's status and headers and discards its body.
+type catcher struct {
+	h      http.Header
+	status int
+}
+
+func (c *catcher) Header() http.Header { return c.h }
+func (c *catcher) Write(b []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	return len(b), nil
+}
+func (c *catcher) WriteHeader(code int) {
+	if c.status == 0 {
+		c.status = code
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// fail answers 500 and logs err; internal details are not exposed.
+func (u *UI) fail(w http.ResponseWriter, r *http.Request, err error) {
+	id := r.Header.Get("X-Request-Id")
+	if ctxDone(err) { // the caller left or timed out waiting for a slot
+		if u.Log != nil && errors.Is(err, context.DeadlineExceeded) {
+			u.Log.Warn("ui api timed out", "id", id, "method", r.Method, "path", r.URL.Path, "err", logsafe.Err(err))
+		}
+		writeError(w, http.StatusServiceUnavailable, "server busy")
+		return
+	}
+	if u.Log != nil {
+		u.Log.Error("ui api failed", "id", id, "method", r.Method, "path", r.URL.Path, "err", logsafe.Err(err))
+	}
+	writeError(w, http.StatusInternalServerError, "internal error (request id "+id+")")
+}
+
+// rfc3339 formats t in UTC; the zero time is "".
+func rfc3339(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// staticETags maps every embedded file to a strong ETag, the quoted hex sha256
+// of its content.
+func staticETags(fsys fs.FS) map[string]string {
+	tags := map[string]string{}
+	_ = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(b)
+		tags[p] = `"` + hex.EncodeToString(sum[:]) + `"`
+		return nil
+	})
+	return tags
+}
+
+// baseURL is the current external URL without a trailing slash. It is read
+// per request, so a change of the baseURL setting applies at once.
+func (u *UI) baseURL() string {
+	if u.BaseURL != nil {
+		return strings.TrimRight(u.BaseURL(), "/")
+	}
+	return strings.TrimRight(u.Auth.Snapshot().Settings().BaseURL, "/")
+}

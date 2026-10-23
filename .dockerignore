@@ -1,0 +1,8 @@
+.git
+data
+docs
+test/smoke/.work
+*.exe
+config.yaml
+test/smoke/project/target
+commandcenter

@@ -1,0 +1,9 @@
+[package]
+name = "smoke-hello"
+version = "1.0.0"
+edition = "2021"
+description = "commandcenter smoke test crate"
+license = "MIT"
+
+[dependencies]
+itoa = "1"

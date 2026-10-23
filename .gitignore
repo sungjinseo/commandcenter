@@ -1,0 +1,14 @@
+/data/
+/commandcenter
+*.exe
+/test/smoke/.work/
+/test/smoke/.work-npm/
+/test/smoke/.work-pypi/
+/test/smoke/project/target/
+/config.yaml
+/test/smoke/.work-go/
+/test/smoke/.work-cargo/
+/test/load/.work/
+/test/smoke/.work-ui/
+/test/smoke/.work*/
+/test/load/.work*/

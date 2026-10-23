@@ -1,0 +1,18 @@
+services:
+  commandcenter:
+    build: .
+    image: commandcenter:latest
+    container_name: commandcenter
+    ports: ["8081:8081"]
+    volumes:
+      - ./config.yaml:/etc/commandcenter/config.yaml:ro
+      - data:/data
+    environment:
+      GOMEMLIMIT: 80MiB
+      # HTTPS_PROXY: http://proxy.example.com:3128   # set if a corporate proxy is required
+    mem_limit: 128m
+    restart: unless-stopped
+
+volumes:
+  data:
+    name: ${COMMANDCENTER_VOLUME:-commandcenter-data}
