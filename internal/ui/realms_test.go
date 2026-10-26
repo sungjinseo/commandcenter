@@ -383,6 +383,7 @@ func TestLockoutRestorableAdmins(t *testing.T) {
 	if err := e.ui.Auth.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	admin = e.cookieFor("admin") // the reload ended the sessions of admin, whose password changed (QA N-2)
 	wantStatus(t, as("PUT", "/-/api/users/ci", `{"roles":["deployer","admin"],"status":"active"}`), http.StatusOK)
 	wantStatus(t, as("POST", "/-/api/users", `{"id":"rescue","password":"longenough","roles":["admin"]}`), http.StatusCreated)
 	// ci and rescue are restorable now: removing one is fine, both is not.

@@ -278,6 +278,48 @@ func TestNewClampsConcurrency(t *testing.T) {
 	}
 }
 
+// A remote that sends its headers and then stalls the body used to hold a
+// fetch slot until the 30-minute fetch timeout; bodyIdle without progress now
+// ends the fetch, while a slow body that keeps arriving is not cut.
+func TestFetchAbortsStalledBody(t *testing.T) {
+	defer func(d time.Duration) { bodyIdle = d }(bodyIdle)
+	bodyIdle = 500 * time.Millisecond
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "8")
+		for i := 0; i < 8; i++ {
+			if r.URL.Path == "/stall" && i == 1 {
+				<-r.Context().Done() // until the fetch gives up
+				return
+			}
+			io.WriteString(w, "x")
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	defer ts.Close()
+	f, _, _ := setup(t, &remote{})
+	cfg := &config.Config{Repositories: []config.Repository{{Name: "s", Type: "proxy", Remote: ts.URL, ContentMaxAge: config.Never}}}
+	rp := repo.Build(cfg)["s"]
+
+	start := time.Now()
+	if _, err := f.Fetch(ctx, rp, "stall", Content); !errors.Is(err, ErrRemote) {
+		t.Fatalf("stalled body: err = %v, want ErrRemote", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("stalled body held the fetch for %v", d)
+	}
+	if inUse, _ := f.Slots(); inUse != 0 {
+		t.Fatalf("fetch slots in use after the stall = %d", inUse)
+	}
+	if _, err := f.Store.Get(ctx, "s", "stall"); !errors.Is(err, repo.ErrNotFound) {
+		t.Fatalf("partial body was cached: %v", err)
+	}
+	res, err := f.Fetch(ctx, rp, "slow", Content) // 0.7 s in all, never 0.5 s without a byte
+	if err != nil || read(t, f, res.Asset) != "xxxxxxxx" {
+		t.Fatalf("slow body: res=%+v err=%v", res, err)
+	}
+}
+
 func TestFetchSendsRemoteAuth(t *testing.T) {
 	var got string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

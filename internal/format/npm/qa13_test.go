@@ -17,7 +17,8 @@ import (
 // Regression tests for the npm findings of the 2026-10-22 QA report (plan 13).
 
 // TestUnpublishAnswers405: npm treats a 404 on `-rev` as "already deleted", so
-// unpublish must fail visibly instead (QA H-2, Decision 1).
+// unpublish must fail visibly instead (QA H-2, Decision 1), with a message
+// that names only a means that exists (QA N-10).
 func TestUnpublishAnswers405(t *testing.T) {
 	e := newEnv(t)
 	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.0.0", []byte("x"), false), ci); w.Code != 201 {
@@ -34,7 +35,7 @@ func TestUnpublishAnswers405(t *testing.T) {
 		for _, p := range []auth.Principal{ci, anon} {
 			w := e.do(c.method, c.repo, c.path, `{"_id":"pkg"}`, p)
 			if w.Code != http.StatusMethodNotAllowed || !emptyAllow(w) ||
-				jsonBody(t, w)["error"] != "unpublish is not supported; use the UI or ask an admin" {
+				jsonBody(t, w)["error"] != "unpublish is not supported by this registry; use npm deprecate instead" {
 				t.Errorf("%s %s/%s as %q: %d %v %q", c.method, c.repo, c.path, p.User, w.Code, w.Header(), w.Body.String())
 			}
 		}
@@ -111,10 +112,12 @@ func TestLogoutRevokesOwnToken(t *testing.T) {
 	}
 }
 
-// TestPublishRejectsNonSemver: new versions must be strict SemVer 2.0 (QA M-5).
+// TestPublishRejectsNonSemver: new versions must be strict SemVer 2.0 (QA M-5)
+// without build metadata, which npm ignores: 3.0.0+a next to 3.0.0 broke
+// `npm install X@3.0.0` (QA N-12).
 func TestPublishRejectsNonSemver(t *testing.T) {
 	e := newEnv(t)
-	for _, v := range []string{"latest", "abc", "1.0.0 ", "=1.0.0", "v1.0.5", "1.0", "1.0.0-<script>"} {
+	for _, v := range []string{"latest", "abc", "1.0.0 ", "=1.0.0", "v1.0.5", "1.0", "1.0.0-<script>", "3.0.0+a", "1.0.0-beta.1+build.5"} {
 		if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", v, []byte("x"), false), ci); w.Code != 400 {
 			t.Errorf("version %q: %d %s", v, w.Code, w.Body.String())
 		}
@@ -122,8 +125,15 @@ func TestPublishRejectsNonSemver(t *testing.T) {
 	if w := e.do("GET", "npm-hosted", "pkg", "", anon); w.Code != 404 {
 		t.Fatalf("rejected publishes left a package: %d", w.Code)
 	}
-	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.0.0-beta.1+build.5", []byte("x"), false), ci); w.Code != 201 {
+	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "3.0.0", []byte("x"), false), ci); w.Code != 201 {
 		t.Fatalf("valid semver: %d %s", w.Code, w.Body.String())
+	}
+	w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "3.0.0+a", []byte("y"), false), ci)
+	if msg, _ := jsonBody(t, w)["error"].(string); w.Code != 400 || !strings.Contains(msg, "build metadata") {
+		t.Fatalf("3.0.0+a next to 3.0.0: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "3.0.1-beta.1", []byte("z"), false), ci); w.Code != 201 {
+		t.Fatalf("valid prerelease: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -220,8 +230,10 @@ func TestGroupWriteTrueReturnsWriteMemberOnly(t *testing.T) {
 		e.h.Serve(w, r, e.repos["npm-all"], "left-pad")
 		return w
 	}
-	if m := jsonBody(t, read("")); get(m, "versions", "1.1.0") == nil {
-		t.Fatalf("plain read must merge the proxy: %v", get(m, "versions"))
+	// The hosted member owns left-pad, so a plain read holds only its
+	// versions too (QA N-1).
+	if m := jsonBody(t, read("")); get(m, "versions", "0.5.0") == nil || get(m, "versions", "1.1.0") != nil {
+		t.Fatalf("plain read: versions = %v", get(m, "versions"))
 	}
 	w := read("?write=true")
 	m := jsonBody(t, w)
@@ -242,30 +254,21 @@ func TestGroupWriteTrueReturnsWriteMemberOnly(t *testing.T) {
 	}
 }
 
-// TestOldMergedPackumentIsReMerged: a group packument merged and stored by an
-// older build (unsalted fingerprint, newest-release latest) is re-merged on
-// the next read, so latest follows member order (plan 13 fix I-1).
-func TestOldMergedPackumentIsReMerged(t *testing.T) {
+// TestOldMergedPackumentIsNotServed: a group packument merged and stored by an
+// older build is never served again; the owner's own document is (QA N-1).
+func TestOldMergedPackumentIsNotServed(t *testing.T) {
 	e := newEnv(t)
 	e.seed(t, "npm-hosted", PackumentKey("left-pad"), hostedDoc)
-	t0 := packumentTarget("left-pad")
 	oldMerge := func(_ context.Context, _ []io.ReadSeeker, w io.Writer) error {
 		_, err := io.WriteString(w, `{"name":"left-pad","dist-tags":{"latest":"1.1.0"},"versions":{"1.1.0":{"version":"1.1.0"}}}`)
 		return err
 	}
-	old, err := e.h.Resolver.MergedTarget(context.Background(), e.repos["npm-all"], t0, "application/json", oldMerge)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mergeSalt != "" && strings.Contains(old.RemoteETag, mergeSalt) {
-		t.Fatalf("setup: old copy already salted: %q", old.RemoteETag)
+	old, err := e.h.Resolver.MergedTarget(context.Background(), e.repos["npm-all"], packumentTarget("left-pad"), "application/json", oldMerge)
+	if err != nil || old.Repo != "npm-all" {
+		t.Fatalf("setup: merged copy not stored in the group: %+v %v", old, err)
 	}
 	m := jsonBody(t, e.do("GET", "npm-all", "left-pad", "", anon))
-	if get(m, "dist-tags", "latest") != "1.0.1" || get(m, "versions", "1.0.0", "from") != "hosted" {
+	if get(m, "dist-tags", "latest") != "1.0.1" || get(m, "versions", "1.0.0", "from") != "hosted" || get(m, "versions", "1.1.0") != nil {
 		t.Fatalf("old merged copy served: %v", m)
-	}
-	a, err := e.h.Store.Get(context.Background(), "npm-all", PackumentKey("left-pad"))
-	if err != nil || !strings.HasPrefix(a.RemoteETag, "group:"+mergeSalt) {
-		t.Fatalf("re-merged copy fingerprint %q %v", a.RemoteETag, err)
 	}
 }

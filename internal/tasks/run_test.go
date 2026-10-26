@@ -153,7 +153,11 @@ func TestStopWithScheduledRun(t *testing.T) {
 	ticks := make(chan time.Time)
 	h.s.Ticks = ticks
 	entered := make(chan struct{}, 1)
-	h.s.GC = func(ctx context.Context, _ string) (int, error) { entered <- struct{}{}; <-ctx.Done(); return 0, ctx.Err() }
+	h.s.GC = func(ctx context.Context, _ string) (int, error) {
+		entered <- struct{}{}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "daily:03:00"})
 	h.clock.Set(time.Date(2026, 10, 20, 4, 0, 0, 0, time.UTC))
 	h.s.Start(context.Background())

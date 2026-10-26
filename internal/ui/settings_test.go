@@ -75,6 +75,10 @@ func TestSettingsValidation(t *testing.T) {
 		"empty baseURL":    `{"baseURL":""}`,
 		"ftp baseURL":      `{"baseURL":"ftp://x"}`,
 		"relative baseURL": `{"baseURL":"repo.example"}`,
+		"baseURL userinfo": `{"baseURL":"https://u:secret@repo.example"}`, // QA N-24
+		"baseURL query":    `{"baseURL":"https://repo.example/?q=1"}`,
+		"baseURL fragment": `{"baseURL":"https://repo.example/#f"}`,
+		"baseURL bare #":   `{"baseURL":"https://repo.example/#"}`,
 		"idle too small":   `{"sessionIdleMinutes":4}`,
 		"idle too large":   `{"sessionIdleMinutes":10081}`,
 		"upload zero":      `{"maxUploadMiB":0}`,

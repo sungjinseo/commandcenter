@@ -257,6 +257,16 @@ func (d *DB) ClearNegative(ctx context.Context, repo, path string) error {
 	return err
 }
 
+// PruneNegative deletes the negative-cache entries that can no longer be a
+// hit at now (see NegativeHit) and returns how many rows went.
+func (d *DB) PruneNegative(ctx context.Context, now time.Time) (int64, error) {
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM negative_cache WHERE expires_at <= ?`, toMs(now))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (d *DB) BlobInUse(ctx context.Context, sha string) (bool, error) {
 	var one int
 	err := d.sql.QueryRowContext(ctx, `SELECT 1 FROM assets WHERE blob_sha256 = ? LIMIT 1`, sha).Scan(&one)

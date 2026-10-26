@@ -452,6 +452,37 @@ func TestLDAPOnUserChangedAndReload(t *testing.T) {
 	}
 }
 
+type sourceFunc func(context.Context) (meta.AccessData, error)
+
+func (f sourceFunc) LoadAccess(ctx context.Context) (meta.AccessData, error) { return f(ctx) }
+
+// The app reloads every few seconds (QA N-2): a reload that changes nothing
+// keeps the LDAP and password caches, so it costs no directory round trips
+// or bcrypt compares.
+func TestReloadWithoutChangeKeepsCaches(t *testing.T) {
+	f := newLDAPFixture(t)
+	f.a.Source = sourceFunc(func(context.Context) (meta.AccessData, error) {
+		return meta.AccessData{Users: f.users, Roles: f.roles, Settings: f.settings}, nil
+	})
+	ctx := context.Background()
+	for user, pw := range map[string]string{"alice": "alice-pw", "admin": "pw"} {
+		if _, err := f.a.CheckPassword(ctx, user, pw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := f.a.Reload(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.a.ldapMu.Lock()
+	n, m := len(f.a.ldapUsers), len(f.a.ldapPass)
+	f.a.ldapMu.Unlock()
+	if n != 1 || m != 1 || f.a.cachedCount("admin") != 1 {
+		t.Fatalf("after reloads: %d LDAP users, %d LDAP passwords, %d local passwords cached", n, m, f.a.cachedCount("admin"))
+	}
+}
+
 func TestCheckLockoutLDAP(t *testing.T) {
 	f := newLDAPFixture(t)
 	snap := func() *Snapshot { return NewSnapshot(f.users, f.roles, f.settings) }
@@ -494,9 +525,11 @@ func TestRestorableAdmins(t *testing.T) {
 	if n := RestorableAdmins(NewSnapshot(f.users, f.roles, f.settings)); n != 1 {
 		t.Fatalf("restorable %d, want 1 (realm state ignored; the disabled admin does not count)", n)
 	}
-	f.users[0].PasswordHash = ""
-	if n := RestorableAdmins(NewSnapshot(f.users, f.roles, f.settings)); n != 0 {
-		t.Fatalf("restorable %d", n)
+	for _, h := range []string{"", "<commandcenter hash-password 출력값>"} {
+		f.users[0].PasswordHash = h
+		if n := RestorableAdmins(NewSnapshot(f.users, f.roles, f.settings)); n != 0 {
+			t.Fatalf("hash %q: restorable %d", h, n)
+		}
 	}
 }
 

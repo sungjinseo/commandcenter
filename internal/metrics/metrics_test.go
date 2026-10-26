@@ -17,6 +17,7 @@ type fakeDB struct {
 	dl        []meta.DownloadDelta
 	rq        []meta.RequestDelta
 	pruned    []int64
+	negPruned []time.Time
 	failNext  bool
 	failAll   bool
 	failRq    bool
@@ -69,6 +70,13 @@ func (f *fakeDB) PruneRequestStats(_ context.Context, before int64) (int64, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pruned = append(f.pruned, before)
+	return 0, nil
+}
+
+func (f *fakeDB) PruneNegative(_ context.Context, now time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.negPruned = append(f.negPruned, now)
 	return 0, nil
 }
 
@@ -196,6 +204,10 @@ func TestRunPrunesOlderThanRetention(t *testing.T) {
 	want := now.Add(-90*24*time.Hour).Unix() / 3600 * 3600
 	if len(db.pruned) != 1 || db.pruned[0] != want {
 		t.Fatalf("pruned %v want %d", db.pruned, want)
+	}
+	// The same pass drops negative-cache entries that expired by now.
+	if len(db.negPruned) != 1 || !db.negPruned[0].Equal(now) {
+		t.Fatalf("negative cache pruned at %v, want once at %v", db.negPruned, now)
 	}
 }
 

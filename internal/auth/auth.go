@@ -201,7 +201,13 @@ func Open(ctx context.Context, src Source, tokens TokenStore) (*Authenticator, e
 }
 
 // Reload rebuilds the snapshot from Source and publishes it. The API layer
-// calls it after every write to users, roles, realms or settings.
+// calls it after every write to users, roles, realms or settings, and the
+// app every few seconds for changes another process wrote ("commandcenter
+// user reset-password", QA N-2). Whoever made the change, a user whose
+// password changed, or who was disabled or removed, since the last snapshot
+// loses its sessions and cached logins (OnUserChanged), as an API change
+// does. This runs under reloadMu: the API creates the new session of its
+// own password change only after its own Reload, so it is never ended here.
 func (a *Authenticator) Reload(ctx context.Context) error {
 	if a.Source == nil {
 		return errors.New("auth: no source to reload from")
@@ -212,7 +218,17 @@ func (a *Authenticator) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	a.setSnapshot(NewSnapshot(data.Users, data.Roles, data.Settings))
+	old, s := a.snap.Load(), NewSnapshot(data.Users, data.Roles, data.Settings)
+	a.setSnapshot(s)
+	if old == nil {
+		return nil
+	}
+	for id, was := range old.users {
+		if u, ok := s.users[id]; !ok || u.PasswordHash != was.PasswordHash ||
+			(was.Status == meta.StatusActive && u.Status != meta.StatusActive) {
+			a.OnUserChanged(id)
+		}
+	}
 	return nil
 }
 
@@ -598,6 +614,16 @@ func CheckNewPassword(pw string) error {
 func HashPassword(pw string) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
 	return string(h), err
+}
+
+// HashUsable reports whether hash is a bcrypt hash, the only kind a password
+// can match. A placeholder such as the config example's "<commandcenter
+// hash-password ...>" is not: its user cannot sign in with a password, so
+// the API shows no password and the lockout checks do not count it as an
+// administrator who can sign in (QA L-2).
+func HashUsable(hash string) bool {
+	_, err := bcrypt.Cost([]byte(hash))
+	return err == nil
 }
 
 type ctxKey struct{}

@@ -103,6 +103,31 @@ func TestLookupSkipsFailingMember(t *testing.T) {
 	}
 }
 
+// Owner fails closed where Lookup (Maven, Go) skips: an offline member ahead
+// of the one that has the asset is a 503, also inside a nested group (QA N-1).
+func TestOwnerFailsClosedOnOfflineMember(t *testing.T) {
+	r, repos := setup(t, remoteServing("from-remote"))
+	put(t, r, "h2", "x", "from-h2")
+	// g = h1, inner(h2, p), h2
+	owner, res, err := r.Owner(ctx, repos["g"], pathTarget("x"), proxy.Content)
+	if err != nil || owner.Name != "h2" || content(t, r, res.Asset) != "from-h2" {
+		t.Fatalf("owner=%v err=%v", owner, err)
+	}
+	if owner, _, err := r.Owner(ctx, repos["g"], pathTarget("only-remote"), proxy.Content); err != nil || owner.Name != "p" {
+		t.Fatalf("owner=%v err=%v", owner, err)
+	}
+	off := false
+	repos["h2"].Online = &off
+	for _, path := range []string{"x", "only-remote", "nowhere"} {
+		if _, _, err := r.Owner(ctx, repos["g"], pathTarget(path), proxy.Content); repo.StatusOf(err) != http.StatusServiceUnavailable {
+			t.Errorf("%s: err = %v, want 503", path, err)
+		}
+	}
+	if res, err := r.Lookup(ctx, repos["g"], "only-remote", proxy.Content); err != nil || content(t, r, res.Asset) != "from-remote" {
+		t.Fatalf("Lookup must keep skipping offline members: %v", err)
+	}
+}
+
 func TestAllFlattensAndDedupes(t *testing.T) {
 	r, repos := setup(t, remoteServing("R"))
 	put(t, r, "h1", "shared", "1")

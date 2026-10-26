@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/repo"
@@ -154,6 +155,30 @@ func TestServeShutsDownOnCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not return after cancel")
+	}
+}
+
+// Docker sends SIGKILL 10 s after SIGTERM unless the compose file says
+// otherwise, which cuts the drain short: uploads fail and leave temp files.
+func TestComposeStopGracePeriod(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Services map[string]struct {
+			StopGracePeriod string `yaml:"stop_grace_period"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	grace, err := time.ParseDuration(f.Services["commandcenter"].StopGracePeriod)
+	if err != nil {
+		t.Fatalf("stop_grace_period: %v", err)
+	}
+	if grace <= shutdownTimeout {
+		t.Fatalf("stop_grace_period %v, want more than the %v drain", grace, shutdownTimeout)
 	}
 }
 

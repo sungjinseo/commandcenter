@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -158,9 +159,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		return repo.Errorf(http.StatusNotImplemented, "npm audit is not supported by this registry")
 	case KindRev:
 		// npm reads a 404 here as "already deleted" and reports success
-		// (QA H-2); unpublish is not supported (plan 13 Decision 1).
+		// (QA H-2); unpublish is not supported (plan 13 Decision 1), and the
+		// message names only a means that exists (QA N-10).
 		// The resource accepts no method: an empty Allow (RFC 9110 15.5.6).
-		return repo.MethodNotAllowed("", "unpublish is not supported; use the UI or ask an admin")
+		return repo.MethodNotAllowed("", "unpublish is not supported by this registry; use npm deprecate instead")
 	case KindToken:
 		return h.logout(w, r, rt.Token)
 	case KindWebLogin:
@@ -229,36 +231,36 @@ func (h *Handler) tarballURL(rp *repo.Repository, name string) func(file string)
 	return func(file string) string { return prefix + file }
 }
 
-// mergeSalt versions mergePackuments' output in the group cache fingerprint:
-// copies merged before latest followed member order (plan 13, QA M-4) are
-// re-merged once. Change it whenever mergePackuments changes its result.
-const mergeSalt = "npm-latest-order-1;"
-
 // packumentTarget is the cache key and upstream request of a package document.
 func packumentTarget(name string) proxy.Target {
 	return proxy.Target{Key: PackumentKey(name), Remote: name, Header: http.Header{"Accept": {"application/json"}}}
 }
 
-// packument resolves the stored package document for name in rp.
-func (h *Handler) packument(ctx context.Context, rp *repo.Repository, name string) (meta.Asset, proxy.Result, error) {
-	t := packumentTarget(name)
-	if rp.Type == "group" {
-		// Strict: a member error ahead of the first member that has the
-		// package is a 5xx, not the later members' latest (QA M-4, I1).
-		a, err := h.Resolver.MergedTargetSaltedStrict(ctx, rp, t, "application/json", mergeSalt, func(_ context.Context, members []io.ReadSeeker, w io.Writer) error {
-			return mergePackuments(members, w)
-		})
-		return a, proxy.Result{Asset: a}, err
-	}
-	res, err := h.Resolver.LookupTarget(ctx, rp, t, proxy.Metadata)
-	return res.Asset, res, err
+// packument resolves the stored package document for name in rp and the
+// repository it comes from. A group answers with the first member that has
+// the package, alone (resolve.Owner): no later member's versions, dist-tags
+// or tarballs are mixed in (dependency confusion, QA M-4, N-1, N-11).
+func (h *Handler) packument(ctx context.Context, rp *repo.Repository, name string) (*repo.Repository, proxy.Result, error) {
+	return h.Resolver.Owner(ctx, rp, packumentTarget(name), proxy.Metadata)
 }
 
 func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
 	ctx := r.Context()
 	if rt.Kind == KindTarball {
-		// Strict for groups, like the packument (QA M-4, I1).
-		res, err := h.Resolver.LookupStrict(ctx, rp, TarballKey(rt.Package, rt.File), proxy.Content)
+		// A group takes tarballs only from the member that owns the
+		// package, so a later member's version is not served even by its
+		// direct URL (QA N-1). Finding the owner reads package documents
+		// first: a proxy may fetch one (cold cache, or older than
+		// metadataMaxAge) before the tarball.
+		src := rp
+		if rp.Type == "group" {
+			owner, _, err := h.packument(ctx, rp, rt.Package)
+			if err != nil {
+				return err
+			}
+			src = owner
+		}
+		res, err := h.Resolver.Lookup(ctx, src, TarballKey(rt.Package, rt.File), proxy.Content)
 		if err != nil {
 			return err
 		}
@@ -276,18 +278,19 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 	if rp.Type == "group" && rp.WriteTarget != nil && r.URL.Query().Get("write") == "true" {
 		// npm reads with ?write=true before sending the whole document back
 		// (deprecate, dist-tag, owner): it must hold only what the
-		// writeMember stores, not the proxies' versions (QA M-7). An
-		// offline writeMember is a 503, not a merged document.
+		// writeMember stores, not another member's versions (QA M-7). An
+		// offline writeMember is a 503.
 		target, err := repo.WriteTarget(rp)
 		if err != nil {
 			return err
 		}
 		src = target
 	}
-	a, res, err := h.packument(ctx, src, rt.Package)
+	_, res, err := h.packument(ctx, src, rt.Package)
 	if err != nil {
 		return err
 	}
+	a := res.Asset
 	f, err := h.Store.Open(a)
 	if err != nil {
 		return err
@@ -377,9 +380,10 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request, token string) e
 }
 
 // bodyDecodeErr maps a failed JSON decode of the request body: an exceeded
-// upload cap stays visible as *http.MaxBytesError (413), anything else is a 400.
+// upload cap (413) or a stalled body (408) passes through unchanged, anything
+// else is a 400.
 func bodyDecodeErr(err error, what string) error {
-	if errors.As(err, new(*http.MaxBytesError)) {
+	if errors.As(err, new(*http.MaxBytesError)) || errors.Is(err, os.ErrDeadlineExceeded) {
 		return err
 	}
 	return repo.Errorf(http.StatusBadRequest, "%s: %v", what, err)

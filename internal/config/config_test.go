@@ -153,6 +153,22 @@ func TestMaxUploadDefault(t *testing.T) {
 	}
 }
 
+// QA N-24: user info in baseURL would reach every client in the URLs built
+// on it, and a '?' or '#' would cut them; the error never repeats a password.
+func TestBaseURLNoUserInfoQueryOrFragment(t *testing.T) {
+	for _, v := range []string{"http://ci:s3cret@repo.example", "http://repo.example/path?q=1", "http://repo.example/path#f", "http://repo.example?", "http://repo.example/#"} {
+		c, err := Parse([]byte("baseURL: \"" + v + "\"\n"))
+		if err != nil || c.SettingsErr == nil || strings.Contains(c.SettingsErr.Error(), "s3cret") {
+			t.Fatalf("%q: err=%v SettingsErr=%v", v, err, c.SettingsErr)
+		}
+	}
+	for _, v := range []string{"https://repo.example", "http://repo.example:8081/nexus", "http://[::1]:8081"} {
+		if c, err := Parse([]byte("baseURL: \"" + v + "\"\n")); err != nil || c.SettingsErr != nil {
+			t.Fatalf("%q: err=%v SettingsErr=%v", v, err, c.SettingsErr)
+		}
+	}
+}
+
 func TestRepositoryOnlineDefault(t *testing.T) {
 	var r Repository
 	if !r.IsOnline() {

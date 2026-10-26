@@ -18,6 +18,7 @@ type Flusher interface {
 	FlushDownloads(ctx context.Context, batch []meta.DownloadDelta) error
 	FlushRequests(ctx context.Context, batch []meta.RequestDelta) error
 	PruneRequestStats(ctx context.Context, before int64) (int64, error)
+	PruneNegative(ctx context.Context, now time.Time) (int64, error)
 }
 
 const (
@@ -237,8 +238,9 @@ func (r *Recorder) restoreRequests(rq map[rqKey]rqVal) {
 
 // Run flushes every interval and whenever MaxKeys keys are pending (not within
 // FailBackoff of a failed flush; the ticker retries then), and prunes old
-// request statistics at start and then daily, until ctx ends. The caller does
-// the final Flush after its server has drained.
+// request statistics and expired negative-cache entries at start and then
+// daily, until ctx ends. The caller does the final Flush after its server has
+// drained.
 func (r *Recorder) Run(ctx context.Context, interval time.Duration) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -265,8 +267,13 @@ func (r *Recorder) Run(ctx context.Context, interval time.Duration) {
 }
 
 func (r *Recorder) prune(ctx context.Context) {
-	before := r.Now().Add(-Retention).Unix() / 3600 * 3600
+	now := r.Now()
+	before := now.Add(-Retention).Unix() / 3600 * 3600
 	if _, err := r.db.PruneRequestStats(ctx, before); err != nil && ctx.Err() == nil {
 		r.warn("prune", "could not prune request statistics", "err", logsafe.Err(err))
+	}
+	// Proxies record one row per missing path; nothing else deletes the expired ones.
+	if _, err := r.db.PruneNegative(ctx, now); err != nil && ctx.Err() == nil {
+		r.warn("prune-negative", "could not prune expired negative-cache entries", "err", logsafe.Err(err))
 	}
 }

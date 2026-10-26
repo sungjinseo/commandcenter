@@ -1,9 +1,9 @@
 package ui
 
 import (
-	"fmt"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -323,6 +323,18 @@ func TestOpsWired(t *testing.T) {
 			if !strings.Contains(js, want) {
 				t.Errorf("%s does not contain %s", file, want)
 			}
+		}
+	}
+}
+
+// TestMavenSetupEnablesSnapshots: the settings.xml shown for a Maven proxy or
+// group turns snapshots on through an active profile; following a mirror
+// alone breaks every SNAPSHOT dependency (QA M-17).
+func TestMavenSetupEnablesSnapshots(t *testing.T) {
+	js := readStatic(t, "browse.js")
+	for _, want := range []string{"<snapshots><enabled>true</enabled></snapshots>", "<activeProfile>commandcenter</activeProfile>"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("browse.js setup snippet lacks %s", want)
 		}
 	}
 }

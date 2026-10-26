@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -156,7 +158,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		u.RawPath = ""
 		target = u.String()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	req, err := http.NewRequestWithContext(withRemote(ctx, rp.RemoteURL), http.MethodGet, target, nil)
 	if err != nil {
 		return Result{}, err
 	}
@@ -203,9 +205,11 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{Asset: a}, nil
 
 	case resp.StatusCode == http.StatusOK:
+		body := newStallReader(resp.Body, cancel)
+		defer body.timer.Stop()
 		var na meta.Asset
 		var verr error
-		sums, err := f.Store.WriteBlob(rp.Name, resp.Body, func(s blob.Sums) error {
+		sums, err := f.Store.WriteBlob(rp.Name, body, func(s blob.Sums) error {
 			if t.SHA256 != "" && !strings.EqualFold(t.SHA256, s.SHA256) {
 				verr = &repo.Error{Status: http.StatusBadGateway, Msg: "upstream content does not match the expected sha256"}
 				if f.Store.Current(rp) != nil {
@@ -254,6 +258,41 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{}, repo.ErrNotFound
 	}
 	return f.stale(rp, t.Key, a, cached, fmt.Errorf("remote status %d", resp.StatusCode))
+}
+
+// bodyIdle is how long a remote body may deliver nothing before its fetch is
+// cancelled; a var for tests.
+var bodyIdle = 60 * time.Second
+
+// stallReader cancels its fetch when the body delivers nothing for bodyIdle,
+// so a stalled remote gives up its fetch slot long before the fetch timeout.
+type stallReader struct {
+	r       io.Reader
+	timer   *time.Timer
+	stalled atomic.Bool
+}
+
+func newStallReader(r io.Reader, cancel context.CancelFunc) *stallReader {
+	s := &stallReader{r: r}
+	s.timer = time.AfterFunc(bodyIdle, func() {
+		s.stalled.Store(true)
+		cancel()
+	})
+	return s
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.timer.Reset(bodyIdle)
+	}
+	if err != nil {
+		s.timer.Stop() // the body is over: the writes that follow must not be cancelled
+		if s.stalled.Load() {
+			err = fmt.Errorf("remote body stalled for %v: %w", bodyIdle, err)
+		}
+	}
+	return n, err
 }
 
 func (f *Fetcher) stale(rp *repo.Repository, path string, a meta.Asset, cached bool, cause error) (Result, error) {

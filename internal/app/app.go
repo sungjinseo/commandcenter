@@ -56,6 +56,11 @@ var Version = "dev"
 // maxConcurrentFetches bounds simultaneous remote downloads (spec §7).
 const maxConcurrentFetches = 32
 
+// maxConns bounds the connections served at once; more wait in the listen
+// backlog. Each costs a goroutine and buffers: QA N-5 filled the 128 MiB
+// container with ~3000 stalled ones, so 1024 stays well inside it.
+const maxConns = 1024
+
 // Option adjusts how New builds the App.
 type Option func(*options)
 
@@ -129,7 +134,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	store := &repo.Store{Blobs: blobs, DB: db, Now: time.Now}
 	recorder := metrics.New(db)
 	store.Downloads = recorder.Download
-	fetcher := proxy.New(store, newHTTPClient(), maxConcurrentFetches)
+	fetcher := proxy.New(store, proxy.NewClient(), maxConcurrentFetches)
 	resolver := &resolve.Resolver{Store: store, Fetcher: fetcher}
 
 	authn, err := loadAccess(cfg, log, db)
@@ -345,6 +350,24 @@ func loadAccess(cfg *config.Config, log *slog.Logger, db *meta.DB) (*auth.Authen
 	if err != nil {
 		return nil, fmt.Errorf("load users, roles and settings: %w", err)
 	}
+	// A placeholder hash (the config example's) fails every login of its
+	// user without a word; say so on every start until it is reset (QA L-2).
+	users, err := db.ListUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load users: %w", err)
+	}
+	for _, u := range users {
+		if u.Source == meta.SourceLocal && u.Status == meta.StatusActive && !auth.HashUsable(u.PasswordHash) {
+			log.Warn("local user cannot sign in with a password: its stored password hash is not a bcrypt hash; "+
+				"set a new password in the web UI or with \"commandcenter user reset-password\"", "user", u.ID)
+		}
+	}
+	// Older builds stored a baseURL with user info, query or fragment (QA
+	// N-24); it is served as is until changed. The value is not logged: it
+	// may hold a password.
+	if err := meta.ValidateBaseURL(authn.Snapshot().Settings().BaseURL); err != nil {
+		log.Warn("the stored baseURL is no longer accepted; change it in the general settings", "err", err.Error())
+	}
 	return authn, nil
 }
 
@@ -363,22 +386,14 @@ func warnUnknownRoleRepos(log *slog.Logger, a *auth.Snapshot, s *repo.Snapshot, 
 	}
 }
 
-func newHTTPClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
-		ForceAttemptHTTP2:     true,
-	}}
-}
+// shutdownTimeout bounds how long Serve drains requests once ctx is cancelled.
+// docker-compose.yml's stop_grace_period must be longer, or Docker kills the
+// process mid-drain (TestComposeStopGracePeriod).
+const shutdownTimeout = 30 * time.Second
 
-// Serve runs the HTTP server until ctx is cancelled, then drains requests for up to 30 s.
+// Serve runs the HTTP server until ctx is cancelled, then drains requests for up to shutdownTimeout.
 func (a *App) Serve(ctx context.Context) error {
 	srv := &http.Server{
-		Addr:              a.Config.Listen,
 		Handler:           a.Handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
@@ -404,14 +419,31 @@ func (a *App) Serve(ctx context.Context) error {
 			a.log.Warn("could not flush metrics on shutdown", "err", logsafe.Err(err))
 		}
 	}()
+	// Users, roles and settings that another process changed apply within
+	// accessReloadEvery; the loop ends before Close closes the database.
+	rctx, stopReload := context.WithCancel(ctx)
+	reloadDone := make(chan struct{})
+	go func() {
+		defer close(reloadDone)
+		a.reloadAccess(rctx)
+	}()
+	defer func() {
+		stopReload()
+		<-reloadDone
+	}()
 	// The scheduler stops (cancelling a run in progress) before the final
 	// metrics flush and before Close closes the database.
 	a.Tasks.Start(ctx)
 	defer a.Tasks.Stop()
+	ln, err := net.Listen("tcp", a.Config.Listen)
+	if err != nil {
+		return err
+	}
+	ln = server.LimitConns(srv, ln, maxConns)
 	errc := make(chan error, 1)
 	go func() {
 		a.log.Info("listening", "addr", a.Config.Listen)
-		errc <- srv.ListenAndServe()
+		errc <- srv.Serve(ln)
 	}()
 	select {
 	case err := <-errc:
@@ -419,7 +451,7 @@ func (a *App) Serve(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 	a.log.Info("shutting down")
-	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
 		srv.Close()
@@ -429,6 +461,34 @@ func (a *App) Serve(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// accessReloadEvery is how often Serve reloads users, roles and settings, so
+// a change another process wrote ("commandcenter user reset-password" next
+// to a running server, QA N-2) applies without a restart. A reload reads
+// three small tables; polling SQLite's data_version would need a connection
+// of its own and changes on every write the server itself makes anyway.
+var accessReloadEvery = 5 * time.Second
+
+// reloadAccess reloads the auth snapshot every accessReloadEvery until ctx
+// ends. A failed reload keeps the current snapshot and is logged once per
+// run of failures.
+func (a *App) reloadAccess(ctx context.Context) {
+	tick := time.NewTicker(accessReloadEvery)
+	defer tick.Stop()
+	failing := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		err := a.Auth.Reload(ctx)
+		if err != nil && !failing && ctx.Err() == nil {
+			a.log.Warn("could not reload users, roles and settings; the loaded ones stay in force", "err", logsafe.Err(err))
+		}
+		failing = err != nil
+	}
 }
 
 // GC runs garbage collection over every blob store and returns the total
@@ -474,6 +534,12 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 	bs := a.Store.StoreByName(storeName)
 	if bs == nil {
 		return 0, fmt.Errorf("unknown blob store %q", storeName)
+	}
+	// The walk below sees only blobs; temp files a killed process left are swept here.
+	if n, err := bs.SweepTmp(); err != nil {
+		a.log.Warn("could not sweep stale temp files", "blobStore", storeName, "removed", n, "err", logsafe.Err(err))
+	} else if n > 0 {
+		a.log.Info("removed stale temp files", "blobStore", storeName, "removed", n)
 	}
 	repos := a.gcScope(storeName)
 	cutoff := time.Now().Add(-minAge)

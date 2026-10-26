@@ -30,6 +30,33 @@ func groupOf(e *env, name string, members ...*repo.Repository) *repo.Repository 
 	return &g
 }
 
+// QA N-1: an offline member ahead of the one that has the package fails the
+// request (503) instead of letting the proxy's same-named package through.
+// While a member is offline, a name no online member has is not a 404 either:
+// the offline member might own it.
+func TestGroupFailsClosedWhenEarlierMemberOffline(t *testing.T) {
+	e := newEnv(t)
+	off := false
+	e.repos["npm-hosted"].Online = &off // npm-all holds the same pointer
+	for _, p := range []string{"left-pad", "left-pad/latest", "-/package/left-pad/dist-tags", "left-pad/-/left-pad-1.1.0.tgz"} {
+		if w := e.do("GET", "npm-all", p, "", anon); w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), "remote-tgz") {
+			t.Errorf("%s: %d %q, want 503", p, w.Code, w.Body.String())
+		}
+	}
+
+	// An offline member behind the owner is never consulted.
+	on := true
+	e.repos["npm-hosted"].Online = &on
+	e.repos["npm-proxy"].Online = &off
+	e.seed(t, "npm-hosted", PackumentKey("left-pad"), hostedDoc)
+	if w := e.do("GET", "npm-all", "left-pad", "", anon); w.Code != 200 || get(jsonBody(t, w), "dist-tags", "latest") != "1.0.1" {
+		t.Fatalf("owner ahead of the offline member: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("GET", "npm-all", "nope", "", anon); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("name only an offline member could have: %d %s", w.Code, w.Body.String())
+	}
+}
+
 // Final review I1 (QA M-4): an npm group fails closed when a member ordered
 // before the first member that answered errors, so a transient error of the
 // internal member never serves the proxy's public latest or tarball.

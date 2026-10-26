@@ -177,7 +177,9 @@ type Repository struct {
 
 	// Online is a pointer so that a definition stored before plan 12 (no
 	// "online" key) reads as online; ApplyRepositoryDefaults sets nil to
-	// true. An offline repository answers 503 and groups skip it.
+	// true. An offline repository answers 503 and groups skip it; npm and
+	// PyPI groups answer 503 instead unless a member before it has the
+	// requested package.
 	Online *bool `yaml:"online,omitempty" json:"online,omitempty"`
 
 	// BlobStore names the file store this repository's blobs live in
@@ -352,8 +354,8 @@ func (c *Config) validate() error {
 	if c.MaxUploadMiB < 0 || c.MaxUploadMiB > 1<<20 {
 		serrs = append(serrs, errors.New("maxUploadMiB must be between 1 and 1048576"))
 	}
-	if u, err := url.Parse(c.BaseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		serrs = append(serrs, fmt.Errorf("baseURL must be an http(s) URL, got %q", c.BaseURL))
+	if err := ValidateBaseURL(c.BaseURL); err != nil {
+		serrs = append(serrs, err)
 	}
 	c.SettingsErr = errors.Join(serrs...)
 
@@ -373,6 +375,19 @@ func (c *Config) validate() error {
 	// repositories, and the app decides whether they matter.
 	c.AccessErr = ValidateAccess(c.Users, c.Roles)
 	return errors.Join(errs...)
+}
+
+// ValidateBaseURL checks a baseURL: an absolute http(s) URL without user
+// info, query or fragment. Clients get it as the prefix of every npm, PyPI
+// and Cargo URL, so user info would hand its credentials to all of them, and
+// a '?' or '#' (even with nothing after it) would cut every URL built on it
+// (QA N-24). The error does not repeat the value: it may hold a password.
+func ValidateBaseURL(v string) error {
+	if u, err := url.Parse(v); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || strings.ContainsAny(v, "?#") {
+		return errors.New("baseURL must be an absolute http(s) URL without user info, query or fragment")
+	}
+	return nil
 }
 
 // ValidateAccess checks the users and roles sections. A role's write entries

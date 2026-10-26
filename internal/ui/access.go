@@ -105,7 +105,7 @@ func userJSON(x meta.User) userDTO {
 		roles = []string{}
 	}
 	return userDTO{ID: x.ID, Name: x.Name, Email: x.Email, Source: x.Source, Status: x.Status, Roles: roles,
-		HasPassword: x.PasswordHash != "", CreatedAt: rfc3339(x.CreatedAt), UpdatedAt: rfc3339(x.UpdatedAt)}
+		HasPassword: auth.HashUsable(x.PasswordHash), CreatedAt: rfc3339(x.CreatedAt), UpdatedAt: rfc3339(x.UpdatedAt)}
 }
 
 type privilegeDTO struct {

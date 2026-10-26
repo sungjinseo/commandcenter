@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"regexp"
 	"runtime"
@@ -27,7 +28,7 @@ type Server struct {
 	Log       *slog.Logger
 	MaxUpload int64 // caps request bodies of uploads; 0 means no cap
 
-	// UploadIdle is how long an upload body may stall before the connection
+	// UploadIdle is how long a request body may stall before the connection
 	// is cut; 0 means UploadIdleTimeout.
 	UploadIdle time.Duration
 
@@ -41,8 +42,8 @@ type Server struct {
 
 const realm = `Basic realm="commandcenter"`
 
-// UploadIdleTimeout is how long a non-GET/HEAD request body may go without
-// data, so a stalled client cannot hold the connection or a per-key lock.
+// UploadIdleTimeout is how long a request body may go without data, so a
+// stalled client cannot hold the connection or a per-key lock.
 const UploadIdleTimeout = 60 * time.Second
 
 // requestIDRE accepts client-supplied request ids; anything else is replaced.
@@ -109,23 +110,12 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only callers who may use the repository learn that it is offline. A
 	// group write goes to its writeMember, so an offline one answers the same
-	// 503 (final review M4).
-	if !rp.IsOnline() || (acc.IsWrite() && rp.WriteTarget != nil && !rp.WriteTarget.IsOnline()) {
+	// 503 (final review M4); a group read whose members are all offline
+	// does too, not a 404 that clients cache (QA N-27).
+	if !rp.IsOnline() || (acc.IsWrite() && rp.WriteTarget != nil && !rp.WriteTarget.IsOnline()) ||
+		(acc == auth.Read && rp.MembersOffline()) {
 		writeOffline(w)
 		return
-	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		idle := s.UploadIdle
-		if idle <= 0 {
-			idle = UploadIdleTimeout
-		}
-		if limit := s.maxUpload(); limit > 0 {
-			r.Body = http.MaxBytesReader(w, r.Body, limit)
-		}
-		// Outermost, so a handler's own IdleBody (npm publish) replaces the
-		// idle value instead of nesting; body-less writes are not wrapped.
-		r.Body = repo.IdleBody(w, r, idle)
-		defer r.Body.Close() // clears the read deadline
 	}
 	h.Serve(w, r, rp, path)
 }
@@ -163,7 +153,8 @@ func deny(w http.ResponseWriter, r *http.Request, p auth.Principal, h repo.Handl
 	repo.WriteError(w, r, err)
 }
 
-// wrap assigns a request id, authenticates the caller and logs the request.
+// wrap assigns a request id, bounds the request body, authenticates the
+// caller and logs the request.
 func (s *Server) wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -193,6 +184,27 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 				}
 			}
 		}()
+		// Before authentication, so no answer (401, 404, 503, ...) leaves a
+		// stalled body holding the connection (QA N-5). On a copy of r:
+		// net/http checks its own r.Body after the handler.
+		r = r.WithContext(r.Context())
+		get := r.Method == http.MethodGet || r.Method == http.MethodHead
+		if limit := s.maxUpload(); limit > 0 && !get {
+			// Inside the idle body, which a handler's own IdleBody (npm
+			// publish) must find to replace the idle value.
+			r.Body = http.MaxBytesReader(rec, r.Body, limit)
+		}
+		idle := s.UploadIdle
+		if idle <= 0 {
+			idle = UploadIdleTimeout
+		}
+		r.Body = repo.IdleBody(w, r, idle)
+		defer r.Body.Close()
+		if get {
+			// No GET or HEAD handler reads a body, and net/http drains it
+			// without a deadline once a long response starts: drain it now.
+			r.Body.Close()
+		}
 		p, err := s.Auth.Authenticate(r)
 		if err != nil && isLogin(r) {
 			// npm sends its stale saved token with the login PUT; the password in
@@ -280,6 +292,33 @@ func writeOffline(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	json.NewEncoder(w).Encode(map[string]string{"error": "repository is offline"})
+}
+
+// LimitConns makes srv serve at most n connections at once: Accept on the
+// returned listener waits while n are open. It sets srv.ConnState, which
+// frees a slot when a connection ends.
+func LimitConns(srv *http.Server, ln net.Listener, n int) net.Listener {
+	slots := make(chan struct{}, n)
+	srv.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateClosed || st == http.StateHijacked {
+			<-slots
+		}
+	}
+	return &limitListener{Listener: ln, slots: slots}
+}
+
+type limitListener struct {
+	net.Listener
+	slots chan struct{}
+}
+
+func (l *limitListener) Accept() (net.Conn, error) {
+	l.slots <- struct{}{}
+	c, err := l.Listener.Accept()
+	if err != nil {
+		<-l.slots
+	}
+	return c, err
 }
 
 // maxUpload is the current cap on upload bodies: the live setting, or the

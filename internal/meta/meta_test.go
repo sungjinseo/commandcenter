@@ -96,6 +96,29 @@ func TestNegativeCache(t *testing.T) {
 	}
 }
 
+// Expired negative-cache rows used to stay forever (only per-path deletes
+// existed); PruneNegative removes exactly the rows that can no longer hit.
+func TestPruneNegative(t *testing.T) {
+	db := openTest(t)
+	now := time.UnixMilli(1_700_000_000_000)
+	for path, exp := range map[string]time.Time{"old": now.Add(-time.Hour), "edge": now, "live": now.Add(time.Minute)} {
+		if err := db.PutNegative(ctx, "r", path, exp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := db.PruneNegative(ctx, now)
+	if err != nil || n != 2 {
+		t.Fatalf("PruneNegative = %d, %v; want 2 rows", n, err)
+	}
+	if hit, _ := db.NegativeHit(ctx, "r", "live", now); !hit {
+		t.Fatal("live entry was pruned")
+	}
+	var left int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM negative_cache`).Scan(&left); err != nil || left != 1 {
+		t.Fatalf("rows left = %d, %v; want 1", left, err)
+	}
+}
+
 func TestMarkCheckedAndBlobInUse(t *testing.T) {
 	db := openTest(t)
 	db.PutAsset(ctx, Asset{Repo: "r", Path: "p", BlobSHA256: "abc"})

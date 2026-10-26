@@ -156,6 +156,34 @@ func TestGCRemovesUnreferencedBlob(t *testing.T) {
 	}
 }
 
+// TestGCSweepsStaleTempFiles: a write killed mid-way leaves a partial temp
+// file; the compact pass removes it once stale, in the store it collects.
+func TestGCSweepsStaleTempFiles(t *testing.T) {
+	a, rootB := twoStoreApp(t)
+	old := time.Now().Add(-2 * time.Hour)
+	tmpFile := func(root string) string {
+		p := filepath.Join(root, "tmp", "up-killed")
+		if err := os.WriteFile(p, []byte("partial"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	inB, inDefault := tmpFile(rootB), tmpFile(a.Config.DataDir)
+
+	if _, err := a.GCStore(context.Background(), "b", time.Hour); err != nil {
+		t.Fatalf("GCStore(b): %v", err)
+	}
+	if _, err := os.Stat(inB); !os.IsNotExist(err) {
+		t.Fatalf("stale temp file in store b survived its GC: %v", err)
+	}
+	if _, err := os.Stat(inDefault); err != nil {
+		t.Fatalf("GC of store b touched the default store's tmp: %v", err)
+	}
+}
+
 // TestGCStoreIsolation proves collecting store A never touches store B: an
 // unreferenced blob in B survives a GC of A, and a referenced blob in B is
 // safe too.

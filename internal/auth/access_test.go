@@ -239,6 +239,7 @@ func TestCheckLockout(t *testing.T) {
 		"admin deleted":   func(f *accessFixture) { f.users = f.users[1:] },
 		"admin demoted":   func(f *accessFixture) { f.users[0].Roles = []string{"adder"} },
 		"no password":     func(f *accessFixture) { f.users[0].PasswordHash = "" },
+		"placeholder":     func(f *accessFixture) { f.users[0].PasswordHash = "<commandcenter hash-password 출력값>" },
 		"ldap admin only": func(f *accessFixture) { f.users[0].Source = meta.SourceLDAP },
 		"local realm off": func(f *accessFixture) {
 			f.settings.Realms = []meta.Realm{{ID: meta.RealmLocal, Enabled: false}, {ID: meta.RealmToken, Enabled: true}}
@@ -367,6 +368,54 @@ func TestReloadFromDatabase(t *testing.T) {
 	}
 	if err := CheckLockout(a.Snapshot()); err != nil {
 		t.Fatalf("lockout on the reloaded snapshot: %v", err)
+	}
+}
+
+// QA N-2: a change another process wrote reaches the server only through
+// Reload, which ends what the API's OnUserChanged would: the sessions of a
+// user whose password changed or who was disabled or removed.
+func TestReloadEndsSessionsOfChangedUsers(t *testing.T) {
+	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	pw := hash(t, "pw")
+	ids := []string{"newpw", "off", "gone", "renamed"}
+	for _, id := range ids {
+		if err := db.CreateUser(ctx, meta.User{ID: id, PasswordHash: pw}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, err := Open(ctx, db, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Sessions = NewSessions()
+	sid := map[string]string{}
+	for _, id := range ids {
+		sid[id] = a.Sessions.Create(id)
+	}
+	for _, u := range []meta.User{
+		{ID: "newpw", PasswordHash: hash(t, "new-pw")},
+		{ID: "off", PasswordHash: pw, Status: meta.StatusDisabled},
+		{ID: "renamed", Name: "Renamed", PasswordHash: pw},
+	} {
+		if err := db.UpdateUser(ctx, u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.DeleteUser(ctx, "gone"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for id, alive := range map[string]bool{"newpw": false, "off": false, "gone": false, "renamed": true} {
+		if _, ok := a.Sessions.User(sid[id]); ok != alive {
+			t.Errorf("%s: session alive = %v, want %v", id, ok, alive)
+		}
 	}
 }
 

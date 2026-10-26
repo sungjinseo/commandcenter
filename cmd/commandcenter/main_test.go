@@ -106,7 +106,9 @@ func TestUserResetPassword(t *testing.T) {
 	if err := run(args, strings.NewReader("longenough\n"), &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`created local user "boss"`, `added the admin role to user "boss"`} {
+	// A running server reloads users every few seconds (QA N-2), so the
+	// message no longer asks for a (re)start.
+	for _, want := range []string{`created local user "boss"`, `added the admin role to user "boss"`, "a running server applies the change within a few seconds"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output %q lacks %q", out.String(), want)
 		}

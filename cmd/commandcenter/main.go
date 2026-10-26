@@ -255,9 +255,10 @@ func readPassword(stdin io.Reader) (string, error) {
 	return pw, auth.CheckNewPassword(pw)
 }
 
-// resetPassword opens the metadata database directly (the server must be
-// stopped), runs the one-time config import if it has not happened yet, and
-// applies meta.ResetLocalPassword. It prints every change.
+// resetPassword opens the metadata database directly, runs the one-time
+// config import if it has not happened yet, and applies
+// meta.ResetLocalPassword. It prints every change. A running server need not
+// be stopped: it reloads users, roles and settings every few seconds.
 func resetPassword(ctx context.Context, cfg *config.Config, name, pw string, admin bool, stdout io.Writer) error {
 	if !meta.ValidUserID(name) {
 		return fmt.Errorf("invalid user id %q", name)
@@ -292,6 +293,6 @@ func resetPassword(ctx context.Context, cfg *config.Config, name, pw string, adm
 	for _, c := range changes {
 		fmt.Fprintln(stdout, c)
 	}
-	fmt.Fprintln(stdout, "done; start the server and sign in as "+name)
+	fmt.Fprintln(stdout, "done; sign in as "+name+" (a running server applies the change within a few seconds)")
 	return nil
 }

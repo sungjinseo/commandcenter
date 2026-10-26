@@ -326,6 +326,11 @@ func TestNewSettingsKeys(t *testing.T) {
 			t.Errorf("%s=%v accepted", key, v)
 		}
 	}
+	for _, v := range []string{"http://u:p@repo.example", "http://repo.example/?q=1", "http://repo.example/#f"} { // QA N-24
+		if err := db.SetSettingJSON(ctx, SettingBaseURL, v); err == nil {
+			t.Errorf("baseURL %q accepted", v)
+		}
+	}
 	for _, v := range []int{5, 10080} {
 		if err := db.SetSettingJSON(ctx, SettingSessionIdleMinutes, v); err != nil {
 			t.Errorf("idle %d: %v", v, err)

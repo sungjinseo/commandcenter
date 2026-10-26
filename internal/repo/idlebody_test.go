@@ -63,19 +63,32 @@ func (d *deadlineRec) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-func TestIdleBodyCloseClearsDeadline(t *testing.T) {
-	w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
-	r := httptest.NewRequest("PUT", "/x", strings.NewReader("abc"))
-	b := IdleBody(w, r, time.Minute)
-	for _, d := range w.deadlines {
-		if !d.IsZero() {
-			t.Fatalf("deadline armed at create (final review M1): %v", w.deadlines)
+// QA N-5: closed before its end, the body leaves a short deadline (idle, at
+// most maxDrain) for net/http's read of the rest; read to its end, also
+// through a nested IdleBody (npm publish), Close clears the deadline.
+func TestIdleBodyCloseDeadline(t *testing.T) {
+	for _, idle := range []time.Duration{time.Minute, 50 * time.Millisecond} {
+		w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
+		r := httptest.NewRequest("PUT", "/x", strings.NewReader("abc"))
+		b := IdleBody(w, r, idle)
+		for _, d := range w.deadlines {
+			if !d.IsZero() {
+				t.Fatalf("deadline armed at create (final review M1): %v", w.deadlines)
+			}
+		}
+		b.Read(make([]byte, 1))
+		b.Close()
+		if last := w.deadlines[len(w.deadlines)-1]; last.IsZero() || time.Until(last) > min(idle, maxDrain) {
+			t.Fatalf("idle %v: deadlines after an early Close = %v, want a trailing one within %v", idle, w.deadlines, min(idle, maxDrain))
 		}
 	}
-	b.Read(make([]byte, 1))
-	b.Close()
+	w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
+	r := httptest.NewRequest("PUT", "/x", strings.NewReader("abc"))
+	r.Body = IdleBody(w, r, time.Minute)
+	io.ReadAll(IdleBody(w, r, time.Hour))
+	r.Body.Close()
 	if n := len(w.deadlines); n < 2 || !w.deadlines[n-1].IsZero() {
-		t.Fatalf("deadlines after Close = %v, want a trailing zero", w.deadlines)
+		t.Fatalf("deadlines after Close at the end = %v, want a trailing zero", w.deadlines)
 	}
 }
 

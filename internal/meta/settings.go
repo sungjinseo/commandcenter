@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
-	"net/url"
 	"strings"
 
 	"commandcenter/internal/config"
@@ -292,13 +291,9 @@ const (
 	MaxMaxUploadMiB       = 1 << 20
 )
 
-// ValidateBaseURL checks an absolute http(s) URL.
-func ValidateBaseURL(v string) error {
-	if u, err := url.Parse(v); v == "" || err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("baseURL must be an absolute http(s) URL")
-	}
-	return nil
-}
+// ValidateBaseURL checks a baseURL: the config file's rule
+// (config.ValidateBaseURL), so a value the import accepts is accepted here.
+func ValidateBaseURL(v string) error { return config.ValidateBaseURL(v) }
 
 // ValidateSessionIdleMinutes checks the idle timeout.
 func ValidateSessionIdleMinutes(v int) error {

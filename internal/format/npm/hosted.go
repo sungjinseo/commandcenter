@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"commandcenter/internal/auth"
@@ -110,6 +111,11 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 			// keep loading and can still be deprecated (QA M-5).
 			if !semver.Valid(v) {
 				return repo.Errorf(http.StatusBadRequest, "invalid version %q: must be a SemVer 2.0 version such as 1.2.3 or 1.2.3-beta.1", v)
+			}
+			// npm ignores build metadata when it matches versions, so
+			// 3.0.0+a would be a second 3.0.0 that breaks installs (QA N-12).
+			if core, _, ok := strings.Cut(v, "+"); ok {
+				return repo.Errorf(http.StatusBadRequest, "invalid version %q: build metadata (+...) is not allowed; npm reads it as %s", v, core)
 			}
 			if !hasTarball {
 				return repo.Errorf(http.StatusBadRequest, "version %s has no tarball attachment", v)

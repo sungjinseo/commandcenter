@@ -1,10 +1,12 @@
 package ui
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
+	"commandcenter/internal/config"
 	"commandcenter/internal/repo/repotest"
 )
 
@@ -377,6 +379,34 @@ func TestLockoutProtection(t *testing.T) {
 	// admin2 is now the last one
 	refused(e.basicAs(t, "admin2", "longenough", "DELETE", "/-/api/users/admin2", ""))
 	refused(e.basicAs(t, "admin2", "longenough", "PUT", "/-/api/users/admin2", `{"roles":["admin"],"status":"disabled"}`))
+}
+
+// QA L-2: an admin with a placeholder passwordHash cannot sign in, so it
+// does not show hasPassword and does not keep the last real admin removable.
+func TestLockoutIgnoresPlaceholderHash(t *testing.T) {
+	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
+		c.Users = append(c.Users, config.User{Name: "placeholder", PasswordHash: "<commandcenter hash-password 출력값>", Roles: []string{"admin"}})
+	})
+	wantStatus(t, e.admin(t, "PUT", "/-/api/users/admin", `{"roles":[],"status":"active"}`), http.StatusConflict)
+	wantStatus(t, e.admin(t, "PUT", "/-/api/users/admin", `{"roles":["admin"],"status":"disabled"}`), http.StatusConflict)
+	wantStatus(t, e.admin(t, "DELETE", "/-/api/users/admin", ""), http.StatusConflict)
+	if m := e.admin(t, "GET", "/-/api/users/placeholder", "").json(t); m["hasPassword"] != false {
+		t.Fatalf("placeholder: %v", m)
+	}
+	var list struct {
+		Users []struct {
+			ID          string `json:"id"`
+			HasPassword bool   `json:"hasPassword"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal([]byte(e.admin(t, "GET", "/-/api/users", "").body), &list); err != nil {
+		t.Fatal(err)
+	}
+	for _, u := range list.Users {
+		if u.HasPassword != (u.ID != "placeholder") {
+			t.Errorf("list: %s hasPassword = %v", u.ID, u.HasPassword)
+		}
+	}
 }
 
 // basicAs is req with an explicit password and the UI header.

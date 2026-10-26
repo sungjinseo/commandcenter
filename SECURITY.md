@@ -16,7 +16,12 @@ exploit, a secret, a sensitive log or a malicious attachment in a public issue.
 
 ## What to include
 
-- the Command Center version or commit, and how you run it (Docker image, compose file, flags);
+- the Command Center version: the output of `commandcenter version`, for example
+  `docker compose exec commandcenter commandcenter version`, `docker run --rm <image> version` or
+  `kubectl exec <pod> -- commandcenter version` (signed-in users also see it in the web UI's
+  sidebar). A local build prints `dev`; then give the commit you built from
+  (`git rev-parse --short HEAD`);
+- how you run it (Docker image, compose file, flags);
 - the affected format or component (Maven, npm, PyPI, Go, Cargo, web UI, auth, LDAP, SMTP, blob
   store, tasks);
 - the security impact and the access an attacker needs (anonymous, signed-in user, token, admin);

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"commandcenter/internal/blob"
@@ -206,9 +207,10 @@ func checkFields(fields map[string]string, filename string) (string, error) {
 }
 
 // multipartErr maps a failed read of the multipart body: an exceeded upload cap
-// passes through unchanged (413), anything else is a bad request.
+// (413) or a stalled body (408) passes through unchanged, anything else is a
+// bad request.
 func multipartErr(err error) error {
-	if errors.As(err, new(*http.MaxBytesError)) {
+	if errors.As(err, new(*http.MaxBytesError)) || errors.Is(err, os.ErrDeadlineExceeded) {
 		return err
 	}
 	return repo.Errorf(http.StatusBadRequest, "invalid multipart body: %v", err)

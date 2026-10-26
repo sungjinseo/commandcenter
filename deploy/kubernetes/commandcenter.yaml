@@ -1,0 +1,160 @@
+# Command Center: reference Kubernetes deployment (one instance).
+#
+# Read "프로덕션 배포" in docs/guide.md first. Before applying, set:
+#   1. image             a released image, or your own build pushed to your registry:
+#                        docker build --build-arg VERSION=<version> -t <registry>/commandcenter:<version> .
+#   2. config.yaml       baseURL and the admin passwordHash (docker run --rm -i <image> hash-password).
+#                        Repositories you want created on the first start can be copied from
+#                        config.example.yaml. users, roles, anonymousRead, baseURL, maxUploadMiB and
+#                        repositories are imported into meta.db on the first start only; change them
+#                        in the web UI afterwards.
+#   3. storageClassName  block storage (cloud disk, iSCSI, local volume). Never NFS or SMB: meta.db is
+#                        SQLite in WAL mode and needs local file locking.
+# Then: kubectl apply -n <namespace> -f deploy/kubernetes/commandcenter.yaml
+#
+# The Service speaks plain HTTP. Publish it through your Ingress or Gateway with TLS, a request body
+# limit of at least maxUploadMiB and body/read timeouts (guide: "TLS와 리버스 프록시").
+#
+# Exactly one replica: all locking is in-process, and every extra replica would get its own empty
+# volume. Do not force-delete the pod while its node may still be running it.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: commandcenter-config
+  labels:
+    app.kubernetes.io/name: commandcenter
+data:
+  # The hash is read on the first start only. If your policy treats bcrypt hashes as secrets, put
+  # this file in a Secret instead and mount that at /etc/commandcenter.
+  config.yaml: |
+    listen: ":8081"
+    baseURL: "https://repo.example.com"   # the https address clients use; TLS ends at the ingress
+    dataDir: "/data"
+    anonymousRead: false                  # private registry: reading needs a sign-in
+    users:
+      - name: admin
+        passwordHash: "<commandcenter hash-password output>"
+        roles: [admin]
+    # repositories: copy the ones you want from config.example.yaml
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: commandcenter
+  labels:
+    app.kubernetes.io/name: commandcenter
+spec:
+  selector:
+    app.kubernetes.io/name: commandcenter
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: commandcenter
+  labels:
+    app.kubernetes.io/name: commandcenter
+spec:
+  # Never more than 1 (see the header). A StatefulSet stops the old pod before it starts the new
+  # one, so two processes never open meta.db at the same time; a Deployment's rolling update could.
+  replicas: 1
+  serviceName: commandcenter
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commandcenter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: commandcenter
+    spec:
+      automountServiceAccountToken: false
+      # On SIGTERM the server drains requests for up to 30 s, then writes the download counters,
+      # queued e-mail and activity events (up to 10 s each) and closes the database.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532 # the image's nonroot user
+        runAsGroup: 65532
+        fsGroup: 65532 # makes the volume writable for that user
+        fsGroupChangePolicy: OnRootMismatch # no recursive chown of every blob on each start
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: commandcenter
+          image: registry.example.com/commandcenter:VERSION # pin a version, never latest
+          ports:
+            - name: http
+              containerPort: 8081
+          env:
+            - name: GOMEMLIMIT
+              value: 80MiB
+            # - name: HTTPS_PROXY # if proxy repositories must reach the internet through a proxy
+            #   value: http://proxy.example.com:3128
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # GOMEMLIMIT stays well below this. No CPU limit: bcrypt and upload hashing come in
+              # bursts, and throttling them only makes sign-ins and uploads slow.
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # httpGet rather than exec "commandcenter healthcheck": the kubelet sends the request, so no
+          # second process runs inside the 128 MiB limit. 200 means the HTTP server answers; it does
+          # not check the database or the disks (the admin UI's System status does).
+          startupProbe:
+            httpGet:
+              path: /service/rest/v1/status
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60 # 5 minutes for a first start or a database upgrade
+          readinessProbe:
+            httpGet:
+              path: /service/rest/v1/status
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /service/rest/v1/status
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /etc/commandcenter
+              readOnly: true
+            # SQLite's temporary files; the root filesystem is read-only. Scratch space only:
+            # never put a blob store here, it is gone when the pod is recreated.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: commandcenter-config
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: commandcenter
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # Left unset, the cluster's default StorageClass is used: make sure it is block storage and
+        # not an NFS/SMB provisioner (nfs-subdir-external-provisioner, Azure Files, EFS, ...).
+        # storageClassName: <block storage class>
+        resources:
+          requests:
+            storage: 50Gi # blobs and meta.db; proxy caches keep growing until cleanup policies remove them

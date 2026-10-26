@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -737,5 +738,93 @@ func TestHandlerIdleBodyOverridesServerIdle(t *testing.T) {
 	io.WriteString(c, "def")
 	if b := <-got; b != "abcdef" {
 		t.Fatalf("handler got %q", b)
+	}
+}
+
+// stall sends head with "Content-Length: 1000" and only 3 body bytes, then
+// waits: the server must answer want and close the connection.
+func stall(addr, head string, want int) error {
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	io.WriteString(c, head+"Content-Length: 1000\r\n\r\nabc")
+	c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		return fmt.Errorf("%q: %v", head, err)
+	}
+	_, err = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != want || err != nil {
+		return fmt.Errorf("%q: status %d (body err %v), want %d", head, resp.StatusCode, err, want)
+	}
+	if _, err := br.ReadByte(); err != io.EOF {
+		return fmt.Errorf("%q: connection not closed: %v", head, err)
+	}
+	return nil
+}
+
+// QA N-5: unauthenticated requests that stall their body cannot pile up:
+// at most the cap are served at once, and each is answered and closed.
+func TestStalledBodiesAreCappedAndReleased(t *testing.T) {
+	const limit, clients = 4, 20
+	cfg := &config.Config{AnonymousRead: true, Repositories: []config.Repository{{Name: "r", Format: "maven", Type: "hosted"}}}
+	s := &Server{Registry: repo.NewRegistry(nil, cfg.Repositories), Handlers: map[string]repo.Handler{"maven": readAllHandler{}}, Auth: auth.New(cfg, noTokens{}),
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), UploadIdle: 200 * time.Millisecond}
+	ts := httptest.NewUnstartedServer(s.Handler())
+	ts.Listener = LimitConns(ts.Config, ts.Listener, limit)
+	var mu sync.Mutex
+	open, peak := 0, 0
+	free := ts.Config.ConnState
+	ts.Config.ConnState = func(c net.Conn, st http.ConnState) {
+		mu.Lock()
+		switch st {
+		case http.StateNew:
+			open++
+			peak = max(peak, open)
+		case http.StateClosed:
+			open--
+		}
+		mu.Unlock()
+		free(c, st)
+	}
+	ts.Start()
+	defer ts.Close()
+	errs := make(chan error, clients)
+	for range clients {
+		go func() { errs <- stall(ts.Listener.Addr().String(), "PUT /repository/r/x HTTP/1.1\r\nHost: x\r\n", 401) }()
+	}
+	for range clients {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > limit {
+		t.Fatalf("%d connections served at once, want at most %d", peak, limit)
+	}
+}
+
+// QA N-8: a body that stalls for the idle timeout is answered 408, not 500,
+// and the connection is closed.
+func TestUploadIdleTimeoutAnswers408(t *testing.T) {
+	srv := idleServer(t, 200*time.Millisecond)
+	// "admin:pw"
+	if err := stall(srv.Listener.Addr().String(), "PUT /repository/r/x HTTP/1.1\r\nHost: x\r\nAuthorization: Basic YWRtaW46cHc=\r\n", 408); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// QA N-5: a GET whose body stalls does not hold the connection either, also
+// when its response is long enough to be sent while the handler runs.
+func TestStalledBodyOnGetIsReleased(t *testing.T) {
+	srv := slowServer(t, handlerFunc(func(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) {
+		io.WriteString(w, strings.Repeat("x", 64<<10))
+	}))
+	if err := stall(srv.Listener.Addr().String(), "GET /repository/r/x HTTP/1.1\r\nHost: x\r\n", 200); err != nil {
+		t.Fatal(err)
 	}
 }

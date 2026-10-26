@@ -130,27 +130,43 @@ func TestProxyPackumentAndTarball(t *testing.T) {
 	}
 }
 
-func TestGroupMergesAndServesThroughGroupURLs(t *testing.T) {
+// TestGroupOwnerAnswersAlone: hosted has left-pad@1.0.0, the proxy has 1.0.0,
+// 1.1.0 and a beta tag. The hosted member owns left-pad and answers alone
+// through the group URLs: no proxy version, tag or tarball gets through, not
+// even by its direct URL (dependency confusion, QA N-1, N-11).
+func TestGroupOwnerAnswersAlone(t *testing.T) {
 	e := newEnv(t)
-	e.seed(t, "npm-hosted", PackumentKey("left-pad"), hostedDoc)
+	if w := e.do("PUT", "npm-hosted", "left-pad", publishBody("left-pad", "1.0.0", []byte("hosted-tgz"), false), ci); w.Code != 201 {
+		t.Fatalf("setup publish: %d %s", w.Code, w.Body.String())
+	}
 	m := jsonBody(t, e.do("GET", "npm-all", "left-pad", "", anon))
-	// latest follows member order (QA M-4): the hosted member's tag wins.
-	if get(m, "dist-tags", "latest") != "1.0.1" || get(m, "versions", "1.0.0", "from") != "hosted" {
-		t.Fatalf("merged = %v", m)
+	vs, _ := get(m, "versions").(map[string]any)
+	if len(vs) != 1 || get(m, "versions", "1.0.0", "description") != "test" || get(m, "readme") != nil {
+		t.Fatalf("group document = %v", m)
 	}
-	if get(m, "versions", "1.1.0", "dist", "tarball") != base+"/repository/npm-all/left-pad/-/left-pad-1.1.0.tgz" {
-		t.Fatalf("tarball = %v", get(m, "versions", "1.1.0", "dist", "tarball"))
+	if tags, _ := get(m, "dist-tags").(map[string]any); len(tags) != 1 || tags["latest"] != "1.0.0" {
+		t.Fatalf("document dist-tags = %v", tags)
 	}
-	if w := e.do("GET", "npm-all", "left-pad/-/left-pad-1.1.0.tgz", "", anon); w.Body.String() != "remote-tgz" {
+	if get(m, "versions", "1.0.0", "dist", "tarball") != base+"/repository/npm-all/left-pad/-/left-pad-1.0.0.tgz" {
+		t.Fatalf("tarball = %v", get(m, "versions", "1.0.0", "dist", "tarball"))
+	}
+	if w := e.do("GET", "npm-all", "left-pad/-/left-pad-1.0.0.tgz", "", anon); w.Code != 200 || w.Body.String() != "hosted-tgz" {
 		t.Fatalf("group tarball: %d %q", w.Code, w.Body.String())
 	}
-	v := jsonBody(t, e.do("GET", "npm-all", "left-pad/latest", "", anon))
-	if v["version"] != "1.0.1" || v["from"] != "hosted" {
+	if v := jsonBody(t, e.do("GET", "npm-all", "left-pad/latest", "", anon)); v["version"] != "1.0.0" {
 		t.Fatalf("version doc = %v", v)
 	}
 	tags := jsonBody(t, e.do("GET", "npm-all", "-/package/left-pad/dist-tags", "", anon))
-	if tags["latest"] != "1.0.1" || tags["beta"] != "9.9.9" {
+	if len(tags) != 1 || tags["latest"] != "1.0.0" {
 		t.Fatalf("dist-tags = %v", tags)
+	}
+	for _, p := range []string{"left-pad/1.1.0", "left-pad/beta", "left-pad/-/left-pad-1.1.0.tgz"} {
+		if w := e.do("GET", "npm-all", p, "", anon); w.Code != 404 {
+			t.Errorf("proxy-only %s through the group: %d %q, want 404", p, w.Code, w.Body.String())
+		}
+	}
+	if w := e.do("GET", "npm-proxy", "left-pad/-/left-pad-1.1.0.tgz", "", anon); w.Code != 200 {
+		t.Fatalf("sanity: the proxy itself serves 1.1.0: %d", w.Code)
 	}
 	if w := e.do("HEAD", "npm-all", "left-pad", "", anon); w.Code != 200 || w.Body.Len() != 0 {
 		t.Fatalf("HEAD: %d %d", w.Code, w.Body.Len())

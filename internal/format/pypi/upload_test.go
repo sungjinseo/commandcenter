@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -395,5 +397,19 @@ func TestLargeMetadataBodyUploads(t *testing.T) {
 		if !strings.Contains(w.Body.String(), want) {
 			t.Errorf("index lacks %q: %s", want, w.Body.String())
 		}
+	}
+}
+
+// QA N-8: a multipart body the server's IdleBody cut for stalling is a 408,
+// not a 400.
+func TestUploadStalledBodyIs408(t *testing.T) {
+	e := newEnv(t)
+	ct, body := uploadBody(t, goodFields("x"), "smoke_hello-1.0.0.tar.gz", "x")
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/repository/py-hosted/", &failingBody{data: body.Bytes()[:40], err: &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}})
+	r.Header.Set("Content-Type", ct)
+	e.h.Serve(w, r, e.repos["py-hosted"], "")
+	if w.Code != 408 {
+		t.Fatalf("status %d %s, want 408", w.Code, w.Body.String())
 	}
 }

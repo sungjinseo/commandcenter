@@ -2,9 +2,7 @@ package npm
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -75,101 +73,6 @@ func writeDistTags(w io.Writer, tags []tagPair) error {
 	for _, t := range tags {
 		tw.Key(t.tag)
 		tw.Value(t.version)
-	}
-	tw.End()
-	return tw.Flush()
-}
-
-// mergePackuments merges documents for one package. Top-level fields, versions
-// and time entries come from the first member that has them; dist-tags too,
-// including "latest": member order decides, so a hosted member's latest is not
-// overridden by a newer release from a proxy (QA M-4, plan 13 Decision 3).
-// Members that are not JSON objects are skipped.
-func mergePackuments(members []io.ReadSeeker, dst io.Writer) error {
-	var valid []io.ReadSeeker
-	latest := ""
-	tags := map[string]string{}
-	var tagOrder []string
-	for _, m := range members {
-		pairs, err := readDistTags(m)
-		if err != nil {
-			slog.Warn("skipping unreadable npm package document in group merge", "err", err)
-			continue
-		}
-		valid = append(valid, m)
-		for _, p := range pairs {
-			if p.tag == "latest" {
-				if latest == "" {
-					latest = p.version
-				}
-				continue
-			}
-			if _, ok := tags[p.tag]; !ok {
-				tags[p.tag] = p.version
-				tagOrder = append(tagOrder, p.tag)
-			}
-		}
-	}
-	if len(valid) == 0 {
-		return errors.New("npm: no readable package document to merge")
-	}
-
-	tw := newTokenWriter(dst)
-	tw.Begin(true)
-	seenTop := map[string]bool{}
-	for _, m := range valid {
-		err := eachTopLevel(m, func(key string, dec *json.Decoder) error {
-			switch key {
-			case "versions", "time", "dist-tags", "_rev", "_attachments":
-				return skipValue(dec)
-			}
-			if seenTop[key] {
-				return skipValue(dec)
-			}
-			seenTop[key] = true
-			tw.Key(key)
-			return copyValue(dec, tw, nil, nil)
-		})
-		if err != nil {
-			return err
-		}
-	}
-
-	tw.Key("dist-tags")
-	tw.Begin(true)
-	if latest != "" {
-		tw.Key("latest")
-		tw.Value(latest)
-	}
-	for _, t := range tagOrder {
-		tw.Key(t)
-		tw.Value(tags[t])
-	}
-	tw.End()
-
-	for _, section := range []string{"versions", "time"} {
-		tw.Key(section)
-		tw.Begin(true)
-		seen := map[string]bool{}
-		for _, m := range valid {
-			err := eachTopLevel(m, func(key string, dec *json.Decoder) error {
-				if key != section {
-					return skipValue(dec)
-				}
-				return eachEntryIfObject(dec, func(k string) error {
-					if seen[k] {
-						return skipValue(dec)
-					}
-					seen[k] = true
-					tw.Key(k)
-					return copyValue(dec, tw, nil, nil)
-				})
-			})
-			if err != nil {
-				return err
-			}
-		}
-		tw.End()
 	}
 	tw.End()
 	return tw.Flush()

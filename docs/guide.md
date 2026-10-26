@@ -1,6 +1,6 @@
 # Command Center 운영 가이드
 
-> 첫 화면과 소개는 [README](../README.md)에 있습니다. 이 문서는 설치, 설정, 포맷별 클라이언트 설정, 운영을 자세히 다룹니다.
+> 첫 화면과 소개는 [README](../README.md)에 있습니다. 이 문서는 설치, 프로덕션 배포, 설정, 포맷별 클라이언트 설정, 운영을 자세히 다룹니다.
 
 ## 소개
 
@@ -61,6 +61,102 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
    ```
 
    상태 확인: `http://localhost:8081/service/rest/v1/status` 가 200을 반환하면 정상입니다.
+
+## 프로덕션 배포
+
+빠른 시작은 한 대에서 시험해 보는 구성입니다. 팀이 매일 쓰는 저장소로 올리기 전에 이 절을 확인하세요.
+
+### 체크리스트
+
+1. 검증한 버전을 고정해서 씁니다(`latest`나 기본 브랜치를 그대로 따라가지 않기). 업그레이드는 백업한 뒤에 하고, 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
+2. TLS는 리버스 프록시에서 끝내고, 일반 설정의 `baseURL`을 `https://` 주소로 둡니다. 서버 포트 8081은 프록시에서만 닿게 합니다.
+3. 사내 전용 저장소라면 익명 읽기를 끕니다. 일반 설정의 `anonymousRead`와 저장소별 `anonymousRead`를 확인하세요. `config.example.yaml`은 시험하기 편하도록 `anonymousRead: true`입니다. 권한이 없는 로그인 사용자의 읽기까지 막으려면 `authenticatedRead`도 끕니다("읽기 권한" 참고).
+4. 프록시에서 요청 본문 크기, 본문 수신 타임아웃, 클라이언트당 연결 수를 제한합니다.
+5. `meta.db`가 있는 `dataDir`는 로컬 디스크나 블록 스토리지에 둡니다. NFS·SMB에는 두지 않습니다. 인스턴스는 하나만 띄웁니다.
+6. 메모리 한도와 `GOMEMLIMIT`을 함께 정합니다.
+7. 중지 대기 시간을 60초로 늘립니다.
+8. 정기 백업을 돌리고, 복원도 한 번 해 봅니다("백업과 복원" 참고).
+
+### TLS와 리버스 프록시
+
+서버는 평문 HTTP만 받습니다. 비밀번호와 토큰이 오가므로 사내망이라도 앞에 리버스 프록시(nginx, HAProxy, Caddy, Traefik, Kubernetes Ingress·Gateway 등)를 두고 거기서 TLS를 끝내세요.
+
+- **`baseURL`은 `https://` 주소**: 일반 설정의 `baseURL`을 클라이언트가 실제로 접속하는 주소와 똑같이 맞춥니다. npm·PyPI·Cargo 응답의 다운로드 URL과 세션 쿠키의 `Secure` 플래그가 이 값으로 정해집니다. 서버는 `X-Forwarded-Proto`, `X-Forwarded-Host` 같은 헤더를 보지 않습니다.
+- **8081은 프록시만**: compose라면 `ports: ["127.0.0.1:8081:8081"]`처럼 프록시가 있는 호스트에만 열거나, 프록시와 같은 Docker 네트워크에서만 노출하세요. 그러지 않으면 프록시의 TLS와 제한을 건너뛰는 평문 경로가 남습니다.
+- **프록시에서 제한할 것**: 서버에도 제한이 있지만, 외부에 노출한다면 연결과 본문에 대한 제한은 앞단에서 거는 것이 확실합니다. 특히 헤더를 보낸 뒤 본문을 멈춘 연결이 대량으로 쌓여 128 MiB 컨테이너의 메모리를 채우지 않게 하세요.
+  - 요청 본문 크기: `maxUploadMiB`(기본 1024 MiB) 이상으로 둡니다. 작으면 큰 업로드가 프록시에서 413으로 끊깁니다.
+  - 본문 수신 타임아웃: 본문이 일정 시간(예: 60초) 동안 한 바이트도 오지 않으면 끊습니다. 느려도 계속 오는 업로드는 끊기지 않습니다.
+  - 클라이언트 IP당 동시 연결 수: 빌드 서버 여러 대가 NAT 하나 뒤에 있으면 넉넉히 잡으세요.
+  - 응답 대기 시간: proxy 저장소가 원격에서 처음 받아 오는 요청은 응답이 늦을 수 있으므로 넉넉히(예: 300초) 둡니다.
+- **요청 로그**: 로그의 `remote`는 프록시의 주소가 됩니다(`X-Forwarded-For`는 기록하지 않습니다). 클라이언트 주소는 프록시 로그에서 확인하세요.
+
+nginx 예시:
+
+```nginx
+# http { } 블록 안
+limit_conn_zone $binary_remote_addr zone=cc_conn:10m;
+
+server {
+    listen 443 ssl;
+    server_name repo.example.com;
+    ssl_certificate     /etc/nginx/tls/repo.example.com.crt;
+    ssl_certificate_key /etc/nginx/tls/repo.example.com.key;
+
+    client_max_body_size  1024m;  # maxUploadMiB 이상
+    client_header_timeout 10s;
+    client_body_timeout   60s;    # 본문이 60초 동안 오지 않으면 끊음
+    limit_conn cc_conn 100;       # 클라이언트 IP당 동시 연결
+
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+}
+```
+
+nginx는 기본적으로 요청 본문을 끝까지 받은 다음 서버로 넘깁니다(`proxy_request_buffering on`). 그래서 본문을 멈춘 연결은 서버까지 오지 않습니다. 대신 큰 업로드는 nginx의 임시 디렉터리를 거치므로 그만큼의 디스크가 필요합니다.
+
+### 저장 공간과 인스턴스
+
+- **`meta.db`는 로컬 디스크나 블록 스토리지에**: `dataDir`(기본 `/data`)에는 `meta.db`(SQLite, WAL 모드)와 default blob store(`blobs/`)가 있습니다. WAL은 같은 호스트의 공유 메모리 파일(`meta.db-shm`)과 파일 잠금에 기대므로, NFS나 SMB(CIFS) 같은 네트워크 파일시스템에서는 잠금이 보장되지 않고 DB가 깨질 수 있습니다. 로컬 디스크, 클라우드 블록 디스크, iSCSI, Kubernetes의 ReadWriteOnce 블록 볼륨을 쓰세요.
+- **NFS에는 blob만**: blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로, 이름 붙은 blob store("Blob Store" 참고)는 NFS 경로에 둘 수 있습니다. compact 작업이 파일의 수정 시각으로 진행 중인 업로드를 보호하므로 NFS 서버와 시계를 맞춰 두세요(NTP).
+- **blob store 경로는 영구 볼륨에**: 컨테이너 안의 경로(예: `/tmp/…`)에 store를 만들면 컨테이너를 다시 만들 때 blob이 사라지고 DB 기록만 남습니다.
+- **인스턴스는 하나만**: 같은 경로 업로드의 잠금, 예약 작업, 세션, 캐시가 모두 프로세스 안에 있습니다. 같은 `dataDir`나 blob store를 두 프로세스가 함께 쓰면 안 되고, 이중화(active-active)나 여러 대로 늘리는 구성은 지원하지 않습니다. 컨테이너를 바꿀 때는 이전 컨테이너가 완전히 멈춘 뒤에 새 컨테이너를 띄우세요. 대신 재시작은 빠릅니다(중지와 기동 모두 보통 1초 안쪽).
+- **디스크 여유**: proxy 캐시는 계속 커집니다. Cleanup 정책과 compact 작업으로 정리하고, Blob Store 화면에서 파일시스템의 남은 용량을 지켜보세요.
+
+### 리소스
+
+- **메모리**: 기본 구성은 컨테이너 한도 128 MiB에 `GOMEMLIMIT=80MiB`이며, 이 구성의 측정값은 "소개"의 메모리 사용량에 있습니다. `docker stats`의 값에는 큰 파일을 읽고 쓸 때의 커널 파일 캐시가 들어가 한도에 가까워 보일 수 있지만, 커널이 회수하는 메모리입니다. 한도를 올릴 때는 `GOMEMLIMIT`도 함께 올리되 한도보다 충분히 낮게 두세요("메모리 설정" 참고).
+- **CPU**: 대부분 업로드 해시 계산(sha256, sha1, md5, sha512)과 bcrypt 비밀번호 확인에 씁니다. CPU 한도를 낮게 걸면 로그인과 큰 업로드가 느려집니다.
+- **디스크**: 같은 blob store 안에서는 같은 내용을 한 번만 저장하므로(hosted와 proxy가 같은 파일을 공유) 필요한 용량은 hosted 패키지와 proxy 캐시를 합친 크기입니다. 디스크가 차면 업로드가 실패합니다.
+
+### 정상 종료
+
+서버는 SIGTERM(또는 SIGINT)을 받으면 새 연결을 받지 않고, 진행 중인 요청을 최대 30초 기다린 뒤 다운로드 수·요청 통계, 보낼 메일, 활동 기록을 각각 최대 10초 동안 마저 쓰고 DB를 닫습니다. 실행 중인 예약 작업은 취소됩니다.
+
+Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않으면 프로세스가 강제로 종료됩니다. 진행 중인 업로드가 끊기고 마지막 통계가 사라질 수 있습니다(`meta.db`는 SQLite 트랜잭션으로 쓰므로 깨지지 않습니다). 대기 시간을 60초로 늘리세요.
+
+- compose: 서비스에 `stop_grace_period: 60s`
+- `docker run`으로 띄웠다면: `docker stop -t 60 commandcenter`
+- Kubernetes: `terminationGracePeriodSeconds: 60`(참조 매니페스트에 들어 있습니다)
+
+### Kubernetes
+
+[`deploy/kubernetes/commandcenter.yaml`](../deploy/kubernetes/commandcenter.yaml)은 ConfigMap(`config.yaml`), Service, StatefulSet으로 된 참조 매니페스트입니다. 파일 맨 위 주석대로 이미지, `config.yaml`의 `baseURL`과 관리자 `passwordHash`, `storageClassName`을 채운 뒤 적용합니다.
+
+```bash
+kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
+```
+
+- **StatefulSet, `replicas: 1`**: StatefulSet은 이전 Pod가 완전히 끝난 뒤에 새 Pod를 띄우므로 업데이트 중에도 두 프로세스가 같은 `meta.db`를 열지 않습니다(Deployment의 롤링 업데이트는 겹칠 수 있습니다). `replicas`를 늘리면 Pod마다 빈 볼륨이 따로 생겨, 데이터가 서로 다른 서버가 여러 대 생깁니다.
+- **볼륨**: `/data`는 ReadWriteOnce PVC(50Gi)입니다. `storageClassName`을 비워 두면 클러스터의 기본 StorageClass를 쓰므로, 그것이 NFS 계열이 아닌지 확인하세요.
+- **노드 장애**: Pod가 `Terminating`이나 `Unknown`에 머물러도 `kubectl delete pod --force --grace-period=0`으로 지우지 마세요. 이전 노드에서 프로세스가 아직 돌고 있으면 같은 볼륨을 두 프로세스가 쓰게 될 수 있습니다.
+- **프로브**: 모두 `GET /service/rest/v1/status`(인증 없이 200)입니다. HTTP 서버가 응답하는지만 보고 DB나 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
+- **보안**: UID 65532(non-root), 읽기 전용 루트 파일시스템, 모든 capability 제거, seccomp `RuntimeDefault`로 Pod Security Standards의 `restricted` 기준에 맞습니다. SQLite 임시 파일은 `/tmp`(emptyDir)에 씁니다. 이름 붙은 blob store는 경로를 비우면 `/data/blobstores/<이름>`에 만들어지고, `/data` 밖의 절대 경로에 두려면 그 경로에 볼륨을 따로 마운트해야 합니다. 루트 파일시스템이 읽기 전용이라 다른 경로에는 만들 수 없고, `/tmp`는 Pod가 다시 만들어지면 비워집니다.
+- **리소스**: 메모리 요청과 한도 128Mi, `GOMEMLIMIT=80MiB`입니다. CPU는 요청(100m)만 두고 한도는 두지 않습니다.
+- **노출**: Service는 평문 HTTP입니다. Ingress나 Gateway에서 TLS를 끝내고, "TLS와 리버스 프록시"의 제한(본문 크기, 타임아웃, 연결 수)을 쓰는 컨트롤러의 설정으로 겁니다.
+- **서버를 멈춰야 하는 작업**(멈춘 상태의 백업, `user reset-password`): `kubectl scale statefulset commandcenter --replicas=0`으로 Pod를 내리고, 같은 PVC(`data-commandcenter-0`)와 ConfigMap을 마운트하고 같은 UID 65532로 도는 일회용 Pod에서 실행한 다음 `--replicas=1`로 되돌립니다.
 
 ## repolite에서 이전하기
 
@@ -241,7 +337,7 @@ Command Center는 파일만 저장하므로 컴포넌트는 서버가 요청 시
 
 설정 파일은 YAML이며 알 수 없는 키가 있으면 시작이 실패합니다. 설정을 바꾼 뒤에는 `docker compose restart`로 반영하세요.
 
-**한 번만 가져오는 키**: `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`는 plan 12부터 **첫 시작 때 한 번만** 읽어 DB로 가져옵니다. 이후에는 파일에 남아 있어도 무시되며(시작 로그에 경고가 한 번 나옵니다) 웹 UI에서 관리합니다("업그레이드"의 이전 안내 참고). `config.yaml`에 계속 쓰는 키는 `listen`, `dataDir`, `memoryLimitMiB`, `metricsFlushSeconds`뿐입니다(`repositories`도 첫 시작에만 가져옵니다).
+**한 번만 가져오는 키**: `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`는 **첫 시작 때 한 번만** 읽어 DB로 가져옵니다. 이후에는 파일에 남아 있어도 무시되며(시작할 때마다 경고가 한 줄 남습니다) 웹 UI에서 관리합니다("업그레이드"의 이전 안내 참고). `config.yaml`에 계속 쓰는 키는 `listen`, `dataDir`, `memoryLimitMiB`, `metricsFlushSeconds`뿐입니다(`repositories`도 첫 시작에만 가져옵니다).
 전체 예시는 `config.example.yaml`을 참고하세요.
 
 ### 최상위 키
@@ -291,7 +387,7 @@ Command Center는 파일만 저장하므로 컴포넌트는 서버가 요청 시
 
 ## 인증과 권한
 
-plan 12부터 사용자, 역할, Realm, LDAP 설정은 `config.yaml`이 아니라 **DB에서 웹 UI로 관리**합니다(첫 시작 때 `config.yaml`의 `users`/`roles`를 한 번 가져옵니다. "업그레이드" 참고). 변경은 바로 적용되며 재시작이 필요 없습니다.
+사용자, 역할, Realm, LDAP 설정은 `config.yaml`이 아니라 **DB에서 웹 UI로 관리**합니다(첫 시작 때 `config.yaml`의 `users`/`roles`를 한 번 가져옵니다. "업그레이드" 참고). 변경은 바로 적용되며 재시작이 필요 없습니다.
 
 ### 사용자
 
@@ -728,7 +824,21 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 
 ### 백업과 복원
 
-데이터는 named volume에 있습니다. 볼륨 이름은 기본 `commandcenter-data`이며 `COMMANDCENTER_VOLUME`으로 바꿀 수 있습니다. 이전 repolite 설치의 데이터를 쓰려면 `COMMANDCENTER_VOLUME=repolite_repolite-data`(또는 `docker volume ls`에 보이는 이름)를 지정하세요. 일관된 백업을 위해 서버를 멈춘 상태에서 하는 것을 권장합니다.
+데이터는 named volume에 있습니다. 볼륨 이름은 기본 `commandcenter-data`이며 `COMMANDCENTER_VOLUME`으로 바꿀 수 있습니다. 이전 repolite 설치의 데이터를 쓰려면 `COMMANDCENTER_VOLUME=repolite_repolite-data`(또는 `docker volume ls`에 보이는 이름)를 지정하세요.
+
+- **백업 대상**: `meta.db`(저장소 정의, 사용자, 역할, 토큰 해시, 설정, 파일 목록)와 모든 blob store입니다. default store는 같은 볼륨의 `blobs/`에, 경로를 비워 만든 이름 붙은 store는 같은 볼륨의 `blobstores/<이름>`에 있습니다. 절대 경로로 만든 store는 그 경로에 있으니 따로 챙기세요. `meta.db`와 blob은 같은 시점의 것이어야 합니다. `config.yaml`도 함께 보관하세요.
+- **백업 파일 보호**: `meta.db`에는 proxy 원격 인증, LDAP bind, SMTP 비밀번호가 들어 있습니다. 백업 파일도 서버와 같은 수준으로 접근을 제한하세요.
+- **실행 중인 볼륨을 그대로 복사하면 백업이 되지 않습니다.** `cp`나 `tar`가 `meta.db`를 읽는 동안 내용이 바뀌거나, `meta.db`가 아직 복사되지 않은 blob을 가리켜서 복원한 뒤 그 파일들이 404가 됩니다(`allow_once` 저장소에는 같은 파일을 다시 올릴 수도 없습니다).
+
+일관된 백업 방법은 두 가지입니다.
+
+1. **멈추고 복사(가장 단순)**: 아래 명령처럼 서버를 멈추고 볼륨을 통째로 복사한 뒤 다시 시작합니다. 중지와 기동은 보통 1초 안쪽이지만 복사하는 동안은 서비스가 멈춥니다.
+2. **무중단**: 먼저 `meta.db`를 SQLite의 online backup API나 `VACUUM INTO`로 스냅샷하고, **그다음에** blob 디렉터리를 복사합니다. blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로 스냅샷 뒤에 생긴 blob이 섞여도 무해합니다(다음 compact 작업이 정리합니다). 순서를 바꾸면 안 됩니다.
+   - 서버 이미지에는 셸과 `sqlite3`가 없습니다. 같은 볼륨을 마운트한 다른 컨테이너에서 **서버와 같은 UID 65532로** 실행하세요(다른 사용자로 실행하면 그 사용자 소유의 파일이 볼륨에 남아 서버가 열지 못할 수 있습니다). 예: `sqlite3 /data/meta.db "VACUUM INTO '/data/meta-snapshot.db'"`. 그다음 `blobs/`(와 이름 붙은 store)를 스냅샷 파일과 함께 복사하고, 볼륨 안의 스냅샷은 지웁니다(`VACUUM INTO`는 이미 있는 파일에 쓰지 않습니다).
+   - 백업하는 동안에는 compact 작업(`commandcenter gc` 포함)이 돌지 않게 하세요. 스냅샷 뒤에 지워진 파일의 blob을 compact가 회수하면 백업에서 빠집니다. 기본 compact 작업은 매일 03:00(서버 시간대)에 돕니다.
+   - 복원할 때는 스냅샷을 `meta.db`라는 이름으로 두고, `meta.db-wal`·`meta.db-shm` 없이 시작합니다.
+
+아래는 1번(멈추고 복사) 방법의 명령입니다.
 
 **백업 (PowerShell)**
 
@@ -761,13 +871,21 @@ Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이�
 
 ### 업그레이드
 
-```bash
-docker compose build && docker compose up -d
-```
+1. 올릴 버전의 [CHANGELOG](../CHANGELOG.md)를 읽습니다. 설정이나 운영 절차가 바뀌면 거기에 적습니다.
+2. 백업합니다("백업과 복원" 참고). 업그레이드한 뒤 되돌릴 수 있는 방법은 이 백업뿐입니다.
+3. 새 버전으로 바꿉니다. 소스에서 빌드한다면 다음과 같습니다.
 
-데이터 볼륨은 그대로 유지됩니다.
+   ```bash
+   docker compose build && docker compose up -d
+   ```
 
-**plan 12 이후 첫 시작(설정 가져오기)**: `config.yaml`의 `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`를 DB로 **한 번** 가져옵니다(`repositories`를 가져오던 plan 7과 같은 방식). 가져온 뒤에는 이 키들이 파일에 있어도 무시되며 시작 로그에 경고가 한 번 남습니다. 이 값들은 UI(사용자, 역할, Realm, 일반 설정)에서 관리합니다. `config.yaml`에는 `listen`, `dataDir`, `memoryLimitMiB`, `metricsFlushSeconds`만 남기면 됩니다. 가져오기 전 `users`나 `roles` 항목이 잘못되어 있으면 시작이 실패하고, 가져온 뒤에 생긴 문제는 경고로만 남습니다. 기존 API 토큰과 `meta.db`는 그대로 쓰이고, 세션은 서버 재시작으로 끊깁니다. 예전 `write` 역할은 해당 저장소(또는 `*`)의 browse, read, add, edit, delete 전부로 바뀌며(예전 쓰기는 삭제를 포함했습니다), 로그인한 사용자의 읽기는 `authenticatedRead` 기본값(켜짐) 덕분에 예전과 같습니다. 가져온 뒤에는 `config.yaml`을 고쳐도 사용자·역할이 바뀌지 않으므로 UI를 쓰세요.
+   데이터 볼륨은 그대로 유지되고, 새 버전은 처음 시작할 때 `meta.db`를 필요한 만큼 새 구조로 바꿉니다.
+4. 시작 로그에 ERROR가 없는지 보고, 로그인·다운로드·업로드를 한 번씩 확인합니다. UI 세션은 재시작으로 끊기고 API 토큰은 유지됩니다.
+
+**다운그레이드는 지원하지 않습니다.** 새 버전이 쓴 데이터로 이전 버전을 띄우면 경고 없이 잘못 동작할 수 있습니다. 예를 들어 사용자를 `config.yaml`에서 읽던 이전 버전으로 내리면 인증이 `config.yaml`의 해시로 돌아가 UI에서 바꾼 비밀번호가 통하지 않고, 기본이 아닌 blob store에 둔 저장소는 파일을 찾지 못합니다. 되돌려야 하면 업그레이드 전에 받은 백업을 이전 버전의 이미지와 함께 복원하세요. 백업 뒤에 올라온 패키지와 바뀐 설정은 사라집니다.
+
+**사용자를 `config.yaml`에서 읽던 버전에서 올릴 때(설정 가져오기)**: 첫 오픈소스 릴리스(2026-10) 전의 빌드(repolite 포함)는 사용자와 역할을 시작할 때마다 `config.yaml`에서 읽었습니다. 지금 버전은 처음 시작할 때 `config.yaml`의 `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`를 DB로 **한 번** 가져옵니다(`repositories`와 같은 방식). 가져온 뒤에는 이 키들이 파일에 있어도 무시되며 시작할 때마다 경고가 한 줄 남습니다. 이 값들은 UI(사용자, 역할, Realm, 일반 설정)에서 관리합니다. `config.yaml`에는 `listen`, `dataDir`, `memoryLimitMiB`, `metricsFlushSeconds`만 남기면 됩니다. 가져오기 전 `users`나 `roles` 항목이 잘못되어 있으면 시작이 실패하고, 가져온 뒤에 생긴 문제는 경고로만 남습니다. **업그레이드 전에** `config.yaml`의 `passwordHash`가 실제 비밀번호의 해시인지 확인하세요. 가져간 해시가 틀렸다면 파일을 고쳐도 반영되지 않으므로 UI의 사용자 관리에서 비밀번호를 재설정해야 합니다. 기존 API 토큰과 `meta.db`는 그대로 쓰이고, 세션은 서버 재시작으로 끊깁니다. 예전 `write` 역할은 해당 저장소(또는 `*`)의 browse, read, add, edit, delete 전부로 바뀌며(예전 쓰기는 삭제를 포함했습니다), 로그인한 사용자의 읽기는 `authenticatedRead` 기본값(켜짐) 덕분에 예전과 같습니다. 가져온 뒤에는 `config.yaml`을 고쳐도 사용자·역할이 바뀌지 않으므로 UI를 쓰세요.
+
 ### 메모리 설정
 
 - `memoryLimitMiB`(기본 80)는 Go 메모리 한도를 정합니다. 단, `GOMEMLIMIT` 환경변수가 있으면 그 값이 우선하며 compose 파일은 `GOMEMLIMIT: 80MiB`를 설정합니다. 한도를 바꾸려면 둘 중 실제로 쓰이는 쪽(compose 사용 시 `GOMEMLIMIT`)을 고치세요.
@@ -788,7 +906,9 @@ docker compose build && docker compose up -d
 ## 제한 사항
 
 - 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML, Go·Cargo 업로드 화면은 없습니다. 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. Docker 포맷, S3 등 원격 blob 저장소, 포맷 고유의 검색(`npm search` 포함)도 없습니다.
-- **plan 12에서 의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**, 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기, S3 같은 원격 blob store(경로는 로컬 디렉터리만), 이미 만든 저장소의 blob store 이동.
+- **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
+- HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
+- **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**, 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기, S3 같은 원격 blob store(경로는 로컬 디렉터리만), 이미 만든 저장소의 blob store 이동.
 - `npm unpublish`는 지원하지 않습니다(`npm deprecate`, `npm dist-tag`는 지원).
 - PyPI는 PEP 658 메타데이터 파일과 `/pypi/<프로젝트>/json`을 제공하지 않습니다.
 - Go 체크섬 DB(`sumdb/`)는 프록시하지 않습니다. 사내 모듈에는 `GONOSUMDB`를 쓰세요.
@@ -827,7 +947,7 @@ docker compose build && docker compose up -d
 scripts/go.sh test ./...      # 단위·통합 테스트
 scripts/go.sh vet ./...
 
-test/e2e.sh                   # 스모크 테스트 5개 + 부하 테스트를 모두 실행하고 요약 출력
+test/e2e.sh                   # 스모크 테스트(포맷 5개, UI, LDAP, 메일)와 부하 테스트를 모두 실행하고 요약 출력
 
 test/smoke/maven-smoke.sh     # 실제 클라이언트로 포맷별 E2E
 test/smoke/npm-smoke.sh
@@ -837,3 +957,5 @@ test/smoke/cargo-smoke.sh
 
 test/load/load.sh             # 128 MiB 컨테이너 메모리 부하 테스트
 ```
+
+기여 절차와 코드 규칙은 [CONTRIBUTING.md](../CONTRIBUTING.md)에 있습니다.

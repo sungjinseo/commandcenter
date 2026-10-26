@@ -496,11 +496,19 @@ function setupSnippets(r) {
   const hosted = r.type === "hosted";
   const cred = "<server><id>commandcenter</id><username>ci</username><password>" + t("setup.password") + "</password></server>";
   switch (r.format) {
-    case "maven":
+    case "maven": {
+      // The mirror alone leaves Maven's "central" with snapshots off, so no
+      // SNAPSHOT dependency is ever requested; the profile turns them on for
+      // "central", which the mirror then sends here (QA M-17).
+      const central = (tag) => "<" + tag + "><id>central</id><url>http://central</url>\n          <releases><enabled>true</enabled></releases>\n          <snapshots><enabled>true</enabled></snapshots></" + tag + ">";
       return hosted
         ? [["pom.xml — distributionManagement", "<distributionManagement>\n  <repository>\n    <id>commandcenter</id>\n    <url>" + xml(url) + "</url>\n  </repository>\n</distributionManagement>"],
           ["~/.m2/settings.xml", "<settings>\n  <servers>\n    " + cred + "\n  </servers>\n</settings>"]]
-        : [["~/.m2/settings.xml — mirror", "<settings>\n  <servers>\n    " + cred + "\n  </servers>\n  <mirrors>\n    <mirror><id>commandcenter</id><mirrorOf>*</mirrorOf>\n      <url>" + xml(url) + "</url></mirror>\n  </mirrors>\n</settings>"]];
+        : [["~/.m2/settings.xml — mirror", "<settings>\n  <servers>\n    " + cred + "\n  </servers>\n  <mirrors>\n    <mirror><id>commandcenter</id><mirrorOf>*</mirrorOf>\n      <url>" + xml(url) + "</url></mirror>\n  </mirrors>\n" +
+          "  <profiles>\n    <profile>\n      <id>commandcenter</id>\n      <repositories>\n        " + central("repository") + "\n      </repositories>\n" +
+          "      <pluginRepositories>\n        " + central("pluginRepository") + "\n      </pluginRepositories>\n    </profile>\n  </profiles>\n" +
+          "  <activeProfiles>\n    <activeProfile>commandcenter</activeProfile>\n  </activeProfiles>\n</settings>"]];
+    }
     case "npm":
       return [["~/.npmrc", "registry=" + url], ["npm login", "npm login --registry " + url]];
     case "pypi": {

@@ -183,3 +183,93 @@ func TestStaleSettingsKeysAfterImport(t *testing.T) {
 		t.Fatalf("session idle = %v", got)
 	}
 }
+
+// QA L-2 and N-24: every start warns about an active local user whose
+// password hash is not a bcrypt hash (a placeholder fails every login without
+// a word), and about a stored baseURL this version no longer accepts, without
+// logging that value: it may hold a password.
+func TestStartupWarnings(t *testing.T) {
+	cfg := testConfig(t, "")
+	cfg.Users = append(cfg.Users, config.User{Name: "todo", PasswordHash: "<commandcenter hash-password 출력값>"})
+	a, err := New(cfg, quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// As an older build stored it (SetSetting does not validate).
+	if err := a.DB.SetSetting(context.Background(), meta.SettingBaseURL, `"http://ci:s3cret@repo.example"`); err != nil {
+		t.Fatal(err)
+	}
+	a.Close()
+	var buf strings.Builder
+	a, err = New(cfg, slog.New(slog.NewTextHandler(&buf, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	var hashWarns []string
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.Contains(line, "cannot sign in with a password") {
+			hashWarns = append(hashWarns, line)
+		}
+	}
+	if len(hashWarns) != 1 || !strings.Contains(hashWarns[0], "level=WARN") || !strings.Contains(hashWarns[0], "user=todo") {
+		t.Fatalf("want one warning, for todo (ci has a real hash): %q", hashWarns)
+	}
+	if logs := buf.String(); !strings.Contains(logs, "stored baseURL is no longer accepted") || strings.Contains(logs, "s3cret") {
+		t.Fatalf("baseURL warning: %s", logs)
+	}
+}
+
+// QA N-2: "user reset-password" next to a running server writes through
+// another connection; the server applies the change within its reload
+// interval and ends the user's sessions, as a reset through the API does.
+func TestServeAppliesOutOfProcessAccessChanges(t *testing.T) {
+	defer func(d time.Duration) { accessReloadEvery = d }(accessReloadEvery)
+	accessReloadEvery = 20 * time.Millisecond
+	cfg := testConfig(t, "")
+	cfg.Listen = "127.0.0.1:0"
+	a, err := New(cfg, quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ctx := context.Background()
+	sid := a.Auth.Sessions.Create("ci")
+	sctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- a.Serve(sctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+
+	// A second handle on the database stands in for the CLI process.
+	other, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := bcrypt.GenerateFromPassword([]byte("new-password"), bcrypt.MinCost)
+	_, err = other.ResetLocalPassword(ctx, "ci", string(h), false)
+	other.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The deadline only absorbs a slow machine: without the reload loop the
+	// change never applies.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := a.Auth.CheckPassword(ctx, "ci", "new-password"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the running server did not apply the new password")
+		}
+	}
+	if _, err := a.Auth.CheckPassword(ctx, "ci", "pw"); err == nil {
+		t.Fatal("the old password still works")
+	}
+	if _, ok := a.Auth.Sessions.User(sid); ok {
+		t.Fatal("the session of ci survived the reset")
+	}
+}

@@ -266,20 +266,39 @@ func versionDir(p Path) string {
 	return segs[len(segs)-2]
 }
 
-// putMetadata merges an uploaded maven-metadata.xml with the stored one.
-// SNAPSHOT version-level documents are owned by the server
-// (rebuildSnapshotVersion): an uploaded one is accepted and dropped
-// (plan 13 Decision 6), so a stale or invented build never reaches clients.
+// metadataSem bounds how many maven-metadata.xml uploads are processed at
+// once: decoding allocates about 20 times the document's size, and four
+// concurrent 10 MiB documents OOM-killed a 128 MiB container.
+var metadataSem = make(chan struct{}, 2)
+
+// metadataWaitTimeout bounds how long an upload waits for a slot (503 on expiry).
+var metadataWaitTimeout = 30 * time.Second
+
+// putMetadata accepts an uploaded maven-metadata.xml. Versioning is owned by
+// the server: GA documents are built from the stored artifacts (rebuildGA,
+// QA L-11) and SNAPSHOT version-level documents from the stored builds
+// (rebuildSnapshotVersion, plan 13 Decision 6), so a stale or invented
+// version, <release> or groupId never reaches clients. Only the <plugins> of
+// a plugin-group document are merged into the stored one; the rest of an
+// upload is accepted and dropped.
 func (h *Handler) putMetadata(ctx context.Context, rp *repo.Repository, path string, body io.Reader) error {
+	select {
+	case metadataSem <- struct{}{}:
+		defer func() { <-metadataSem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(metadataWaitTimeout):
+		return repo.Errorf(http.StatusServiceUnavailable, "too many concurrent maven-metadata.xml uploads, retry")
+	}
 	// Parse the client body before taking the lock so slow uploads do not block the GA directory.
-	up, err := ParseMetadata(body)
+	up, err := ParseMetadata(http.MaxBytesReader(nil, io.NopCloser(body), maxUploadedMetadata))
 	if err != nil {
 		if errors.As(err, new(*http.MaxBytesError)) {
 			return err
 		}
 		return repo.Errorf(http.StatusBadRequest, "invalid maven-metadata.xml: %v", err)
 	}
-	if isSnapshotPath(Path{Main: path}) {
+	if isSnapshotPath(Path{Main: path}) || len(up.Plugins) == 0 {
 		return nil
 	}
 	unlock := h.locks.Lock(rp.Name + "\x00" + dir(path))
@@ -288,11 +307,13 @@ func (h *Handler) putMetadata(ctx context.Context, rp *repo.Repository, path str
 	if err != nil {
 		return err
 	}
-	return h.storeMetadata(ctx, rp, path, Merge(existing, up))
+	return h.storeMetadata(ctx, rp, path, Merge(existing, &Metadata{Plugins: up.Plugins}))
 }
 
 // rebuildGA updates groupId/artifactId/maven-metadata.xml from the stored artifacts.
-// With replace, the document is regenerated instead of merged (used after deletes).
+// Everything but <plugins> is the server's and regenerated (QA L-11); the
+// plugins of the stored document (a groupId directory that is also a GA) are
+// kept. With replace, the document is regenerated from scratch (used after deletes).
 func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, artifactID string, replace bool) error {
 	gaDir := strings.ReplaceAll(groupID, ".", "/") + "/" + artifactID
 	unlock := h.locks.Lock(rp.Name + "\x00" + gaDir)
@@ -328,7 +349,11 @@ func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, a
 	if err != nil {
 		return err
 	}
-	return h.storeMetadata(ctx, rp, path, Merge(existing, ForVersions(groupID, artifactID, versions, h.Now())))
+	m := ForVersions(groupID, artifactID, versions, h.Now())
+	if existing != nil {
+		m.Plugins = existing.Plugins
+	}
+	return h.storeMetadata(ctx, rp, path, m)
 }
 
 // loadMetadata returns the stored document, or nil if there is none or it is unreadable.

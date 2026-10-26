@@ -100,6 +100,18 @@ Open `http://localhost:8081/` and you are done. No screen asks for a license key
 
 Client settings for each format (Maven `settings.xml`, `.npmrc`, `pip.conf`, `GOPROXY`, Cargo `config.toml`) are ready to copy from each repository's page in the web UI and from the [operations guide](docs/guide.md#포맷별-클라이언트-설정) (Korean).
 
+## Production checklist
+
+The quick start is for trying it out. Before your team relies on it every day, read the production deployment section of the [operations guide](docs/guide.md#프로덕션-배포) (Korean). In short:
+
+- Terminate TLS at a reverse proxy and set `baseURL` to the `https://` address.
+- For a private registry, turn anonymous read (`anonymousRead`) off.
+- Limit upload size, body timeouts and connections per client at the proxy.
+- Keep `meta.db` on local disk or block storage, never on NFS or SMB, and run exactly one instance.
+- Give the server 60 seconds to stop (`stop_grace_period` in compose).
+- Back up regularly and before every upgrade. Downgrades are not supported.
+- Reference Kubernetes manifests are in [deploy/kubernetes](deploy/kubernetes/commandcenter.yaml).
+
 ## How light is it
 
 A single Go binary with no CGO. It runs in a 128 MiB container with `GOMEMLIMIT=80MiB`.
@@ -113,11 +125,12 @@ Compare that with the memory recommended for JVM-based servers that do the same 
 
 ## Honest status
 
-The Human Edition was made by humans. So it has bugs.
+The Human Edition was made by humans. So it has bugs. You will not see an "all problems solved" hologram here.
 
-- Every High and Medium item from a black-box QA run has been fixed, and each fix comes with a regression test.
-- What is not supported yet is written down as it is, in the limitations section of the [operations guide](docs/guide.md#제한-사항) (Korean).
-- npm unpublish is not supported yet. npm reports it as an error, not as a success.
+- We work through the findings of black-box QA runs one by one, and every fix gets a regression test. Some findings are still open.
+- Known limitations and what is not supported yet are in the [limitations section of the operations guide](docs/guide.md#제한-사항) (Korean); what each release fixed and changed is in the [CHANGELOG](CHANGELOG.md).
+- The server is built to run as a single instance. High availability and running several instances are not supported.
+- Report bugs as issues, and security problems privately as the [security policy](SECURITY.md) describes.
 
 ## FAQ
 
@@ -141,7 +154,10 @@ Use it under MIT or Apache-2.0, whichever you prefer. Commercial use is fine. Th
 
 ## Documentation
 
-- [Operations guide](docs/guide.md) (Korean): installation, configuration reference, authentication and permissions, LDAP, blob stores, client settings per format, backup and upgrades
+- [Operations guide](docs/guide.md) (Korean): installation, production deployment, configuration reference, authentication and permissions, LDAP, blob stores, client settings per format, backup and upgrades
+- [Kubernetes reference manifests](deploy/kubernetes/commandcenter.yaml)
+- [Changelog](CHANGELOG.md): what each release fixed and changed
+- [Contributing guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Security policy](SECURITY.md): how to report a vulnerability
 - [Attribution](ATTRIBUTION.md): authors and licenses of the third-party code we ship
 
@@ -160,6 +176,8 @@ bash test/e2e.sh
 ```
 
 `test/e2e.sh` runs smoke tests that drive every format with the real clients (mvn, npm, pip, go, cargo), plus a 128 MiB load test. It takes about 20 minutes, so get a coffee. Coffee is not included in the Human Edition.
+
+Before you send an issue or a PR, please read the [contributing guide](CONTRIBUTING.md): it covers the code conventions and what we expect from a PR.
 
 ## License
 
