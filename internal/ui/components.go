@@ -209,18 +209,21 @@ func (k compKey) compare(o compKey) int {
 }
 
 // pageToken is the continuationToken that resumes after k: opaque to clients.
+// The fields are []byte (base64 in JSON), so a key that is not valid UTF-8
+// comes back unchanged instead of with U+FFFD, which would skip or repeat
+// components.
 func pageToken(k compKey) string {
-	b, _ := json.Marshal([]string{k.repo, k.group, k.name, k.version})
+	b, _ := json.Marshal([][]byte{[]byte(k.repo), []byte(k.group), []byte(k.name), []byte(k.version)})
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func parsePageToken(s string) (compKey, bool) {
-	var f []string
+	var f [][]byte
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil || json.Unmarshal(b, &f) != nil || len(f) != 4 {
 		return compKey{}, false
 	}
-	return compKey{f[0], f[1], f[2], f[3]}, true
+	return compKey{string(f[0]), string(f[1]), string(f[2]), string(f[3])}, true
 }
 
 // builder accumulates every component the scan finds, capping each one's

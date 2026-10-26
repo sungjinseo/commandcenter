@@ -214,6 +214,21 @@ func TestPublishChecksTarballAndName(t *testing.T) {
 	}
 }
 
+// TestPublishScopedNameStartingWithUnderscore: validate-npm-package-name
+// (npm 10.8.2) checks a leading "." or "_" on the whole name only, so npm
+// publishes @acme/_internal; it publishes and installs, also through a group.
+func TestPublishScopedNameStartingWithUnderscore(t *testing.T) {
+	e := newEnv(t)
+	if w := e.do("PUT", "npm-hosted", "@acme/_internal", publishBody("@acme/_internal", "1.0.0", []byte("x"), false), ci); w.Code != 201 {
+		t.Fatalf("publish @acme/_internal: %d %s", w.Code, w.Body.String())
+	}
+	for _, p := range []string{"@acme/_internal", "@acme/_internal/-/_internal-1.0.0.tgz"} {
+		if w := e.do("GET", "npm-all", p, "", anon); w.Code != 200 {
+			t.Fatalf("group read %s: %d %s", p, w.Code, w.Body.String())
+		}
+	}
+}
+
 func TestDeprecateKeepsDist(t *testing.T) {
 	e := newEnv(t)
 	dep := deployer(t, e)

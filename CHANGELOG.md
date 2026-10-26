@@ -42,6 +42,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failures of that name in a row; give CI an API token. Scripts that create a role with a `repo:`
   privilege before its repository, a blob store with a relative path, or a user or role whose id
   differs from an existing one only in case now get 400 or 409 (see Changed and Security).
+- LDAP: a login name that is not printable ASCII, or that has leading, trailing or repeated spaces,
+  is now refused like a wrong password (see Security). If your `userFilter` finds users by a
+  non-ASCII value such as a Korean `cn`, they can no longer sign in with it; make the filter match
+  an ASCII attribute such as `uid`, `sAMAccountName` or `mail`. Local users are not affected.
+- A proxy's `remoteAuth` credentials no longer follow a redirect to another scheme, port or
+  subdomain, where such a remote typically answers 401 (`remote status 401` in the log): make the
+  remote redirect within its own `https` origin, or point `remote` at the final `https` address. A
+  proxy whose `remote` host is not ASCII must be changed to its punycode form (`xn--…`), or all its
+  fetches are refused (see Changed and Security).
 
 ### Added
 
@@ -69,8 +78,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   UI); without it the version is `dev`.
 - `npm unpublish pkg@version` and `npm unpublish pkg --force` delete from a hosted repository, or
   through a group's `writeMember`, with the delete privilege (QA H-2, N-10). Dist-tags of removed
-  versions go, `latest` moves to the newest remaining release, and an unpublish whose document
-  misses a version published meanwhile is refused with 409 instead of deleting that version.
+  versions go, `latest` moves to the newest remaining release, and an unpublish that would delete a
+  version published after npm read the package is refused with 409 instead: the PUT checks the
+  document npm sends back, and every unpublish request that would delete a stored version checks the
+  `_rev` that hosted package documents now carry (made from their versions and publish times,
+  unchanged by dist-tag and deprecate edits). A document written by an older build has no `_rev`;
+  npm then sends `undefined`, which is not checked, until the package next changes.
 - Go hosted repositories accept `DELETE` of a version's `.mod`, `.info` or `.zip`. It removes the
   whole version, also one that has only a `.mod`, and needs the delete privilege (QA M-11).
 - `DELETE /-/api/repositories/{name}/components?group=&name=&version=` deletes one component
@@ -91,7 +104,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `COMMANDCENTER_SECRET_KEY` or in the file the new `secretKeyFile` key names, the SMTP password,
   the LDAP bind password and proxy `remoteAuth` passwords and bearer tokens are stored with
   AES-256-GCM, and plain-text ones are encrypted on the next start. Without a key they stay plain
-  text and every start logs the warning `no secret key is configured`.
+  text and every start logs the warning `no secret key is configured`. A user name, password or
+  query in a proxy's `remote` URL is not encrypted: with a key, every start logs a warning that
+  names those proxies (`the remote URL of these proxies holds a user name, password or
+  query`); move user names and passwords to `remoteAuth`.
 
 ### Changed
 
@@ -123,7 +139,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   body to its end, it waits at most 5 s for the rest, then closes the connection. At most 1024
   connections are served at once; when all are taken, the one that has been idle between requests
   or has not finished its first request's headers the longest (at least 1 s) is closed for the new
-  one, and only while none qualifies does a new connection wait in the listen backlog.
+  one, and only while none qualifies does a new connection wait in the listen backlog. On shutdown a
+  connection waiting for a slot is closed, so the 30 s drain ends on time also while every slot is
+  busy.
 - **Bodies from callers who are not signed in must arrive within 5 s** (QA N-5): the web UI login
   and `npm login` bodies are cut 5 s after the request headers however steadily they trickle in,
   and the connection is closed. Uploads always need a sign-in and keep the 60 s idle rule.
@@ -136,12 +154,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   only IP-literal destinations are checked. A host that spells an IPv4 address other than in
   dotted-decimal form (`10.1`, `167772161`, `0x0a000001`, `012.0.0.1`, `10.0.0.1.`) is always
   refused, also through `HTTP(S)_PROXY` and for internal remotes, because resolvers and forward
-  proxies read it as an address the check did not see. NAT64 addresses (`64:ff9b::/96`,
-  `64:ff9b:1::/48`) are classified by the IPv4 address in their last 32 bits. When the DNS lookup
-  of the remote's host fails, what its last successful lookup in the past 10 minutes found is used,
-  so an internal remote keeps working through a DNS blip instead of counting as public. A read of a
-  remote body that waits 60 s for data aborts the fetch; time spent writing to the blob store does
-  not count.
+  proxies read it as an address the check did not see. A host name that is not ASCII is refused the
+  same way, because Go maps it to ASCII only when it connects, which can turn fullwidth digits and
+  dots into such an address; write internationalized names in punycode (`xn--…`). Creating or
+  updating a proxy whose `remote` host is not ASCII is refused (400), and so is a first-start import
+  of one; a stored one still loads, but its fetches are refused until its `remote` is changed. NAT64
+  addresses (`64:ff9b::/96`, `64:ff9b:1::/48`) are classified by the IPv4 address in their last 32
+  bits. When the DNS lookup of the remote's host fails, what its last successful lookup in the past
+  10 minutes found is used, so an internal remote keeps working through a DNS blip instead of
+  counting as public. A read of a remote body that waits 60 s for data aborts the fetch; time spent
+  writing to the blob store does not count.
 - **`baseURL` must be an `http(s)` URL without user info, query or fragment** (QA N-24), in
   `config.yaml` and in the settings API (400). A value stored by an older build keeps working and
   logs a warning at every start; error messages no longer repeat the value.
@@ -203,14 +225,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   well-formed XML of at most 1 MiB (413 beyond) with one `<project>` root. Its `groupId` (or the
   parent's) and `artifactId`, with `${...}` references replaced from its own `<properties>`, and
   its `version` (or the parent's) must match its path; anything else gets 400 and stores nothing. A
-  version that holds a `${...}` reference is not compared, so a CI-friendly `${revision}` set with
-  `mvn -Drevision=… deploy` is accepted without flatten-maven-plugin.
+  reference left in `groupId` or `artifactId`, such as a `${scala.binary.version}` the parent sets,
+  stands for one or more characters other than `/` and `:`, and the rest must match. A version that
+  holds a `${...}` reference is not compared, so a CI-friendly `${revision}` set with
+  `mvn -Drevision=… deploy` is accepted without flatten-maven-plugin. As in Maven, bytes that are
+  not UTF-8 in a POM that declares no other encoding are read as U+FFFD instead of refusing the POM.
 - **Maven proxies fetch and cache only Maven files** (QA L-12): artifacts, signatures,
-  `maven-metadata.xml`, `.meta/prefixes.txt`, `archetype-catalog.xml` and their checksums. Other
+  `maven-metadata.xml`, `.meta/prefixes.txt`, `archetype-catalog.xml`, sbt plugin files in sbt's
+  legacy layout (`…/sbt-assembly_2.12_1.0/2.1.1/sbt-assembly-2.1.1.jar`) and their checksums. Other
   paths, such as directories, answer 404 through proxies and groups without asking the remote; a
-  `text/html` answer for a file not named `.html` is taken as not found and negative-cached; and
-  directory listings cached by older builds are no longer served but stay in Browse until the proxy
-  is re-created.
+  `text/html` answer for a file not named `.html` is taken as not found and negative-cached, or, for
+  a file already cached, as a failed check that serves the cached copy; and directory listings
+  cached by older builds are no longer served but stay in Browse until the proxy is re-created.
 - **Cargo proxy and group index responses carry an `ETag`** (QA L-21) and answer a matching
   `If-None-Match` with 304, like hosted ones, so cargo stops downloading them again on every
   resolve. No Cargo index response sends `Last-Modified`.
@@ -271,9 +297,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tar, one without `package.json`, or one packed for another name or version (QA L-15). The server
   now reads the stored tarball and answers 400 unless exactly one regular `package.json` of at most
   1 MiB sits in its top directory (`package/` from `npm pack`; any name is accepted) with the
-  published name and version, and it reads at most 1 GiB uncompressed.
+  published name and version, and it reads at most 1 GiB uncompressed for all new tarballs of one
+  publish document together, only after the version, name and checksum checks pass, and stops when
+  the client goes away.
 - npm publish accepted a new version whose manifest `name` differed from the package name; it now
   answers 400 (QA L-15).
+- Scoped npm names whose scope or package part starts with `_`, such as `@acme/_internal`, were
+  refused with 400 on every route, so they could not be published, nor installed from npmjs through
+  a proxy or group. npm accepts them, and now so does Command Center; a scope or package part that
+  starts with `.` is still refused.
 - PyPI duplicate detection missed wheels that only respelled their compressed tag set (`py3.py3`)
   or build number (`01`), and a `.zip` sdist next to the `.tar.gz` of a release. They now get 400
   `File already exists` naming the existing file, a release has one sdist, and malformed wheel file
@@ -308,6 +340,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   other coordinates, while it rejected a broken `maven-metadata.xml` (QA N-6).
 - Maven proxies cached upstream HTML directory listings under the directory's name, served them as
   files forever and listed them in Browse as both a file and a folder (QA L-12).
+- Rebuilding `maven-metadata.xml`, which every Maven artifact upload and delete does, loaded the
+  database record of every file of the `groupId:artifactId` (and of the SNAPSHOT version) at once:
+  over 90 MiB for 100,000 files, which a SNAPSHOT that CI has deployed for years without a cleanup
+  policy can reach, so two such uploads at once could exceed the 128 MiB container. The rebuild now
+  reads one file path at a time.
+- Maven uploads accepted paths that are not valid UTF-8 (only a hand-made request such as `caf%E9`
+  sends one), names that JSON responses such as the web UI's listings cannot carry unchanged. They
+  now get 400 `invalid path`; files stored earlier stay readable.
 - Clients that sent headers and then stalled their bodies, even without credentials, could fill the
   128 MiB container with idle connections (QA N-5).
 - A body that stalled past the idle timeout answered 500 and logged an ERROR (QA N-8).
@@ -338,6 +378,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refuse. It now applies the same rules (at least 8 characters, at most 72 bytes).
 - LDAP users saw none of their own API tokens on the token page. `/-/api/me` now returns `owner`
   (`ldap:<id>` for them), which the page matches.
+- The user list merged an LDAP user into the local user with the same id, so the local user showed
+  the directory user's roles. They are now separate rows, an LDAP user is merged only into its
+  role-override record, and an LDAP user's account page shows the owner key `ldap:<id>` (QA N-19).
+- Deleting the disabled role-override record of an LDAP user let that user sign in again. The delete
+  is now refused with 409 until the record is set active (QA N-20).
 - `scripts/third-party-licenses.sh` wrote a `THIRD_PARTY_LICENSES.txt` without any module licenses,
   and reported success, wherever root in its container does not own the checkout (GitHub runners,
   Linux with rootful Docker). It now works there, fails when `go list` fails, and runs in the
@@ -348,6 +393,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Server-side request forgery: an upstream redirect or a file URL in an upstream index could lead a
   proxy repository to internal addresses, such as cloud metadata at `169.254.169.254`. See the
   egress policy under Changed.
+- Proxy `remoteAuth` credentials followed a redirect from the remote to the same host name on
+  another port or scheme, or to a subdomain, so a remote redirecting from `https` to `http` sent
+  them in clear text. Redirects now keep them only on the remote's own scheme, host and port (an
+  omitted port counts as the default); other redirects are still followed, without credentials.
 - Dependency confusion: npm and PyPI groups could serve a same-named public package in place of an
   internal one (QA N-1, N-11).
 - Denial of service: stalled or slowly trickled request bodies, even without credentials (QA N-5),
@@ -375,11 +424,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   one login name with no success in between (Basic auth, web UI login, `npm login`, the current
   password of a password change; local and LDAP), the name is now refused with 429 and
   `Retry-After` for 1 minute after its last failure, doubling per further failure up to 15 minutes;
-  a success or an hour without failures forgets them. An address with 20 failures in 15 minutes
-  gets one failed attempt per name. Checks of one name run one at a time, tokens and existing
-  sessions are not affected, and a revoked token sent as a Basic password is not counted.
+  a success or an hour without failures forgets them. Names are counted case-insensitively, and a
+  name that is not printable ASCII, or has leading, trailing or repeated spaces, fails like a wrong
+  password, unchecked and uncounted, since a directory would match such spellings to the same
+  account. An address with 20 failures in 15 minutes gets one failed attempt per name. Checks of one
+  name run one at a time, tokens and existing sessions are not affected, and a revoked token sent as
+  a Basic password is not counted.
 - A PyPI deployer could publish a text file or another project's wheel as a release, which broke
   `pip install` for that name, or shadow a release file by respelling its wheel tags or adding a
   second sdist (QA M-8, M-9).
+- Denial of service: a crafted zip uploaded as a PyPI wheel or `.zip` sdist could make the server
+  allocate far more memory than the zip's size. Go's `archive/zip` reader keeps reading central
+  directory headers past the entry count and directory size the archive declares, and compares the
+  count only modulo 65536, so a 28 MiB zip64 file that declared one entry made it build 655,361
+  entries, and one such upload grew the heap by about 137 MiB, more than the default 128 MiB
+  container. Every header is now counted before the zip is opened: a wheel or zip sdist with over
+  10,000 entries or 2 MiB of central directory is refused with 400 whatever it declares, and Go
+  module zips get the same count against their 50,000-entry and 4 MiB limits.
+- Denial of service: Go module uploads were checked with no limit on how many run at once, and
+  checking a zip at the 50,000-entry limit takes about 20 MiB of memory, so six parallel uploads of
+  8 MB zips grew the heap by about 126 MiB. At most two uploads (`.mod`, `.zip` or `.info`) are now
+  checked at once; the others wait with their body already stored.
 
 [Unreleased]: https://github.com/sungjinseo/commandcenter/commits/main

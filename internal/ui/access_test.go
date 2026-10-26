@@ -479,6 +479,25 @@ func TestDisableAndDeleteEndSessionsAndTokens(t *testing.T) {
 	}
 }
 
+// QA N-20: a disabled source=ldap row is what keeps a directory user out,
+// so deleting it, which would let the user in again, is refused until it
+// is set active. Disabled local users can still be deleted.
+func TestDeleteDisabledLDAPOverride(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	wantStatus(t, e.admin(t, "POST", "/-/api/users", `{"id":"ld","source":"ldap","status":"disabled"}`), http.StatusCreated)
+	r := e.admin(t, "DELETE", "/-/api/users/ld", "")
+	wantStatus(t, r, http.StatusConflict)
+	if msg, _ := r.json(t)["error"].(string); !strings.Contains(msg, "blocks LDAP user ld") {
+		t.Fatalf("error: %s", r.body)
+	}
+	wantStatus(t, e.admin(t, "GET", "/-/api/users/ld", ""), http.StatusOK)
+	wantStatus(t, e.admin(t, "PUT", "/-/api/users/ld", `{"roles":[],"status":"active"}`), http.StatusOK)
+	wantStatus(t, e.admin(t, "DELETE", "/-/api/users/ld", ""), http.StatusNoContent)
+
+	wantStatus(t, e.admin(t, "POST", "/-/api/users", `{"id":"off","password":"longenough","status":"disabled"}`), http.StatusCreated)
+	wantStatus(t, e.admin(t, "DELETE", "/-/api/users/off", ""), http.StatusNoContent)
+}
+
 func TestAccessGates(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	_, adminTok := e.newToken(t, "admin", "")

@@ -165,6 +165,81 @@ func TestProxyCachesOnlyMavenFiles(t *testing.T) {
 	}
 }
 
+// sbt plugins published before sbt 1.9 are on Maven Central in sbt's legacy
+// layout only: the artifact directory has the _<scala>_<sbt> cross suffix,
+// the file names do not. sbt and coursier ask for exactly these paths, so
+// proxies and groups fetch them, while the version directory is still not
+// asked for (QA L-12).
+func TestProxyServesSbtLegacyPluginLayout(t *testing.T) {
+	const (
+		dir = "com/eed3si9n/sbt-assembly_2.12_1.0/2.1.1"
+		pom = dir + "/sbt-assembly-2.1.1.pom"
+		jar = dir + "/sbt-assembly-2.1.1.jar"
+	)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch strings.TrimPrefix(r.URL.Path, "/maven2/") {
+		case pom:
+			w.Header().Set("Content-Type", "application/xml")
+			io.WriteString(w, "<project><groupId>com.eed3si9n</groupId><artifactId>sbt-assembly</artifactId><version>2.1.1</version></project>")
+		case jar:
+			w.Header().Set("Content-Type", "application/java-archive")
+			io.WriteString(w, "jar")
+		case dir, dir + "/":
+			io.WriteString(w, "sbt-assembly-2.1.1.jar\n") // a listing that is not HTML: only not asking keeps it out
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(up.Close)
+	e := newEnv(t,
+		config.Repository{Name: "central-sbt", Format: "maven", Type: "proxy", Remote: up.URL + "/maven2",
+			MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Minute)},
+		config.Repository{Name: "sbt-group", Format: "maven", Type: "group", Members: []string{"central-sbt"}},
+	)
+	for _, rp := range []string{"central-sbt", "sbt-group"} {
+		for _, p := range []string{pom, pom + ".sha1", jar} {
+			if w := e.do("GET", rp, p, ""); w.Code != 200 {
+				t.Errorf("GET %s %s: %d %q, want 200 (the upstream has it)", rp, p, w.Code, w.Body)
+			}
+		}
+		for _, p := range []string{dir, dir + "/"} {
+			if w := e.do("GET", rp, p, ""); w.Code != 404 {
+				t.Errorf("GET %s %s: %d %q, want 404", rp, p, w.Code, w.Body)
+			}
+		}
+	}
+}
+
+// Files of that layout that older builds cached are served too.
+func TestProxyServesCachedSbtLegacyPluginFile(t *testing.T) {
+	e := newEnv(t)
+	const jar = "com/eed3si9n/sbt-assembly_2.12_1.0/2.1.1/sbt-assembly-2.1.1.jar"
+	e.seed(t, "central", jar, "cached by an older build")
+	for _, rp := range []string{"central", "public"} {
+		if w := e.do("GET", rp, jar, ""); w.Code != 200 || w.Body.String() != "cached by an older build" {
+			t.Errorf("GET %s %s: %d %q, want the cached file", rp, jar, w.Code, w.Body)
+		}
+	}
+}
+
+// A cached maven-metadata.xml whose revalidation gets a web page (an upstream
+// maintenance or sign-in page answered with 200 text/html) is a remote
+// failure, not a removal: the cached document is served stale, also through
+// a group, as for any other failed revalidation.
+func TestWebPageRevalidationServesCachedMetadata(t *testing.T) {
+	e := newEnv(t)
+	const path = "org/up/lib/maven-metadata.xml" // the remote answers this with text/html
+	doc := `<metadata><groupId>org.up</groupId><artifactId>lib</artifactId><versioning><versions><version>1.0</version></versions></versioning></metadata>`
+	e.seed(t, "central", path, doc)                                                      // cached earlier, when the upstream was fine
+	e.h.Resolver.Fetcher.Now = func() time.Time { return time.Now().Add(2 * time.Hour) } // past metadataMaxAge
+	for _, rp := range []string{"central", "public"} {
+		w := e.do("GET", rp, path, "")
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "<version>1.0</version>") {
+			t.Errorf("GET %s %s: %d %q, want the cached document (stale)", rp, path, w.Code, w.Body)
+		}
+	}
+}
+
 func TestGetGroupContentAndMergedMetadata(t *testing.T) {
 	e := newEnv(t)
 	e.seed(t, "releases", "org/example/app/1.0/app-1.0.pom", "<project/>")

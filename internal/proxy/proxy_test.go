@@ -191,7 +191,7 @@ func TestFetchNegativeCache(t *testing.T) {
 // targets still store web pages (a PyPI simple page is one).
 func TestFetchTargetNotHTML(t *testing.T) {
 	rm := &remote{ctype: "Text/HTML; charset=utf-8"}
-	f, rp, _ := setup(t, rm)
+	f, rp, c := setup(t, rm)
 	tg := Target{Key: "g/a.jar", Remote: "g/a.jar", NotHTML: true}
 	for i := 0; i < 2; i++ {
 		if _, err := f.FetchTarget(ctx, rp, tg, Content); repo.StatusOf(err) != 404 {
@@ -207,6 +207,17 @@ func TestFetchTargetNotHTML(t *testing.T) {
 	res, err := f.Fetch(ctx, rp, "simple/a/", Metadata)
 	if err != nil || read(t, f, res.Asset) != "body of /maven2/simple/a/" {
 		t.Fatalf("page without NotHTML: %+v %v", res, err)
+	}
+	// A cached asset whose revalidation gets a web page (a maintenance or
+	// sign-in page) is served stale, as after any other failed fetch.
+	md := Target{Key: "g/maven-metadata.xml", Remote: "g/maven-metadata.xml", NotHTML: true}
+	if _, err := f.Store.Put(ctx, "p", md.Key, "application/xml", strings.NewReader("cached")); err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(2 * time.Hour)
+	res, err = f.FetchTarget(ctx, rp, md, Metadata)
+	if err != nil || !res.Stale || read(t, f, res.Asset) != "cached" {
+		t.Fatalf("cached, revalidated with a web page: %+v %v", res, err)
 	}
 }
 

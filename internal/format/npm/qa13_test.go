@@ -35,9 +35,10 @@ func unpublishDoc(t *testing.T, e *env, name, version string) string {
 }
 
 // TestUnpublishOneVersion: npm unpublish of one version (QA H-2, N-10) is a
-// PUT of the document without it, then a DELETE of its tarball. The PUT
-// removes the whole version; the DELETE then finds nothing, which npm reads
-// as done. It works through the group's writeMember.
+// PUT of the document without it, then a DELETE of its tarball, each with the
+// _rev npm read just before. The PUT removes the whole version; the DELETE
+// then finds nothing, which npm reads as done. It works through the group's
+// writeMember.
 func TestUnpublishOneVersion(t *testing.T) {
 	e := newEnv(t)
 	for _, v := range []string{"1.0.0", "1.1.0"} {
@@ -47,10 +48,10 @@ func TestUnpublishOneVersion(t *testing.T) {
 	}
 	sink := &repotest.Sink{}
 	e.h.Store.Events = sink
-	if w := e.do("PUT", "npm-all", "@s/p/-rev/undefined", unpublishDoc(t, e, "@s/p", "1.1.0"), ci); w.Code != 200 || jsonBody(t, w)["ok"] != true {
+	if w := e.do("PUT", "npm-all", "@s/p/-rev/"+revOf(t, e, "@s/p"), unpublishDoc(t, e, "@s/p", "1.1.0"), ci); w.Code != 200 || jsonBody(t, w)["ok"] != true {
 		t.Fatalf("unpublish PUT: %d %s", w.Code, w.Body.String())
 	}
-	if w := e.do("DELETE", "npm-all", "@s/p/-/p-1.1.0.tgz/-rev/undefined", "", ci); w.Code != 404 {
+	if w := e.do("DELETE", "npm-all", "@s/p/-/p-1.1.0.tgz/-rev/"+revOf(t, e, "@s/p"), "", ci); w.Code != 404 {
 		t.Fatalf("tarball DELETE after the PUT: %d %s", w.Code, w.Body.String())
 	}
 	for _, repoName := range []string{"npm-hosted", "npm-all"} {
@@ -109,8 +110,60 @@ func TestUnpublishWholePackage(t *testing.T) {
 	}
 }
 
+// revOf is the _rev of name's hosted document, as npm reads it with ?write=true.
+func revOf(t *testing.T, e *env, name string) string {
+	t.Helper()
+	rev, _ := jsonBody(t, e.do("GET", "npm-hosted", name, "", ci))["_rev"].(string)
+	if rev == "" {
+		t.Fatalf("%s: the document has no _rev", name)
+	}
+	return rev
+}
+
+// TestUnpublishWholeKeepsVersionPublishedAfterRead: npm 10 (libnpmpublish
+// 9.0.9) sends DELETE {pkg}/-rev/{_rev} for `npm unpublish pkg@1.0.0 --force`
+// when the document it read with ?write=true held only that version. A
+// version published between that read and the DELETE changes the _rev, so the
+// DELETE is refused (409) and deletes nothing; a dist-tag edit keeps the _rev.
+func TestUnpublishWholeKeepsVersionPublishedAfterRead(t *testing.T) {
+	e := newEnv(t)
+	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.0.0", []byte("a"), false), ci); w.Code != 201 {
+		t.Fatalf("publish 1.0.0: %d %s", w.Code, w.Body.String())
+	}
+	// npm: GET pkg?write=true -> one version -> onlyVersion -> DELETE.
+	doc := jsonBody(t, e.do("GET", "npm-hosted", "pkg", "", ci))
+	if n := len(doc["versions"].(map[string]any)); n != 1 {
+		t.Fatalf("versions npm saw: %d", n)
+	}
+	rev := revOf(t, e, "pkg")
+	// A CI job publishes 1.1.0 meanwhile.
+	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.1.0", []byte("b"), false), ci); w.Code != 201 {
+		t.Fatalf("publish 1.1.0: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("DELETE", "npm-hosted", "pkg/-rev/"+rev, "", ci); w.Code != 409 {
+		t.Fatalf("DELETE with the _rev npm read: %d %s, want 409", w.Code, w.Body.String())
+	}
+	if pkgs, _ := e.h.Store.DB.ListPackages(context.Background(), "npm-hosted", "pkg"); len(pkgs) != 2 {
+		t.Fatalf("versions after a refused unpublish: %+v", pkgs)
+	}
+	rev = revOf(t, e, "pkg")
+	if w := e.do("PUT", "npm-hosted", "-/package/pkg/dist-tags/beta", `"1.0.0"`, ci); w.Code != 201 {
+		t.Fatalf("dist-tag: %d", w.Code)
+	}
+	if got := revOf(t, e, "pkg"); got != rev {
+		t.Fatalf("a dist-tag edit changed _rev %s to %s", rev, got)
+	}
+	if w := e.do("DELETE", "npm-hosted", "pkg/-rev/"+rev, "", ci); w.Code != 200 {
+		t.Fatalf("DELETE with the current _rev: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("GET", "npm-hosted", "pkg", "", anon); w.Code != 404 {
+		t.Fatalf("packument after unpublish: %d", w.Code)
+	}
+}
+
 // TestUnpublishTarballAlone: a tarball DELETE without the PUT removes its
-// version too; a file of another package is not found.
+// version too, unless its rev is not the document's; a file of another
+// package, or of no stored version, is not found whatever the rev.
 func TestUnpublishTarballAlone(t *testing.T) {
 	e := newEnv(t)
 	for _, v := range []string{"1.0.0", "1.1.0"} {
@@ -123,12 +176,24 @@ func TestUnpublishTarballAlone(t *testing.T) {
 			t.Fatalf("%s: %d %s", file, w.Code, w.Body.String())
 		}
 	}
-	if w := e.do("DELETE", "npm-hosted", "pkg/-/pkg-1.1.0.tgz/-rev/x", "", ci); w.Code != 200 {
+	rev := revOf(t, e, "pkg")
+	if w := e.do("DELETE", "npm-hosted", "pkg/-/pkg-1.1.0.tgz/-rev/x", "", ci); w.Code != 409 {
+		t.Fatalf("tarball DELETE with a stale rev: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("DELETE", "npm-hosted", "pkg/-/pkg-1.1.0.tgz/-rev/undefined", "", ci); w.Code != 200 {
 		t.Fatalf("tarball DELETE: %d %s", w.Code, w.Body.String())
 	}
 	m := jsonBody(t, e.do("GET", "npm-hosted", "pkg", "", anon))
 	if get(m, "versions", "1.1.0") != nil || get(m, "dist-tags", "latest") != "1.0.0" {
 		t.Fatalf("packument = %v", m)
+	}
+	// 1.1.0 published again is not the 1.1.0 that rev saw.
+	e.h.Now = func() time.Time { return time.Now().Add(time.Hour) }
+	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.1.0", []byte("again"), false), ci); w.Code != 201 {
+		t.Fatalf("republish 1.1.0: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("DELETE", "npm-hosted", "pkg/-/pkg-1.1.0.tgz/-rev/"+rev, "", ci); w.Code != 409 {
+		t.Fatalf("tarball DELETE of a republished version: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -142,12 +207,16 @@ func TestUnpublishKeepsVersionsNotRead(t *testing.T) {
 			t.Fatalf("publish %s: %d", v, w.Code)
 		}
 	}
-	stale := unpublishDoc(t, e, "pkg", "1.0.0")
+	stale, staleRev := unpublishDoc(t, e, "pkg", "1.0.0"), revOf(t, e, "pkg")
 	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.2.0", []byte("tgz-1.2.0"), false), ci); w.Code != 201 {
 		t.Fatalf("publish 1.2.0: %d", w.Code)
 	}
 	if w := e.do("PUT", "npm-hosted", "pkg/-rev/undefined", stale, ci); w.Code != 409 {
 		t.Fatalf("stale unpublish: %d %s", w.Code, w.Body.String())
+	}
+	// A real rev is compared too: here the document is current, the rev is not.
+	if w := e.do("PUT", "npm-hosted", "pkg/-rev/"+staleRev, unpublishDoc(t, e, "pkg", "1.0.0"), ci); w.Code != 409 {
+		t.Fatalf("unpublish with a stale rev: %d %s", w.Code, w.Body.String())
 	}
 	if pkgs, _ := e.h.Store.DB.ListPackages(context.Background(), "npm-hosted", "pkg"); len(pkgs) != 3 {
 		t.Fatalf("versions after a refused unpublish: %+v", pkgs)

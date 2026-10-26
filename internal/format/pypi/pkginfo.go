@@ -4,14 +4,13 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bufio"
-	"bytes"
 	"compress/gzip"
-	"encoding/binary"
 	"io"
 	"net/http"
 	"strings"
 
 	"commandcenter/internal/repo"
+	"commandcenter/internal/zipdir"
 )
 
 const (
@@ -105,7 +104,7 @@ func fromZip(r io.ReaderAt, size int64) (distMeta, string, error) {
 
 // openZip opens a zip archive whose central directory is small enough to parse.
 func openZip(r io.ReaderAt, size int64) (*zip.Reader, error) {
-	if !zipDirectoryOK(r, size) {
+	if !zipdir.OK(r, size, maxEntries, maxDirectory) {
 		return nil, badDist("not a zip archive, or one with over %d entries or a central directory over %d MiB", maxEntries, maxDirectory>>20)
 	}
 	zr, err := zip.NewReader(r, size)
@@ -190,58 +189,3 @@ func badDist(format string, a ...any) error {
 
 // maxDirectory caps the bytes of a zip central directory that is parsed.
 const maxDirectory = 2 << 20
-
-// zipDirectoryOK reads the end-of-central-directory record (and the zip64 one
-// whenever archive/zip would consult it) and reports whether the archive
-// claims few enough entries and a small enough directory to be parsed.
-// archive/zip allocates a File per directory record up front, so this must run
-// before zip.NewReader. The zip64 trigger mirrors readDirectoryEnd.
-func zipDirectoryOK(r io.ReaderAt, size int64) bool {
-	n := int64(65557)
-	if size < n {
-		n = size
-	}
-	tail := make([]byte, n)
-	if _, err := r.ReadAt(tail, size-n); err != nil && err != io.EOF {
-		return false
-	}
-	i := -1
-	for j := len(tail) - 22; j >= 0; j-- {
-		if bytes.Equal(tail[j:j+4], []byte("PK\x05\x06")) {
-			i = j
-			break
-		}
-	}
-	if i < 0 {
-		return false
-	}
-	eocd := tail[i:]
-	if int(binary.LittleEndian.Uint16(eocd[20:]))+22 > len(eocd) {
-		return false
-	}
-	count := uint64(binary.LittleEndian.Uint16(eocd[10:]))
-	dirSize := uint64(binary.LittleEndian.Uint32(eocd[12:]))
-	dirOff := uint64(binary.LittleEndian.Uint32(eocd[16:]))
-	end := uint64(size-n) + uint64(i) // start of the record that ends the directory
-	if count == 0xffff || dirSize == 0xffff || dirOff == 0xffffffff {
-		// archive/zip would read the zip64 record; so must we, and never trust
-		// the 16-bit values when it is missing or invalid.
-		if i < 20 || !bytes.Equal(tail[i-20:i-16], []byte("PK\x06\x07")) ||
-			binary.LittleEndian.Uint32(tail[i-16:]) != 0 || binary.LittleEndian.Uint32(tail[i-4:]) != 1 {
-			return false
-		}
-		z64 := binary.LittleEndian.Uint64(tail[i-12:])
-		if size < 56 || z64 > uint64(size)-56 {
-			return false
-		}
-		rec := make([]byte, 56)
-		if _, err := r.ReadAt(rec, int64(z64)); err != nil || !bytes.Equal(rec[:4], []byte("PK\x06\x06")) {
-			return false
-		}
-		count = binary.LittleEndian.Uint64(rec[32:])
-		dirSize = binary.LittleEndian.Uint64(rec[40:])
-		dirOff = binary.LittleEndian.Uint64(rec[48:])
-		end = z64
-	}
-	return count <= maxEntries && dirSize <= maxDirectory && dirOff <= end && end-dirOff <= maxDirectory
-}

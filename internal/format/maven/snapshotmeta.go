@@ -28,10 +28,6 @@ func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repositor
 
 	unlock := h.locks.Lock(rp.Name + "\x00" + verDir)
 	defer unlock()
-	assets, err := h.Store.DB.ListAssets(ctx, rp.Name, verDir+"/")
-	if err != nil {
-		return err
-	}
 	type build struct {
 		timestamp string // yyyyMMdd.HHmmss
 		number    int
@@ -49,23 +45,23 @@ func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repositor
 		builds = map[string]build{} // per file key, the build of files[key]
 	)
 	base := strings.TrimSuffix(baseVersion, "SNAPSHOT")
-	for _, a := range assets {
-		if dir(a.Path) != verDir {
-			continue
+	err := h.Store.DB.WalkAssetPaths(ctx, rp.Name, verDir+"/", func(p string) { // streamed, as in rebuildGA
+		if dir(p) != verDir {
+			return
 		}
-		pp, err := ParsePath(a.Path)
+		pp, err := ParsePath(p)
 		if err != nil || pp.Hash != "" || pp.Coords == nil || pp.Coords.GroupID != groupID ||
 			pp.Coords.ArtifactID != artifactID || pp.Coords.BaseVersion != baseVersion {
-			continue
+			return
 		}
 		ts := strings.TrimPrefix(pp.Coords.Version, base)
 		if ts == pp.Coords.Version || !timestampRE.MatchString(ts) {
-			continue // a non-unique X-SNAPSHOT file
+			return // a non-unique X-SNAPSHOT file
 		}
 		i := strings.IndexByte(ts, '-')
 		num, err := strconv.Atoi(ts[i+1:])
 		if err != nil {
-			continue
+			return
 		}
 		b := build{timestamp: ts[:i], number: num}
 		if !found || newer(b, latest) {
@@ -81,6 +77,9 @@ func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repositor
 				Updated:    strings.Replace(b.timestamp, ".", "", 1),
 			}
 		}
+	})
+	if err != nil {
+		return err
 	}
 	if !found {
 		if err := h.Store.Delete(ctx, rp.Name, path); err != nil && !errors.Is(err, repo.ErrNotFound) {

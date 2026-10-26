@@ -331,6 +331,107 @@ func TestZip64TriggersAreChecked(t *testing.T) {
 	}
 }
 
+// zip64Chain builds a zip whose zip64 end-of-central-directory record sits
+// inside the comment of the first central directory header, so that header
+// straddles the record and archive/zip keeps parsing the n-1 headers after
+// it. The records declare r entries (n % 65536 == r) and a 46-byte directory
+// ending at the record.
+func zip64Chain(n, r int) []byte {
+	var b bytes.Buffer
+	le := binary.LittleEndian
+	hdr := func(commentLen uint16) {
+		h := make([]byte, 46)
+		copy(h, "PK\x01\x02")
+		le.PutUint16(h[32:], commentLen)
+		b.Write(h)
+	}
+	hdr(56) // its comment is the zip64 EOCD record below, at offset 46
+	rec := make([]byte, 56)
+	copy(rec, "PK\x06\x06")
+	le.PutUint64(rec[4:], 44)
+	le.PutUint64(rec[24:], uint64(r)) // entries on this disk
+	le.PutUint64(rec[32:], uint64(r)) // entries
+	le.PutUint64(rec[40:], 46)        // directory size
+	le.PutUint64(rec[48:], 0)         // directory offset
+	b.Write(rec)
+	for i := 1; i < n; i++ {
+		hdr(0)
+	}
+	loc := make([]byte, 20)
+	copy(loc, "PK\x06\x07")
+	le.PutUint64(loc[8:], 46) // offset of the zip64 EOCD record
+	le.PutUint32(loc[16:], 1)
+	b.Write(loc)
+	eocd := make([]byte, 22)
+	copy(eocd, "PK\x05\x06")
+	le.PutUint16(eocd[8:], 0xffff)
+	le.PutUint16(eocd[10:], 0xffff)
+	le.PutUint32(eocd[12:], 0xffffffff)
+	le.PutUint32(eocd[16:], 0xffffffff)
+	b.Write(eocd)
+	return b.Bytes()
+}
+
+// The end records bound nothing by themselves: zip.NewReader reads headers
+// until one is not valid and compares the count only modulo 65536. A 30 MB
+// zip64 wheel or zip sdist whose records declare one entry holds 655,361
+// headers and is refused before zip.NewReader allocates a File for each.
+func TestReadMetadataRefusesZip64HeaderChain(t *testing.T) {
+	data := zip64Chain(10*65536+1, 1)
+	for _, name := range []string{"x-1.0-py3-none-any.whl", "x-1.0.zip"} {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, err := readMeta(data, name)
+		runtime.ReadMemStats(&after)
+		if repo.StatusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "entries") {
+			t.Fatalf("%s: got %v, want a 400 for the directory", name, err)
+		}
+		if d := after.TotalAlloc - before.TotalAlloc; d > 1<<20 {
+			t.Fatalf("%s: allocated %d bytes: zip directory must not be parsed", name, d)
+		}
+	}
+}
+
+// The same archive uploaded as a wheel is refused without the heap growing by
+// what zip.NewReader would allocate for its headers (some 140 MiB, more than
+// the default 128 MiB container). The peak is sampled while the request runs.
+func TestUploadZip64HeaderChainHeap(t *testing.T) {
+	e := newEnv(t)
+	data := string(zip64Chain(10*65536+1, 1))
+	f := map[string]string{":action": "file_upload", "protocol_version": "1", "name": "x", "version": "1.0", "filetype": "bdist_wheel"}
+	ct, body := uploadBody(t, f, "x-1.0-py3-none-any.whl", data)
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+	stop := make(chan struct{})
+	peak := make(chan uint64)
+	go func() {
+		var m runtime.MemStats
+		var top uint64
+		for {
+			runtime.ReadMemStats(&m)
+			top = max(top, m.HeapInuse)
+			select {
+			case <-stop:
+				peak <- top
+				return
+			case <-time.After(200 * time.Microsecond):
+			}
+		}
+	}()
+	w := e.upload("py-hosted", ct, body)
+	close(stop)
+	grew := (int64(<-peak) - int64(base.HeapInuse)) >> 20
+	t.Logf("upload answered %d %q; peak heap grew by %d MiB for a %d MiB upload", w.Code, w.Body.String(), grew, len(data)>>20)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "entries") {
+		t.Fatalf("got %d %q, want a 400 for the directory", w.Code, w.Body.String())
+	}
+	if grew > 16 {
+		t.Fatalf("one wheel upload grew the heap by %d MiB", grew)
+	}
+}
+
 func TestCanonicalVersionSpellings(t *testing.T) {
 	for _, p := range [][2]string{
 		{"x-1.0.post1.tar.gz", "x-1.0.0.post1.tar.gz"},

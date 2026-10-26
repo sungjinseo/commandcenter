@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"commandcenter/internal/repo"
 )
@@ -32,15 +33,27 @@ var pomSem = make(chan struct{}, 2)
 
 var pomRefRE = regexp.MustCompile(`\$\{[^}]*\}`)
 
-// checkPOM verifies that r is well-formed XML with a <project> root naming
-// the coordinates c of its path (QA N-6): groupId (or the parent's),
-// artifactId and version (or the parent's), after ${name} references are
-// replaced with the POM's own <properties>. A version that holds a reference
-// is not compared: a CI-friendly ${revision} may be set on the command line
-// (mvn -Drevision=1.2 deploy without flatten-maven-plugin, which Nexus
-// accepts) or by the parent, not by the POM's defaults. Errors are 400s.
+// checkPOM verifies that r (the stored upload, at most maxPOMSize bytes) is
+// well-formed XML with a <project> root naming the coordinates c of its path
+// (QA N-6): groupId (or the parent's), artifactId and version (or the
+// parent's), after ${name} references are replaced with the POM's own
+// <properties>. A reference left in groupId or artifactId stands for any
+// text there (sameCoord). A version that holds a reference is not compared:
+// a CI-friendly ${revision} may be set on the command line (mvn -Drevision=1.2
+// deploy without flatten-maven-plugin, which Nexus accepts) or by the
+// parent, not by the POM's defaults. A POM that fails the check gets a 400.
 func checkPOM(r io.Reader, c *Coordinates) error {
-	vals, err := readPOM(r)
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return err
+	}
+	vals, err := readPOM(bytes.NewReader(b))
+	if err != nil && !utf8.Valid(b) {
+		// Maven reads bytes that are not UTF-8 in a UTF-8 or undeclared POM
+		// (text saved in MS949, say) as U+FFFD. One that declares another
+		// encoding needs no second pass: latin1 reads any byte.
+		vals, err = readPOM(bytes.NewReader(bytes.ToValidUTF8(b, []byte("\uFFFD"))))
+	}
 	if err != nil {
 		return repo.Errorf(http.StatusBadRequest, "invalid .pom: %.300v", err)
 	}
@@ -54,7 +67,7 @@ func checkPOM(r io.Reader, c *Coordinates) error {
 	a, _ := expand(vals, vals["artifactId"])
 	raw := inherited("version")
 	v, _ := expand(vals, raw)
-	if g == c.GroupID && a == c.ArtifactID && (strings.Contains(raw, "${") || v == c.BaseVersion || v == c.Version) {
+	if sameCoord(g, c.GroupID) && sameCoord(a, c.ArtifactID) && (strings.Contains(raw, "${") || v == c.BaseVersion || v == c.Version) {
 		return nil
 	}
 	got := g + ":" + a + ":" + v
@@ -62,6 +75,23 @@ func checkPOM(r io.Reader, c *Coordinates) error {
 		got += " (version " + raw + ")"
 	}
 	return repo.Errorf(http.StatusBadRequest, ".pom declares %.300q, want %q", got, c.GroupID+":"+c.ArtifactID+":"+c.BaseVersion)
+}
+
+// sameCoord reports whether s, a groupId or artifactId after expand, names
+// want. Each ${...} left in s, a property the parent or the command line
+// sets (artifactId name_${scala.binary.version}, say), matches one or more
+// characters other than '/' and ':'; the rest must be equal. An s over 256
+// bytes, which expand leaves alone too, must be equal as a whole.
+func sameCoord(s, want string) bool {
+	if s == want || len(s) > 256 || !strings.Contains(s, "${") {
+		return s == want
+	}
+	lit := pomRefRE.Split(s, -1)
+	for i := range lit {
+		lit[i] = regexp.QuoteMeta(lit[i])
+	}
+	re, err := regexp.Compile("^" + strings.Join(lit, "[^/:]+") + "$")
+	return err == nil && re.MatchString(want)
 }
 
 // readPOM returns the trimmed text of the project's and its parent's
@@ -79,6 +109,7 @@ func readPOM(r io.Reader) (map[string]string, error) {
 		names [3]string // the open elements of the first three levels
 		depth int
 		text  []byte // the text of the element pomKey names, so far
+		props int    // the "${name}" keys in vals
 	)
 	for {
 		tok, err := d.Token()
@@ -110,8 +141,15 @@ func readPOM(r io.Reader) (map[string]string, error) {
 			}
 		case xml.EndElement:
 			if k := pomKey(names, depth); k != "" {
-				if _, ok := vals[k]; ok || len(vals) < maxPOMValues {
+				// Only properties count against the cap, so the
+				// coordinates are kept wherever they come.
+				_, ok := vals[k]
+				newProp := !ok && strings.HasPrefix(k, "${")
+				if !newProp || props < maxPOMValues {
 					vals[k] = strings.TrimSpace(string(text))
+					if newProp {
+						props++
+					}
 				}
 			}
 			depth--

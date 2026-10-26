@@ -17,6 +17,7 @@ import (
 
 	"commandcenter/internal/repo"
 	"commandcenter/internal/semver"
+	"commandcenter/internal/zipdir"
 )
 
 const maxDoc = 1 << 20
@@ -152,9 +153,18 @@ func modulePath(r io.Reader) (string, error) {
 // spaces, tabs and carriage returns separate them, "//" starts a comment,
 // each of ( ) [ ] { } , is a token, a token that starts with " or ` is a
 // string that must end on the line, and any other is a run of printable,
-// non-space runes.
+// non-space runes. A line of over five tokens comes back as its first two,
+// "…" and its last two: modulePath reads no more, and a 1 MiB line can hold
+// a million tokens.
 func goModTokens(line string) ([]string, error) {
 	var toks []string
+	add := func(t string) {
+		if len(toks) < 5 {
+			toks = append(toks, t)
+		} else {
+			toks[2], toks[3], toks[4] = "…", toks[4], t
+		}
+	}
 	for i := 0; i < len(line); {
 		c := line[i]
 		switch {
@@ -164,7 +174,7 @@ func goModTokens(line string) ([]string, error) {
 		case strings.HasPrefix(line[i:], "//"):
 			return toks, nil
 		case strings.IndexByte("()[]{},", c) >= 0:
-			toks = append(toks, line[i:i+1])
+			add(line[i : i+1])
 			i++
 			continue
 		case c == '"' || c == '`':
@@ -177,7 +187,7 @@ func goModTokens(line string) ([]string, error) {
 			if j >= len(line) {
 				return nil, errors.New("unterminated string")
 			}
-			toks = append(toks, line[i:j+1])
+			add(line[i : j+1])
 			i = j + 1
 			continue
 		}
@@ -196,7 +206,7 @@ func goModTokens(line string) ([]string, error) {
 			r, _ := utf8.DecodeRuneInString(line[i:])
 			return nil, fmt.Errorf("unexpected input character %#q", r)
 		}
-		toks = append(toks, line[i:j])
+		add(line[i:j])
 		i = j
 	}
 	return toks, nil
@@ -207,8 +217,9 @@ const maxZipDirBytes = 4 << 20
 // maxZipEntries is a variable so tests can lower it.
 var maxZipEntries = 50000
 
-// checkDirectory bounds the central directory using the end-of-central-directory
-// record before archive/zip allocates for it. Zip64 archives are not supported.
+// checkDirectory bounds the central directory before archive/zip allocates for
+// it: by the end-of-central-directory record, then by the headers zip.NewReader
+// will read (zipdir.OK). Zip64 archives are not supported.
 func checkDirectory(r io.ReaderAt, size int64) error {
 	n := size
 	if n > 65557 {
@@ -255,10 +266,24 @@ func checkDirectory(r io.ReaderAt, size int64) error {
 			return repo.Errorf(http.StatusBadRequest, "zip has %d entries, limit is %d", count, maxZipEntries)
 		case dirSize > maxZipDirBytes:
 			return repo.Errorf(http.StatusBadRequest, "zip central directory is %d bytes, limit is %d", dirSize, maxZipDirBytes)
+		case !zipdir.OK(r, size, maxZipEntries, maxZipDirBytes):
+			return repo.Errorf(http.StatusBadRequest, "not a valid zip file, or one with over %d entries or a central directory over %d MiB", maxZipEntries, maxZipDirBytes>>20)
 		}
 		return nil
 	}
 	return notZip
+}
+
+// openZip opens a module zip once checkDirectory has bounded its directory.
+func openZip(r io.ReaderAt, size int64) (*zip.Reader, error) {
+	if err := checkDirectory(r, size); err != nil {
+		return nil, err
+	}
+	zr, err := zip.NewReader(r, size)
+	if err != nil {
+		return nil, repo.Errorf(http.StatusBadRequest, "not a valid zip file: %v", err)
+	}
+	return zr, nil
 }
 
 // checkZip validates a module zip as the go command checks one it downloads:
@@ -266,16 +291,9 @@ func checkDirectory(r io.ReaderAt, size int64) error {
 // with its CRC-32 and declared size, and a root go.mod declares module.
 // module and version are unescaped.
 func checkZip(r io.ReaderAt, size int64, module, version string) error {
-	if err := checkDirectory(r, size); err != nil {
-		return err
-	}
-	zr, err := zip.NewReader(r, size)
+	zr, err := openZip(r, size)
 	if err != nil {
-		return repo.Errorf(http.StatusBadRequest, "not a valid zip file: %v", err)
-	}
-	// archive/zip counts entries modulo 65536, so bound the real number too.
-	if len(zr.File) > maxZipEntries {
-		return repo.Errorf(http.StatusBadRequest, "zip has %d entries, limit is %d", len(zr.File), maxZipEntries)
+		return err
 	}
 	prefix := module + "@" + version + "/"
 	isDir := make(map[string]bool, len(zr.File)) // by name without a trailing slash

@@ -343,7 +343,7 @@ const shedAfter = time.Second
 // never closed; while none qualifies, the new one waits. LimitConns sets
 // srv.ConnState.
 func LimitConns(srv *http.Server, ln net.Listener, n int) net.Listener {
-	l := &limitListener{Listener: ln, n: n, conns: map[net.Conn]connState{}, changed: make(chan struct{}, 1)}
+	l := &limitListener{Listener: ln, n: n, conns: map[net.Conn]connState{}, changed: make(chan struct{}, 1), done: make(chan struct{})}
 	srv.ConnState = l.track
 	return l
 }
@@ -354,6 +354,15 @@ type limitListener struct {
 	mu      sync.Mutex
 	conns   map[net.Conn]connState // being served; Accept drops those it closes
 	changed chan struct{}          // a connection changed state
+	done    chan struct{}          // closed by Close
+	once    sync.Once
+}
+
+// Close also ends an Accept that waits for a slot: Server.Shutdown and Close
+// wait for Serve to return before they close any connection.
+func (l *limitListener) Close() error {
+	l.once.Do(func() { close(l.done) })
+	return l.Listener.Close()
 }
 
 type connState struct {
@@ -393,6 +402,9 @@ func (l *limitListener) Accept() (net.Conn, error) {
 			select {
 			case <-l.changed:
 			case <-time.After(wait):
+			case <-l.done:
+				c.Close()
+				return nil, net.ErrClosed
 			}
 			l.mu.Lock()
 		}

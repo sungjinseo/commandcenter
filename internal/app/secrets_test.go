@@ -90,3 +90,66 @@ func TestSecretKeyStartup(t *testing.T) {
 		}
 	}
 }
+
+// QA N-29 review: the key itself put into secretKeyFile, instead of the path
+// of a file holding it, is not repeated by the startup error (main prints it
+// to stderr, so it would end up in the container logs).
+func TestSecretKeyFileNotEchoed(t *testing.T) {
+	cfg := testConfig(t, "")
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{9}, 32))
+	t.Setenv(secretKeyEnv, "")
+	cfg.SecretKeyFile = key // the value, not a path
+	var logs bytes.Buffer
+	a, err := New(cfg, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err == nil {
+		a.Close()
+		t.Fatal("started with an unreadable secretKeyFile")
+	}
+	if strings.Contains(err.Error(), key) || strings.Contains(logs.String(), key) {
+		t.Fatalf("the startup error repeats the secret key: %v", err)
+	}
+	if !strings.Contains(err.Error(), "secretKeyFile") || !strings.Contains(err.Error(), "no such file") {
+		t.Fatalf("error %v does not say which setting fails and why", err)
+	}
+}
+
+// QA N-29 review: the key seals remoteAuth, not a proxy's remote URL, so with
+// a key every start warns about the proxies whose URL holds a user name,
+// password or query, naming them without the URL. Without such a URL, or
+// without a key (that warning covers it), there is no such warning.
+func TestSecretKeyRemoteURLWarning(t *testing.T) {
+	const warning = "the secret key does not encrypt"
+	key := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 32))
+	for _, c := range []struct {
+		key, remote string
+		warn        bool
+	}{
+		{key, "https://deploy:url-secret@repo.example.com/maven2/?token=query-secret", true},
+		{key, "https://deploy:url-secret@repo.example.com/maven2/", true},
+		{key, "https://repo.example.com/maven2/?token=query-secret", true},
+		{key, "https://repo.example.com/maven2/", false},
+		{"", "https://deploy:url-secret@repo.example.com/maven2/?token=query-secret", false},
+	} {
+		cfg := testConfig(t, `  - { name: px, format: maven, type: proxy, remote: "`+c.remote+
+			`", remoteAuth: { username: u, password: auth-secret } }`+"\n")
+		t.Setenv(secretKeyEnv, c.key)
+		var logs bytes.Buffer
+		a, err := New(cfg, slog.New(slog.NewTextHandler(&logs, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.Close()
+		out := logs.String()
+		if got := strings.Contains(out, warning); got != c.warn {
+			t.Fatalf("key %v, remote %s: warning %v, want %v: %s", c.key != "", c.remote, got, c.warn, out)
+		}
+		if c.warn && !strings.Contains(out, `repos=px`) {
+			t.Fatalf("warning does not name the proxy: %s", out)
+		}
+		for _, s := range []string{"url-secret", "query-secret", "auth-secret"} {
+			if strings.Contains(out, s) {
+				t.Fatalf("startup log holds %q: %s", s, out)
+			}
+		}
+	}
+}

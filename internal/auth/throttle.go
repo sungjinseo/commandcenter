@@ -19,10 +19,14 @@ import (
 // A success forgets the name's failures, and so does an hour without one.
 // Names are compared case-insensitively (directories match uid that way)
 // and unknown names count like real ones, so a refusal does not reveal
-// which exist. Checks of one name run one at a time, so a burst of
-// parallel guesses cannot all start before the first failures are counted,
-// while parallel requests with the right password (a build whose cached
-// login expired) wait for the first and then hit the password cache.
+// which exist. A name that is not plainName fails like a wrong password
+// before any of this, unchecked and uncounted: a directory also ignores
+// width, Unicode form and extra spaces when it matches a name (RFC 4518),
+// so each such spelling of one entry would get a count of its own. Checks
+// of one name run one at a time, so a burst of parallel guesses cannot all
+// start before the first failures are counted, while parallel requests
+// with the right password (a build whose cached login expired) wait for
+// the first and then hit the password cache.
 //
 // A client address with addrLimit failures within addrWindow of its first
 // one may make only one failed attempt per name: a password spray from one
@@ -98,6 +102,19 @@ type failGate struct {
 func nameKey(name string) string { return "u\x00" + strings.ToLower(name) }
 func addrKey(addr string) string { return "a\x00" + addr }
 
+// plainName reports whether name is printable ASCII without leading,
+// trailing or repeated spaces. For such a name a directory's
+// case-insensitive match is plain ASCII case folding, so nameKey gives
+// all the spellings it matches one count.
+func plainName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		if name[i] < ' ' || name[i] > '~' {
+			return false
+		}
+	}
+	return strings.TrimSpace(name) == name && !strings.Contains(name, "  ")
+}
+
 // lapsed reports whether record r under key k no longer counts at now.
 func lapsed(k string, r failRec, now time.Time) bool {
 	if strings.HasPrefix(k, "a\x00") {
@@ -109,6 +126,9 @@ func lapsed(k string, r failRec, now time.Time) bool {
 // throttle runs check for name unless the name is being refused, and
 // records the outcome. An attempt whose caller went away is not counted.
 func (a *Authenticator) throttle(ctx context.Context, name string, check func() (Principal, bool)) (Principal, error) {
+	if !plainName(name) {
+		return Principal{}, ErrBadCredentials
+	}
 	remote, _ := ctx.Value(clientAddrKey{}).(string)
 	addr, k := throttleAddr(remote), nameKey(name)
 	unlock, err := a.lockName(ctx, k)

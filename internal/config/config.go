@@ -434,12 +434,16 @@ type namedDuration struct {
 // created or updated (API/UI, or the one-time import of the config file): no
 // negative duration other than "-1" (never), no group member listed twice,
 // no remote (or remoteAuth) except on a proxy and no versionPolicy on a
-// group (QA L-9). Rows that older builds stored are not held to them; the
-// app loads those through NormalizeStored instead (final review C1).
+// group (QA L-9), and no remote host that is not ASCII, which remote fetches
+// refuse. Rows that older builds stored are not held to them; the app loads
+// those through NormalizeStored instead (final review C1).
 func ValidateDefinition(r Repository) error {
 	var errs []error
 	if r.Type != "proxy" && (r.Remote != "" || r.RemoteAuth != nil) {
 		errs = append(errs, fmt.Errorf("repository %q: remote and remoteAuth are only valid for proxy repositories", r.Name))
+	}
+	if u, err := url.Parse(r.Remote); r.Type == "proxy" && err == nil && strings.ContainsFunc(u.Hostname(), func(c rune) bool { return c >= 0x80 }) {
+		errs = append(errs, fmt.Errorf("repository %q: remote host %q is not ASCII; use its punycode form (xn--...)", r.Name, u.Hostname()))
 	}
 	if r.Type == "group" && r.VersionPolicy != "" {
 		errs = append(errs, fmt.Errorf("repository %q: versionPolicy is not valid for group repositories", r.Name))

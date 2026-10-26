@@ -2,8 +2,11 @@ package npm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -75,14 +78,51 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 	for _, p := range existing {
 		old[p.Version] = p
 	}
-	// New versions' tarballs are read back before the transaction, so the
-	// walk never holds the database write lock.
+	// Every version is checked before any tarball is walked.
+	var fresh []string // new versions
 	for _, v := range sortedKeys(doc.Versions) {
-		sums, ok := tarballs[TarballFile(name, v)]
-		if _, stored := old[v]; ok && !stored {
-			if err := h.validateTarball(rp, sums, name, v); err != nil {
-				return err
+		var vm versionManifest
+		if err := json.Unmarshal(doc.Versions[v], &vm); err != nil {
+			return badJSON(err)
+		}
+		if vm.Version != v {
+			return repo.Errorf(http.StatusBadRequest, "version key %q does not match manifest version %q", v, vm.Version)
+		}
+		sums, hasTarball := tarballs[TarballFile(name, v)]
+		if _, ok := old[v]; ok {
+			if hasTarball {
+				return repo.Errorf(http.StatusForbidden, "cannot publish over the previously published version %s", v)
 			}
+			continue
+		}
+		// Only new versions are checked: rows stored by older builds
+		// keep loading and can still be deprecated (QA M-5).
+		if vm.Name != name {
+			return repo.Errorf(http.StatusBadRequest, "version %s: manifest name %q does not match package name %q", v, vm.Name, name)
+		}
+		if !semver.Valid(v) {
+			return repo.Errorf(http.StatusBadRequest, "invalid version %q: must be a SemVer 2.0 version such as 1.2.3 or 1.2.3-beta.1", v)
+		}
+		// npm ignores build metadata when it matches versions, so
+		// 3.0.0+a would be a second 3.0.0 that breaks installs (QA N-12).
+		if core, _, ok := strings.Cut(v, "+"); ok {
+			return repo.Errorf(http.StatusBadRequest, "invalid version %q: build metadata (+...) is not allowed; npm reads it as %s", v, core)
+		}
+		if !hasTarball {
+			return repo.Errorf(http.StatusBadRequest, "version %s has no tarball attachment", v)
+		}
+		if err := verifyTarball(vm.Dist.Shasum, vm.Dist.Integrity, sums); err != nil {
+			return err
+		}
+		fresh = append(fresh, v)
+	}
+	// New versions' tarballs are read back before the transaction, so the
+	// walk never holds the database write lock. They share one budget, so a
+	// document of many versions costs no more than one large tarball.
+	left := maxTarballBytes
+	for _, v := range fresh {
+		if err := h.validateTarball(ctx, rp, tarballs[TarballFile(name, v)], name, v, &left); err != nil {
+			return err
 		}
 	}
 	now := h.Now()
@@ -97,19 +137,7 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 		}
 		for _, v := range sortedKeys(doc.Versions) {
 			raw := doc.Versions[v]
-			var vm versionManifest
-			if err := json.Unmarshal(raw, &vm); err != nil {
-				return badJSON(err)
-			}
-			if vm.Version != v {
-				return repo.Errorf(http.StatusBadRequest, "version key %q does not match manifest version %q", v, vm.Version)
-			}
-			file := TarballFile(name, v)
-			sums, hasTarball := tarballs[file]
 			if p, ok := old[v]; ok {
-				if hasTarball {
-					return repo.Errorf(http.StatusForbidden, "cannot publish over the previously published version %s", v)
-				}
 				attrs, err := applyDeprecation(raw, p.Attrs)
 				if err != nil {
 					return err
@@ -122,25 +150,8 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 				}
 				continue
 			}
-			// Only new versions are checked: rows stored by older builds
-			// keep loading and can still be deprecated (QA M-5).
-			if vm.Name != name {
-				return repo.Errorf(http.StatusBadRequest, "version %s: manifest name %q does not match package name %q", v, vm.Name, name)
-			}
-			if !semver.Valid(v) {
-				return repo.Errorf(http.StatusBadRequest, "invalid version %q: must be a SemVer 2.0 version such as 1.2.3 or 1.2.3-beta.1", v)
-			}
-			// npm ignores build metadata when it matches versions, so
-			// 3.0.0+a would be a second 3.0.0 that breaks installs (QA N-12).
-			if core, _, ok := strings.Cut(v, "+"); ok {
-				return repo.Errorf(http.StatusBadRequest, "invalid version %q: build metadata (+...) is not allowed; npm reads it as %s", v, core)
-			}
-			if !hasTarball {
-				return repo.Errorf(http.StatusBadRequest, "version %s has no tarball attachment", v)
-			}
-			if err := verifyTarball(vm.Dist.Shasum, vm.Dist.Integrity, sums); err != nil {
-				return err
-			}
+			file := TarballFile(name, v)
+			sums := tarballs[file]
 			attrs, err := withServerDist(raw, file, sums)
 			if err != nil {
 				return err
@@ -210,9 +221,10 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 	return nil
 }
 
-// validateTarball checks the stored tarball of name@version (checkTarball). The
-// blob is read back from disk, so nothing is buffered.
-func (h *Handler) validateTarball(rp *repo.Repository, sums blob.Sums, name, version string) error {
+// validateTarball checks the stored tarball of name@version (checkTarball,
+// which charges it to left). The blob is read back from disk, so nothing is
+// buffered.
+func (h *Handler) validateTarball(ctx context.Context, rp *repo.Repository, sums blob.Sums, name, version string, left *int64) error {
 	bs, err := h.Store.BlobStore(rp.Name)
 	if err != nil {
 		return err
@@ -222,7 +234,7 @@ func (h *Handler) validateTarball(rp *repo.Repository, sums blob.Sums, name, ver
 		return err
 	}
 	defer f.Close()
-	return checkTarball(f, name, version)
+	return checkTarball(ctx, f, name, version, left)
 }
 
 func (h *Handler) setDistTag(ctx context.Context, rp *repo.Repository, name, tag, version string) error {
@@ -314,6 +326,8 @@ func buildPackument(w io.Writer, name string, pkgs []meta.Package, tags []meta.D
 	tw.Begin(true)
 	tw.Key("_id")
 	tw.Value(name)
+	tw.Key("_rev")
+	tw.Value(packumentRev(pkgs))
 	tw.Key("name")
 	tw.Value(name)
 	tw.Key("dist-tags")
@@ -351,6 +365,17 @@ func buildPackument(w io.Writer, name string, pkgs []meta.Package, tags []meta.D
 	tw.End()
 	tw.End()
 	return tw.Flush()
+}
+
+// packumentRev is the _rev of the document for pkgs: a digest of the versions
+// and when each was published, so dist-tag and deprecation edits keep it. npm
+// sends it back in unpublish URLs ({pkg}/-rev/{rev}).
+func packumentRev(pkgs []meta.Package) string {
+	h := sha256.New()
+	for _, p := range pkgs {
+		fmt.Fprintf(h, "%s %d\n", p.Version, p.CreatedAt.UnixMilli())
+	}
+	return hex.EncodeToString(h.Sum(nil)[:16])
 }
 
 func npmTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }

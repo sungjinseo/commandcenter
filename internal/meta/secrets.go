@@ -51,6 +51,9 @@ func (d *DB) SetSecretKey(key []byte) error {
 	return nil
 }
 
+// HasSecretKey reports whether SetSecretKey gave d a key.
+func (d *DB) HasSecretKey() bool { return d.box.aead != nil }
+
 func (s sealer) seal(v string) (string, error) {
 	switch {
 	case v == "":

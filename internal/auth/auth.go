@@ -391,7 +391,8 @@ func (a *Authenticator) lookup(ctx context.Context, name string) (Principal, boo
 // that errors (LDAP unreachable) is logged and the next one is tried. If
 // ctx ends while waiting for a bcrypt slot, the check fails with
 // ErrBadCredentials. A name with too many recent failures is refused with a
-// *ThrottledError before any realm is asked (throttle.go).
+// *ThrottledError, and one that is not plainName fails, before any realm
+// is asked (throttle.go).
 func (a *Authenticator) CheckPassword(ctx context.Context, user, pass string) (Principal, error) {
 	if len(user) > maxLoginName || len(pass) > maxLoginPassword {
 		// Never sent to any realm: no stored id or password is this long,
@@ -438,7 +439,13 @@ func (a *Authenticator) CheckLocalPassword(ctx context.Context, user, pass strin
 func (a *Authenticator) localPassword(ctx context.Context, s *Snapshot, user, pass string) (Principal, bool) {
 	u, ok := s.users[user]
 	if !ok || !s.canPasswordLogin(u) {
-		compareHash(ctx, dummyHash, pass)
+		// The compare only hides which names exist, so an LDAP user whose
+		// password the ldap realm has cached skips it; otherwise each of
+		// the user's parallel requests would pay one, in turn, behind the
+		// throttle's gate.
+		if !a.ldapPassCached(user, pass) {
+			compareHash(ctx, dummyHash, pass)
+		}
 		return Principal{}, false
 	}
 	// The key covers the stored hash, so a success never outlives a password

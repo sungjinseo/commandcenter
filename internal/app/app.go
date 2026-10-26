@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,7 +121,13 @@ func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
 	case cfg.SecretKeyFile != "":
 		b, err := os.ReadFile(cfg.SecretKeyFile)
 		if err != nil {
-			return fmt.Errorf("secretKeyFile: %w", err)
+			// Without the path: it is the key itself when that was given
+			// here by mistake instead of the file holding it.
+			var pe *os.PathError
+			if errors.As(err, &pe) {
+				err = pe.Err
+			}
+			return fmt.Errorf("secretKeyFile: cannot read the file it names: %w", err)
 		}
 		val, src = string(b), "secretKeyFile "+cfg.SecretKeyFile
 	case val == "":
@@ -344,6 +351,7 @@ func loadRepositories(cfg *config.Config, log *slog.Logger, db *meta.DB, hasStor
 	if err != nil {
 		return nil, fmt.Errorf("load repositories: %w", err)
 	}
+	var plain []string // proxies whose remote URL holds credentials the secret key does not seal
 	// Older builds stored negative durations and groups listing a member
 	// twice; serve them (0-length cache, members once) instead of refusing
 	// to start. Only a create or update is held to the new rules (C1).
@@ -353,6 +361,14 @@ func loadRepositories(cfg *config.Config, log *slog.Logger, db *meta.DB, hasStor
 				"they are used as noted until the repository is edited",
 				"repo", defs[i].Name, "notes", strings.Join(notes, "; "))
 		}
+		if u, err := url.Parse(defs[i].Remote); err == nil && (u.User != nil || u.RawQuery != "") {
+			plain = append(plain, defs[i].Name)
+		}
+	}
+	if len(plain) > 0 && db.HasSecretKey() { // names only: the URL holds the secret
+		log.Warn("the remote URL of these proxies holds a user name, password or query, which the secret key does "+
+			"not encrypt: it is stored in meta.db in plain text; give a user name and password in remoteAuth instead",
+			"repos", strings.Join(plain, ", "))
 	}
 	if err := config.ValidateRepositories(defs); err != nil {
 		return nil, fmt.Errorf("stored repositories are invalid: %w", err)

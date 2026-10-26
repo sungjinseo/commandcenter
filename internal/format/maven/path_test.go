@@ -66,6 +66,7 @@ func TestParsePathRejectsControlAndQueryChars(t *testing.T) {
 		"org/ex?ample/odd/1.0/odd-1.0.jar",
 		"org/example/odd/1.0;x/odd-1.0.jar",
 		"org/example/odd/maven-metadata.xml#x",
+		"org/example/caf\xe9/1.0/caf\xe9-1.0.jar", // not UTF-8
 	} {
 		if err := validateWritePath(in); repo.StatusOf(err) != 400 {
 			t.Errorf("%q: err = %v", in, err)

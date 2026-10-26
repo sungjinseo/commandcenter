@@ -381,21 +381,22 @@ func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, a
 	unlock := h.locks.Lock(rp.Name + "\x00" + gaDir)
 	defer unlock()
 
-	assets, err := h.Store.DB.ListAssets(ctx, rp.Name, gaDir+"/")
-	if err != nil {
-		return err
-	}
+	// The paths are streamed: memory grows with the GA's versions, not with
+	// its files (a SNAPSHOT GA that CI deploys to can hold 10^5 of them).
 	seen := map[string]bool{}
 	var versions []string
-	for _, a := range assets {
-		pp, err := ParsePath(a.Path)
+	err := h.Store.DB.WalkAssetPaths(ctx, rp.Name, gaDir+"/", func(path string) {
+		pp, err := ParsePath(path)
 		if err != nil || pp.Coords == nil || pp.Coords.GroupID != groupID || pp.Coords.ArtifactID != artifactID {
-			continue
+			return
 		}
 		if !seen[pp.Coords.BaseVersion] {
 			seen[pp.Coords.BaseVersion] = true
 			versions = append(versions, pp.Coords.BaseVersion)
 		}
+	})
+	if err != nil {
+		return err
 	}
 	path := gaDir + "/maven-metadata.xml"
 	if replace {

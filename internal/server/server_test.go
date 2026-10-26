@@ -953,3 +953,48 @@ func TestConnCapShedsIdleAndSlowHeaderConns(t *testing.T) {
 		t.Fatalf("upload answered %d after %d bytes, want 201", code, n)
 	}
 }
+
+// Shutdown honours its context while every slot is busy and one more client
+// waits inside Accept: Server.Shutdown and Close wait for Serve to return
+// before they close any connection, so closing the listener must end that
+// wait (App.Serve's drain timeout and its Close fallback depend on it).
+func TestConnCapShutdownReturnsWhileAcceptWaits(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	free := sync.OnceFunc(func() { close(release) })
+	srv := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(started)
+		<-release // a long download
+	})}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(LimitConns(srv, ln, 1))
+	t.Cleanup(func() { free(); srv.Close() })
+
+	busy, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	io.WriteString(busy, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+	<-started
+	waiting, err := net.Dial("tcp", ln.Addr().String()) // taken by Accept, which then waits for a slot
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer waiting.Close()
+	time.Sleep(200 * time.Millisecond)
+
+	defer time.AfterFunc(5*time.Second, free).Stop() // a regression fails instead of hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = srv.Shutdown(ctx)
+	if took := time.Since(start); took > 2*time.Second || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown with a 500 ms context returned after %v (err %v), want its deadline: it waited for the busy request", took.Round(100*time.Millisecond), err)
+	}
+	if !closedByServer(waiting) {
+		t.Fatal("the connection waiting for a slot was not closed")
+	}
+}

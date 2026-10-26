@@ -29,10 +29,11 @@ func TestParseRoute(t *testing.T) {
 		{"-/package/foo/dist-tags/dist-tags", Route{Kind: KindDistTag, Package: "foo", Tag: "dist-tags"}},
 		{"-/package/@s/p/dist-tags", Route{Kind: KindDistTags, Package: "@s/p"}},
 		{"@s/p/1.0.0", Route{Kind: KindVersion, Package: "@s/p", Version: "1.0.0"}},
-		{"pkg/-rev/undefined", Route{Kind: KindRev, Package: "pkg"}},
-		{"@s/p/-rev/3-abc", Route{Kind: KindRev, Package: "@s/p"}},
-		{"pkg/-/pkg-1.0.0.tgz/-rev/x", Route{Kind: KindRev, Package: "pkg", File: "pkg-1.0.0.tgz"}},
-		{"@s/p/-/p-1.0.0.tgz/-rev/x", Route{Kind: KindRev, Package: "@s/p", File: "p-1.0.0.tgz"}},
+		{"pkg/-rev/undefined", Route{Kind: KindRev, Package: "pkg", Rev: "undefined"}},
+		{"@s/p/-rev/3-abc", Route{Kind: KindRev, Package: "@s/p", Rev: "3-abc"}},
+		{"pkg/-/pkg-1.0.0.tgz/-rev/x", Route{Kind: KindRev, Package: "pkg", File: "pkg-1.0.0.tgz", Rev: "x"}},
+		{"@s/p/-/p-1.0.0.tgz/-rev/x", Route{Kind: KindRev, Package: "@s/p", File: "p-1.0.0.tgz", Rev: "x"}},
+		{"@acme/_internal/-/_internal-1.0.0.tgz", Route{Kind: KindTarball, Package: "@acme/_internal", File: "_internal-1.0.0.tgz"}},
 		{"-/user/token/cc_abc", Route{Kind: KindToken, Token: "cc_abc"}},
 	}
 	for _, c := range cases {
@@ -50,7 +51,7 @@ func TestParseRouteErrors(t *testing.T) {
 			t.Errorf("%s: err = %v, want 404", in, err)
 		}
 	}
-	for _, in := range []string{"", ".hidden", "_private", "a b", "@/x", "@s/.x"} {
+	for _, in := range []string{"", ".hidden", "_private", "a b", "@/x", "@s/.x", "@s/.", "@s/..", "@./x"} {
 		if _, err := ParseRoute(in); repo.StatusOf(err) != 400 {
 			t.Errorf("%q: err = %v, want 400", in, err)
 		}
@@ -83,5 +84,16 @@ func TestNamesAndKeys(t *testing.T) {
 	}
 	if !ValidName(strings.Repeat("a", 214)) {
 		t.Fatal("214-character name must be valid")
+	}
+	// npm refuses a leading "." or "_" on the whole name only.
+	for _, name := range []string{"@acme/_internal", "@_acme/x", "@s/x.y", "@s/x_"} {
+		if !ValidName(name) {
+			t.Errorf("%q must be valid", name)
+		}
+	}
+	for _, name := range []string{"_x", ".x", "a..b", "@s/.x", "@.s/x", "@s/a..b", "@s/.", "@s/..", "@./x", "@../x", "@s/", "@s/a/b"} {
+		if ValidName(name) {
+			t.Errorf("%q must be invalid", name)
+		}
 	}
 }

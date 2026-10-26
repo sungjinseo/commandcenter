@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"commandcenter/internal/auth"
@@ -144,8 +145,11 @@ func (h *Handler) deleteVersions(ctx context.Context, rp *repo.Repository, name,
 // deleting its tarball, DELETE {pkg}/-/{file}/-rev/{rev}; a whole package goes
 // with DELETE {pkg}/-rev/{rev}. Each request removes whole versions
 // (deleteVersions), so the PUT already takes the tarball and the DELETE that
-// follows answers 404, which npm reads as done. The rev is not checked:
-// package documents carry no _rev, so npm sends "undefined".
+// follows answers 404, which npm reads as done. rev is the document's _rev
+// (packumentRev): a request that would delete a stored version is refused
+// (409) when the versions changed since npm read the document, so one
+// published meanwhile is never deleted. npm sends "undefined" for a document
+// an older build wrote without _rev, and that is not checked.
 func (h *Handler) unpublish(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
 	if !repo.AcceptsWrites(rp) {
 		// The resource accepts no method here: an empty Allow.
@@ -186,6 +190,17 @@ func (h *Handler) unpublish(w http.ResponseWriter, r *http.Request, rp *repo.Rep
 	default:
 		if pick, err = h.unpublishPick(ctx, w, r, target, rt.Package); err != nil {
 			return err
+		}
+	}
+	if rt.Rev != "undefined" {
+		inner := pick
+		pick = func(tx *meta.Tx, stored []meta.Package) ([]string, error) {
+			drop, err := inner(tx, stored)
+			deletes := slices.ContainsFunc(stored, func(p meta.Package) bool { return slices.Contains(drop, p.Version) })
+			if err == nil && deletes && packumentRev(stored) != rt.Rev {
+				return nil, repo.Errorf(http.StatusConflict, "package %q changed after revision %q was read: read the package again and retry", rt.Package, rt.Rev)
+			}
+			return drop, err
 		}
 	}
 	n, _, err := h.deleteVersions(ctx, target, rt.Package, auth.FromContext(ctx).Owner(), pick)

@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/ldap"
+	"commandcenter/internal/meta"
 )
 
 // throttleAuth has users u0..u4 (password "pw") and a fake clock.
@@ -261,6 +264,144 @@ func TestThrottleAllPasswordPaths(t *testing.T) {
 	f.advance(refuseFirst)
 	if p, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); err != nil || !p.IsLDAP() {
 		t.Fatalf("ldap login after the refusal: %+v %v", p, err)
+	}
+}
+
+// spaceFoldDir models how a real directory matches the uid in the login
+// filter: caseIgnoreMatch with RFC 4518 insignificant-space handling
+// (OpenLDAP, 389-ds), so " alice", "alice " and "ALICE" all find
+// uid=alice. It counts the logins it is asked for and the password binds
+// made against each entry.
+type spaceFoldDir struct {
+	mu     sync.Mutex
+	logins int
+	binds  map[string]int
+}
+
+func (d *spaceFoldDir) entry(name string) (ldap.User, bool) {
+	id := strings.ToLower(strings.Join(strings.Fields(name), " "))
+	if id != "alice" {
+		return ldap.User{}, false
+	}
+	return ldap.User{DN: aliceDN, ID: "alice"}, true
+}
+
+func (d *spaceFoldDir) Authenticate(_ context.Context, _ meta.LDAP, name, pw string) (ldap.User, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.logins++
+	u, ok := d.entry(name)
+	if !ok {
+		return ldap.User{}, ldap.ErrNoSuchUser
+	}
+	d.binds[u.ID]++
+	if pw != "alice-pw" {
+		return ldap.User{}, ldap.ErrInvalidCredentials
+	}
+	return u, nil
+}
+
+func (d *spaceFoldDir) Find(_ context.Context, _ meta.LDAP, id string) (ldap.User, error) {
+	if u, ok := d.entry(id); ok && u.ID == id {
+		return u, nil
+	}
+	return ldap.User{}, ldap.ErrNoSuchUser
+}
+
+// A directory finds one entry under many spellings of its name, and each
+// spelling would be a fresh count of accountLimit guesses. So only a
+// printable ASCII name without leading, trailing or repeated spaces
+// reaches a realm; any other fails like a wrong password, unchecked and
+// uncounted.
+func TestThrottleLDAPNameSpellings(t *testing.T) {
+	f := newLDAPFixture(t)
+	d := &spaceFoldDir{binds: map[string]int{}}
+	f.a.LDAP = d
+	ctx := context.Background()
+	for i := 0; i < 30; i++ {
+		name := strings.Repeat(" ", i) + "alice" // the same directory entry every time
+		if _, err := f.a.CheckPassword(ctx, name, fmt.Sprintf("wrong-%d", i)); !errors.Is(err, ErrBadCredentials) || refusedFor(err) != 0 {
+			t.Fatalf("attempt %d: %v", i+1, err)
+		}
+	}
+	p, err := f.a.CheckPassword(ctx, strings.Repeat(" ", 31)+"alice", "alice-pw")
+	if n := d.binds["alice"]; n != 1 || !errors.Is(err, ErrBadCredentials) || refusedFor(err) != 0 {
+		t.Fatalf("the directory checked %d password guesses against uid=alice, and a spelled-out variant got %+v %v", n, p, err)
+	}
+	logins := d.logins
+	for _, name := range []string{"alice ", "\talice", "a  lice", "ali\u00a0ce", "ａｌｉｃｅ", "김철수", "alice\x00", "alice\x7f"} {
+		if _, err := f.a.CheckPassword(ctx, name, "alice-pw"); !errors.Is(err, ErrBadCredentials) || refusedFor(err) != 0 {
+			t.Errorf("%q: %v", name, err)
+		}
+	}
+	if d.logins != logins {
+		t.Fatalf("%d refused spellings reached the directory", d.logins-logins)
+	}
+	for _, name := range []string{"Alice Smith", "alice@example.org", "a.b_c-d~"} {
+		if !plainName(name) {
+			t.Errorf("%q refused", name)
+		}
+	}
+	if p, err := f.a.CheckPassword(ctx, "ALICE", "alice-pw"); err != nil || p.User != "alice" {
+		t.Fatalf("upper-case login: %+v %v", p, err)
+	}
+}
+
+// anyDir accepts the names l0..l7, each with the password "pw".
+type anyDir struct{}
+
+func (anyDir) Authenticate(_ context.Context, _ meta.LDAP, name, pw string) (ldap.User, error) {
+	if len(name) != 2 || name[0] != 'l' || name[1] < '0' || name[1] > '7' {
+		return ldap.User{}, ldap.ErrNoSuchUser
+	}
+	if pw != "pw" {
+		return ldap.User{}, ldap.ErrInvalidCredentials
+	}
+	return ldap.User{DN: "uid=" + name + ",ou=people,dc=example,dc=org", ID: name}, nil
+}
+
+func (anyDir) Find(_ context.Context, _ meta.LDAP, id string) (ldap.User, error) {
+	return ldap.User{DN: "uid=" + id + ",ou=people,dc=example,dc=org", ID: id}, nil
+}
+
+// With the default realm order (local before ldap) every request of an
+// LDAP user passes the local realm, whose compare for a name it does not
+// know no cache covers; behind the per-name gate one user's parallel
+// requests paid those compares one at a time. A password the ldap realm
+// has cached skips it: with every bcrypt slot taken, the parallel requests
+// still pass at once, while a wrong password still waits for its compare.
+func TestThrottleLDAPParallelRightPassword(t *testing.T) {
+	f := newLDAPFixture(t) // realms: local, token, ldap
+	f.a.LDAP = anyDir{}
+	if _, err := f.a.CheckPassword(context.Background(), "l0", "pw"); err != nil { // fills the LDAP caches
+		t.Fatal(err)
+	}
+	for i := 0; i < cap(bcryptSlots); i++ {
+		bcryptSlots <- struct{}{} // every compare now waits until its caller leaves
+	}
+	defer func() {
+		for i := 0; i < cap(bcryptSlots); i++ {
+			<-bcryptSlots
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if p, err := f.a.CheckPassword(ctx, "l0", "pw"); err != nil || p.User != "l0" || ctx.Err() != nil {
+				t.Errorf("a parallel request with the right password waited for a compare: %+v %v (%v)", p, err, ctx.Err())
+			}
+		}()
+	}
+	wg.Wait()
+	short, stop := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer stop()
+	f.a.CheckPassword(short, "l0", "wrong")
+	if short.Err() == nil {
+		t.Fatal("a wrong password skipped the local realm's compare")
 	}
 }
 

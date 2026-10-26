@@ -598,6 +598,7 @@ func TestLegacyOddNamesStillServed(t *testing.T) {
 		"org/example/app/2.0/app-2.0.jar;jsessionid=1",
 		"org/example/app/3.0/app-3.0.jar\x00.pom",
 		"org/example/app/3.0/app-3.0.jar#frag",
+		"org/example/app/3.0/app-3.0-caf\xe9.jar",
 	}
 	for _, p := range legacy {
 		e.seed(t, "releases", p, "legacy")
@@ -622,7 +623,7 @@ func TestLegacyOddNamesStillServed(t *testing.T) {
 	if got := versionsOf(t, e, "releases"); got != "1.0,3.0 release=3.0" {
 		t.Fatalf("after legacy delete: %s", got)
 	}
-	for _, p := range []string{"org/example/app/4.0/app-4.0.jar;x=1", "org/example/app/4.0/app-4.0.jar\x00.pom", "org/example/app/4.0/app-4.0.jar?q=1"} {
+	for _, p := range []string{"org/example/app/4.0/app-4.0.jar;x=1", "org/example/app/4.0/app-4.0.jar\x00.pom", "org/example/app/4.0/app-4.0.jar?q=1", "org/example/app/4.0/app-4.0-caf\xe9.jar"} {
 		if w := e.doRaw("PUT", "releases", p, "new"); w.Code != 400 {
 			t.Fatalf("PUT %q: %d", p, w.Code)
 		}

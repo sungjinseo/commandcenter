@@ -38,9 +38,13 @@ type Route struct {
 	Tag     string // KindDistTag
 	User    string // KindLogin
 	Token   string // KindToken
+	Rev     string // KindRev: the _rev npm read ("undefined" when the document had none)
 }
 
-var nameRE = regexp.MustCompile(`^(?:@[a-zA-Z0-9~-][a-zA-Z0-9._~-]*/)?[a-zA-Z0-9~-][a-zA-Z0-9._~-]*$`)
+// npm (validate-npm-package-name) refuses a leading "." or "_" on the whole
+// name and a leading "." on a scoped name's package part, so the parts of a
+// scoped name may start with "_" (@acme/_internal) but not with ".".
+var nameRE = regexp.MustCompile(`^(?:@[a-zA-Z0-9_~-][a-zA-Z0-9._~-]*/[a-zA-Z0-9_~-][a-zA-Z0-9._~-]*|[a-zA-Z0-9~-][a-zA-Z0-9._~-]*)$`)
 
 // ValidName reports whether name is an acceptable npm package name
 // (legacy upper-case names are accepted).
@@ -50,8 +54,8 @@ func ValidName(name string) bool {
 
 // validNewName reports whether npm accepts a ValidName for a new package
 // (validate-npm-package-name): ValidName already refuses a leading dot or
-// underscore, URL-unsafe characters and more than 214 characters, which leaves
-// upper case and the two reserved names.
+// underscore of the whole name, as npm does, URL-unsafe characters and more
+// than 214 characters, which leaves upper case and the two reserved names.
 func validNewName(name string) bool {
 	return name == strings.ToLower(name) && name != "node_modules" && name != "favicon.ico"
 }
@@ -145,13 +149,13 @@ func ParseRoute(path string) (Route, error) {
 		return Route{Kind: KindTarball, Package: name, File: rest[1]}, nil
 	case len(rest) == 2 && rest[0] == "-rev":
 		// npm unpublish: PUT/DELETE {pkg}/-rev/{rev}.
-		return Route{Kind: KindRev, Package: name}, nil
+		return Route{Kind: KindRev, Package: name, Rev: rest[1]}, nil
 	case len(rest) == 4 && rest[0] == "-" && strings.HasSuffix(rest[1], ".tgz") && rest[2] == "-rev":
 		// npm unpublish of one version: DELETE {pkg}/-/{file}.tgz/-rev/{rev}.
 		if !validSegment(rest[1]) {
 			return Route{}, segmentError(rest[1])
 		}
-		return Route{Kind: KindRev, Package: name, File: rest[1]}, nil
+		return Route{Kind: KindRev, Package: name, File: rest[1], Rev: rest[3]}, nil
 	}
 	return Route{}, notFound
 }

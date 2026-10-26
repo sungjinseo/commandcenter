@@ -6,9 +6,14 @@ import (
 	"compress/flate"
 	"encoding/binary"
 	"hash/crc32"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"commandcenter/internal/repo"
 )
@@ -196,6 +201,96 @@ func TestCheckDirectoryRejectsZip64LocatorOutsideTail(t *testing.T) {
 	binary.LittleEndian.PutUint32(raw[eocd(t, raw)+12:], 0xFFFF)
 	if err := checkDirectory(bytes.NewReader(raw), int64(len(raw))); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), "zip64") {
 		t.Fatalf("dirSize 0xFFFF: %v", err)
+	}
+}
+
+// archive/zip reads central directory headers until one is not valid and
+// compares the declared count only modulo 65536, so 65537 headers that fit the
+// declared directory and are declared as one are refused before it allocates
+// for them.
+func TestCheckZipCountsDirectoryHeaders(t *testing.T) {
+	const n = 65537
+	z := make([]byte, 46*n+22)
+	for i := range n {
+		copy(z[46*i:], "PK\x01\x02")
+	}
+	e := z[46*n:]
+	copy(e, "PK\x05\x06")
+	binary.LittleEndian.PutUint16(e[8:], 1)
+	binary.LittleEndian.PutUint16(e[10:], 1)
+	binary.LittleEndian.PutUint32(e[12:], 46*n)
+	r := bytes.NewReader(z)
+	if zr, err := zip.NewReader(r, r.Size()); err != nil || len(zr.File) != n {
+		t.Fatalf("archive/zip should read all %d headers: %v", n, err)
+	}
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err := checkZip(r, r.Size(), "example.com/m", "v1.0.0")
+	runtime.ReadMemStats(&after)
+	if repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), "entries") {
+		t.Fatalf("got %v, want a 400 for the directory", err)
+	}
+	if d := after.TotalAlloc - before.TotalAlloc; d > 1<<20 {
+		t.Fatalf("allocated %d bytes: zip directory must not be parsed", d)
+	}
+}
+
+// QA L-22 review: goModTokens kept every token of a line. A go.mod line of
+// 1 MiB of commas is a million one-byte tokens, a 16 MiB []string per parse,
+// in a zip of a few KiB, and nothing bounds how many uploads validate at once.
+func TestCheckZipGoModLineMemory(t *testing.T) {
+	line := strings.Repeat(",", maxDoc-1)
+	gomod := strings.Repeat(line+"\n", 4) + "module example.com/m\n"
+
+	var zbuf bytes.Buffer
+	zw := zip.NewWriter(&zbuf)
+	w, _ := zw.Create("example.com/m@v1.0.0/go.mod")
+	w.Write([]byte(gomod))
+	zw.Close()
+
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(80 << 20)) // GOMEMLIMIT of docker-compose.yml and the Kubernetes manifest
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+	var peak atomic.Uint64
+	stop := make(chan struct{})
+	sampled := make(chan struct{})
+	go func() {
+		defer close(sampled)
+		for {
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			if ms.HeapInuse > peak.Load() {
+				peak.Store(ms.HeapInuse)
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(200 * time.Microsecond):
+			}
+		}
+	}()
+	const uploads = 6
+	var wg sync.WaitGroup
+	for range uploads {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// what upload() runs on the stored zip (validate -> checkZip -> modulePath)
+			z := bytes.NewReader(zbuf.Bytes())
+			if err := checkZip(z, z.Size(), "example.com/m", "v1.0.0"); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), "unknown directive") {
+				t.Errorf("got %v, want a 400 for the comma line", err)
+			}
+		}()
+	}
+	wg.Wait()
+	close(stop)
+	<-sampled
+	grew := (int64(peak.Load()) - int64(base.HeapInuse)) >> 20
+	t.Logf("heap in use grew by %d MiB for %d concurrent go.mod checks of a %d-byte zip", grew, uploads, zbuf.Len())
+	if grew > 32 {
+		t.Fatalf("%d concurrent go.mod checks took %d MiB of heap", uploads, grew)
 	}
 }
 

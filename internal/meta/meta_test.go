@@ -79,6 +79,13 @@ func TestListAssetsByPrefix(t *testing.T) {
 	if len(all) != 4 {
 		t.Fatalf("all = %d", len(all))
 	}
+	var walked []string
+	if err := db.WalkAssetPaths(ctx, "r", "g/a/", func(p string) { walked = append(walked, p) }); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(walked, ",") != "g/a/1.0/a-1.0.jar,g/a/2.0/a-2.0.jar" {
+		t.Fatalf("walked = %v", walked)
+	}
 }
 
 func TestNegativeCache(t *testing.T) {

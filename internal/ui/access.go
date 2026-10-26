@@ -491,11 +491,18 @@ func (u *UI) deleteUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
 	defer u.accessMu.Unlock()
-	if _, err := u.DB.GetUser(r.Context(), id); err != nil {
+	cur, err := u.DB.GetUser(r.Context(), id)
+	if err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	err := u.checkLockout(r.Context(), func(users []meta.User) []meta.User {
+	if cur.Source == meta.SourceLDAP && cur.Status == meta.StatusDisabled {
+		// The disabled override row is what keeps the directory user out
+		// (QA N-20): deleting it would let them sign in again unannounced.
+		writeError(w, http.StatusConflict, "this disabled record blocks LDAP user "+cur.ID+"; deleting it lets them sign in again (set it active first)")
+		return
+	}
+	err = u.checkLockout(r.Context(), func(users []meta.User) []meta.User {
 		out := users[:0]
 		for _, x := range users {
 			if x.ID != id {

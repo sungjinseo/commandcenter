@@ -53,7 +53,8 @@ type Target struct {
 	// SHA256 is the expected content sha256 (hex); a mismatching download is rejected and not cached.
 	SHA256 string
 	// NotHTML marks an asset that is never a web page: a text/html answer
-	// (an upstream directory listing or error page) is taken as a 404.
+	// (an upstream directory listing or error page) is taken as a 404, or as
+	// a failed fetch when the asset is cached, which serves the cached copy.
 	NotHTML bool
 }
 
@@ -198,6 +199,9 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 	now := f.Now()
 	status := resp.StatusCode
 	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); status == http.StatusOK && t.NotHTML && mt == "text/html" {
+		if cached { // a maintenance or sign-in page is a remote failure, not a removal
+			return f.stale(rp, t.Key, a, cached, errors.New("remote answered with a web page"))
+		}
 		slog.Warn("remote answered with a web page, taken as not found", "repo", rp.Name, "path", t.Key)
 		status = http.StatusNotFound
 	}

@@ -151,7 +151,7 @@ export function openLogin() {
     }
     btn.disabled = true;
     try {
-      await api("login", { method: "POST", body: { user: user.value, password: pass.value } });
+      await api("login", { method: "POST", body: { user: user.value.trim(), password: pass.value } }); // the server refuses names with outer spaces
       await refreshMe();
       hideBanner();
       m.close();

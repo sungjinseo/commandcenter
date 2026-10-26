@@ -244,15 +244,17 @@ func verifyTarball(shasum, integrity string, sums blob.Sums) error {
 // the work for any archive (every entry costs a 512-byte header) and neither
 // depends on a size the archive claims.
 var (
-	maxTarballBytes int64 = 1 << 30 // uncompressed
+	maxTarballBytes int64 = 1 << 30 // uncompressed, all new tarballs of one publish together
 	maxPackageJSON  int64 = 1 << 20
 )
 
 // checkTarball verifies that r is a gzip+tar npm tarball for name@version.
 // npm extracts with the first path component stripped (npm pack writes
 // package/), so exactly one entry must land on package.json: a regular file of
-// at most maxPackageJSON bytes with that name and version. Errors are 400s.
-func checkTarball(r io.Reader, name, version string) error {
+// at most maxPackageJSON bytes with that name and version. It reads at most
+// *left bytes uncompressed and subtracts what it read, and it stops between
+// entries once ctx is done. Errors other than ctx's are 400s.
+func checkTarball(ctx context.Context, r io.Reader, name, version string, left *int64) error {
 	bad := func(format string, a ...any) error {
 		return repo.Errorf(http.StatusBadRequest, "invalid tarball for %s@%s: %s", name, version, fmt.Sprintf(format, a...))
 	}
@@ -264,16 +266,20 @@ func checkTarball(r io.Reader, name, version string) error {
 		return bad("not a gzip archive")
 	}
 	defer gz.Close()
-	lr := &io.LimitedReader{R: gz, N: maxTarballBytes + 1}
+	lr := &io.LimitedReader{R: gz, N: *left + 1}
+	defer func() { *left = lr.N - 1 }()
 	broken := func(err error) error {
 		if lr.N <= 0 {
-			return bad("more than %d bytes uncompressed", maxTarballBytes)
+			return bad("more than %d bytes uncompressed in this publish", maxTarballBytes)
 		}
 		return bad("not a tar archive: %v", err)
 	}
 	tr := tar.NewReader(lr)
 	found := false
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		h, err := tr.Next()
 		if err == io.EOF {
 			break

@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,8 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -223,6 +227,147 @@ func TestEgressRefusesNumericIPv4Spellings(t *testing.T) {
 		if err := get(c, host); err != nil {
 			t.Errorf("%s: %v", host, err)
 		}
+	}
+}
+
+// net/http maps a host that is not ASCII with UTS #46 for the dial and for a
+// forward proxy's CONNECT target, so fullwidth digits and dots (U+FF10-FF19,
+// U+FF0E) reached the proxy as "CONNECT 169.254.169.254:443" or
+// "CONNECT 10.1:443", past the literal and numeric checks. Such a host, and a
+// name not written in punycode, is refused on either path.
+func TestEgressRefusesNonASCIIHosts(t *testing.T) {
+	var mu sync.Mutex
+	var connects []string
+	fwd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		connects = append(connects, r.Method+" "+r.Host)
+		mu.Unlock()
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer fwd.Close()
+	viaProxy := func(*http.Request) (*url.URL, error) { return url.Parse(fwd.URL) }
+	for _, proxy := range []func(*http.Request) (*url.URL, error){viaProxy, nil} {
+		c := newClient(proxy, resolvesTo("203.0.113.10"))
+		for _, host := range []string{"１６９．２５４．１６９．２５４", "１０．１", "bücher.example"} {
+			req, err := http.NewRequestWithContext(withRemote(ctx, &url.URL{Scheme: "https", Host: "index.example"}), http.MethodGet, "https://"+host+"/latest/meta-data/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := c.Do(req)
+			if err == nil {
+				resp.Body.Close()
+			}
+			if !errors.Is(err, errEgress) {
+				t.Errorf("proxied %v, %s: err = %v, want the egress refusal", proxy != nil, host, err)
+			}
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(connects) > 0 {
+		t.Fatalf("public remote: the proxy was asked for %q", connects)
+	}
+}
+
+// net/http copies the first request's Authorization to a redirect whose host
+// name is the same or a subdomain, whatever its scheme or port. Credentials
+// stay with the remote's own origin: here https://127.0.0.1:A keeps them on a
+// redirect to itself, then sends the fetch to http://127.0.0.1:B (a backend
+// URL behind a TLS proxy), which must not receive them in clear text.
+func TestEgressRedirectKeepsCredentialsAtHome(t *testing.T) {
+	var mu sync.Mutex
+	var moved, leaked string
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		leaked = r.Header.Get("Authorization")
+		mu.Unlock()
+		io.WriteString(w, "jar")
+	}))
+	defer plain.Close()
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if path, ok := strings.CutPrefix(r.URL.Path, "/moved"); ok {
+			mu.Lock()
+			moved = r.Header.Get("Authorization")
+			mu.Unlock()
+			http.Redirect(w, r, plain.URL+path, http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, "/moved"+r.URL.Path, http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	f, _, _ := setup(t, &remote{})
+	c := newClient(nil, resolvesTo("127.0.0.1"))
+	pool := x509.NewCertPool()
+	pool.AddCert(upstream.Certificate())
+	c.Transport.(*egress).base.TLSClientConfig = &tls.Config{RootCAs: pool}
+	f.Client = c
+	cfg := &config.Config{Repositories: []config.Repository{{Name: "a", Type: "proxy", Remote: upstream.URL + "/",
+		RemoteAuth: &config.RemoteAuth{Username: "u", Password: "p"}, ContentMaxAge: config.Never}}}
+	rp := repo.Build(cfg)["a"]
+	if _, err := f.Fetch(ctx, rp, "g/a.jar", Content); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if moved != "Basic dTpw" || leaked != "" {
+		t.Fatalf("Authorization on the redirect to the remote itself = %q (want it kept), on the redirect to %s = %q (want none)", moved, plain.URL, leaked)
+	}
+}
+
+// The origin compared is scheme, host name and port, an omitted port being
+// the scheme's default, so a remote written as host:443 keeps its
+// credentials on a redirect to host.
+func TestEgressRedirectComparesEffectivePort(t *testing.T) {
+	check := newClient(nil, resolvesTo("203.0.113.10")).CheckRedirect
+	first := httptest.NewRequest(http.MethodGet, "https://repo.example:443/a", nil)
+	for target, keep := range map[string]bool{
+		"https://repo.example/b":      true,
+		"https://repo.example:443/b":  true,
+		"http://repo.example/b":       false,
+		"http://repo.example:443/b":   false,
+		"https://repo.example:8443/b": false,
+		"https://cdn.repo.example/b":  false,
+	} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Authorization", "Basic dTpw") // as net/http copied it
+		if err := check(req, []*http.Request{first}); err != nil {
+			t.Fatal(err)
+		}
+		if kept := req.Header.Get("Authorization") != ""; kept != keep {
+			t.Errorf("%s: Authorization kept = %v, want %v", target, kept, keep)
+		}
+	}
+}
+
+// An http remote whose server moves every request to TLS on the same host
+// keeps its credentials there: the first hop already sent them to that host.
+// Any other change of scheme, port or host still drops them.
+func TestEgressRedirectKeepsCredentialsOnUpgradeToTLS(t *testing.T) {
+	check := newClient(nil, resolvesTo("203.0.113.10")).CheckRedirect
+	first := httptest.NewRequest(http.MethodGet, "http://nexus.corp/repository/maven-public/a", nil)
+	for target, keep := range map[string]bool{
+		"https://nexus.corp/repository/maven-public/a":     true,
+		"https://nexus.corp:443/repository/maven-public/a": true,
+		"http://nexus.corp/b":                              true,
+		"https://nexus.corp:8443/a":                        false,
+		"http://nexus.corp:8081/a":                         false,
+		"https://cdn.nexus.corp/a":                         false,
+	} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Authorization", "Basic dTpw")
+		if err := check(req, []*http.Request{first}); err != nil {
+			t.Fatal(err)
+		}
+		if kept := req.Header.Get("Authorization") != ""; kept != keep {
+			t.Errorf("%s: Authorization kept = %v, want %v", target, kept, keep)
+		}
+	}
+	// On a remote at a non-default port the move to TLS is a new origin.
+	req := httptest.NewRequest(http.MethodGet, "https://nexus.corp/a", nil)
+	req.Header.Set("Authorization", "Basic dTpw")
+	if err := check(req, []*http.Request{httptest.NewRequest(http.MethodGet, "http://nexus.corp:8081/a", nil)}); err != nil || req.Header.Get("Authorization") != "" {
+		t.Errorf("http://nexus.corp:8081 to https://nexus.corp kept the credentials (err %v)", err)
 	}
 }
 

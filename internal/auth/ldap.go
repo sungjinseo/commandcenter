@@ -133,6 +133,15 @@ func ldapPassKey(name, pass string) string {
 	return "ldap\x00" + hex.EncodeToString(sum[:])
 }
 
+// ldapPassCached reports whether name and pass are a live cached LDAP
+// password success.
+func (a *Authenticator) ldapPassCached(name, pass string) bool {
+	a.ldapMu.Lock()
+	hit, ok := a.ldapPass[ldapPassKey(name, pass)]
+	a.ldapMu.Unlock()
+	return ok && a.clock().Before(hit.exp)
+}
+
 // clearLDAP drops every cached LDAP user and password success.
 func (a *Authenticator) clearLDAP() {
 	a.ldapMu.Lock()

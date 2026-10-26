@@ -259,6 +259,32 @@ func listAssets(ctx context.Context, qr querier, repo, prefix string) ([]Asset, 
 	return out, rows.Err()
 }
 
+// WalkAssetPaths calls fn with the path of each asset of repo whose path
+// starts with prefix, in path order. Unlike ListAssets it holds one row at a
+// time, so memory does not grow with the number of assets; fn runs while the
+// query holds a connection.
+func (d *DB) WalkAssetPaths(ctx context.Context, repo, prefix string, fn func(path string)) error {
+	q := `SELECT path FROM assets WHERE repo = ? AND path >= ?`
+	args := []any{repo, prefix}
+	if upper, ok := prefixUpper(prefix); ok {
+		q += ` AND path < ?`
+		args = append(args, upper)
+	}
+	rows, err := d.sql.QueryContext(ctx, q+` ORDER BY path`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return err
+		}
+		fn(p)
+	}
+	return rows.Err()
+}
+
 func (d *DB) MarkChecked(ctx context.Context, repo, path string, t time.Time) error {
 	_, err := d.sql.ExecContext(ctx, `UPDATE assets SET checked_at = ? WHERE repo = ? AND path = ?`, toMs(t), repo, path)
 	return err

@@ -467,6 +467,27 @@ func TestStoredLegacyDefinitionDecodesAndNormalizes(t *testing.T) {
 	}
 }
 
+// Remote fetches refuse a host that is not ASCII (net/http would map
+// fullwidth digits and dots to an address the egress checks never saw), so a
+// new definition must use the punycode form; a stored row still loads.
+func TestValidateDefinitionRejectsNonASCIIRemoteHost(t *testing.T) {
+	for remote, ok := range map[string]bool{
+		"https://bücher.example/":             false,
+		"https://１０．１/":                       false,
+		"https://%EF%BC%91%EF%BC%90.example/": false, // the host is decoded
+		"https://xn--bcher-kva.example/":      true,
+		"https://repo.example/bücher/":        true, // only the host counts
+	} {
+		r := Repository{Name: "p", Format: "maven", Type: "proxy", Remote: remote}
+		if err := ValidateDefinition(r); ok && err != nil || !ok && (err == nil || !strings.Contains(err.Error(), "punycode")) {
+			t.Errorf("%s: err = %v", remote, err)
+		}
+		if err := ValidateRepositories([]Repository{r}); err != nil {
+			t.Errorf("%s: stored row refused: %v", remote, err)
+		}
+	}
+}
+
 // QA L-9: a remote belongs to a proxy and a versionPolicy never to a group.
 // New definitions are refused; stored ones load with the fields dropped.
 func TestValidateDefinitionTypeFields(t *testing.T) {

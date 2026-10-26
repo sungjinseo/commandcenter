@@ -3,9 +3,12 @@ package golang
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"io"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUploadAndInstall(t *testing.T) {
@@ -62,6 +65,29 @@ func TestUploadRejects(t *testing.T) {
 	}
 	if w := e.do("PUT", "go-proxy", "example.com/a/@v/v1.0.0.mod", strings.NewReader("module example.com/a\n")); w.Code != 405 {
 		t.Fatalf("upload to proxy: %d", w.Code)
+	}
+}
+
+// Stored uploads are checked in at most cap(checkSem) slots: an upload waits
+// for one.
+func TestUploadCheckSlots(t *testing.T) {
+	e := newEnv(t)
+	const path, mod = "example.com/m/@v/v1.0.0.mod", "module example.com/m\n"
+	for range cap(checkSem) {
+		checkSem <- struct{}{}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w := httptest.NewRecorder()
+	e.h.Serve(w, httptest.NewRequestWithContext(ctx, "PUT", "/repository/go-hosted/x", strings.NewReader(mod)), e.repos["go-hosted"], path)
+	for range cap(checkSem) {
+		<-checkSem
+	}
+	if w.Code == 201 {
+		t.Fatal("upload recorded while every check slot was taken")
+	}
+	if w := e.do("PUT", "go-hosted", path, strings.NewReader(mod)); w.Code != 201 {
+		t.Fatalf("upload with a free slot: %d %s", w.Code, w.Body.String())
 	}
 }
 

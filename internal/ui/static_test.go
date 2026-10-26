@@ -369,6 +369,24 @@ func TestCargoUsageUsesPublishedName(t *testing.T) {
 	}
 }
 
+// TestUserListKeepsPrincipalsApart: the user list merges a directory user
+// only into its override row (source "ldap"); next to a local user with the
+// same id it is a row of its own, linked by its owner key, and the account
+// page of an LDAP session shows that key (QA N-19).
+func TestUserListKeepsPrincipalsApart(t *testing.T) {
+	js := readStatic(t, "access.js")
+	for _, want := range []string{
+		`const over = (id) => stored.has(id) && stored.get(id).source === "ldap";`,
+		`key: stored.has(id) ? "ldap:" + id : id`,
+		`.find((x) => x.key === id)`,
+		`ldap ? kv(t("acct.owner"), h("code", null, me.owner)) : null`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("access.js lacks %s", want)
+		}
+	}
+}
+
 func TestStaticETagAndNoCache(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	for _, p := range []string{"/ui/", "/ui/app.js", "/ui/app.css", "/ui/some/typo"} {

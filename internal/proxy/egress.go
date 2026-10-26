@@ -112,7 +112,8 @@ func withRemote(ctx context.Context, u *url.URL) context.Context {
 // that dialed it. A request that base.Proxy routes to a forward proxy is
 // connected, and its host resolved, by that proxy: only an address literal
 // can be checked then, and the proxy's own address is the admin's choice. A
-// numericHost is refused on either path, whatever the remote.
+// numericHost or non-ASCII host is refused on either path, whatever the
+// remote.
 type egress struct {
 	base   *http.Transport
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
@@ -130,7 +131,10 @@ type classified struct {
 }
 
 func (e *egress) RoundTrip(req *http.Request) (*http.Response, error) {
-	if numericHost(req.URL.Hostname()) {
+	// net/http maps a non-ASCII host with UTS #46 (fullwidth digits and dots
+	// become ASCII ones) for the dial and the CONNECT target, past the checks
+	// here; registries use ASCII or punycode host names.
+	if h := req.URL.Hostname(); numericHost(h) || strings.ContainsFunc(h, func(r rune) bool { return r >= 0x80 }) {
 		return nil, errEgress
 	}
 	var remote string
@@ -216,7 +220,8 @@ func newDialer(control func(network, address string, c syscall.RawConn) error) *
 // private hosts, and any class the remote itself resolves to. HTTP_PROXY,
 // HTTPS_PROXY and NO_PROXY apply as usual; through a forward proxy only an
 // address-literal destination can be checked. An IPv4 address spelled other
-// than in dotted-decimal form (10.1, 167772161) is refused everywhere.
+// than in dotted-decimal form (10.1, 167772161), and a host name that is not
+// ASCII (its punycode form works), are refused everywhere.
 func NewClient() *http.Client {
 	return newClient(http.ProxyFromEnvironment, net.DefaultResolver.LookupNetIP)
 }
@@ -241,7 +246,35 @@ func newClient(proxy func(*http.Request) (*url.URL, error), lookup func(context.
 			if len(via) > maxRedirects {
 				return fmt.Errorf("stopped after %d redirects", maxRedirects)
 			}
+			// net/http keeps the first request's Authorization for its host
+			// name on any scheme or port, and for subdomains: credentials
+			// stay with the first request's own origin (sendsCredentials),
+			// or follow it to TLS on the same host (http:80 to https:443),
+			// where the first hop already sent them to that host.
+			if origin(req.URL) != origin(via[0].URL) && !upgradesToTLS(via[0].URL, req.URL) {
+				req.Header.Del("Authorization")
+			}
 			return nil
 		},
 	}
+}
+
+// upgradesToTLS reports whether to is from's host moved from http on port 80
+// to https on port 443.
+func upgradesToTLS(from, to *url.URL) bool {
+	h := from.Hostname()
+	return to.Hostname() == h && origin(from) == "http://"+net.JoinHostPort(h, "80") && origin(to) == "https://"+net.JoinHostPort(h, "443")
+}
+
+// origin is u's scheme, host name and port, an omitted port being the
+// scheme's default.
+func origin(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		port = "80"
+		if u.Scheme == "https" {
+			port = "443"
+		}
+	}
+	return u.Scheme + "://" + net.JoinHostPort(u.Hostname(), port)
 }
