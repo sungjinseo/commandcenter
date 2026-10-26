@@ -191,6 +191,7 @@ func TestHostedAndGroup(t *testing.T) {
 	if w := e.do("GET", "py-all", "packages/six/six-2.0.0.tar.gz", ""); w.Body.String() != "internal six" {
 		t.Fatalf("group hosted file: %q", w.Body.String())
 	}
+	cacheProxyWheel(t, e) // cached in the proxy, still not served by the group
 	if w := e.do("GET", "py-all", "packages/six/six-1.16.0-py2.py3-none-any.whl", ""); w.Code != http.StatusNotFound {
 		t.Fatalf("proxy-only file through the group: %d %q", w.Code, w.Body.String())
 	}
@@ -254,6 +255,7 @@ func TestFileURLUsesLiveBaseURL(t *testing.T) {
 // one behind the owner is not consulted.
 func TestGroupFailsClosedOnOfflineMember(t *testing.T) {
 	e := newEnv(t)
+	cacheProxyWheel(t, e)
 	e.seedHosted(t, "six", "six-2.0.0.tar.gz", "internal six")
 	off, on := false, true
 	e.repos["py-hosted"].Online = &off // the group holds the same pointer
@@ -284,6 +286,7 @@ func TestGroupFailsClosedOnOfflineMember(t *testing.T) {
 // read, is a 5xx, not a reason to serve the proxy's same-named project.
 func TestGroupFailsClosedOnMemberError(t *testing.T) {
 	e := newEnv(t)
+	cacheProxyWheel(t, e)
 	ctx := context.Background()
 	err := e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
 		return tx.InsertPackage(ctx, meta.Package{Repo: "py-hosted", Format: "pypi", Name: "six", Version: "x", Attrs: "not json"})
@@ -295,5 +298,77 @@ func TestGroupFailsClosedOnMemberError(t *testing.T) {
 		if w := e.do("GET", "py-all", p, ""); w.Code < 500 || strings.Contains(w.Body.String(), "six-wheel") || strings.Contains(w.Body.String(), "six-1.16.0") {
 			t.Errorf("%s: %d %q, want 5xx", p, w.Code, w.Body.String())
 		}
+	}
+}
+
+const wheel = "packages/six/six-1.16.0-py2.py3-none-any.whl"
+
+// cacheProxyWheel has py-proxy fetch and cache the six wheel, so a group test
+// shows that the later member's cached file does not get through.
+func cacheProxyWheel(t *testing.T, e *env) {
+	t.Helper()
+	if w := e.do("GET", "py-proxy", wheel, ""); w.Code != 200 {
+		t.Fatalf("caching the proxy's wheel: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// withUpstream adds py-up, a proxy with py-proxy's settings on an upstream
+// that serves fakeIndex while *status is 0 and otherwise answers everything
+// with *status (503: down, 404: the project was removed), and the group
+// py-up-all = py-hosted, py-up. reqs counts the upstream's requests.
+func withUpstream(t *testing.T, e *env) (status, reqs *atomic.Int32) {
+	t.Helper()
+	status, reqs = &atomic.Int32{}, &atomic.Int32{}
+	index := fakeIndex(&atomic.Int32{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs.Add(1)
+		if s := int(status.Load()); s != 0 {
+			http.Error(w, "switched off", s)
+			return
+		}
+		index(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	def := e.repos["py-proxy"].Repository
+	def.Name, def.Remote = "py-up", srv.URL+"/"
+	e.repos["py-up"] = repo.Build(&config.Config{Repositories: []config.Repository{def}})["py-up"]
+	g := *e.repos["py-all"]
+	g.Name, g.MemberRepos = "py-up-all", []*repo.Repository{e.repos["py-hosted"], e.repos["py-up"]}
+	e.repos[g.Name] = &g
+	return status, reqs
+}
+
+// Format review F2: a group serves a cached file without the project index,
+// so after the upstream removed the project, as the proxy URL does, and
+// without asking the upstream.
+func TestGroupServesCachedFileAfterUpstreamRemovedProject(t *testing.T) {
+	e := newEnv(t)
+	status, reqs := withUpstream(t, e)
+	for _, p := range []string{"simple/six/", wheel} {
+		if w := e.do("GET", "py-up-all", p, ""); w.Code != 200 {
+			t.Fatalf("caching %s: %d %s", p, w.Code, w.Body.String())
+		}
+	}
+	status.Store(http.StatusNotFound)
+	e.h.Fetcher.Now = func() time.Time { return time.Now().Add(2 * time.Hour) } // past metadataMaxAge
+	n := reqs.Load()
+	if w := e.do("GET", "py-up-all", wheel, ""); w.Code != 200 || w.Body.String() != "six-wheel" {
+		t.Fatalf("project removed upstream: %d %q", w.Code, w.Body.String())
+	}
+	if d := reqs.Load() - n; d != 0 {
+		t.Fatalf("the upstream was asked %d times for a cached file", d)
+	}
+}
+
+// ... and while the upstream is down, also with no index cached.
+func TestGroupServesCachedFileWhileUpstreamDown(t *testing.T) {
+	e := newEnv(t)
+	status, _ := withUpstream(t, e)
+	if _, err := e.h.Store.Put(context.Background(), "py-up", fileKey("six", "six-1.16.0-py2.py3-none-any.whl"), "", strings.NewReader("six-wheel")); err != nil {
+		t.Fatal(err)
+	}
+	status.Store(http.StatusServiceUnavailable)
+	if w := e.do("GET", "py-up-all", wheel, ""); w.Code != 200 || w.Body.String() != "six-wheel" {
+		t.Fatalf("upstream down: %d %q", w.Code, w.Body.String())
 	}
 }

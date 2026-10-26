@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
-# Base images are pinned by digest and updated by Dependabot. Keep go-version in
-# .github/workflows/ci.yml equal to the golang tag.
+# Base images are pinned by digest and updated by Dependabot. When the golang tag
+# changes, set go-version in .github/workflows/ci.yml to it and rerun
+# scripts/third-party-licenses.sh; CI fails until both are done.
 # The build stage runs on the build machine and cross-compiles for the target.
 FROM --platform=$BUILDPLATFORM golang:1.26.10@sha256:672c944cfd07599b5f1bb179869270cdc94c6254e41db4d431259693cb286b82 AS build
 WORKDIR /src

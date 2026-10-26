@@ -108,7 +108,7 @@ The quick start is for trying it out. Before your team relies on it every day, r
 - For a private registry, turn anonymous read (`anonymousRead`) off.
 - Limit upload size, body timeouts and connections per client at the proxy.
 - Keep `meta.db` on local disk or block storage, never on NFS or SMB, and run exactly one instance.
-- Give the server 60 seconds to stop (`stop_grace_period` in compose).
+- Give the server 60 seconds to stop. The bundled compose file already sets `stop_grace_period: 60s`; with `docker run` (`--stop-timeout 60`) or Kubernetes, set it yourself.
 - Back up regularly and before every upgrade. Downgrades are not supported.
 - Reference Kubernetes manifests are in [deploy/kubernetes](deploy/kubernetes/commandcenter.yaml).
 

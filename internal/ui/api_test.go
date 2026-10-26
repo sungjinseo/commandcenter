@@ -234,7 +234,9 @@ func TestUnknownPathsStill404(t *testing.T) {
 	}
 	// existing routes are untouched
 	wantStatus(t, e.get(t, "/service/rest/v1/status", ""), http.StatusOK)
-	if r := e.get(t, "/repository/missing/x", ""); r.status != http.StatusNotFound {
+	// as a user who could read it: anonymous read is off, so an anonymous
+	// caller gets the 401 of an unreadable repository
+	if r := e.get(t, "/repository/missing/x", "reader"); r.status != http.StatusNotFound {
 		t.Errorf("unknown repository: %d", r.status)
 	}
 	// unknown API paths answer JSON 404; a wrong method answers 405
@@ -309,12 +311,12 @@ func TestMe(t *testing.T) {
 	}
 	c := login(t, e, "admin")
 	r = e.req(t, "GET", "/-/api/me", "", "", c, false)
-	if got := r.json(t); !reflect.DeepEqual(got, map[string]any{"user": "admin", "admin": true, "anonymous": false, "roles": []any{"admin"}, "realm": "Local", "version": "test", "defaultLanguage": "ko"}) {
+	if got := r.json(t); !reflect.DeepEqual(got, map[string]any{"user": "admin", "admin": true, "anonymous": false, "roles": []any{"admin"}, "owner": "admin", "realm": "Local", "version": "test", "defaultLanguage": "ko"}) {
 		t.Fatalf("session me: %v", got)
 	}
 	c = login(t, e, "reader")
 	r = e.req(t, "GET", "/-/api/me", "", "", c, false)
-	if got := r.json(t); !reflect.DeepEqual(got, map[string]any{"user": "reader", "admin": false, "anonymous": false, "roles": []any{}, "realm": "Local", "version": "test", "defaultLanguage": "ko"}) {
+	if got := r.json(t); !reflect.DeepEqual(got, map[string]any{"user": "reader", "admin": false, "anonymous": false, "roles": []any{}, "owner": "reader", "realm": "Local", "version": "test", "defaultLanguage": "ko"}) {
 		t.Fatalf("roleless me: %v", got)
 	}
 	c = login(t, e, "ci")
@@ -341,8 +343,11 @@ func TestLogin(t *testing.T) {
 	if strings.Contains(raw, "Secure") {
 		t.Errorf("cookie %q is Secure on http", raw)
 	}
-	if len(r.cookie) != 2 || r.cookie[1].Name != "repolite_session" || r.cookie[1].MaxAge >= 0 || r.cookie[1].Path != "/" {
-		t.Errorf("legacy cookie not expired on login: %v", r.header.Values("Set-Cookie"))
+	// The https name and the legacy name are expired (a __Host- cookie
+	// only counts with Secure, so its expiry is Secure even on http).
+	if len(r.cookie) != 3 || r.cookie[1].Name != auth.HostSessionCookie || r.cookie[1].MaxAge >= 0 || !r.cookie[1].Secure ||
+		r.cookie[2].Name != "repolite_session" || r.cookie[2].MaxAge >= 0 || r.cookie[2].Path != "/" {
+		t.Errorf("other session cookies not expired on login: %v", r.header.Values("Set-Cookie"))
 	}
 	c := r.cookie[0]
 	if len(c.Value) != 64 {
@@ -375,12 +380,71 @@ func TestLogin(t *testing.T) {
 	}
 }
 
+// Under an https baseURL the session cookie is __Host-cc_session: Secure,
+// Path=/ and no Domain, so another host under the same domain cannot plant
+// or shadow it. The http name is expired and does not authenticate.
 func TestLoginSecureCookie(t *testing.T) {
 	e := newEnv(t, "https://repo.example")
 	r := e.req(t, "POST", "/-/api/login", `{"user":"ci","password":"pw"}`, "", nil, true)
 	wantStatus(t, r, http.StatusOK)
-	if !strings.Contains(r.header.Get("Set-Cookie"), "Secure") {
-		t.Fatalf("cookie not Secure: %q", r.header.Get("Set-Cookie"))
+	raw := r.header.Get("Set-Cookie")
+	if !strings.HasPrefix(raw, auth.HostSessionCookie+"=") || !strings.Contains(raw, "Secure") ||
+		!strings.Contains(raw, "Path=/") || strings.Contains(raw, "Domain") {
+		t.Fatalf("session cookie %q", raw)
+	}
+	c := r.cookie[0]
+	if len(r.cookie) != 3 || r.cookie[1].Name != auth.SessionCookie || r.cookie[1].MaxAge >= 0 || !r.cookie[1].Secure {
+		t.Fatalf("http cookie not expired: %v", r.header.Values("Set-Cookie"))
+	}
+	if got := e.req(t, "GET", "/-/api/me", "", "", c, false).json(t)["user"]; got != "ci" {
+		t.Fatalf("__Host- cookie: me %v", got)
+	}
+	if got := e.req(t, "GET", "/-/api/me", "", "", &http.Cookie{Name: auth.SessionCookie, Value: c.Value}, false).json(t)["anonymous"]; got != true {
+		t.Fatal("the http cookie name authenticated under an https baseURL")
+	}
+}
+
+// Login and logout end the session of every session cookie the request
+// carries, under both names. So a live session another host planted beside
+// the user's own, which makes the cookies refused (auth.cookiePrincipal), is
+// gone once the user signs in again.
+func TestLoginEndsEveryCookieSession(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	planted, own, stale := e.ses.Create("reader"), e.ses.Create("ci"), e.ses.Create("ci")
+	send := func(method, path, body string, cookies ...*http.Cookie) resp {
+		t.Helper()
+		r, _ := http.NewRequest(method, e.ts.URL+path, strings.NewReader(body))
+		r.Header.Set(auth.UIHeader, "1")
+		for _, c := range cookies {
+			r.AddCookie(c)
+		}
+		res, err := noRedirect.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return resp{status: res.StatusCode, header: res.Header, body: string(b), cookie: res.Cookies()}
+	}
+	plantedC := &http.Cookie{Name: auth.SessionCookie, Value: planted}
+	if got := send("GET", "/-/api/me", "", plantedC, &http.Cookie{Name: auth.SessionCookie, Value: own}).json(t)["anonymous"]; got != true {
+		t.Fatal("two users' sessions: one was picked")
+	}
+	r := send("POST", "/-/api/login", `{"user":"ci","password":"pw"}`, plantedC,
+		&http.Cookie{Name: auth.SessionCookie, Value: own}, &http.Cookie{Name: auth.HostSessionCookie, Value: stale})
+	wantStatus(t, r, http.StatusOK)
+	for _, id := range []string{planted, own, stale} {
+		if _, ok := e.ses.User(id); ok {
+			t.Fatal("a session named by a cookie survived the login")
+		}
+	}
+	// The planted cookie may linger in the browser; it names no session now.
+	if got := send("GET", "/-/api/me", "", plantedC, r.cookie[0]).json(t)["user"]; got != "ci" {
+		t.Fatalf("after signing in again: me %v", got)
+	}
+	wantStatus(t, send("POST", "/-/api/logout", "", plantedC, r.cookie[0]), http.StatusNoContent)
+	if _, ok := e.ses.User(r.cookie[0].Value); ok {
+		t.Fatal("session survived logout")
 	}
 }
 
@@ -395,10 +459,11 @@ func TestLogout(t *testing.T) {
 	r := e.req(t, "POST", "/-/api/logout", "", "", c, true)
 	wantStatus(t, r, http.StatusNoContent)
 	checkAPIHeaders(t, r)
-	if len(r.cookie) != 2 || r.cookie[0].Name != auth.SessionCookie || r.cookie[0].MaxAge >= 0 {
-		t.Fatalf("cookie not cleared: %v", r.header.Values("Set-Cookie"))
+	if len(r.cookie) != 3 || r.cookie[0].Name != auth.SessionCookie || r.cookie[0].MaxAge >= 0 ||
+		r.cookie[1].Name != auth.HostSessionCookie || r.cookie[1].MaxAge >= 0 || !r.cookie[1].Secure {
+		t.Fatalf("cookies not cleared: %v", r.header.Values("Set-Cookie"))
 	}
-	if lc := r.cookie[1]; lc.Name != "repolite_session" || lc.MaxAge >= 0 || lc.Path != "/" {
+	if lc := r.cookie[2]; lc.Name != "repolite_session" || lc.MaxAge >= 0 || lc.Path != "/" {
 		t.Fatalf("legacy cookie not expired: %v", r.header.Values("Set-Cookie"))
 	}
 	if _, ok := e.ses.User(c.Value); ok {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -26,10 +27,23 @@ const (
 	classMulticast
 )
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+var (
+	cgnat = netip.MustParsePrefix("100.64.0.0/10")
+	// NAT64 (RFC 6052, RFC 8215): the translator connects to the IPv4
+	// address in the last 32 bits.
+	nat64      = netip.MustParsePrefix("64:ff9b::/96")
+	nat64Local = netip.MustParsePrefix("64:ff9b:1::/48")
+)
 
 func classOf(ip netip.Addr) int {
 	ip = ip.Unmap()
+	// ponytail: the /96 format only; a local prefix shorter than /96 (RFC 6052
+	// splits the IPv4 address around bits 64-71 then) or a network-specific
+	// prefix is not recognised. Make the prefixes a setting if one shows up.
+	if a := ip.WithZone(""); nat64.Contains(a) || nat64Local.Contains(a) {
+		b := a.As16()
+		ip = netip.AddrFrom4([4]byte(b[12:]))
+	}
 	switch {
 	case ip.IsUnspecified() || ip.Is4() && ip.As4()[0] == 0:
 		return classUnspecified
@@ -66,6 +80,23 @@ func checkAddr(ip netip.Addr, allowed int) error {
 	return nil
 }
 
+// numericHost reports whether host, which netip does not parse, ends in a
+// number as the WHATWG URL standard puts it (a decimal or 0x hex label).
+// inet_aton, and so getaddrinfo and most forward proxies, reads 10.1,
+// 167772161, 0x0a000001 or 012.0.0.1 as an IPv4 address that the checks here
+// would not see. No top-level domain is numeric.
+func numericHost(host string) bool {
+	if _, err := netip.ParseAddr(host); err == nil {
+		return false
+	}
+	last := strings.TrimSuffix(host, ".")
+	last = strings.ToLower(last[strings.LastIndexByte(last, '.')+1:])
+	if hex, ok := strings.CutPrefix(last, "0x"); ok {
+		return strings.Trim(hex, "0123456789abcdef") == ""
+	}
+	return last != "" && strings.Trim(last, "0123456789") == ""
+}
+
 type remoteKey struct{}
 
 // withRemote marks ctx as a fetch for the repository whose remote is u.
@@ -80,16 +111,28 @@ func withRemote(ctx context.Context, u *url.URL) context.Context {
 // has its own transport: a pooled connection is only reused under the policy
 // that dialed it. A request that base.Proxy routes to a forward proxy is
 // connected, and its host resolved, by that proxy: only an address literal
-// can be checked then, and the proxy's own address is the admin's choice.
+// can be checked then, and the proxy's own address is the admin's choice. A
+// numericHost is refused on either path, whatever the remote.
 type egress struct {
 	base   *http.Transport
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
 
 	mu     sync.Mutex
 	direct map[int]*http.Transport
+	// ponytail: never pruned, one entry per remote host ever configured;
+	// drop expired entries if remotes churn.
+	known map[string]classified
+}
+
+type classified struct {
+	classes int
+	at      time.Time
 }
 
 func (e *egress) RoundTrip(req *http.Request) (*http.Response, error) {
+	if numericHost(req.URL.Hostname()) {
+		return nil, errEgress
+	}
 	var remote string
 	if u, _ := req.Context().Value(remoteKey{}).(*url.URL); u != nil {
 		remote = u.Hostname()
@@ -115,17 +158,30 @@ func (e *egress) RoundTrip(req *http.Request) (*http.Response, error) {
 	return e.transport(allowedFor(e.classes(req.Context(), remote))).RoundTrip(req)
 }
 
-// classes returns the classes of the addresses host resolves to. A host that
-// does not resolve counts as public, the most restricted remote.
+// classTTL is how long the classes a lookup of a remote host found stand in
+// for a later lookup that fails; a var for tests.
+var classTTL = 10 * time.Minute
+
+// classes returns the classes of the addresses host resolves to. When the
+// lookup fails, what the last successful one found within classTTL stands in,
+// so a DNS blip neither makes an internal remote public nor strands the
+// connections pooled under its policy. A host with no such answer counts as
+// public, the most restricted remote.
 func (e *egress) classes(ctx context.Context, host string) int {
 	ips, err := e.lookup(ctx, "ip", host)
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if err != nil || len(ips) == 0 {
+		if k, ok := e.known[host]; ok && time.Since(k.at) < classTTL {
+			return k.classes
+		}
 		return classPublic
 	}
 	c := 0
 	for _, ip := range ips {
 		c |= classOf(ip)
 	}
+	e.known[host] = classified{c, time.Now()}
 	return c
 }
 
@@ -159,7 +215,8 @@ func newDialer(control func(network, address string, c syscall.RawConn) error) *
 // index-supplied URL leads there; an internal remote may also reach other
 // private hosts, and any class the remote itself resolves to. HTTP_PROXY,
 // HTTPS_PROXY and NO_PROXY apply as usual; through a forward proxy only an
-// address-literal destination can be checked.
+// address-literal destination can be checked. An IPv4 address spelled other
+// than in dotted-decimal form (10.1, 167772161) is refused everywhere.
 func NewClient() *http.Client {
 	return newClient(http.ProxyFromEnvironment, net.DefaultResolver.LookupNetIP)
 }
@@ -178,6 +235,7 @@ func newClient(proxy func(*http.Request) (*url.URL, error), lookup func(context.
 			},
 			lookup: lookup,
 			direct: map[int]*http.Transport{},
+			known:  map[string]classified{},
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > maxRedirects {

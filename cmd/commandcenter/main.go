@@ -130,13 +130,9 @@ func serve(args []string) error {
 }
 
 func hashPassword(stdin io.Reader, stdout io.Writer) error {
-	line, err := bufio.NewReader(stdin).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
+	pw, err := readPassword(stdin) // the API's rules, as every other password entry point
+	if err != nil {
 		return err
-	}
-	pw := strings.TrimRight(line, "\r\n")
-	if pw == "" {
-		return errors.New("empty password (type the password and press Enter)")
 	}
 	h, err := auth.HashPassword(pw)
 	if err != nil {

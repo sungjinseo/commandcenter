@@ -56,10 +56,17 @@ var Version = "dev"
 // maxConcurrentFetches bounds simultaneous remote downloads (spec §7).
 const maxConcurrentFetches = 32
 
-// maxConns bounds the connections served at once; more wait in the listen
-// backlog. Each costs a goroutine and buffers: QA N-5 filled the 128 MiB
-// container with ~3000 stalled ones, so 1024 stays well inside it.
+// maxConns bounds the connections served at once. When it is reached,
+// server.LimitConns closes an idle or slow-header one to make room; only
+// while all serve requests do new ones wait in the listen backlog. Measured,
+// a connection costs 14-25 KiB (idle, sending headers, or stalled in a body)
+// plus about 1.6 times the header bytes it sent, at most ~40 KiB with
+// maxHeaderBytes: 1024 stay within ~40 MiB of the 80 MiB GOMEMLIMIT.
 const maxConns = 1024
+
+// maxHeaderBytes bounds a request's headers (431 above it). Go's default of
+// 1 MiB lets one connection cost ~1.5 MiB while it sends them.
+const maxHeaderBytes = 16 << 10
 
 // Option adjusts how New builds the App.
 type Option func(*options)
@@ -393,11 +400,7 @@ const shutdownTimeout = 30 * time.Second
 
 // Serve runs the HTTP server until ctx is cancelled, then drains requests for up to shutdownTimeout.
 func (a *App) Serve(ctx context.Context) error {
-	srv := &http.Server{
-		Handler:           a.Handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	srv := newHTTPServer(a.Handler)
 	// The counters are flushed periodically; the final flush runs on every way
 	// out, after the server stopped taking requests.
 	mctx, stopMetrics := context.WithCancel(ctx)
@@ -461,6 +464,16 @@ func (a *App) Serve(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// newHTTPServer is the HTTP server Serve runs h on.
+func newHTTPServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
 }
 
 // accessReloadEvery is how often Serve reloads users, roles and settings, so

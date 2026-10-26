@@ -30,7 +30,7 @@ func IdleBody(w http.ResponseWriter, r *http.Request, idle time.Duration) io.Rea
 		return r.Body
 	}
 	if inner, ok := r.Body.(*idleBody); ok {
-		return &idleBody{ReadCloser: inner.ReadCloser, rc: inner.rc, idle: idle, over: inner.over}
+		return &idleBody{ReadCloser: inner.ReadCloser, rc: inner.rc, idle: idle, by: inner.by, over: inner.over}
 	}
 	rc := http.NewResponseController(w)
 	// Probe for support with the zero deadline, which leaves none armed.
@@ -40,15 +40,34 @@ func IdleBody(w http.ResponseWriter, r *http.Request, idle time.Duration) io.Rea
 	return &idleBody{ReadCloser: r.Body, rc: rc, idle: idle, over: new(bool)}
 }
 
+// WithDeadline returns body, which IdleBody returned, with every later read
+// also ending by t, so the rest of the body must have arrived by then however
+// steadily it trickles in; a nested IdleBody keeps t. Any other body is
+// returned unchanged.
+func WithDeadline(body io.ReadCloser, t time.Time) io.ReadCloser {
+	b, ok := body.(*idleBody)
+	if !ok {
+		return body
+	}
+	d := *b
+	d.by = t
+	return &d
+}
+
 type idleBody struct {
 	io.ReadCloser
 	rc   *http.ResponseController
 	idle time.Duration
-	over *bool // read to its end or closed
+	by   time.Time // no read past it; zero: none (WithDeadline)
+	over *bool     // read to its end or closed
 }
 
 func (b *idleBody) Read(p []byte) (int, error) {
-	b.rc.SetReadDeadline(time.Now().Add(b.idle))
+	d := time.Now().Add(b.idle)
+	if !b.by.IsZero() && b.by.Before(d) {
+		d = b.by
+	}
+	b.rc.SetReadDeadline(d)
 	n, err := b.ReadCloser.Read(p)
 	// Disarm until the next read: the time the handler spends between reads
 	// (writing to disk, waiting for a lock) is not the client's, and once

@@ -128,6 +128,30 @@ func TestOwnerFailsClosedOnOfflineMember(t *testing.T) {
 	}
 }
 
+// OwnerFile asks a member without the file for the document unless it is
+// the last one: inner's last member p is not last in g, and its document
+// "only-remote" makes it the owner, so the later h1's file is not served.
+func TestOwnerFileStopsAtOwnerInNestedGroup(t *testing.T) {
+	r, repos := setup(t, remoteServing("from-remote"))
+	put(t, r, "h1", "f", "from-h1")
+	g := *repos["g"]
+	g.MemberRepos = []*repo.Repository{repos["inner"], repos["h1"]} // inner = h2, p
+	if _, err := r.OwnerFile(ctx, &g, pathTarget("f"), pathTarget("only-remote")); repo.StatusOf(err) != http.StatusNotFound {
+		t.Fatalf("p owns the package: err = %v, want 404", err)
+	}
+	if res, err := r.OwnerFile(ctx, &g, pathTarget("f"), pathTarget("nowhere")); err != nil || content(t, r, res.Asset) != "from-h1" {
+		t.Fatalf("no owner ahead of h1: err = %v", err)
+	}
+	if res, err := r.OwnerFile(ctx, &g, pathTarget("shared"), pathTarget("only-remote")); err != nil || content(t, r, res.Asset) != "from-remote" {
+		t.Fatalf("p has the file: err = %v", err)
+	}
+	off := false
+	repos["h2"].Online = &off
+	if _, err := r.OwnerFile(ctx, &g, pathTarget("f"), pathTarget("nowhere")); repo.StatusOf(err) != http.StatusServiceUnavailable {
+		t.Fatalf("h2 offline ahead of h1: err = %v, want 503", err)
+	}
+}
+
 func TestAllFlattensAndDedupes(t *testing.T) {
 	r, repos := setup(t, remoteServing("R"))
 	put(t, r, "h1", "shared", "1")

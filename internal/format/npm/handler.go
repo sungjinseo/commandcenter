@@ -37,14 +37,16 @@ func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticato
 func (h *Handler) Access(r *http.Request, rp *repo.Repository, path string) auth.Access {
 	if rt, err := ParseRoute(path); err == nil {
 		switch rt.Kind {
-		case KindLogin, KindWebLogin, KindPing, KindAudit:
-			return auth.Public
+		case KindLogin, KindWebLogin:
+			return auth.Public // npm logs in without a token
 		case KindRev, KindToken:
 			// The handler answers these itself: unpublish is refused for
 			// every caller (405, not a 401/403 that npm would retry with
 			// credentials), and logout needs only the caller's own token.
 			return auth.Public
-		case KindWhoami:
+		case KindWhoami, KindPing, KindAudit:
+			// A public ping or audit would tell a hidden repository from
+			// a missing one.
 			return auth.Read
 		}
 	}
@@ -249,18 +251,10 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 	if rt.Kind == KindTarball {
 		// A group takes tarballs only from the member that owns the
 		// package, so a later member's version is not served even by its
-		// direct URL (QA N-1). Finding the owner reads package documents
-		// first: a proxy may fetch one (cold cache, or older than
-		// metadataMaxAge) before the tarball.
-		src := rp
-		if rp.Type == "group" {
-			owner, _, err := h.packument(ctx, rp, rt.Package)
-			if err != nil {
-				return err
-			}
-			src = owner
-		}
-		res, err := h.Resolver.Lookup(ctx, src, TarballKey(rt.Package, rt.File), proxy.Content)
+		// direct URL (QA N-1). A member that has the tarball needs no
+		// packument (resolve.OwnerFile).
+		key := TarballKey(rt.Package, rt.File)
+		res, err := h.Resolver.OwnerFile(ctx, rp, proxy.Target{Key: key, Remote: key}, packumentTarget(rt.Package))
 		if err != nil {
 			return err
 		}

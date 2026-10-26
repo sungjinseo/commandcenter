@@ -89,8 +89,43 @@ func (r *Resolver) Owner(ctx context.Context, rp *repo.Repository, t proxy.Targe
 	return nil, proxy.Result{}, repo.ErrNotFound
 }
 
-// memberFailure is the error Owner returns for a failed member: the member's
-// own status when it is a 5xx, otherwise 502.
+// OwnerFile looks up file, a file of the package whose document is doc (an
+// npm tarball and its packument), under Owner's rule while reading doc as
+// little as it can. A group asks its members in order for file, and the
+// first that has it answers, from its cache or its upstream: a member with a
+// file of the package has the package. A member without file is asked for
+// doc (a nested group through Owner), and if it has the package it owns it:
+// the answer is not found, never a later member's file (QA N-1). The last
+// member is not asked, as no member follows it. So a cached file is served
+// while its upstream is down or after the upstream dropped the package, and
+// a lockfile install fetches no packuments. An offline member reached is a
+// 503 and a failing one a 5xx, as in Owner.
+func (r *Resolver) OwnerFile(ctx context.Context, rp *repo.Repository, file, doc proxy.Target) (proxy.Result, error) {
+	if rp.Type != "group" {
+		return r.LookupTarget(ctx, rp, file, proxy.Content)
+	}
+	for i, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+		}
+		res, err := r.OwnerFile(ctx, m, file, doc)
+		if err == nil {
+			return res, nil
+		}
+		if repo.StatusOf(err) == http.StatusNotFound && i < len(rp.MemberRepos)-1 {
+			if _, _, err = r.Owner(ctx, m, doc, proxy.Metadata); err == nil {
+				return proxy.Result{}, repo.ErrNotFound // m owns the package, without this file
+			}
+		}
+		if repo.StatusOf(err) != http.StatusNotFound {
+			return proxy.Result{}, memberFailure(rp.Name, m.Name, err)
+		}
+	}
+	return proxy.Result{}, repo.ErrNotFound
+}
+
+// memberFailure is the error Owner and OwnerFile return for a failed
+// member: the member's own status when it is a 5xx, otherwise 502.
 func memberFailure(group, member string, err error) error {
 	slog.Warn("group member lookup failed", "group", group, "member", member, "err", logsafe.Err(err))
 	if repo.StatusOf(err) >= 500 {

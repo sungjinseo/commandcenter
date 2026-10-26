@@ -320,6 +320,24 @@ func TestFetchAbortsStalledBody(t *testing.T) {
 	}
 }
 
+// The stall timer runs only while a read waits for the remote: the time the
+// fetch spends before its first read and between reads (writing what came to
+// a blob store that has stalled) is not the remote's.
+func TestStallTimerCountsOnlyReads(t *testing.T) {
+	defer func(d time.Duration) { bodyIdle = d }(bodyIdle)
+	bodyIdle = 50 * time.Millisecond
+	var cancelled atomic.Bool
+	s := newStallReader(strings.NewReader("ab"), func() { cancelled.Store(true) })
+	p := make([]byte, 1)
+	for range 3 { // "a", "b", EOF
+		time.Sleep(4 * bodyIdle)
+		s.Read(p)
+	}
+	if cancelled.Load() {
+		t.Fatal("time outside Read cancelled the fetch")
+	}
+}
+
 func TestFetchSendsRemoteAuth(t *testing.T) {
 	var got string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

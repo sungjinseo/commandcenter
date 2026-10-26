@@ -123,9 +123,12 @@ spec:
               port: http
             periodSeconds: 10
             timeoutSeconds: 5
+          # Liveness is a TCP connect, which the kernel completes even while all 1024 connection slots
+          # of the server are busy. An HTTP check would wait behind them, fail and restart the pod,
+          # cutting every transfer; a saturated pod only leaves the Service (readiness) until it
+          # catches up.
           livenessProbe:
-            httpGet:
-              path: /service/rest/v1/status
+            tcpSocket:
               port: http
             periodSeconds: 30
             timeoutSeconds: 5

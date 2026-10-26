@@ -31,7 +31,7 @@ const (
 	Add                  // a new upload or publish
 	Edit                 // overwrite, npm dist-tags and deprecate, Cargo yank/unyank
 	Delete               // removing content
-	Public               // no permission needed (e.g. ping, login endpoints)
+	Public               // no permission needed (e.g. npm login endpoints)
 )
 
 // IsWrite reports whether a is one of the write kinds (Add, Edit, Delete),
@@ -303,23 +303,44 @@ func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 	return Principal{}, ErrBadCredentials
 }
 
+// SessionCookieName is the UI session cookie's name under the live baseURL:
+// HostSessionCookie when it is https (the cookie is then Secure), else
+// SessionCookie. Only this name authenticates.
+func (a *Authenticator) SessionCookieName() string {
+	if strings.HasPrefix(a.snap.Load().settings.BaseURL, "https://") {
+		return HostSessionCookie
+	}
+	return SessionCookie
+}
+
 // cookiePrincipal authenticates by session cookie. Anything doubtful (no
 // store, no cookie, unknown session, removed or disabled user) is anonymous.
 // Unsafe methods need the X-Command-Center-UI header, which a cross-site form
-// cannot set.
+// cannot set. On http another host under the same domain can add cookies of
+// the name (with a Domain or a longer Path, sent first), so all of them are
+// tried: unknown ids are skipped, so a planted value neither shadows the
+// user's session nor locks the user out, and live sessions of two users are
+// refused rather than one picked (signing in again ends them all). A browser
+// sends at most one __Host- cookie of the name.
 func (a *Authenticator) cookiePrincipal(r *http.Request) Principal {
 	if a.Sessions == nil {
-		return Principal{}
-	}
-	c, err := r.Cookie(SessionCookie)
-	if err != nil {
 		return Principal{}
 	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Header.Get(UIHeader) != "1" {
 		return Principal{}
 	}
-	user, ok := a.Sessions.User(c.Value)
-	if !ok {
+	user := ""
+	for _, c := range r.CookiesNamed(a.SessionCookieName()) {
+		u, ok := a.Sessions.User(c.Value)
+		if !ok {
+			continue
+		}
+		if user != "" && u != user {
+			return Principal{}
+		}
+		user = u
+	}
+	if user == "" {
 		return Principal{}
 	}
 	p, ok := a.lookup(r.Context(), user)

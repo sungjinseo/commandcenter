@@ -108,7 +108,7 @@ docker compose up -d
 - 사내 전용이면 익명 읽기(`anonymousRead`)를 끕니다.
 - 프록시에서 업로드 크기, 본문 수신 타임아웃, 연결 수를 제한합니다.
 - `meta.db`는 로컬 디스크나 블록 스토리지에 둡니다. NFS·SMB는 안 됩니다. 인스턴스는 하나만 띄웁니다.
-- 중지 대기 시간을 60초로 늘립니다(compose의 `stop_grace_period`).
+- 중지 대기 시간을 60초로 둡니다. 들어 있는 compose 파일은 이미 `stop_grace_period: 60s`이고, `docker run`(`--stop-timeout 60`)이나 Kubernetes에서는 직접 정합니다.
 - 정기적으로, 그리고 업그레이드 전에 백업합니다. 다운그레이드는 지원하지 않습니다.
 - Kubernetes용 참조 매니페스트는 [deploy/kubernetes](deploy/kubernetes/commandcenter.yaml)에 있습니다.
 

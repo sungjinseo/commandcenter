@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -170,11 +171,16 @@ func (h *jsonErrHandler) WriteError(w http.ResponseWriter, r *http.Request, err 
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// TestDenyUsesHandlerErrorWriter: a caller who may read the repository (here
+// anonymously) gets a denied write in its format; one who may not read it
+// gets the plain answer of a missing repository
+// (TestMissingRepositoryAnswersLikeUnreadable).
 func TestDenyUsesHandlerErrorWriter(t *testing.T) {
 	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
 	cfg := &config.Config{
-		Users:        []config.User{{Name: "reader", PasswordHash: string(h)}},
-		Repositories: []config.Repository{{Name: "n", Format: "npm", Type: "hosted"}},
+		AnonymousRead: true,
+		Users:         []config.User{{Name: "reader", PasswordHash: string(h)}},
+		Repositories:  []config.Repository{{Name: "n", Format: "npm", Type: "hosted"}},
 	}
 	s := &Server{
 		Registry: repo.NewRegistry(nil, cfg.Repositories),
@@ -826,5 +832,124 @@ func TestStalledBodyOnGetIsReleased(t *testing.T) {
 	}))
 	if err := stall(srv.Listener.Addr().String(), "GET /repository/r/x HTTP/1.1\r\nHost: x\r\n", 200); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// capServer serves repository r with handler under a cap of n connections and
+// without net/http's header and idle timeouts: only the cap frees a slot.
+func capServer(t *testing.T, n int, handler repo.Handler) *httptest.Server {
+	t.Helper()
+	cfg := &config.Config{AnonymousRead: true, Repositories: []config.Repository{{Name: "r", Format: "maven", Type: "hosted"}}}
+	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	cfg.Users = []config.User{{Name: "admin", PasswordHash: string(h), Roles: []string{"admin"}}}
+	s := &Server{Registry: repo.NewRegistry(nil, cfg.Repositories), Handlers: map[string]repo.Handler{"maven": handler}, Auth: auth.New(cfg, noTokens{}),
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ts := httptest.NewUnstartedServer(s.Handler())
+	ts.Listener = LimitConns(ts.Config, ts.Listener, n)
+	ts.Start()
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// getStatus asks for the status page on a new connection, which it returns
+// open, idle between requests, once the 200 came within a second.
+func getStatus(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	io.WriteString(c, "GET /service/rest/v1/status HTTP/1.1\r\nHost: x\r\n\r\n")
+	c.SetReadDeadline(time.Now().Add(time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatalf("status not answered within 1 s: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status answered %d", resp.StatusCode)
+	}
+	return c
+}
+
+// closedByServer reports whether the server closed c within a second.
+func closedByServer(c net.Conn) bool {
+	c.SetReadDeadline(time.Now().Add(time.Second))
+	_, err := c.Read(make([]byte, 1))
+	var ne net.Error
+	return err != nil && !(errors.As(err, &ne) && ne.Timeout())
+}
+
+// QA N-5: once the cap is reached by connections that cost their clients
+// nothing to hold, idle between requests or never finishing their headers, a
+// new client is still served at once: the one idle or waiting the longest is
+// closed to make room. An upload in progress is never closed for it.
+func TestConnCapShedsIdleAndSlowHeaderConns(t *testing.T) {
+	reading := make(chan struct{})
+	got := make(chan int64, 1)
+	ts := capServer(t, 3, handlerFunc(func(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) {
+		close(reading)
+		n, err := io.Copy(io.Discard, r.Body)
+		got <- n
+		if err != nil {
+			repo.WriteError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	addr := ts.Listener.Addr().String()
+
+	// A signed-in upload that keeps coming: 32 KiB every 20 ms until stop.
+	pr, pw := io.Pipe()
+	stop := make(chan struct{})
+	end := sync.OnceFunc(func() { close(stop) })
+	defer end() // also on t.Fatal: ts.Close waits for the upload
+	go func() {
+		defer pw.Close()
+		chunk := make([]byte, 32<<10)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			if _, err := pw.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	upload := make(chan int, 1)
+	go func() {
+		req, _ := http.NewRequest("PUT", ts.URL+"/repository/r/big.jar", pr)
+		req.SetBasicAuth("admin", "pw")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			upload <- 0
+			return
+		}
+		resp.Body.Close()
+		upload <- resp.StatusCode
+	}()
+	<-reading
+	idle := getStatus(t, addr)
+	slow, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer slow.Close()
+	io.WriteString(slow, "GET /service/rest/v1/status HTTP/1.1\r\nHost: x\r\n") // headers never finished
+	time.Sleep(shedAfter + 100*time.Millisecond)
+
+	// The cap of 3 is reached: each new client takes the place of the oldest
+	// cheap connection, the idle one first, then the slow one.
+	getStatus(t, addr)
+	getStatus(t, addr)
+	if !closedByServer(idle) || !closedByServer(slow) {
+		t.Fatal("the idle and the slow-header connection were not both closed")
+	}
+	end()
+	if code, n := <-upload, <-got; code != http.StatusCreated || n < 32<<10 {
+		t.Fatalf("upload answered %d after %d bytes, want 201", code, n)
 	}
 }

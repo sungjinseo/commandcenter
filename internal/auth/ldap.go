@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"commandcenter/internal/ldap"
@@ -54,12 +53,18 @@ const (
 var ldapSlots = make(chan struct{}, 8)
 
 type ldapEntry struct {
-	mu sync.Mutex // serialises the re-check of one id
+	// busy is a one-slot lock that serialises the re-check of one id; unlike
+	// a mutex, waiting for it ends with the caller's context.
+	busy chan struct{}
 
-	// guarded by mu
+	// guarded by busy
 	user      ldap.User
 	checkedAt time.Time
 	failedAt  time.Time
+}
+
+func newLDAPEntry(u ldap.User, checkedAt time.Time) *ldapEntry {
+	return &ldapEntry{busy: make(chan struct{}, 1), user: u, checkedAt: checkedAt}
 }
 
 type ldapPassHit struct {
@@ -188,7 +193,7 @@ func (a *Authenticator) ldapPassword(ctx context.Context, s *Snapshot, name, pas
 		a.logger().Warn("ldap login refused: the user id is not valid", "attr", s.settings.LDAP.UserIDAttr)
 		return Principal{}, false
 	}
-	e := &ldapEntry{user: u, checkedAt: now}
+	e := newLDAPEntry(u, now)
 	p, ok := a.ldapPrincipal(s, e.user)
 	if !ok {
 		return Principal{}, false
@@ -226,7 +231,8 @@ func (a *Authenticator) ldapPrincipal(s *Snapshot, u ldap.User) (Principal, bool
 
 // ldapLookup returns the principal of LDAP user id, re-checking it against
 // the directory when its entry is older than ldapRecheck (or missing, as
-// after a restart). It fails closed.
+// after a restart). It fails closed, also when ctx ends while another
+// request re-checks the same id.
 func (a *Authenticator) ldapLookup(ctx context.Context, id string) (Principal, bool) {
 	s := a.snap.Load()
 	if !ldapUsable(s) || !meta.ValidUserID(id) {
@@ -238,23 +244,33 @@ func (a *Authenticator) ldapLookup(ctx context.Context, id string) (Principal, b
 	}
 	e := a.ldapUsers[id]
 	if e == nil {
-		e = &ldapEntry{user: ldap.User{ID: id}}
+		e = newLDAPEntry(ldap.User{ID: id}, time.Time{})
 		a.ldapUsers[id] = e
 	}
 	a.ldapMu.Unlock()
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	select {
+	case e.busy <- struct{}{}:
+	case <-ctx.Done():
+		return Principal{}, false
+	}
+	defer func() { <-e.busy }()
 	now := a.clock()
 	if e.checkedAt.IsZero() || now.Sub(e.checkedAt) >= ldapRecheck {
 		if !e.failedAt.IsZero() && now.Sub(e.failedAt) < ldapRetry {
 			return Principal{}, false
 		}
 		u, err := a.findLDAP(ctx, s.settings.LDAP, id)
+		// Stamp with the time the attempt ended: after a directory that hung
+		// past ldapRetry, the requests queued behind this one must still be
+		// denied without dialling.
+		now = a.clock()
 		switch {
 		case errors.Is(err, ldap.ErrNoSuchUser) || errors.Is(err, ldap.ErrAmbiguous):
 			a.dropLDAP(id)
 			return Principal{}, false
+		case err != nil && ctx.Err() != nil:
+			return Principal{}, false // the caller left: not a directory failure (as isOutage)
 		case err != nil:
 			e.failedAt = now
 			a.logger().Warn("ldap re-check failed: denying until the directory answers", "user", id, "err", logsafe.Err(err))
@@ -304,11 +320,13 @@ func (a *Authenticator) LDAPUsers() []LDAPUser {
 	a.ldapMu.Unlock()
 	var out []LDAPUser
 	for _, e := range entries {
-		if !e.mu.TryLock() {
+		select {
+		case e.busy <- struct{}{}:
+		default:
 			continue // being re-checked
 		}
 		u, checked := e.user, !e.checkedAt.IsZero()
-		e.mu.Unlock()
+		<-e.busy
 		if !checked {
 			continue
 		}

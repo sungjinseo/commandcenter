@@ -247,7 +247,7 @@ func TestLDAPLoginThroughAPI(t *testing.T) {
 	alice := e.loginCookie(t, "alice", "alice-pw")
 	r := e.req(t, "GET", "/-/api/me", "", "", alice, false)
 	m := r.json(t)
-	if m["user"] != "alice" || m["admin"] != true || m["realm"] != "LDAP" || fmt.Sprint(m["roles"]) != "[admin]" {
+	if m["user"] != "alice" || m["owner"] != "ldap:alice" || m["admin"] != true || m["realm"] != "LDAP" || fmt.Sprint(m["roles"]) != "[admin]" {
 		t.Fatalf("me: %s", r.body)
 	}
 	// Basic auth with the LDAP password.
@@ -286,6 +286,10 @@ func TestLDAPLoginThroughAPI(t *testing.T) {
 	r = e.req(t, "GET", "/-/api/tokens", "", "", bobCookie, false)
 	if !strings.Contains(r.body, bobID) || strings.Contains(r.body, id) || !strings.Contains(r.body, `"user":"ldap:bob"`) {
 		t.Fatalf("bob's list: %s", r.body)
+	}
+	// The token page keeps the tokens whose user is /me's owner, not its user.
+	if me := e.req(t, "GET", "/-/api/me", "", "", bobCookie, false).json(t); me["owner"] != "ldap:bob" || me["user"] != "bob" {
+		t.Fatalf("bob's me: %v", me)
 	}
 	wantStatus(t, e.req(t, "DELETE", "/-/api/tokens/"+id, "", "", bobCookie, true), http.StatusNotFound)
 	wantStatus(t, e.req(t, "DELETE", "/-/api/tokens/"+bobID, "", "", bobCookie, true), http.StatusNoContent)

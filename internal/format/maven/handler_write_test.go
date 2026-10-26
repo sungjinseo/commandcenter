@@ -4,11 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"commandcenter/internal/config"
@@ -239,6 +242,98 @@ func TestMetadataUploadSlots(t *testing.T) {
 	}
 }
 
+// A slot holder must send its body within metadataReadTimeout (408), even
+// one sending steadily enough for the idle timeout never to fire: two such
+// clients delay another upload by that much, not until metadataWaitTimeout
+// (503).
+func TestSlowMetadataUploadLosesSlot(t *testing.T) {
+	e := newEnv(t)
+	oldRead, oldWait := metadataReadTimeout, metadataWaitTimeout
+	metadataReadTimeout, metadataWaitTimeout = 500*time.Millisecond, 3*time.Second
+	t.Cleanup(func() { metadataReadTimeout, metadataWaitTimeout = oldRead, oldWait })
+	const path = "org/example/app/maven-metadata.xml"
+	cut := iotest.ErrReader(&net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded})
+	if err := e.h.putMetadata(context.Background(), e.repos["releases"], path, cut); repo.StatusOf(err) != 408 {
+		t.Fatalf("body cut at the deadline: %v (status %d), want 408", err, repo.StatusOf(err))
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = repo.IdleBody(w, r, time.Minute) // as the server wraps every body
+		defer r.Body.Close()
+		e.h.Serve(w, r, e.repos["releases"], strings.TrimPrefix(r.URL.Path, "/repository/releases/"))
+	}))
+	t.Cleanup(srv.Close)
+	for i := range cap(metadataSem) {
+		c, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		fmt.Fprintf(c, "PUT /repository/releases/org/example/slow%d/maven-metadata.xml HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n<metadata>", i)
+		go func() { // a byte every 20 ms until the connection is closed
+			for {
+				time.Sleep(20 * time.Millisecond)
+				if _, err := io.WriteString(c, " "); err != nil {
+					return
+				}
+			}
+		}()
+	}
+	for deadline := time.Now().Add(5 * time.Second); len(metadataSem) < cap(metadataSem); time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("slow uploads hold %d slots", len(metadataSem))
+		}
+	}
+	start := time.Now()
+	req, _ := http.NewRequest("PUT", srv.URL+"/repository/releases/"+path, strings.NewReader("<metadata/>"))
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("upload behind slow ones: %d after %v, want 201", resp.StatusCode, time.Since(start))
+	}
+}
+
+// cancelOnEmit cancels the request whose artifact PUT emits an event, which
+// makes the metadata rebuild after it fail.
+type cancelOnEmit context.CancelFunc
+
+func (c cancelOnEmit) Emit(kind, actor, repo, subject, detail string) { c() }
+
+// mvn deploy uploads the GA maven-metadata.xml after the artifacts. That
+// upload rebuilds the document from the stored artifacts, so it repairs a
+// rebuild that failed after an artifact PUT; the client's versions are still
+// ignored, and a GA without artifacts still gets no document.
+func TestClientGAMetadataRepairsFailedRebuild(t *testing.T) {
+	e := newEnv(t)
+	e.putAll(t, "releases", "org/example/app/1.0/app-1.0.pom")
+	ctx, cancel := context.WithCancel(context.Background())
+	e.h.Store.Events = cancelOnEmit(cancel)
+	w := httptest.NewRecorder()
+	const pom = "org/example/app/1.1/app-1.1.pom"
+	e.h.Serve(w, httptest.NewRequestWithContext(ctx, "PUT", "/repository/releases/"+pom, strings.NewReader("p")), e.repos["releases"], pom)
+	e.h.Store.Events = nil
+	if got := versionsOf(t, e, "releases"); w.Code != 201 || got != "1.0 release=1.0" {
+		t.Fatalf("PUT with a failed rebuild: %d, metadata %s", w.Code, got)
+	}
+	ga := func(artifact string) string {
+		return fmt.Sprintf(`<metadata><groupId>org.example</groupId><artifactId>%s</artifactId><versioning><release>9.9</release>
+<versions><version>1.1</version><version>9.9</version></versions></versioning></metadata>`, artifact)
+	}
+	for _, a := range []string{"app", "ghost"} {
+		if w := e.do("PUT", "releases", "org/example/"+a+"/maven-metadata.xml", ga(a)); w.Code != 201 {
+			t.Fatalf("PUT %s metadata: %d %s", a, w.Code, w.Body)
+		}
+	}
+	if got := versionsOf(t, e, "releases"); got != "1.0,1.1 release=1.1" {
+		t.Fatalf("after the GA upload: %s", got)
+	}
+	if w := e.do("GET", "releases", "org/example/ghost/maven-metadata.xml", ""); w.Code != 404 {
+		t.Fatalf("GA without artifacts: %d %s", w.Code, w.Body)
+	}
+}
+
 // L-11: GA versioning is the server's. An upload cannot add a version or a
 // <release>, rename the GA or create a document for a GA without artifacts,
 // and a document stored by an older build is rebuilt by the next artifact PUT.
@@ -288,7 +383,8 @@ func TestClientGAMetadataIgnored(t *testing.T) {
 
 // Plugin-group documents still merge: <plugins> is the part of an upload the
 // server keeps, also beside a GA's versioning (groupId org.example and GA
-// org:example share org/example/maven-metadata.xml).
+// org:example share org/example/maven-metadata.xml), which a GA upload for
+// that directory rebuilds without losing them.
 func TestPluginGroupMetadataMerged(t *testing.T) {
 	e := newEnv(t)
 	const path = "org/example/maven-metadata.xml"
@@ -303,18 +399,28 @@ func TestPluginGroupMetadataMerged(t *testing.T) {
 	if w := e.do("PUT", "releases", path, plugin("b")); w.Code != 201 {
 		t.Fatalf("PUT plugin b: %d %s", w.Code, w.Body)
 	}
-	w := e.do("GET", "releases", path, "")
-	m, err := ParseMetadata(w.Body)
-	if w.Code != 200 || err != nil || m.Versioning == nil {
-		t.Fatalf("metadata: %d %v %+v", w.Code, err, m)
+	doc := func() string {
+		t.Helper()
+		w := e.do("GET", "releases", path, "")
+		m, err := ParseMetadata(w.Body)
+		if w.Code != 200 || err != nil || m.Versioning == nil {
+			t.Fatalf("metadata: %d %v %+v", w.Code, err, m)
+		}
+		var prefixes []string
+		for _, p := range m.Plugins {
+			prefixes = append(prefixes, p.Prefix+"="+p.ArtifactID)
+		}
+		return fmt.Sprintf("%s %s:%s %s", strings.Join(prefixes, ","), m.GroupID, m.ArtifactID, strings.Join(m.Versioning.Versions, ","))
 	}
-	var prefixes []string
-	for _, p := range m.Plugins {
-		prefixes = append(prefixes, p.Prefix+"="+p.ArtifactID)
-	}
-	got := fmt.Sprintf("%s %s:%s %s", strings.Join(prefixes, ","), m.GroupID, m.ArtifactID, strings.Join(m.Versioning.Versions, ","))
-	if got != "a=a-maven-plugin,b=b-maven-plugin org:example 1.0" {
+	if got := doc(); got != "a=a-maven-plugin,b=b-maven-plugin org:example 1.0" {
 		t.Fatalf("metadata: %s", got)
+	}
+	e.seed(t, "releases", "org/example/2.0/example-2.0.pom", "p") // its rebuild failed
+	if w := e.do("PUT", "releases", path, `<metadata><groupId>org</groupId><artifactId>example</artifactId></metadata>`); w.Code != 201 {
+		t.Fatalf("PUT GA metadata: %d %s", w.Code, w.Body)
+	}
+	if got := doc(); got != "a=a-maven-plugin,b=b-maven-plugin org:example 1.0,2.0" {
+		t.Fatalf("after the GA upload: %s", got)
 	}
 }
 

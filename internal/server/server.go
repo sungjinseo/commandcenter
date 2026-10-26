@@ -9,9 +9,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"commandcenter/internal/auth"
@@ -46,8 +48,17 @@ const realm = `Basic realm="commandcenter"`
 // stalled client cannot hold the connection or a per-key lock.
 const UploadIdleTimeout = 60 * time.Second
 
+// anonymousBodyTimeout bounds the whole body of a request from a caller who is
+// not signed in (at most the idle timeout). No upload is anonymous, so such a
+// body is small: a login, which carries its password in the body.
+const anonymousBodyTimeout = 5 * time.Second
+
 // requestIDRE accepts client-supplied request ids; anything else is replaced.
 var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// crossOrigin refuses non-safe cross-origin browser requests (CSRF). A
+// request with neither Sec-Fetch-Site nor Origin (every CLI client) passes.
+var crossOrigin http.CrossOriginProtection
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -79,11 +90,19 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	hd := w.Header()
 	hd.Set("Content-Security-Policy", "sandbox allow-downloads; default-src 'none'")
 	hd.Set("X-Content-Type-Options", "nosniff")
-	if !auth.FromContext(r.Context()).Anonymous() {
+	p := auth.FromContext(r.Context())
+	if !p.Anonymous() {
 		hd.Set("Cache-Control", "private") // authorized content must not enter shared caches
 	}
 	rp := s.Registry.Get(r.PathValue("name"))
 	if rp == nil {
+		// Whoever could not read a repository of this name (an unknown name
+		// follows the global anonymousRead and authenticatedRead) gets the
+		// answer of an unreadable one, so hidden names cannot be probed.
+		if !s.Auth.Can(p, r.PathValue("name"), auth.Read) {
+			deny(w, r, p, nil)
+			return
+		}
 		repo.WriteError(w, r, repo.Errorf(http.StatusNotFound, "repository %q not found", r.PathValue("name")))
 		return
 	}
@@ -103,8 +122,10 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	if acc.IsWrite() && rp.WriteTarget != nil {
 		target = rp.WriteTarget.Name
 	}
-	p := auth.FromContext(r.Context())
 	if !s.Auth.Can(p, target, acc) {
+		if !s.Auth.Can(p, rp.Name, auth.Read) {
+			h = nil // its format's error body would tell it from a missing repository
+		}
 		deny(w, r, p, h)
 		return
 	}
@@ -205,6 +226,13 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			// without a deadline once a long response starts: drain it now.
 			r.Body.Close()
 		}
+		// A browser replays Basic credentials it cached after our challenge
+		// on a cross-site form post too: refuse such writes, on every route,
+		// before authenticating.
+		if err := crossOrigin.Check(r); err != nil && !s.fromBaseURL(r) {
+			repo.WriteError(rec, r, repo.Errorf(http.StatusForbidden, "%v", err))
+			return
+		}
 		p, err := s.Auth.Authenticate(r)
 		if err != nil && isLogin(r) {
 			// npm sends its stale saved token with the login PUT; the password in
@@ -217,6 +245,11 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			}
 			repo.WriteError(rec, r, repo.Errorf(http.StatusUnauthorized, "invalid credentials"))
 		} else {
+			if p.Anonymous() {
+				// Read before anyone is signed in: a byte per idle period
+				// must not hold the connection for weeks (QA N-5).
+				r.Body = repo.WithDeadline(r.Body, time.Now().Add(min(idle, anonymousBodyTimeout)))
+			}
 			next.ServeHTTP(rec, r.WithContext(auth.WithPrincipal(r.Context(), p)))
 		}
 	})
@@ -294,31 +327,98 @@ func writeOffline(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(map[string]string{"error": "repository is offline"})
 }
 
-// LimitConns makes srv serve at most n connections at once: Accept on the
-// returned listener waits while n are open. It sets srv.ConnState, which
-// frees a slot when a connection ends.
+// shedAfter is how long a connection must have been idle between requests,
+// or waiting for its first request's headers, before LimitConns may close it
+// to make room.
+const shedAfter = time.Second
+
+// LimitConns makes srv serve at most n connections at once. When n are open,
+// Accept makes room by closing the connection that has been idle between
+// requests, or waiting for its first request's headers, the longest, if that
+// is at least shedAfter: holding such connections costs a client nothing, so
+// they must not lock others out (QA N-5). A connection serving a request is
+// never closed; while none qualifies, the new one waits. LimitConns sets
+// srv.ConnState.
 func LimitConns(srv *http.Server, ln net.Listener, n int) net.Listener {
-	slots := make(chan struct{}, n)
-	srv.ConnState = func(_ net.Conn, st http.ConnState) {
-		if st == http.StateClosed || st == http.StateHijacked {
-			<-slots
-		}
-	}
-	return &limitListener{Listener: ln, slots: slots}
+	l := &limitListener{Listener: ln, n: n, conns: map[net.Conn]connState{}, changed: make(chan struct{}, 1)}
+	srv.ConnState = l.track
+	return l
 }
 
 type limitListener struct {
 	net.Listener
-	slots chan struct{}
+	n       int
+	mu      sync.Mutex
+	conns   map[net.Conn]connState // being served; Accept drops those it closes
+	changed chan struct{}          // a connection changed state
+}
+
+type connState struct {
+	state http.ConnState
+	since time.Time
+}
+
+func (l *limitListener) track(c net.Conn, st http.ConnState) {
+	l.mu.Lock()
+	if _, ok := l.conns[c]; ok {
+		if st == http.StateClosed || st == http.StateHijacked {
+			delete(l.conns, c)
+		} else {
+			l.conns[c] = connState{st, time.Now()}
+		}
+	}
+	l.mu.Unlock()
+	select {
+	case l.changed <- struct{}{}:
+	default:
+	}
 }
 
 func (l *limitListener) Accept() (net.Conn, error) {
-	l.slots <- struct{}{}
 	c, err := l.Listener.Accept()
 	if err != nil {
-		<-l.slots
+		return nil, err
 	}
-	return c, err
+	l.mu.Lock()
+	var shed net.Conn
+	for shed == nil && len(l.conns) >= l.n {
+		var wait time.Duration
+		if shed, wait = l.cheapest(time.Now()); shed != nil {
+			delete(l.conns, shed)
+		} else {
+			l.mu.Unlock()
+			select {
+			case <-l.changed:
+			case <-time.After(wait):
+			}
+			l.mu.Lock()
+		}
+	}
+	l.conns[c] = connState{http.StateNew, time.Now()}
+	l.mu.Unlock()
+	if shed != nil {
+		shed.Close() // its read fails and net/http ends it
+	}
+	return c, nil
+}
+
+// cheapest returns the connection idle or waiting for headers the longest if
+// that has been shedAfter, else nil and when to look again.
+func (l *limitListener) cheapest(now time.Time) (net.Conn, time.Duration) {
+	var shed net.Conn
+	var oldest time.Time
+	wait := shedAfter
+	for c, s := range l.conns {
+		if s.state != http.StateNew && s.state != http.StateIdle {
+			continue
+		}
+		if left := shedAfter - now.Sub(s.since); left > 0 {
+			wait = min(wait, left)
+		} else if shed == nil || s.since.Before(oldest) {
+			shed, oldest = c, s.since
+		}
+	}
+	return shed, wait
 }
 
 // maxUpload is the current cap on upload bodies: the live setting, or the
@@ -330,4 +430,18 @@ func (s *Server) maxUpload() int64 {
 		}
 	}
 	return s.MaxUpload
+}
+
+// fromBaseURL reports whether r's Origin is the origin of the live baseURL,
+// which crossOrigin then trusts: a reverse proxy that rewrites Host (nginx's
+// default) breaks its Origin-Host match, which pages without Sec-Fetch-Site
+// (plain HTTP) depend on. Compared per request rather than AddTrustedOrigin,
+// which would keep trusting a baseURL after it changed.
+func (s *Server) fromBaseURL(r *http.Request) bool {
+	snap := s.Auth.Snapshot()
+	if snap == nil {
+		return false
+	}
+	u, err := url.Parse(snap.Settings().BaseURL)
+	return err == nil && strings.EqualFold(r.Header.Get("Origin"), u.Scheme+"://"+u.Host)
 }

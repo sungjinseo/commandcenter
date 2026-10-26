@@ -160,13 +160,14 @@ func TestGroupOwnerAnswersAlone(t *testing.T) {
 	if len(tags) != 1 || tags["latest"] != "1.0.0" {
 		t.Fatalf("dist-tags = %v", tags)
 	}
+	// The proxy serves 1.1.0 and now has it cached; the group still does not.
+	if w := e.do("GET", "npm-proxy", "left-pad/-/left-pad-1.1.0.tgz", "", anon); w.Code != 200 {
+		t.Fatalf("sanity: the proxy itself serves 1.1.0: %d", w.Code)
+	}
 	for _, p := range []string{"left-pad/1.1.0", "left-pad/beta", "left-pad/-/left-pad-1.1.0.tgz"} {
 		if w := e.do("GET", "npm-all", p, "", anon); w.Code != 404 {
 			t.Errorf("proxy-only %s through the group: %d %q, want 404", p, w.Code, w.Body.String())
 		}
-	}
-	if w := e.do("GET", "npm-proxy", "left-pad/-/left-pad-1.1.0.tgz", "", anon); w.Code != 200 {
-		t.Fatalf("sanity: the proxy itself serves 1.1.0: %d", w.Code)
 	}
 	if w := e.do("HEAD", "npm-all", "left-pad", "", anon); w.Code != 200 || w.Body.Len() != 0 {
 		t.Fatalf("HEAD: %d %d", w.Code, w.Body.Len())
@@ -221,8 +222,8 @@ func TestAccessDecisions(t *testing.T) {
 	}{
 		{"PUT", "-/user/org.couchdb.user:ci", auth.Public},
 		{"POST", "-/v1/login", auth.Public},
-		{"GET", "-/ping", auth.Public},
-		{"POST", "-/npm/v1/security/audits/quick", auth.Public},
+		{"GET", "-/ping", auth.Read}, // were public, which revealed hidden repositories
+		{"POST", "-/npm/v1/security/audits/quick", auth.Read},
 		{"GET", "-/whoami", auth.Read},
 		{"GET", "left-pad", auth.Read},
 		{"PUT", "left-pad", auth.Add},

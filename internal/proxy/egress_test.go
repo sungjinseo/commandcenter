@@ -27,6 +27,10 @@ func TestClassOf(t *testing.T) {
 		"169.254.169.254": classLinkLocal, "fe80::1%eth0": classLinkLocal,
 		"0.0.0.0": classUnspecified, "0.1.2.3": classUnspecified, "::": classUnspecified,
 		"224.0.0.1": classMulticast, "ff02::1": classMulticast,
+		// NAT64 connects to the IPv4 address in the last 32 bits.
+		"64:ff9b::a00:5": classPrivate, "64:ff9b::7f00:1": classLoopback, "64:ff9b::a9fe:a9fe": classLinkLocal,
+		"64:ff9b::a00:5%eth0": classPrivate, "64:ff9b::808:808": classPublic,
+		"64:ff9b:1::a00:5": classPrivate, "64:ff9b:1:2::c0a8:1": classPrivate, "64:ff9b:1::808:808": classPublic,
 	} {
 		if got := classOf(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("classOf(%s) = %b, want %b", addr, got, want)
@@ -178,6 +182,82 @@ func TestEgressProxiedRequestChecksLiteral(t *testing.T) {
 	res, err := f.FetchTarget(ctx, index, Target{Key: "x.whl", URL: "http://files.example/x.whl"}, Content)
 	if err != nil || read(t, f, res.Asset) != "via proxy" {
 		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+// A host that netip does not parse but that ends in a number is an IPv4
+// address to inet_aton, so to getaddrinfo and most forward proxies (10.1 and
+// 167772161 are 10.0.0.1): it is refused on the proxied and the direct path
+// alike, for an internal remote too, before a proxy or resolver reads it.
+// Names that merely contain digits still go through.
+func TestEgressRefusesNumericIPv4Spellings(t *testing.T) {
+	var proxied atomic.Int32
+	fwd := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { proxied.Add(1) }))
+	defer fwd.Close()
+	viaProxy := func(*http.Request) (*url.URL, error) { return url.Parse(fwd.URL) }
+	get := func(c *http.Client, host string) error {
+		req, err := http.NewRequestWithContext(withRemote(ctx, &url.URL{Scheme: "http", Host: "nexus.corp"}), http.MethodGet, "http://"+host+"/x", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := c.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		return err
+	}
+	for _, proxy := range []func(*http.Request) (*url.URL, error){viaProxy, nil} {
+		c := newClient(proxy, resolvesTo("10.0.0.5"))
+		for _, host := range []string{"10.1", "167772161", "0x0a000001", "0X0A000001", "012.0.0.1", "127.1",
+			"2130706433:8080", "0x7f.1", "127.0.0.1.", "0251.0376.0251.0376", "0x"} {
+			if err := get(c, host); !errors.Is(err, errEgress) {
+				t.Errorf("proxied %v, %s: err = %v, want the egress refusal", proxy != nil, host, err)
+			}
+		}
+	}
+	if proxied.Load() != 0 {
+		t.Fatalf("%d numeric hosts reached the proxy", proxied.Load())
+	}
+	c := newClient(viaProxy, resolvesTo("203.0.113.10"))
+	for _, host := range []string{"1e100.net", "123.example", "0x.example", "10.1.example", "0xsvc"} {
+		if err := get(c, host); err != nil {
+			t.Errorf("%s: %v", host, err)
+		}
+	}
+}
+
+// The remote's name is looked up on every request to classify it. When the
+// lookup fails, the classes the last successful one found, at most classTTL
+// ago, stand in: a DNS blip does not make an internal remote public, which
+// would fail its fetches even with warm connections in its pool. With nothing
+// known the remote counts as public, the most restricted.
+func TestEgressKeepsRemoteClassesWhenLookupFails(t *testing.T) {
+	defer func(d time.Duration) { classTTL = d }(classTTL)
+	internal, hits := internalServer(t)
+	_, port, _ := net.SplitHostPort(internal.Listener.Addr().String())
+	rp := proxyRepo("mirror", "http://localhost:"+port+"/")
+	var down atomic.Bool
+	f, _, _ := setup(t, &remote{})
+	f.Client = newClient(nil, func(_ context.Context, _, host string) ([]netip.Addr, error) {
+		if down.Load() {
+			return nil, &net.DNSError{Err: "server misbehaving", Name: host, IsTemporary: true}
+		}
+		return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+	})
+
+	if _, err := f.Fetch(ctx, rp, "a.jar", Content); err != nil {
+		t.Fatalf("lookup working: %v", err)
+	}
+	down.Store(true)
+	if _, err := f.Fetch(ctx, rp, "b.jar", Content); err != nil {
+		t.Fatalf("lookup failing, remote known to be loopback: %v", err)
+	}
+	classTTL = 0
+	if _, err := f.Fetch(ctx, rp, "c.jar", Content); !errors.Is(err, ErrRemote) {
+		t.Fatalf("lookup failing, last answer too old: err = %v, want ErrRemote", err)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("internal hits = %d, want 2", hits.Load())
 	}
 }
 

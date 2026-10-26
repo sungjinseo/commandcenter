@@ -337,6 +337,111 @@ func TestLDAPRecheckSerialized(t *testing.T) {
 	}
 }
 
+// findFunc is a Directory whose Find runs the function; it serves no logins.
+type findFunc func(ctx context.Context, cfg meta.LDAP, id string) (ldap.User, error)
+
+func (findFunc) Authenticate(context.Context, meta.LDAP, string, string) (ldap.User, error) {
+	return ldap.User{}, ldap.ErrInvalidCredentials
+}
+
+func (fn findFunc) Find(ctx context.Context, cfg meta.LDAP, id string) (ldap.User, error) {
+	return fn(ctx, cfg, id)
+}
+
+// The re-check back-off runs from the end of the failed attempt: after a
+// directory that hung past ldapRetry, the next lookup is still denied
+// without dialling.
+func TestLDAPRecheckBackoffAfterSlowFailure(t *testing.T) {
+	f := newLDAPFixture(t)
+	if _, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); err != nil {
+		t.Fatal(err)
+	}
+	f.a.LDAP = findFunc(func(ctx context.Context, cfg meta.LDAP, id string) (ldap.User, error) {
+		f.advance(ldapRetry + time.Second) // the directory hangs, then fails
+		return defaultDirectory.Find(ctx, cfg, id)
+	})
+	f.srv.SetDown(true)
+	f.advance(ldapRecheck)
+	lookup := func() bool { _, ok := f.a.Lookup("ldap:alice"); return ok }
+	if n := f.dialsDuring(func() {
+		if lookup() {
+			t.Fatal("outage: re-check failed open")
+		}
+	}); n != 1 {
+		t.Fatalf("re-check made %d connections", n)
+	}
+	if n := f.dialsDuring(func() {
+		if lookup() {
+			t.Fatal("allowed right after the failed re-check")
+		}
+	}); n != 0 {
+		t.Fatalf("dialled %d times right after the failed re-check", n)
+	}
+	f.srv.SetDown(false)
+	f.advance(ldapRetry)
+	if !lookup() {
+		t.Fatal("not restored after the back-off")
+	}
+}
+
+// A caller that left during the re-check is not a directory failure: the
+// next caller re-checks at once instead of being denied for ldapRetry.
+func TestLDAPRecheckCancelledCallerStartsNoBackoff(t *testing.T) {
+	f := newLDAPFixture(t)
+	if _, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	f.a.LDAP = findFunc(func(ctx context.Context, _ meta.LDAP, _ string) (ldap.User, error) {
+		cancel() // the client hangs up mid-check
+		return ldap.User{}, &ldap.DialError{Phase: "connect", Err: ctx.Err()}
+	})
+	f.advance(ldapRecheck)
+	if _, ok := f.a.ldapLookup(ctx, "alice"); ok {
+		t.Fatal("a cancelled re-check allowed the user")
+	}
+	f.a.LDAP = nil
+	if _, ok := f.a.Lookup("ldap:alice"); !ok {
+		t.Fatal("the next caller was denied: a cancelled re-check started the back-off")
+	}
+}
+
+// Waiting for another request's re-check of the same id ends with the
+// caller's context.
+func TestLDAPRecheckWaitHonoursContext(t *testing.T) {
+	f := newLDAPFixture(t)
+	if _, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.a.LDAP = findFunc(func(_ context.Context, _ meta.LDAP, id string) (ldap.User, error) {
+		close(entered)
+		<-release
+		return ldap.User{ID: id}, nil
+	})
+	f.advance(ldapRecheck)
+	first := make(chan bool)
+	go func() { _, ok := f.a.Lookup("ldap:alice"); first <- ok }()
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	waited := make(chan bool)
+	go func() { _, ok := f.a.ldapLookup(ctx, "alice"); waited <- ok }()
+	select {
+	case ok := <-waited:
+		if ok {
+			t.Error("a cancelled waiter was allowed")
+		}
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("the wait for the entry ignored the context")
+	}
+	close(release)
+	if !<-first {
+		t.Fatal("the re-check failed")
+	}
+}
+
 func TestLDAPTokens(t *testing.T) {
 	f := newLDAPFixture(t)
 	ctx := context.Background()

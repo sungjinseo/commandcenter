@@ -206,7 +206,6 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 
 	case resp.StatusCode == http.StatusOK:
 		body := newStallReader(resp.Body, cancel)
-		defer body.timer.Stop()
 		var na meta.Asset
 		var verr error
 		sums, err := f.Store.WriteBlob(rp.Name, body, func(s blob.Sums) error {
@@ -260,12 +259,14 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 	return f.stale(rp, t.Key, a, cached, fmt.Errorf("remote status %d", resp.StatusCode))
 }
 
-// bodyIdle is how long a remote body may deliver nothing before its fetch is
-// cancelled; a var for tests.
+// bodyIdle is how long a read of a remote body may wait for data before its
+// fetch is cancelled; a var for tests.
 var bodyIdle = 60 * time.Second
 
-// stallReader cancels its fetch when the body delivers nothing for bodyIdle,
+// stallReader cancels its fetch when a read waits bodyIdle for the remote,
 // so a stalled remote gives up its fetch slot long before the fetch timeout.
+// The timer runs only inside Read: the time the fetch spends before the first
+// read and between reads (writing to a slow blob store) is not the remote's.
 type stallReader struct {
 	r       io.Reader
 	timer   *time.Timer
@@ -278,19 +279,16 @@ func newStallReader(r io.Reader, cancel context.CancelFunc) *stallReader {
 		s.stalled.Store(true)
 		cancel()
 	})
+	s.timer.Stop()
 	return s
 }
 
 func (s *stallReader) Read(p []byte) (int, error) {
+	s.timer.Reset(bodyIdle)
 	n, err := s.r.Read(p)
-	if n > 0 {
-		s.timer.Reset(bodyIdle)
-	}
-	if err != nil {
-		s.timer.Stop() // the body is over: the writes that follow must not be cancelled
-		if s.stalled.Load() {
-			err = fmt.Errorf("remote body stalled for %v: %w", bodyIdle, err)
-		}
+	s.timer.Stop()
+	if err != nil && s.stalled.Load() {
+		err = fmt.Errorf("remote body stalled for %v: %w", bodyIdle, err)
 	}
 	return n, err
 }

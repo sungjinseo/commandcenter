@@ -65,6 +65,9 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 		// The principal's own roles: a stored user's, or an LDAP user's
 		// mapped and override roles (plan 12 Task 6).
 		out["roles"] = p.Roles()
+		// The key of its sessions and tokens ("ldap:<id>" for an LDAP
+		// user), which the token page matches token owners against.
+		out["owner"] = p.Owner()
 		out["realm"] = "Local"
 		if p.IsLDAP() {
 			out["realm"] = "LDAP"
@@ -105,26 +108,47 @@ func requireUIHeader(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// cookie is the session cookie under the name the authenticator reads
+// (auth.SessionCookieName), Secure exactly when that is the __Host- name.
 func (u *UI) cookie(value string, maxAge int) *http.Cookie {
+	name := u.Auth.SessionCookieName()
 	return &http.Cookie{
-		Name:     auth.SessionCookie,
+		Name:     name,
 		Value:    value,
 		Path:     "/",
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   strings.HasPrefix(u.baseURL(), "https://"),
+		Secure:   name == auth.HostSessionCookie,
 	}
 }
 
-// legacySessionCookie is the session cookie of the repolite releases. It is
-// expired on login and logout so a stale copy does not linger in the browser.
+// legacySessionCookie is the session cookie of the repolite releases.
 const legacySessionCookie = "repolite_session"
 
-func (u *UI) expireLegacyCookie(w http.ResponseWriter) {
-	c := u.cookie("", -1)
-	c.Name = legacySessionCookie
-	http.SetCookie(w, c)
+// endCookieSessions ends the sessions named by the request's session
+// cookies, under both names, so none of them outlives a login or logout.
+func (u *UI) endCookieSessions(r *http.Request) {
+	for _, name := range []string{auth.SessionCookie, auth.HostSessionCookie} {
+		for _, c := range r.CookiesNamed(name) {
+			u.Auth.Sessions.Delete(c.Value)
+		}
+	}
+}
+
+// expireCookies expires the session cookie names other than keep: the
+// other scheme's (left from before a baseURL change between http and https)
+// and the repolite releases', so no stale copy lingers in the browser.
+func (u *UI) expireCookies(w http.ResponseWriter, keep string) {
+	for _, name := range []string{auth.SessionCookie, auth.HostSessionCookie, legacySessionCookie} {
+		if name == keep {
+			continue
+		}
+		c := u.cookie("", -1)
+		c.Name = name
+		c.Secure = c.Secure || name == auth.HostSessionCookie // a __Host- cookie must be Secure
+		http.SetCookie(w, c)
+	}
 }
 
 func (u *UI) login(w http.ResponseWriter, r *http.Request) {
@@ -147,26 +171,24 @@ func (u *UI) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid user name or password")
 		return
 	}
-	if old, err := r.Cookie(auth.SessionCookie); err == nil {
-		u.Auth.Sessions.Delete(old.Value)
-	}
-	http.SetCookie(w, u.cookie(u.Auth.Sessions.Create(p.Owner()), sessionMaxAge))
-	u.expireLegacyCookie(w)
+	u.endCookieSessions(r)
+	c := u.cookie(u.Auth.Sessions.Create(p.Owner()), sessionMaxAge)
+	http.SetCookie(w, c)
+	u.expireCookies(w, c.Name)
 	writeJSON(w, http.StatusOK, map[string]any{"user": p.User, "admin": p.Admin})
 }
 
-// logout ends the session named by the cookie, if any, and clears the
-// cookie. It succeeds for an already expired session, so the UI can always
+// logout ends the sessions named by the cookies, if any, and clears the
+// cookies. It succeeds for an already expired session, so the UI can always
 // return to the anonymous state.
 func (u *UI) logout(w http.ResponseWriter, r *http.Request) {
 	if !requireUIHeader(w, r) {
 		return
 	}
-	if c, err := r.Cookie(auth.SessionCookie); err == nil && u.Auth.Sessions != nil {
-		u.Auth.Sessions.Delete(c.Value)
+	if u.Auth.Sessions != nil {
+		u.endCookieSessions(r)
 	}
-	http.SetCookie(w, u.cookie("", -1))
-	u.expireLegacyCookie(w)
+	u.expireCookies(w, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 

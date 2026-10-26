@@ -265,12 +265,29 @@ func (h *Handler) file(ctx context.Context, rp *repo.Repository, project, filena
 		}
 		return res, nil
 	case "group":
-		// Only the owner's files, even by direct URL (QA N-1).
-		m, err := h.owner(ctx, rp, project)
-		if err != nil {
-			return proxy.Result{}, err
+		// Only the owner's files, even by direct URL (QA N-1), as in
+		// resolve.OwnerFile: the first member that has the file answers, a
+		// member without it that lists the project owns the project, and
+		// the last member is not asked. So a cached file needs no index,
+		// also while the upstream is down or after it dropped the project.
+		for i, m := range rp.MemberRepos {
+			if !m.IsOnline() {
+				return proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+			}
+			res, err := h.file(ctx, m, project, filename)
+			if err == nil {
+				return res, nil
+			}
+			if repo.StatusOf(err) == http.StatusNotFound && i < len(rp.MemberRepos)-1 {
+				if _, err = h.owner(ctx, m, project); err == nil {
+					return proxy.Result{}, repo.ErrNotFound // m owns the project, without this file
+				}
+			}
+			if repo.StatusOf(err) != http.StatusNotFound {
+				return proxy.Result{}, memberFailure(rp, m, project, err)
+			}
 		}
-		return h.file(ctx, m, project, filename)
+		return proxy.Result{}, repo.ErrNotFound
 	}
 	return proxy.Result{}, fmt.Errorf("unknown repository type %q", rp.Type)
 }

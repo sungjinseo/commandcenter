@@ -8,8 +8,14 @@ import (
 )
 
 const (
-	// SessionCookie is the name of the UI session cookie.
+	// SessionCookie is the name of the UI session cookie under an http
+	// baseURL.
 	SessionCookie = "cc_session"
+	// HostSessionCookie is its name under an https baseURL, where the cookie
+	// is Secure. Browsers take a __Host- cookie only from the host itself
+	// (Secure, Path=/, no Domain), so another host under the same domain
+	// cannot plant or shadow it.
+	HostSessionCookie = "__Host-" + SessionCookie
 	// UIHeader must be "1" for a cookie to authenticate a state-changing request.
 	UIHeader = "X-Command-Center-UI"
 )
@@ -54,37 +60,49 @@ func sessionKey(id string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// Create starts a session for user and returns its id. When the store is full
-// the oldest session (by creation time) is evicted; that scan is O(n) but only
-// runs at capacity.
+// Create starts a session for user and returns its id, after making room
+// (makeRoomLocked).
 func (s *Sessions) Create(user string) string {
 	id := randomHex(32)
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.evictUserLocked(user, now)
-	if len(s.m) >= s.max {
-		s.evictLocked(now)
-	}
+	s.makeRoomLocked(user, now)
 	s.m[sessionKey(id)] = &session{user: user, created: now, last: now}
 	return id
 }
 
-// evictLocked drops expired sessions, then the oldest one if still full.
-func (s *Sessions) evictLocked(now time.Time) {
-	var oldestKey string
-	var oldest time.Time
+// makeRoomLocked makes room for one more session of user, in one O(n) scan:
+// expired sessions go; then, when user is at the per-user cap or the store
+// is full, user's own least recently used session; and when the store is
+// full and user holds none, the least recently used session of anyone. So
+// at capacity a user's logins replace its own sessions, and end another
+// user's (the idlest) only while it holds none; a session in use outlasts
+// idle ones however old it is.
+func (s *Sessions) makeRoomLocked(user string, now time.Time) {
+	var ownKey, lruKey string
+	var own, lru *session
+	n := 0
 	for k, v := range s.m {
 		if s.expired(v, now) {
 			delete(s.m, k)
 			continue
 		}
-		if oldestKey == "" || v.created.Before(oldest) {
-			oldestKey, oldest = k, v.created
+		if v.user == user {
+			n++
+			if own == nil || v.last.Before(own.last) {
+				ownKey, own = k, v
+			}
+		}
+		if lru == nil || v.last.Before(lru.last) {
+			lruKey, lru = k, v
 		}
 	}
-	if len(s.m) >= s.max && oldestKey != "" {
-		delete(s.m, oldestKey)
+	switch {
+	case own != nil && (n >= s.perUser || len(s.m) >= s.max):
+		delete(s.m, ownKey)
+	case lru != nil && len(s.m) >= s.max:
+		delete(s.m, lruKey)
 	}
 }
 
@@ -129,30 +147,6 @@ func (s *Sessions) DeleteUser(user string) {
 		if v.user == user {
 			delete(s.m, k)
 		}
-	}
-}
-
-// evictUserLocked makes room for one more session of user: expired sessions
-// of the user go first, then the oldest while the user is at the cap.
-func (s *Sessions) evictUserLocked(user string, now time.Time) {
-	n := 0
-	var oldestKey string
-	var oldest time.Time
-	for k, v := range s.m {
-		if v.user != user {
-			continue
-		}
-		if s.expired(v, now) {
-			delete(s.m, k)
-			continue
-		}
-		n++
-		if oldestKey == "" || v.created.Before(oldest) {
-			oldestKey, oldest = k, v.created
-		}
-	}
-	if n >= s.perUser && oldestKey != "" {
-		delete(s.m, oldestKey)
 	}
 }
 
