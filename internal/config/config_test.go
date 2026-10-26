@@ -381,6 +381,13 @@ func TestValidateRepositoriesAcceptsNameCreate(t *testing.T) {
 	}
 }
 
+// QA N-29: the key file for stored secrets is a regular, always-read key.
+func TestSecretKeyFile(t *testing.T) {
+	if c, err := Parse([]byte("secretKeyFile: /run/secrets/key\n")); err != nil || c.SecretKeyFile != "/run/secrets/key" {
+		t.Fatalf("secretKeyFile = %q, %v", c.SecretKeyFile, err)
+	}
+}
+
 func TestMetricsFlushSeconds(t *testing.T) {
 	c, err := Parse([]byte("{}"))
 	if err != nil || c.MetricsFlushSeconds != 30 {
@@ -457,5 +464,38 @@ func TestStoredLegacyDefinitionDecodesAndNormalizes(t *testing.T) {
 	}
 	if notes := NormalizeStored(&r); notes != nil {
 		t.Fatalf("second pass: %v", notes)
+	}
+}
+
+// QA L-9: a remote belongs to a proxy and a versionPolicy never to a group.
+// New definitions are refused; stored ones load with the fields dropped.
+func TestValidateDefinitionTypeFields(t *testing.T) {
+	for _, c := range []struct {
+		r    Repository
+		want string
+	}{
+		{Repository{Name: "h", Format: "maven", Type: "hosted", Remote: "https://repo1.example.org/"}, "only valid for proxy"},
+		{Repository{Name: "h", Format: "npm", Type: "hosted", RemoteAuth: &RemoteAuth{Username: "u"}}, "only valid for proxy"},
+		{Repository{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, Remote: "https://x.example/"}, "only valid for proxy"},
+		{Repository{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, VersionPolicy: "release"}, "versionPolicy is not valid for group"},
+		{Repository{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/", VersionPolicy: "release"}, ""},
+		{Repository{Name: "h", Format: "maven", Type: "hosted", VersionPolicy: "snapshot"}, ""},
+	} {
+		err := ValidateDefinition(c.r)
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%+v: err = %v, want %q", c.r, err, c.want)
+		}
+	}
+	r := Repository{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, VersionPolicy: "mixed",
+		Remote: "https://x.example/", RemoteAuth: &RemoteAuth{Username: "u"}}
+	if notes := NormalizeStored(&r); len(notes) != 2 || r.Remote != "" || r.RemoteAuth != nil || r.VersionPolicy != "" {
+		t.Fatalf("notes=%v r=%+v", notes, r)
+	}
+	if err := ValidateDefinition(r); err != nil {
+		t.Fatalf("normalized row: %v", err)
+	}
+	p := Repository{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/", VersionPolicy: "release"}
+	if notes := NormalizeStored(&p); notes != nil || p.Remote == "" || p.VersionPolicy != "release" {
+		t.Fatalf("proxy changed: %v %+v", notes, p)
 	}
 }

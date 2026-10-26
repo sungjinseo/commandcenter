@@ -84,7 +84,7 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request, rp *repo.Repos
 	if err != nil {
 		return err
 	}
-	h.Store.Emit(r, "upload", rp.Name, name+"@"+m.Vers, "")
+	h.Store.Emit(r, "upload", rp.Name, m.Name+"@"+m.Vers, "")
 	writeJSON(w, http.StatusOK, map[string]any{"warnings": map[string][]string{"invalid_categories": {}, "invalid_badges": {}, "other": {}}})
 	return nil
 }
@@ -131,6 +131,21 @@ func canonicalName(s string) string {
 	return strings.ReplaceAll(strings.ToLower(s), "_", "-")
 }
 
+// reservedNames are canonical names no new crate may take: Windows device
+// names (no Windows client can store their index or source files; com1-9 and
+// lpt1-9 are checked in reservedName) and the standard library's crates, as
+// cargo and crates.io reserve them.
+var reservedNames = map[string]bool{"con": true, "prn": true, "aux": true, "nul": true,
+	"std": true, "core": true, "alloc": true, "proc-macro": true, "test": true}
+
+func reservedName(name string) bool {
+	c := canonicalName(name)
+	if len(c) == 4 && (c[:3] == "com" || c[:3] == "lpt") && c[3] >= '1' && c[3] <= '9' {
+		return true
+	}
+	return reservedNames[c]
+}
+
 // stripBuild drops semver build metadata.
 func stripBuild(v string) string {
 	before, _, _ := strings.Cut(v, "+")
@@ -138,7 +153,8 @@ func stripBuild(v string) string {
 }
 
 // checkDuplicate applies the crates.io rules: a name differing only by case or
-// `-`/`_` is taken, and versions equal apart from build metadata collide.
+// `-`/`_` is taken, versions equal apart from build metadata collide, and a
+// reserved name cannot start a new crate (one that already exists keeps it).
 func (h *Handler) checkDuplicate(ctx context.Context, rp *repo.Repository, m publishMeta) error {
 	name := strings.ToLower(m.Name)
 	names, err := h.Store.DB.ListPackageNamesCanonical(ctx, rp.Name, canonicalName(name))
@@ -168,6 +184,9 @@ func (h *Handler) checkDuplicate(ctx context.Context, rp *repo.Repository, m pub
 	pkgs, err := h.Store.DB.ListPackages(ctx, rp.Name, name)
 	if err != nil {
 		return err
+	}
+	if len(pkgs) == 0 && reservedName(m.Name) {
+		return badPublish("crate name %q is reserved", m.Name)
 	}
 	for _, p := range pkgs {
 		if stripBuild(p.Version) == stripBuild(m.Vers) {

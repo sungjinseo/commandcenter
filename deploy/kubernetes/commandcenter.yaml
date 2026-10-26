@@ -94,6 +94,9 @@ spec:
               value: 80MiB
             # - name: HTTPS_PROXY # if proxy repositories must reach the internet through a proxy
             #   value: http://proxy.example.com:3128
+            # - name: COMMANDCENTER_SECRET_KEY # encrypts stored SMTP/LDAP/remoteAuth secrets (guide: "저장된 비밀값 암호화")
+            #   valueFrom: # kubectl create secret generic commandcenter-secret-key --from-literal=key="$(head -c 32 /dev/urandom | base64)"
+            #     secretKeyRef: { name: commandcenter-secret-key, key: key }
           resources:
             requests:
               cpu: 100m

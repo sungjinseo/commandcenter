@@ -2,12 +2,15 @@ package pypi
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"os"
 	"strings"
+
+	"golang.org/x/crypto/blake2b"
 
 	"commandcenter/internal/blob"
 	"commandcenter/internal/meta"
@@ -23,7 +26,7 @@ const (
 // usedFields are the only form fields buffered; everything else is drained.
 var usedFields = map[string]bool{
 	":action": true, "name": true, "version": true, "requires_python": true,
-	"sha256_digest": true, "md5_digest": true,
+	"sha256_digest": true, "md5_digest": true, "blake2_256_digest": true,
 }
 
 // upload handles twine's legacy upload API. The file part is streamed to the
@@ -37,6 +40,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		return repo.Errorf(http.StatusBadRequest, "upload must be multipart/form-data: %v", err)
 	}
 	fields := map[string]string{}
+	b2, _ := blake2b.New256(nil) // errors only for a key over 64 bytes
 	var (
 		sums     blob.Sums
 		filename string
@@ -75,11 +79,11 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 				if err != nil {
 					return err
 				}
-				if hasCanonical(project, pkgs, filename) {
-					return repo.Errorf(http.StatusBadRequest, "File already exists.")
+				if err := duplicate(project, pkgs, filename); err != nil {
+					return err
 				}
 			}
-			if sums, err = h.Store.WriteBlob(rp.Name, part, nil); err != nil {
+			if sums, err = h.Store.WriteBlob(rp.Name, io.TeeReader(part, b2), nil); err != nil {
 				if errors.Is(err, io.ErrUnexpectedEOF) {
 					return repo.Errorf(http.StatusBadRequest, "upload body ended early: %v", err)
 				}
@@ -122,18 +126,29 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if err != nil {
 		return err
 	}
-	version := fields["version"]
-	requiresPython := fields["requires_python"]
-	if fromFile, err := h.fileRequiresPython(rp, sums, filename); err != nil {
-		return err // blob store failures are server-side (500)
-	} else if fromFile != "" && validSpecifier(fromFile) {
-		requiresPython = fromFile // the file's own metadata wins over the form
-	}
 	if d := fields["sha256_digest"]; d != "" && !strings.EqualFold(d, sums.SHA256) {
 		return repo.Errorf(http.StatusBadRequest, "sha256_digest does not match the uploaded file")
 	}
 	if d := fields["md5_digest"]; d != "" && !strings.EqualFold(d, sums.MD5) {
 		return repo.Errorf(http.StatusBadRequest, "md5_digest does not match the uploaded file")
+	}
+	if d := fields["blake2_256_digest"]; d != "" && !strings.EqualFold(d, hex.EncodeToString(b2.Sum(nil))) {
+		return repo.Errorf(http.StatusBadRequest, "blake2_256_digest does not match the uploaded file")
+	}
+	version, _ := normalizeVersion(fields["version"])
+	md, err := h.fileMetadata(rp, sums, filename, project, version)
+	if err != nil {
+		return err
+	}
+	if Normalize(md.Name) != project || canonicalVersion(md.Version) != canonicalVersion(version) {
+		return repo.Errorf(http.StatusBadRequest, "the file's metadata is for %.100q %.100q, not for %s %s", md.Name, md.Version, project, version)
+	}
+	requiresPython := fields["requires_python"]
+	if md.RequiresPython != "" {
+		if !validSpecifier(md.RequiresPython) {
+			return repo.Errorf(http.StatusBadRequest, "invalid Requires-Python %.100q in the file's metadata", md.RequiresPython)
+		}
+		requiresPython = md.RequiresPython // the file's own metadata wins over the form
 	}
 	if err := h.record(r.Context(), rp, project, fileAttrs{
 		Filename: filename, Version: version, SHA256: sums.SHA256, RequiresPython: requiresPython,
@@ -158,8 +173,8 @@ func (h *Handler) record(ctx context.Context, rp *repo.Repository, project strin
 		if err != nil {
 			return err
 		}
-		if hasCanonical(project, pkgs, attrs.Filename) {
-			return repo.Errorf(http.StatusBadRequest, "File already exists.")
+		if err := duplicate(project, pkgs, attrs.Filename); err != nil {
+			return err
 		}
 		err = tx.InsertPackage(ctx, meta.Package{
 			Repo: rp.Name, Format: "pypi", Name: project, Version: attrs.Filename, Attrs: string(doc), CreatedAt: h.Now(),
@@ -194,11 +209,18 @@ func checkFields(fields map[string]string, filename string) (string, error) {
 	if !ok {
 		return "", repo.Errorf(http.StatusBadRequest, "unsupported file type %q: use .whl, .tar.gz or .zip", filename)
 	}
-	if !validVersion(fv) || !validVersion(fields["version"]) {
-		return "", repo.Errorf(http.StatusBadRequest, "invalid version: must be a PEP 440 version")
+	for _, v := range []string{fields["version"], fv} {
+		if !validVersion(v) {
+			return "", repo.Errorf(http.StatusBadRequest, "invalid version %q: must be a PEP 440 version, without a leading \"v\"", v)
+		}
 	}
-	if !strings.EqualFold(fv, fields["version"]) {
+	if canonicalVersion(fv) != canonicalVersion(fields["version"]) {
 		return "", repo.Errorf(http.StatusBadRequest, "version %q does not match file name version %q", fields["version"], fv)
+	}
+	if base, ext, _ := splitUploadExt(filename); ext == ".whl" {
+		if _, ok := wheelTags(strings.Split(base, "-")[2:]); !ok {
+			return "", repo.Errorf(http.StatusBadRequest, "invalid wheel file name %q: want {name}-{version}(-{build})?-{python}-{abi}-{platform}.whl", filename)
+		}
 	}
 	if rpy := fields["requires_python"]; rpy != "" && !validSpecifier(rpy) {
 		return "", repo.Errorf(http.StatusBadRequest, "invalid requires_python %q", rpy)
@@ -216,28 +238,32 @@ func multipartErr(err error) error {
 	return repo.Errorf(http.StatusBadRequest, "invalid multipart body: %v", err)
 }
 
-// hasCanonical reports whether pkgs already hold a file that is the same as
-// filename after folding its spelling.
-func hasCanonical(project string, pkgs []meta.Package, filename string) bool {
+// duplicate returns the 400 for filename when pkgs already hold the same file
+// after folding its spelling (canonicalKey), and nil otherwise.
+func duplicate(project string, pkgs []meta.Package, filename string) error {
 	want := canonicalKey(project, filename)
 	for _, p := range pkgs {
-		if p.Version == filename || canonicalKey(project, p.Version) == want {
-			return true
+		switch {
+		case p.Version == filename:
+			return repo.Errorf(http.StatusBadRequest, "File already exists.")
+		case canonicalKey(project, p.Version) == want: // twine --skip-existing looks for "already exist"
+			return repo.Errorf(http.StatusBadRequest, "File already exists: this release already has %q (one sdist per release; wheel tags compare as sets)", p.Version)
 		}
 	}
-	return false
+	return nil
 }
 
-// fileRequiresPython reads Requires-Python from the stored upload's metadata.
-func (h *Handler) fileRequiresPython(rp *repo.Repository, sums blob.Sums, filename string) (string, error) {
+// fileMetadata reads the stored upload's metadata (see readMetadata). Failing
+// to open the blob is server-side (500).
+func (h *Handler) fileMetadata(rp *repo.Repository, sums blob.Sums, filename, project, version string) (distMeta, error) {
 	bs, err := h.Store.BlobStore(rp.Name)
 	if err != nil {
-		return "", err
+		return distMeta{}, err
 	}
 	f, err := bs.Open(sums.SHA256)
 	if err != nil {
-		return "", err
+		return distMeta{}, err
 	}
 	defer f.Close()
-	return readRequiresPython(f, sums.Size, filename)
+	return readMetadata(f, sums.Size, filename, project, version)
 }

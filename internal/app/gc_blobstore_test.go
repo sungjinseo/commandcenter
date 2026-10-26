@@ -156,6 +156,28 @@ func TestGCRemovesUnreferencedBlob(t *testing.T) {
 	}
 }
 
+// QA N-30: a build without named stores (a downgrade) writes the blobs of a
+// named-store repository to the default store. A GC of the default store
+// keeps such a blob, the only copy, until it is moved into its store.
+func TestGCDefaultKeepsBlobOfNamedStoreRepo(t *testing.T) {
+	a, _ := twoStoreApp(t)
+	ctx := context.Background()
+	sums, err := a.Store.StoreByName("default").Write(strings.NewReader("written-by-an-older-build"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.DB.PutAsset(ctx, meta.Asset{Repo: "maven-b", Path: "org/o/1.0/o-1.0.jar", BlobSHA256: sums.SHA256, Size: sums.Size}); err != nil {
+		t.Fatal(err)
+	}
+	ageBlob(t, a.Config.DataDir, sums.SHA256)
+	if n, err := a.GC(ctx, time.Hour); err != nil || n != 0 {
+		t.Fatalf("GC removed %d (err %v); a blob a repository references must survive in the default store", n, err)
+	}
+	if !present(t, a.Store.StoreByName("default"), sums.SHA256) {
+		t.Fatal("the default store lost a blob that maven-b references")
+	}
+}
+
 // TestGCSweepsStaleTempFiles: a write killed mid-way leaves a partial temp
 // file; the compact pass removes it once stale, in the store it collects.
 func TestGCSweepsStaleTempFiles(t *testing.T) {

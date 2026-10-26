@@ -22,6 +22,10 @@ func TestUserCRUD(t *testing.T) {
 	if err := db.CreateUser(ctx, u); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate create: %v", err)
 	}
+	// QA N-18: an id that differs only in case is taken too, and named.
+	if err := db.CreateUser(ctx, User{ID: "ALICE"}); !errors.Is(err, ErrExists) || !strings.Contains(err.Error(), `"alice"`) {
+		t.Fatalf("case-variant create: %v", err)
+	}
 	got, err := db.GetUser(ctx, "alice")
 	if err != nil {
 		t.Fatal(err)
@@ -66,6 +70,9 @@ func TestRoleCRUD(t *testing.T) {
 	}
 	if err := db.CreateRole(ctx, r); !errors.Is(err, ErrExists) {
 		t.Fatalf("duplicate: %v", err)
+	}
+	if err := db.CreateRole(ctx, Role{ID: "Dev"}); !errors.Is(err, ErrExists) || !strings.Contains(err.Error(), `"dev"`) {
+		t.Fatalf("case-variant role: %v", err)
 	}
 	got, err := db.GetRole(ctx, "dev")
 	if err != nil || !reflect.DeepEqual(got.Privileges, r.Privileges) || got.Description != "devs" {

@@ -79,7 +79,7 @@ me="$(curl -s -b "$jar" "$base/-/api/me")"
 echo "$me" | grep -q '"user":"admin"' || fail "me: $me"
 
 echo "== maven upload, browse, asset sha1"
-printf '<project>ui-smoke</project>\n' > "$work/hello-1.0.0.pom"
+printf '<project><groupId>com.example</groupId><artifactId>hello</artifactId><version>1.0.0</version></project>\n' > "$work/hello-1.0.0.pom"
 expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/hello-1.0.0.pom" \
   "$base/repository/maven-releases/com/example/hello/1.0.0/hello-1.0.0.pom")" "maven PUT"
 curl -s -b "$jar" "$base/-/api/repositories/maven-releases/browse?path=com/example/hello/1.0.0/" \
@@ -283,7 +283,7 @@ expect 401 "$(status -b "$jar" -X POST -d "$newrepo" "$api")" "repository create
 expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d "$newrepo" "$api")" "repository create"
 expect 400 "$(status -b "$jar" "${ui[@]}" -X POST -d "$newrepo" "$api")" "duplicate repository create"
 rurl="$base/repository/smoke-hosted/com/example/new/1.0/new-1.0.pom"
-printf '<project>new</project>\n' > "$work/new-1.0.pom"
+printf '<project><groupId>com.example</groupId><artifactId>new</artifactId><version>1.0</version></project>\n' > "$work/new-1.0.pom"
 expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/new-1.0.pom" "$rurl")" "PUT into the new repository"
 expect 200 "$(status -u admin:ui-pass "$rurl")" "GET from the new repository"
 cfg="$(curl -s -b "$jar" "$api/smoke-hosted/config")"
@@ -327,7 +327,7 @@ expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d '{"description":"add, no del
 curl -s -b "$jar" "$roles/smoke-writer" | grep -q 'edited' || fail "role edit was not stored"
 expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d '{"name":"Smoke","email":"s@example.com","roles":["smoke-writer"],"status":"active"}' "$users/smoke-user")" "assign the role"
 wurl="$base/repository/maven-releases/com/example/acl/1.0/acl-1.0.pom"
-printf '<project>acl</project>
+printf '<project><groupId>com.example</groupId><artifactId>acl</artifactId><version>1.0</version></project>
 ' > "$work/acl-1.0.pom"
 expect 201 "$(status -u smoke-user:password-1 -X PUT --data-binary @"$work/acl-1.0.pom" "$wurl")" "PUT with the add privilege"
 expect 403 "$(status -u smoke-user:password-1 -X DELETE "$wurl")" "DELETE without the delete privilege"
@@ -357,7 +357,7 @@ on='{"name":"smoke-off","format":"maven","type":"hosted","versionPolicy":"releas
 off='{"name":"smoke-off","format":"maven","type":"hosted","versionPolicy":"release","writePolicy":"allow","online":false}'
 expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d "$on" "$api")" "offline test repository create"
 ourl="$base/repository/smoke-off/com/example/off/1.0/off-1.0.pom"
-printf '<project>off</project>\n' > "$work/off-1.0.pom"
+printf '<project><groupId>com.example</groupId><artifactId>off</artifactId><version>1.0</version></project>\n' > "$work/off-1.0.pom"
 expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/off-1.0.pom" "$ourl")" "PUT into the repository before going offline"
 expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d "$off" "$api/smoke-off")" "repository offline"
 expect 503 "$(status -u admin:ui-pass "$ourl")" "GET from an offline repository"
@@ -375,7 +375,7 @@ inbs='{"name":"smoke-in-store","format":"maven","type":"hosted","versionPolicy":
 expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d "$inbs" "$api")" "repository in the blob store"
 curl -s -b "$jar" "$api" | grep -Eq '"name":"smoke-in-store"[^}]*"blobStore":"smoke-store"' || fail "repository list does not show the blob store"
 surl="$base/repository/smoke-in-store/com/example/bs/1.0/bs-1.0.pom"
-printf '<project>bs</project>\n' > "$work/bs-1.0.pom"
+printf '<project><groupId>com.example</groupId><artifactId>bs</artifactId><version>1.0</version></project>\n' > "$work/bs-1.0.pom"
 expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/bs-1.0.pom" "$surl")" "PUT into the blob store repository"
 curl -s -u admin:ui-pass "$surl" | cmp -s - "$work/bs-1.0.pom" || fail "download from the blob store repository differs"
 expect 409 "$(status -b "$jar" "${ui[@]}" -X DELETE "$bs/smoke-store")" "delete of a blob store in use"

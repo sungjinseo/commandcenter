@@ -66,9 +66,24 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 	if err != nil {
 		return err
 	}
+	// Names stored by older builds or read through proxies stay valid; only
+	// a new package needs a name npm accepts for new packages (QA L-15).
+	if len(existing) == 0 && !validNewName(name) {
+		return repo.Errorf(http.StatusBadRequest, "invalid package name %q: a new package name must be lower case and not node_modules or favicon.ico", name)
+	}
 	old := map[string]meta.Package{}
 	for _, p := range existing {
 		old[p.Version] = p
+	}
+	// New versions' tarballs are read back before the transaction, so the
+	// walk never holds the database write lock.
+	for _, v := range sortedKeys(doc.Versions) {
+		sums, ok := tarballs[TarballFile(name, v)]
+		if _, stored := old[v]; ok && !stored {
+			if err := h.validateTarball(rp, sums, name, v); err != nil {
+				return err
+			}
+		}
 	}
 	now := h.Now()
 
@@ -109,6 +124,9 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 			}
 			// Only new versions are checked: rows stored by older builds
 			// keep loading and can still be deprecated (QA M-5).
+			if vm.Name != name {
+				return repo.Errorf(http.StatusBadRequest, "version %s: manifest name %q does not match package name %q", v, vm.Name, name)
+			}
 			if !semver.Valid(v) {
 				return repo.Errorf(http.StatusBadRequest, "invalid version %q: must be a SemVer 2.0 version such as 1.2.3 or 1.2.3-beta.1", v)
 			}
@@ -190,6 +208,21 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 		published(v)
 	}
 	return nil
+}
+
+// validateTarball checks the stored tarball of name@version (checkTarball). The
+// blob is read back from disk, so nothing is buffered.
+func (h *Handler) validateTarball(rp *repo.Repository, sums blob.Sums, name, version string) error {
+	bs, err := h.Store.BlobStore(rp.Name)
+	if err != nil {
+		return err
+	}
+	f, err := bs.Open(sums.SHA256)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return checkTarball(f, name, version)
 }
 
 func (h *Handler) setDistTag(ctx context.Context, rp *repo.Repository, name, tag, version string) error {

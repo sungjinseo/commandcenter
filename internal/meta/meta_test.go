@@ -2,8 +2,11 @@ package meta
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -116,6 +119,61 @@ func TestPruneNegative(t *testing.T) {
 	var left int
 	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM negative_cache`).Scan(&left); err != nil || left != 1 {
 		t.Fatalf("rows left = %d, %v; want 1", left, err)
+	}
+}
+
+func userVersion(t *testing.T, db *DB) int {
+	t.Helper()
+	var v int
+	if err := db.sql.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// QA N-30: Open stamps the schema version on new and older (version 0)
+// databases, and refuses one a newer build wrote, naming both versions and
+// the way back, without changing it.
+func TestOpenSchemaVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := userVersion(t, db); v != schemaVersion {
+		t.Fatalf("new database: user_version %d, want %d", v, schemaVersion)
+	}
+	if _, err := db.sql.Exec("PRAGMA user_version = 0"); err != nil { // as builds before the guard left it
+		t.Fatal(err)
+	}
+	db.Close()
+	if db, err = Open(path); err != nil {
+		t.Fatalf("older database: %v", err)
+	}
+	if v := userVersion(t, db); v != schemaVersion {
+		t.Fatalf("older database: user_version %d, want %d", v, schemaVersion)
+	}
+	if _, err := db.sql.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion+1)); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	_, err = Open(path)
+	if err == nil {
+		t.Fatal("a database from a newer schema was opened")
+	}
+	for _, want := range []string{fmt.Sprintf("schema %d", schemaVersion+1), fmt.Sprintf("up to %d", schemaVersion), "backup"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var v int
+	if err := raw.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != schemaVersion+1 {
+		t.Fatalf("refused database: user_version %d (err %v), want it untouched at %d", v, err, schemaVersion+1)
 	}
 }
 

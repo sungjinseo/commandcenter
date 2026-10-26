@@ -95,8 +95,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	return nil
 }
 
+// fileURL is a file's link in a project page: host-relative, keeping the
+// path of baseURL, so pip downloads from the host (and with the credentials)
+// it reached the index with (QA L-5). PEP 503 and PEP 691 allow relative URLs.
 func (h *Handler) fileURL(rp *repo.Repository, project, file string) string {
-	return h.baseURL() + "/repository/" + rp.Name + "/packages/" + project + "/" + url.PathEscape(file)
+	prefix := ""
+	if u, err := url.Parse(h.baseURL()); err == nil {
+		prefix = u.EscapedPath()
+	}
+	return prefix + "/repository/" + rp.Name + "/packages/" + project + "/" + url.PathEscape(file)
 }
 
 func (h *Handler) project(w http.ResponseWriter, r *http.Request, rp *repo.Repository, name string) error {

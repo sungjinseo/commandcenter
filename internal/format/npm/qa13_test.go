@@ -12,33 +12,209 @@ import (
 
 	"commandcenter/internal/auth"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/repo/repotest"
 )
 
 // Regression tests for the npm findings of the 2026-10-22 QA report (plan 13).
 
-// TestUnpublishAnswers405: npm treats a 404 on `-rev` as "already deleted", so
-// unpublish must fail visibly instead (QA H-2, Decision 1), with a message
-// that names only a means that exists (QA N-10).
-func TestUnpublishAnswers405(t *testing.T) {
+// unpublishDoc is the document `npm unpublish name@version` sends back when
+// other versions remain: the one it read, without the version and the
+// dist-tags that pointed at it (npm keeps the version under "time").
+func unpublishDoc(t *testing.T, e *env, name, version string) string {
+	t.Helper()
+	doc := jsonBody(t, e.do("GET", "npm-hosted", name, "", ci))
+	delete(doc["versions"].(map[string]any), version)
+	tags := doc["dist-tags"].(map[string]any)
+	for tag, v := range tags {
+		if v == version {
+			delete(tags, tag)
+		}
+	}
+	b, _ := json.Marshal(doc)
+	return string(b)
+}
+
+// TestUnpublishOneVersion: npm unpublish of one version (QA H-2, N-10) is a
+// PUT of the document without it, then a DELETE of its tarball. The PUT
+// removes the whole version; the DELETE then finds nothing, which npm reads
+// as done. It works through the group's writeMember.
+func TestUnpublishOneVersion(t *testing.T) {
+	e := newEnv(t)
+	for _, v := range []string{"1.0.0", "1.1.0"} {
+		if w := e.do("PUT", "npm-all", "@s/p", publishBody("@s/p", v, []byte("tgz-"+v), false), ci); w.Code != 201 {
+			t.Fatalf("publish %s: %d %s", v, w.Code, w.Body.String())
+		}
+	}
+	sink := &repotest.Sink{}
+	e.h.Store.Events = sink
+	if w := e.do("PUT", "npm-all", "@s/p/-rev/undefined", unpublishDoc(t, e, "@s/p", "1.1.0"), ci); w.Code != 200 || jsonBody(t, w)["ok"] != true {
+		t.Fatalf("unpublish PUT: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("DELETE", "npm-all", "@s/p/-/p-1.1.0.tgz/-rev/undefined", "", ci); w.Code != 404 {
+		t.Fatalf("tarball DELETE after the PUT: %d %s", w.Code, w.Body.String())
+	}
+	for _, repoName := range []string{"npm-hosted", "npm-all"} {
+		m := jsonBody(t, e.do("GET", repoName, "@s/p", "", anon))
+		if get(m, "versions", "1.1.0") != nil || get(m, "versions", "1.0.0") == nil || get(m, "dist-tags", "latest") != "1.0.0" {
+			t.Fatalf("%s packument = %v", repoName, m)
+		}
+		if w := e.do("GET", repoName, "@s/p/-/p-1.1.0.tgz", "", anon); w.Code != 404 {
+			t.Fatalf("%s: unpublished tarball: %d", repoName, w.Code)
+		}
+	}
+	want := repotest.Event{Kind: "delete", Actor: "ci", Repo: "npm-hosted", Subject: "@s/p@1.1.0", Detail: "assets=1"}
+	if got := sink.Events(); len(got) != 1 || got[0] != want {
+		t.Fatalf("events: %v", got)
+	}
+	// npm must not keep offering 1.1.0 from a heuristically fresh cache: a
+	// hosted document is always revalidated; a proxied one is not.
+	for _, c := range []struct{ repo, path, want string }{{"npm-all", "@s/p", "no-cache"}, {"npm-hosted", "@s/p/1.0.0", "no-cache"}, {"npm-proxy", "left-pad", ""}} {
+		if w := e.do("GET", c.repo, c.path, "", anon); w.Code != 200 || w.Header().Get("Cache-Control") != c.want {
+			t.Fatalf("%s %s: %d Cache-Control %q, want %q", c.repo, c.path, w.Code, w.Header().Get("Cache-Control"), c.want)
+		}
+	}
+}
+
+// TestUnpublishWholePackage: DELETE {pkg}/-rev/{rev} removes every version,
+// its dist-tags and the document in one go.
+func TestUnpublishWholePackage(t *testing.T) {
+	e := newEnv(t)
+	for _, v := range []string{"1.0.0", "1.1.0"} {
+		if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", v, []byte("tgz-"+v), false), ci); w.Code != 201 {
+			t.Fatalf("publish %s: %d", v, w.Code)
+		}
+	}
+	if w := e.do("PUT", "npm-hosted", "-/package/pkg/dist-tags/beta", `"1.0.0"`, ci); w.Code != 201 {
+		t.Fatalf("dist-tag: %d", w.Code)
+	}
+	sink := &repotest.Sink{}
+	e.h.Store.Events = sink
+	if w := e.do("DELETE", "npm-all", "pkg/-rev/undefined", "", ci); w.Code != 200 {
+		t.Fatalf("unpublish: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("GET", "npm-hosted", "pkg", "", anon); w.Code != 404 {
+		t.Fatalf("packument after unpublish: %d", w.Code)
+	}
+	if as, _ := e.h.Store.DB.ListAssets(context.Background(), "npm-hosted", "pkg/"); len(as) != 0 {
+		t.Fatalf("assets left: %+v", as)
+	}
+	if got := tagsOf(t, e, "pkg"); len(got) != 0 {
+		t.Fatalf("tags left: %v", got)
+	}
+	if got := sink.Events(); len(got) != 2 || got[0].Subject != "pkg@1.0.0" || got[1].Subject != "pkg@1.1.0" {
+		t.Fatalf("events: %v", got)
+	}
+	if w := e.do("DELETE", "npm-hosted", "pkg/-rev/undefined", "", ci); w.Code != 404 {
+		t.Fatalf("second unpublish: %d", w.Code)
+	}
+}
+
+// TestUnpublishTarballAlone: a tarball DELETE without the PUT removes its
+// version too; a file of another package is not found.
+func TestUnpublishTarballAlone(t *testing.T) {
+	e := newEnv(t)
+	for _, v := range []string{"1.0.0", "1.1.0"} {
+		if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", v, []byte("tgz-"+v), false), ci); w.Code != 201 {
+			t.Fatalf("publish %s: %d", v, w.Code)
+		}
+	}
+	for _, file := range []string{"other-1.0.0.tgz", "pkg-.tgz", "pkg-9.9.9.tgz"} {
+		if w := e.do("DELETE", "npm-hosted", "pkg/-/"+file+"/-rev/x", "", ci); w.Code != 404 {
+			t.Fatalf("%s: %d %s", file, w.Code, w.Body.String())
+		}
+	}
+	if w := e.do("DELETE", "npm-hosted", "pkg/-/pkg-1.1.0.tgz/-rev/x", "", ci); w.Code != 200 {
+		t.Fatalf("tarball DELETE: %d %s", w.Code, w.Body.String())
+	}
+	m := jsonBody(t, e.do("GET", "npm-hosted", "pkg", "", anon))
+	if get(m, "versions", "1.1.0") != nil || get(m, "dist-tags", "latest") != "1.0.0" {
+		t.Fatalf("packument = %v", m)
+	}
+}
+
+// TestUnpublishKeepsVersionsNotRead: a version published after npm read the
+// document is in neither "versions" nor "time" of the PUT; the PUT is
+// refused (409) instead of deleting it, and nothing goes.
+func TestUnpublishKeepsVersionsNotRead(t *testing.T) {
+	e := newEnv(t)
+	for _, v := range []string{"1.0.0", "1.1.0"} {
+		if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", v, []byte("tgz-"+v), false), ci); w.Code != 201 {
+			t.Fatalf("publish %s: %d", v, w.Code)
+		}
+	}
+	stale := unpublishDoc(t, e, "pkg", "1.0.0")
+	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.2.0", []byte("tgz-1.2.0"), false), ci); w.Code != 201 {
+		t.Fatalf("publish 1.2.0: %d", w.Code)
+	}
+	if w := e.do("PUT", "npm-hosted", "pkg/-rev/undefined", stale, ci); w.Code != 409 {
+		t.Fatalf("stale unpublish: %d %s", w.Code, w.Body.String())
+	}
+	if pkgs, _ := e.h.Store.DB.ListPackages(context.Background(), "npm-hosted", "pkg"); len(pkgs) != 3 {
+		t.Fatalf("versions after a refused unpublish: %+v", pkgs)
+	}
+	// Nothing to remove is no change.
+	if w := e.do("PUT", "npm-hosted", "pkg/-rev/undefined", unpublishDoc(t, e, "pkg", "9.9.9"), ci); w.Code != 200 {
+		t.Fatalf("unpublish of nothing: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestUnpublishDocumentChecks: the PUT body is a bounded, checked document;
+// a refused one deletes nothing.
+func TestUnpublishDocumentChecks(t *testing.T) {
 	e := newEnv(t)
 	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.0.0", []byte("x"), false), ci); w.Code != 201 {
-		t.Fatalf("setup publish: %d %s", w.Code, w.Body.String())
+		t.Fatalf("publish: %d", w.Code)
 	}
-	for _, c := range []struct{ method, repo, path string }{
-		{"PUT", "npm-hosted", "pkg/-rev/undefined"},
-		{"DELETE", "npm-hosted", "pkg/-rev/undefined"},
-		{"DELETE", "npm-hosted", "pkg/-/pkg-1.0.0.tgz/-rev/x"},
-		{"PUT", "npm-all", "pkg/-rev/undefined"},
-		{"DELETE", "npm-all", "pkg/-/pkg-1.0.0.tgz/-rev/x"},
-		{"GET", "npm-hosted", "pkg/-rev/undefined"},
+	deep := `{"name":"pkg","versions":{"1.0.0":` + strings.Repeat("[", 100) + strings.Repeat("]", 100) + `},"time":{}}`
+	for _, c := range []struct {
+		body string
+		want int
+	}{
+		{`{"name":"other","versions":{},"time":{"1.0.0":"x"}}`, 400},
+		{`{"name":"pkg","time":{"1.0.0":"x"}}`, 400},
+		{`["pkg"]`, 400},
+		{`{"name":"pkg","versions":{},"time":{"1.0.0":`, 400},
+		{deep, 400},
+		{`{"name":"pkg","readme":"` + strings.Repeat("x", maxManifest) + `"}`, 413},
 	} {
-		for _, p := range []auth.Principal{ci, anon} {
-			w := e.do(c.method, c.repo, c.path, `{"_id":"pkg"}`, p)
-			if w.Code != http.StatusMethodNotAllowed || !emptyAllow(w) ||
-				jsonBody(t, w)["error"] != "unpublish is not supported by this registry; use npm deprecate instead" {
-				t.Errorf("%s %s/%s as %q: %d %v %q", c.method, c.repo, c.path, p.User, w.Code, w.Header(), w.Body.String())
-			}
+		if w := e.do("PUT", "npm-hosted", "pkg/-rev/undefined", c.body, ci); w.Code != c.want {
+			t.Errorf("body %.60q: %d %s, want %d", c.body, w.Code, w.Body.String(), c.want)
 		}
+	}
+	if w := e.do("PUT", "npm-hosted", "ghost/-rev/undefined", `{"name":"ghost","versions":{}}`, ci); w.Code != 404 {
+		t.Fatalf("unknown package: %d", w.Code)
+	}
+	if w := e.do("GET", "npm-hosted", "pkg/1.0.0", "", anon); w.Code != 200 {
+		t.Fatalf("version gone after refused unpublishes: %d", w.Code)
+	}
+}
+
+// TestUnpublishWhereNotSupported: a proxy accepts no method here (an empty
+// Allow and a message that says where unpublish works), the other methods are
+// 405 with the true Allow, and a read-only repository refuses.
+func TestUnpublishWhereNotSupported(t *testing.T) {
+	e := newEnv(t)
+	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.0.0", []byte("x"), false), ci); w.Code != 201 {
+		t.Fatalf("publish: %d", w.Code)
+	}
+	for _, c := range []struct{ method, path string }{{"PUT", "pkg/-rev/undefined"}, {"DELETE", "pkg/-rev/undefined"}, {"DELETE", "pkg/-/pkg-1.0.0.tgz/-rev/x"}} {
+		w := e.do(c.method, "npm-proxy", c.path, `{}`, ci)
+		if msg, _ := jsonBody(t, w)["error"].(string); w.Code != 405 || !emptyAllow(w) || !strings.Contains(msg, "unpublish is not supported in proxy repository") {
+			t.Errorf("proxy %s %s: %d %v %q", c.method, c.path, w.Code, w.Header(), w.Body.String())
+		}
+	}
+	for _, c := range []struct{ method, path, allow string }{
+		{"GET", "pkg/-rev/undefined", "PUT, DELETE"},
+		{"POST", "pkg/-rev/undefined", "PUT, DELETE"},
+		{"PUT", "pkg/-/pkg-1.0.0.tgz/-rev/x", "DELETE"},
+	} {
+		if w := e.do(c.method, "npm-hosted", c.path, `{}`, ci); w.Code != 405 || w.Header().Get("Allow") != c.allow {
+			t.Errorf("%s %s: %d Allow %q, want %q", c.method, c.path, w.Code, w.Header().Get("Allow"), c.allow)
+		}
+	}
+	e.repos["npm-hosted"].WritePolicy = "deny"
+	if w := e.do("DELETE", "npm-all", "pkg/-rev/undefined", "", ci); w.Code != 400 {
+		t.Fatalf("read-only repository: %d %s", w.Code, w.Body.String())
 	}
 	if w := e.do("GET", "npm-hosted", "pkg/1.0.0", "", anon); w.Code != 200 {
 		t.Fatalf("package must survive: %d", w.Code)

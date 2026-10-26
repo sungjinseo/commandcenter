@@ -61,9 +61,15 @@ func TestDeleteComponentPyPI(t *testing.T) {
 	if other, _ := e.h.Store.DB.ListPackages(context.Background(), "py-hosted", "other"); len(other) != 1 {
 		t.Fatalf("other rows = %+v", other)
 	}
-	body := e.do("GET", "py-hosted", "simple/demo-pkg/", "").Body.String()
-	if strings.Contains(body, "demo_pkg-1.0.tar.gz") || strings.Contains(body, "demo_pkg-1.0-py3") || !strings.Contains(body, "demo_pkg-1.0.1.tar.gz") {
-		t.Fatalf("index = %s", body)
+	// The group stops serving the version too: its page and its file URL.
+	for _, repoName := range []string{"py-hosted", "py-all"} {
+		body := e.do("GET", repoName, "simple/demo-pkg/", "").Body.String()
+		if strings.Contains(body, "demo_pkg-1.0.tar.gz") || strings.Contains(body, "demo_pkg-1.0-py3") || !strings.Contains(body, "demo_pkg-1.0.1.tar.gz") {
+			t.Fatalf("%s index = %s", repoName, body)
+		}
+		if w := e.do("GET", repoName, "packages/demo-pkg/demo_pkg-1.0.tar.gz", ""); w.Code != 404 {
+			t.Fatalf("%s: deleted file: %d", repoName, w.Code)
+		}
 	}
 	want := repotest.Event{Kind: "delete", Actor: "system", Repo: "py-hosted", Subject: "demo-pkg@1.0", Detail: "assets=2"}
 	if got := sink.Events(); len(got) != 1 || got[0] != want {

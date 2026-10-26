@@ -5,7 +5,8 @@
 #   3. reject a republish of the same version
 #   4. install it from an empty cache; its dependency comes through npm-proxy
 #   5. add and list a dist-tag, and view the package
-#   6. deprecate through the group; unpublish fails (405); audit is 501
+#   6. deprecate through the group; unpublish one version, then the whole
+#      package; audit is 501
 #   7. npm logout revokes the token
 # Finally prints the container's memory usage.
 set -euo pipefail
@@ -84,10 +85,16 @@ echo "== deprecate through the group (?write=true reads the writeMember only)"
 npm deprecate @smoke/hello@1.0.0 "smoke deprecation" --loglevel=error
 npm view @smoke/hello@1.0.0 deprecated | grep -q 'smoke deprecation'
 
-echo "== unpublish must fail visibly and delete nothing"
-if out=$(npm unpublish @smoke/hello@1.0.0 --force 2>&1); then echo "FAIL: unpublish reported success:"; echo "$out"; exit 1; fi
-echo "$out" | grep -q E405 || { echo "FAIL: unpublish error was not E405:"; echo "$out"; exit 1; }
+echo "== unpublish one version (latest moves back), then the whole package"
+HOSTED=http://commandcenter:8081/repository/npm-hosted/
+cd /work/pkg && npm version 1.0.1 --no-git-tag-version >/dev/null && npm publish --loglevel=error
+test "$(npm view @smoke/hello version)" = 1.0.1
+npm unpublish @smoke/hello@1.0.1 --force --loglevel=error
 test "$(npm view @smoke/hello version)" = 1.0.0
+test "$(curl -s -o /dev/null -w '%{http_code}' "${REG}@smoke/hello/-/hello-1.0.1.tgz")" = 404
+test "$(curl -s -o /dev/null -w '%{http_code}' "${REG}@smoke/hello/-/hello-1.0.0.tgz")" = 200
+npm unpublish @smoke/hello --force --loglevel=error
+test "$(curl -s -o /dev/null -w '%{http_code}' "${HOSTED}@smoke%2fhello")" = 404
 
 echo "== audit is reported as unsupported"
 test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"express":["4.0.0"]}' "${REG}-/npm/v1/security/advisories/bulk")" = 501

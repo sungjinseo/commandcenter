@@ -1,8 +1,10 @@
 package server
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"log/slog"
@@ -267,7 +269,7 @@ func TestCrossSiteUploadRefused(t *testing.T) {
 		mw.WriteField("name", "demo")
 		mw.WriteField("version", version)
 		fw, _ := mw.CreateFormFile("content", "demo-"+version+".tar.gz")
-		io.WriteString(fw, "sdist")
+		fw.Write(sdist(t, "demo-"+version+"/PKG-INFO", "Name: demo\nVersion: "+version+"\n")) // PyPI checks the archive
 		mw.Close()
 		return send(t, "POST", ts.URL+"/repository/py/", body.String(), func(r *http.Request) {
 			r.Header.Set("Content-Type", mw.FormDataContentType())
@@ -297,6 +299,21 @@ func TestCrossSiteUploadRefused(t *testing.T) {
 	if c := upload("2.0", ui); c != http.StatusOK || stored("2.0") != http.StatusOK {
 		t.Fatalf("same-origin UI upload: %d, then GET %d", c, stored("2.0"))
 	}
+}
+
+// sdist is a gzipped tar holding one file.
+func sdist(t *testing.T, name, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: name, Size: int64(len(content)), Mode: 0o644, Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	io.WriteString(tw, content)
+	tw.Close()
+	gz.Close()
+	return buf.Bytes()
 }
 
 // Behind a reverse proxy that rewrites Host (nginx's default), a page served

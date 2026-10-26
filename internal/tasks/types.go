@@ -110,7 +110,7 @@ func cleanupParamsOf(s *Service, raw json.RawMessage, check bool) (string, []str
 		case rp.Type == "group":
 			errs = append(errs, fmt.Sprintf("repository %q is a group: clean its members", name))
 		case rp.Type == "hosted" && rp.Format == "cargo":
-			errs = append(errs, fmt.Sprintf("repository %q is Cargo hosted: crates are immutable, yank them instead", name))
+			errs = append(errs, fmt.Sprintf("repository %q is Cargo hosted: yank crates, or delete versions in the web UI", name))
 		}
 		repos = append(repos, name)
 	}

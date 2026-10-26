@@ -21,7 +21,7 @@ import (
 )
 
 // ErrNotSupported is returned for repositories whose components cannot be
-// deleted: Cargo hosted, groups, and formats or types without a deleter.
+// deleted: groups, and formats or types without a deleter.
 var ErrNotSupported = component.ErrNotSupported
 
 // Result is what one component delete removed (component.Result).

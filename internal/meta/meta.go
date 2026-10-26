@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -31,6 +32,7 @@ type Asset struct {
 
 type DB struct {
 	sql *sql.DB
+	box sealer // seals the stored secrets; see SetSecretKey
 }
 
 // querier is implemented by *sql.DB and *sql.Tx.
@@ -96,6 +98,17 @@ CREATE TABLE IF NOT EXISTS tasks(
   last_removed INTEGER NOT NULL DEFAULT 0, last_bytes INTEGER NOT NULL DEFAULT 0);
 `
 
+// schemaVersion is the database layout this build reads and writes, kept in
+// SQLite's PRAGMA user_version. Open refuses a database with a higher
+// version: an older build must never run on data a newer one wrote (QA
+// N-30). Bump it with every change an older build would mishandle (a table
+// or column it would not maintain, a stored value it would misread). Builds
+// before version 1 left it at 0 and do not check it.
+//
+//	1: users, roles and settings in the database, named blob stores,
+//	   secrets sealed with the secret key (secrets.go).
+const schemaVersion = 1
+
 // Open opens (and creates if needed) the database at path.
 func Open(path string) (*DB, error) {
 	dsn := "file:" + path +
@@ -105,6 +118,17 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if version > schemaVersion {
+		db.Close()
+		return nil, fmt.Errorf("%s was written by a newer version of Command Center (database schema %d; this version supports up to %d) "+
+			"and this version would misread it: run the newer version again, or restore the backup taken before the upgrade "+
+			"together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", path, version, schemaVersion)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, err
@@ -112,6 +136,12 @@ func Open(path string) (*DB, error) {
 	if err := migrate(context.Background(), db); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if version < schemaVersion { // PRAGMA takes no bind parameters
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return &DB{sql: db}, nil
 }

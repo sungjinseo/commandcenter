@@ -3,11 +3,13 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -86,6 +88,10 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open metadata db: %w", err)
 	}
+	if err := useSecretKey(cfg, log, db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	blobs, err := openBlobStores(cfg, db)
 	if err != nil {
 		db.Close()
@@ -97,6 +103,46 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// secretKeyEnv holds the key that encrypts the stored secrets; secretKeyFile
+// in the config file names a file holding it instead (QA N-29).
+const secretKeyEnv = "COMMANDCENTER_SECRET_KEY"
+
+// useSecretKey gives db the secret key, if one is configured, and seals the
+// secrets still stored in plain text. Without a key secrets stay plain text,
+// as before, and one warning says so. The key is never logged.
+func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
+	val, src := os.Getenv(secretKeyEnv), secretKeyEnv
+	switch {
+	case val != "" && cfg.SecretKeyFile != "":
+		return fmt.Errorf("set %s or secretKeyFile, not both", secretKeyEnv)
+	case cfg.SecretKeyFile != "":
+		b, err := os.ReadFile(cfg.SecretKeyFile)
+		if err != nil {
+			return fmt.Errorf("secretKeyFile: %w", err)
+		}
+		val, src = string(b), "secretKeyFile "+cfg.SecretKeyFile
+	case val == "":
+		log.Warn("no secret key is configured: the SMTP password, the LDAP bind password and proxy remoteAuth " +
+			"credentials are stored in meta.db in plain text; set " + secretKeyEnv + " or secretKeyFile to encrypt them")
+		return nil
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(val))
+	if err == nil {
+		err = db.SetSecretKey(key)
+	}
+	if err != nil {
+		return fmt.Errorf("%s must hold 32 random bytes in base64 (make them with: head -c 32 /dev/urandom | base64)", src)
+	}
+	n, err := db.SealSecrets(context.Background())
+	if err != nil {
+		return fmt.Errorf("stored secrets: %w", err)
+	}
+	if n > 0 {
+		log.Info("encrypted the stored secrets that were plain text", "rows", n)
+	}
+	return nil
 }
 
 // openBlobStores seeds the default blob store (its tree stays at
@@ -163,7 +209,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("maven", "hosted", mavenH)
 	deleters.Register("npm", "hosted", npmH)
 	deleters.Register("pypi", "hosted", pypiH)
-	deleters.Register("cargo", "hosted", cargoH) // refuses: crates are immutable
+	deleters.Register("cargo", "hosted", cargoH) // the UI's delete only: cleanup skips Cargo hosted
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)
@@ -213,7 +259,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot(), "")
 	registry.OnDelete = func(name string) { warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot(), name) }
 
-	authn.Log = log // redacted LDAP failures
+	authn.Log = log // redacted LDAP failures, sign-in throttling
 	authn.Sessions = auth.NewSessions()
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, log: log}
@@ -242,6 +288,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Config:     cfg,
 		DataDir:    cfg.DataDir,
 		FetchSlots: fetcher.Slots,
+		Deleters:   deleters,
 	}
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
@@ -524,10 +571,10 @@ func (a *App) GC(ctx context.Context, minAge time.Duration) (int, error) {
 	return total, errors.Join(errs...)
 }
 
-// gcScope returns the repositories whose assets keep blobs of the named store
-// alive: those repo.StoreOf assigns to it, plus every repository whose store
-// cannot be resolved (defense in depth: GC never deletes for such a
-// repository, whichever store its blobs ended up in).
+// gcScope returns the repositories whose assets keep blobs of a named store
+// (not the default one, see GCStore) alive: those repo.StoreOf assigns to it,
+// plus every repository whose store cannot be resolved (defense in depth: GC
+// never deletes for such a repository, whichever store its blobs ended up in).
 func (a *App) gcScope(storeName string) []string {
 	snap := a.Registry.Snapshot()
 	return append(repo.ReposForStore(snap, storeName), repo.OrphanRepos(snap, a.Store.HasStore)...)
@@ -537,6 +584,9 @@ func (a *App) gcScope(storeName string) []string {
 // references and that are older than minAge, deleting only from that store's
 // *blob.Store. "In use" is scoped to the store's repositories (gcScope) so that a blob
 // shared by name across stores (dedup is per store) is never wrongly removed.
+// The default store keeps every blob any asset references: a build without
+// named stores (an unsupported downgrade) writes all repositories' blobs
+// there, and those may be the only copies (QA N-30).
 // The age guard protects uploads written but not yet recorded; the ModTime and
 // in-use re-check immediately before removal protects uploads that raced the
 // walk.
@@ -554,14 +604,18 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 	} else if n > 0 {
 		a.log.Info("removed stale temp files", "blobStore", storeName, "removed", n)
 	}
-	repos := a.gcScope(storeName)
+	inUse := func(sha string) (bool, error) { return a.DB.BlobInUse(ctx, sha) }
+	if storeName != repo.DefaultStore {
+		repos := a.gcScope(storeName)
+		inUse = func(sha string) (bool, error) { return a.DB.BlobInUseInRepos(ctx, sha, repos) }
+	}
 	cutoff := time.Now().Add(-minAge)
 	removed := 0
 	err := bs.Walk(func(sha string, mod time.Time) error {
 		if mod.After(cutoff) {
 			return nil
 		}
-		used, err := a.DB.BlobInUseInRepos(ctx, sha, repos)
+		used, err := inUse(sha)
 		if err != nil || used {
 			return err
 		}
@@ -577,7 +631,7 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		if mod.After(cutoff) {
 			return nil
 		}
-		used, err = a.DB.BlobInUseInRepos(ctx, sha, repos)
+		used, err = inUse(sha)
 		if err != nil || used {
 			return err
 		}

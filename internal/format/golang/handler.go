@@ -50,7 +50,7 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-	case http.MethodPut:
+	case http.MethodPut, http.MethodDelete:
 		if rt.Query {
 			return errBadVersion
 		}
@@ -58,17 +58,20 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		if err != nil {
 			return repo.WithAllow(err, "GET, HEAD")
 		}
+		if r.Method == http.MethodDelete {
+			return h.deleteVersion(w, r, target, rt)
+		}
 		return h.upload(w, r, target, rt)
 	default:
 		allow := "GET, HEAD"
 		if !rt.Query && (rt.Kind == KindMod || rt.Kind == KindZip || rt.Kind == KindInfo) && repo.AcceptsWrites(rp) {
-			allow += ", PUT"
+			allow += ", PUT, DELETE"
 		}
 		return repo.MethodNotAllowed(allow, "method %s not allowed", r.Method)
 	}
 	ctx := r.Context()
-	if rt.Query {
-		res, err := h.query(ctx, rp, rt)
+	if rt.Kind == KindInfo {
+		res, err := h.info(ctx, rp, rt)
 		if err != nil {
 			return err
 		}
@@ -104,16 +107,32 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	return h.serveAsset(w, r, res, rt.Kind)
 }
 
-// query answers {module}/@v/{query}.info for a non-canonical version such as
-// "master": only a remote can resolve it, so hosted repositories answer 404.
-func (h *Handler) query(ctx context.Context, rp *repo.Repository, rt Route) (proxy.Result, error) {
+// info answers {module}/@v/{version}.info. Only a remote resolves a query
+// such as "master". A hosted version exists once its .zip does, as in
+// listVersions, so a hosted .info without its .zip is not found (QA N-15).
+func (h *Handler) info(ctx context.Context, rp *repo.Repository, rt Route) (proxy.Result, error) {
+	key := assetKey(rt.Module, rt.Version+".info")
 	switch rp.Type {
 	case "proxy":
-		return h.Resolver.Fetcher.Fetch(ctx, rp, assetKey(rt.Module, rt.Version+".info"), proxy.Metadata)
+		if rt.Query {
+			return h.Resolver.Fetcher.Fetch(ctx, rp, key, proxy.Metadata)
+		}
+		return h.Resolver.Lookup(ctx, rp, key, proxy.Content)
+	case "hosted":
+		if rt.Query {
+			break
+		}
+		_, err := h.Store.Get(ctx, rp.Name, assetKey(rt.Module, rt.Version+".zip"))
+		if err == nil {
+			return h.Resolver.Lookup(ctx, rp, key, proxy.Content)
+		}
+		if !errors.Is(err, repo.ErrNotFound) {
+			return proxy.Result{}, err
+		}
 	case "group":
 		var firstErr error
 		for _, m := range rp.OnlineMembers() {
-			res, err := h.query(ctx, m, rt)
+			res, err := h.info(ctx, m, rt)
 			if err == nil {
 				return res, nil
 			}

@@ -36,6 +36,13 @@ func remoteRepo() http.HandlerFunc {
 		case "/maven2/org/example/app/maven-metadata.xml":
 			io.WriteString(w, `<metadata><groupId>org.example</groupId><artifactId>app</artifactId>
 <versioning><versions><version>0.9</version></versions><lastUpdated>20250101000000</lastUpdated></versioning></metadata>`)
+		case "/maven2/org/up/lib/1.0", "/maven2/org/up/lib/1.0/":
+			io.WriteString(w, "lib-1.0.jar\n") // a listing that is not HTML: only not asking keeps it out
+		case "/maven2/org/up/lib/3.0/lib-3.0.jar", "/maven2/org/up/lib/maven-metadata.xml", "/maven2/org/up/lib/1.0/lib-1.0-report.html":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			io.WriteString(w, "<html><body>Index of /maven2/org/up/lib/</body></html>")
+		case "/maven2/archetype-catalog.xml":
+			io.WriteString(w, "<archetype-catalog/>")
 		default:
 			http.NotFound(w, r)
 		}
@@ -125,6 +132,36 @@ func TestGetProxy(t *testing.T) {
 	}
 	if w := e.do("GET", "central", "org/up/lib/2.0/lib-2.0.jar", ""); w.Code != 404 {
 		t.Fatalf("proxy missing: %d", w.Code)
+	}
+}
+
+// QA L-12: a proxy fetches and caches Maven files only. A directory path is
+// not asked for (the upstream answers 200 for it here, so a fetch would cache
+// it), and a text/html answer for a file not named .html (a listing or error
+// page) is not found and negative-cached, also through a group.
+func TestProxyCachesOnlyMavenFiles(t *testing.T) {
+	e := newEnv(t)
+	for _, p := range []string{"org/up/lib/1.0", "org/up/lib/1.0/", "org/up/lib/1.0.sha1",
+		"org/up/lib/3.0/lib-3.0.jar", "org/up/lib/3.0/lib-3.0.jar.sha1", "org/up/lib/maven-metadata.xml"} {
+		for _, rp := range []string{"public", "central"} { // the group first: central's negative cache would hide it
+			if w := e.do("GET", rp, p, ""); w.Code != 404 {
+				t.Fatalf("GET %s %s: %d %q", rp, p, w.Code, w.Body)
+			}
+		}
+	}
+	if got := assetPaths(t, e, "central", ""); got != "" {
+		t.Fatalf("cached: %s", got)
+	}
+	if hit, err := e.h.Store.DB.NegativeHit(context.Background(), "central", "org/up/lib/3.0/lib-3.0.jar", time.Now()); err != nil || !hit {
+		t.Fatalf("web page answer not negative-cached: %v %v", hit, err)
+	}
+	for p, want := range map[string]string{
+		"org/up/lib/1.0/lib-1.0-report.html": "<html><body>Index of /maven2/org/up/lib/</body></html>",
+		"archetype-catalog.xml":              "<archetype-catalog/>",
+	} {
+		if w := e.do("GET", "central", p, ""); w.Code != 200 || w.Body.String() != want {
+			t.Fatalf("GET %s: %d %q", p, w.Code, w.Body)
+		}
 	}
 }
 

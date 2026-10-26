@@ -54,8 +54,10 @@ func TestStartWithLegacyStoredRows(t *testing.T) {
 		switch d.Name {
 		case "maven-releases":
 			d.NegativeCacheTTL = config.Duration(-5 * time.Minute)
+			d.Remote = "https://old.example.org/maven2/" // QA L-9: a hosted remote
 		case "maven-public":
 			d.Members = []string{"maven-releases", "maven-releases"}
+			d.VersionPolicy = "release" // QA L-9: a group versionPolicy
 		}
 	})
 
@@ -66,7 +68,7 @@ func TestStartWithLegacyStoredRows(t *testing.T) {
 	}
 	defer a.Close()
 	logs := buf.String()
-	for _, want := range []string{"repo=maven-releases", "repo=maven-public", "negativeCacheTTL", "duplicate member"} {
+	for _, want := range []string{"repo=maven-releases", "repo=maven-public", "negativeCacheTTL", "duplicate member", "remote ignored", "versionPolicy"} {
 		if !strings.Contains(logs, want) {
 			t.Errorf("no warning containing %q: %s", want, logs)
 		}
@@ -74,10 +76,10 @@ func TestStartWithLegacyStoredRows(t *testing.T) {
 	if n := strings.Count(logs, "repo=maven-public"); n != 1 {
 		t.Errorf("maven-public warned %d times: %s", n, logs)
 	}
-	if rp := a.Registry.Get("maven-releases"); rp == nil || rp.NegativeCacheTTL != 0 {
+	if rp := a.Registry.Get("maven-releases"); rp == nil || rp.NegativeCacheTTL != 0 || rp.Remote != "" {
 		t.Fatalf("maven-releases = %+v", rp)
 	}
-	if rp := a.Registry.Get("maven-public"); rp == nil || !slices.Equal(rp.Members, []string{"maven-releases"}) {
+	if rp := a.Registry.Get("maven-public"); rp == nil || !slices.Equal(rp.Members, []string{"maven-releases"}) || rp.VersionPolicy != "" {
 		t.Fatalf("maven-public = %+v", rp)
 	}
 
@@ -102,8 +104,12 @@ func TestStartWithLegacyStoredRows(t *testing.T) {
 		}
 	}
 
-	// Unrelated create and update succeed with the legacy rows present.
+	// Unrelated create and update succeed with the legacy rows present, and
+	// so does an edit of the normalized row itself.
 	ctx := context.Background()
+	if err := a.Registry.Update(ctx, "maven-releases", config.Repository{WritePolicy: "allow"}, repo.ClearSecrets{}); err != nil {
+		t.Fatalf("update the legacy hosted row: %v", err)
+	}
 	if err := a.Registry.Create(ctx, config.Repository{Name: "npm-hosted", Format: "npm", Type: "hosted"}); err != nil {
 		t.Fatalf("create unrelated: %v", err)
 	}

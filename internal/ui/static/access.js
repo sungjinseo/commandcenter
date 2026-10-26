@@ -216,11 +216,29 @@ async function userDetail(view, id) {
     effective.length ? effective.map((r) => h("div", { class: "listrow" }, h("a", { href: roleLink(r) }, h("strong", null, r)), r === "admin" ? badge(t("users.isAdmin"), "amber") : null))
       : h("div", { class: "empty" }, t("users.noRoles")),
     notice(t("users.tokenNote"))]);
+  // revoke ends every API token of the user (local and LDAP); a password
+  // reset leaves them valid.
+  const revoke = button(t("users.revoke"), "danger");
+  revoke.addEventListener("click", async () => {
+    if (!(await confirmDelete(t("users.revokeText", { id }), t("users.revokeTitle"), t("users.revoke")))) return;
+    fs.clear();
+    revoke.disabled = true;
+    try {
+      const out = await api("users/" + enc(id) + "/tokens", { method: "DELETE" });
+      if (!isLive()) return;
+      put(fs.ok, t("users.revoked", { n: out.revoked }));
+      fs.ok.hidden = false;
+    } catch (e) {
+      if (isLive()) failWith(fs, e, t("users.revokeErr"));
+    } finally {
+      revoke.disabled = false;
+    }
+  });
   let head;
   if (!stored) {
     put(form, kv(t("users.id"), u.id), kv(t("users.name"), u.name), kv(t("users.email"), u.email), kv(t("users.realm"), realmBadge(u)),
       kv(t("users.roles"), h("span", null, roleBadges(u.eff))), notice(t("users.dirNote")));
-    head = acts(back);
+    head = acts(back, revoke);
   } else {
     const nameIn = textIn(u.name, { disabled: ldap, maxlength: 200 });
     const emailIn = textIn(u.email, { disabled: ldap, maxlength: 200 });
@@ -284,7 +302,7 @@ async function userDetail(view, id) {
       }
       if (isLive()) location.hash = userLink();
     });
-    head = acts(back, reset, toggle, del);
+    head = acts(back, reset, revoke, toggle, del);
   }
   put(view, pageHead(u.id, sub(t("users.realmSub", { realm: realmName(ldap ? "ldap" : "local") })), head, eyebrow()),
     fs.ok, h("div", { class: "two" }, card(t("users.info"), t("users.infoSub"), form), access));
@@ -502,7 +520,7 @@ export async function viewRealms(view) {
   const bindPw = h("input", { type: "password", autocomplete: "new-password", placeholder: ld.bindPasswordSet ? t("rf.unchanged") : "" });
   const clearPw = ld.bindPasswordSet ? h("input", { type: "checkbox" }) : null;
   if (clearPw) clearPw.addEventListener("change", () => { bindPw.disabled = clearPw.checked; if (clearPw.checked) bindPw.value = ""; });
-  const timeout = textIn(ld.timeoutSeconds || "", { type: "number", min: 1, max: 300 });
+  const timeout = textIn(ld.timeoutSeconds || "", { type: "number", min: 1, max: 60 });
   const baseDN = textIn(ld.userBaseDN, { maxlength: 300 });
   const filter = textIn(ld.userFilter, { placeholder: "(uid={user})", class: "mono", maxlength: 300 });
   const idAttr = textIn(ld.userIdAttr, { placeholder: "uid" });
@@ -657,7 +675,7 @@ export async function viewAccount(view) {
       fs.ok.hidden = true;
       const c = cur.value, a = pw.value, b = pw2.value;
       cur.value = pw.value = pw2.value = ""; // the secrets never stay in the page
-      const msg = !c ? t("acct.e.current") : runes(a) < 8 ? t("access.e.pwShort") : a !== b ? t("access.e.pwMatch") : "";
+      const msg = !c ? t("acct.e.current") : runes(a) < 8 ? t("access.e.pwShort") : a !== b ? t("access.e.pwMatch") : a === c ? t("acct.e.same") : "";
       if (msg) { fs.show([msg], t("acct.errOne")); return; }
       save.disabled = true;
       try {
@@ -667,7 +685,7 @@ export async function viewAccount(view) {
         fs.ok.hidden = false;
       } catch (e) {
         if (e.status === 401 || (e.status === 403 && !WRONG_PW.test(e.message))) handleError(e);
-        else fs.show(e.status === 403 ? [t("acct.wrong")] : errList(e), t("acct.errOne"));
+        else fs.show(e.status === 403 ? [t("acct.wrong")] : e.status === 429 ? [t("login.wait", { s: (e.data && e.data.retryAfter) || 60 })] : errList(e), t("acct.errOne"));
       } finally {
         save.disabled = false;
       }

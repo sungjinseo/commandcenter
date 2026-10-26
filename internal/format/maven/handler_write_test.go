@@ -122,8 +122,7 @@ func TestVersionPolicies(t *testing.T) {
 
 func TestMetadataMaintenance(t *testing.T) {
 	e := newEnv(t)
-	e.do("PUT", "releases", "org/example/app/1.0/app-1.0.pom", "p1")
-	e.do("PUT", "releases", "org/example/app/2.0/app-2.0.pom", "p2")
+	e.putAll(t, "releases", "org/example/app/1.0/app-1.0.pom", "org/example/app/2.0/app-2.0.pom")
 	if got := versionsOf(t, e, "releases"); got != "1.0,2.0 release=2.0" {
 		t.Fatalf("after puts: %s", got)
 	}
@@ -312,7 +311,7 @@ func TestClientGAMetadataRepairsFailedRebuild(t *testing.T) {
 	e.h.Store.Events = cancelOnEmit(cancel)
 	w := httptest.NewRecorder()
 	const pom = "org/example/app/1.1/app-1.1.pom"
-	e.h.Serve(w, httptest.NewRequestWithContext(ctx, "PUT", "/repository/releases/"+pom, strings.NewReader("p")), e.repos["releases"], pom)
+	e.h.Serve(w, httptest.NewRequestWithContext(ctx, "PUT", "/repository/releases/"+pom, strings.NewReader(fileBody(pom))), e.repos["releases"], pom)
 	e.h.Store.Events = nil
 	if got := versionsOf(t, e, "releases"); w.Code != 201 || got != "1.0 release=1.0" {
 		t.Fatalf("PUT with a failed rebuild: %d, metadata %s", w.Code, got)
@@ -426,9 +425,7 @@ func TestPluginGroupMetadataMerged(t *testing.T) {
 
 func TestDeleteLastArtifactsDropsVersionFromGAMetadata(t *testing.T) {
 	e := newEnv(t)
-	e.do("PUT", "releases", "org/example/app/1.0/app-1.0.jar", "j1")
-	e.do("PUT", "releases", "org/example/app/1.0/app-1.0.pom", "p1")
-	e.do("PUT", "releases", "org/example/app/2.0/app-2.0.pom", "p2")
+	e.putAll(t, "releases", "org/example/app/1.0/app-1.0.jar", "org/example/app/1.0/app-1.0.pom", "org/example/app/2.0/app-2.0.pom")
 	for _, f := range []string{"app-1.0.jar", "app-1.0.jar.sha1", "app-1.0.pom"} {
 		if w := e.do("DELETE", "releases", "org/example/app/1.0/"+f, ""); w.Code != 204 {
 			t.Fatalf("DELETE %s: %d", f, w.Code)

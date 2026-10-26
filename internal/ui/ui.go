@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/cleanup"
 	"commandcenter/internal/config"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
@@ -49,6 +50,7 @@ type UI struct {
 	Config     *config.Config          // read-only; never serialised wholesale
 	DataDir    string                  // blob root, for the health and filestore checks
 	FetchSlots func() (inUse, max int) // nil skips the fetch-slot check
+	Deleters   *cleanup.Registry       // component deletes in hosted repositories; nil serves 501
 
 	smtpTest       smtpTestState              // rate limit of the SMTP test send
 	settingsLoaded func()                     // test hook: runs between putSettings' read and its write

@@ -157,7 +157,7 @@ export function openLogin() {
       m.close();
       hooks.rerender();
     } catch (e) {
-      msg.textContent = e.status === 401 ? t("login.bad") : e.message;
+      msg.textContent = e.status === 401 ? t("login.bad") : e.status === 429 ? t("login.wait", { s: (e.data && e.data.retryAfter) || 60 }) : e.message;
       pass.value = "";
       pass.focus();
     } finally {

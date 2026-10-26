@@ -86,7 +86,7 @@ docker compose build
 docker run --rm -i commandcenter:latest hash-password
 ```
 
-Copy `config.example.yaml` to `config.yaml` and put the hash printed above into `passwordHash`.
+Type a password (at least 8 characters, at most 72 bytes) and press Enter to get its hash. Copy `config.example.yaml` to `config.yaml` and put that hash into `passwordHash`.
 
 ```bash
 cp config.example.yaml config.yaml
@@ -106,7 +106,7 @@ The quick start is for trying it out. Before your team relies on it every day, r
 
 - Terminate TLS at a reverse proxy and set `baseURL` to the `https://` address.
 - For a private registry, turn anonymous read (`anonymousRead`) off.
-- Limit upload size, body timeouts and connections per client at the proxy.
+- Limit upload size, request body and response timeouts, and connections per client at the proxy.
 - Keep `meta.db` on local disk or block storage, never on NFS or SMB, and run exactly one instance.
 - Give the server 60 seconds to stop. The bundled compose file already sets `stop_grace_period: 60s`; with `docker run` (`--stop-timeout 60`) or Kubernetes, set it yourself.
 - Back up regularly and before every upgrade. Downgrades are not supported.

@@ -26,7 +26,7 @@ func TestHashPassword(t *testing.T) {
 	}
 	// The API's password rules apply, as for user reset-password (the old
 	// "s3cret" is too short now).
-	for _, bad := range []string{"\n", "s3cret\n", "seven77\n", strings.Repeat("x", 73) + "\n"} {
+	for _, bad := range []string{"\n", "s3cret\n", "seven77\n", strings.Repeat("x", 73) + "\n", "        \n", " \t \t    \n"} {
 		out.Reset()
 		if err := run([]string{"hash-password"}, strings.NewReader(bad), &out); err == nil || out.Len() != 0 {
 			t.Fatalf("password %q accepted: %v %q", bad, err, out.String())

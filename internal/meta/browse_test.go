@@ -2,6 +2,7 @@ package meta
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -305,5 +306,23 @@ func TestDeleteTokenByHash(t *testing.T) {
 	}
 	if err := db.DeleteTokenByHash(ctx, "hash-1"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second delete: %v", err)
+	}
+}
+
+func TestDeleteUserTokens(t *testing.T) {
+	db := openTest(t)
+	for i, u := range []string{"alice", "alice", "ldap:alice", "bob"} {
+		if err := db.CreateToken(ctx, fmt.Sprint("t", i), u, fmt.Sprint("hash-", i), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := db.DeleteUserTokens(ctx, "alice", "ldap:alice"); err != nil || n != 3 {
+		t.Fatalf("deleted %d, %v; want 3", n, err)
+	}
+	if u, _, err := db.TokenUser(ctx, "hash-3"); err != nil || u != "bob" {
+		t.Fatalf("bob's token: %q %v", u, err)
+	}
+	if n, err := db.DeleteUserTokens(ctx, "alice"); err != nil || n != 0 {
+		t.Fatalf("second delete: %d %v", n, err)
 	}
 }

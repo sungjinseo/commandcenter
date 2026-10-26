@@ -150,7 +150,7 @@ func TestGroupOwnerAnswersAlone(t *testing.T) {
 	if get(m, "versions", "1.0.0", "dist", "tarball") != base+"/repository/npm-all/left-pad/-/left-pad-1.0.0.tgz" {
 		t.Fatalf("tarball = %v", get(m, "versions", "1.0.0", "dist", "tarball"))
 	}
-	if w := e.do("GET", "npm-all", "left-pad/-/left-pad-1.0.0.tgz", "", anon); w.Code != 200 || w.Body.String() != "hosted-tgz" {
+	if w := e.do("GET", "npm-all", "left-pad/-/left-pad-1.0.0.tgz", "", anon); w.Code != 200 || w.Body.String() != string(testTarball("left-pad", "1.0.0", []byte("hosted-tgz"))) {
 		t.Fatalf("group tarball: %d %q", w.Code, w.Body.String())
 	}
 	if v := jsonBody(t, e.do("GET", "npm-all", "left-pad/latest", "", anon)); v["version"] != "1.0.0" {
@@ -229,8 +229,10 @@ func TestAccessDecisions(t *testing.T) {
 		{"PUT", "left-pad", auth.Add},
 		{"PUT", "-/package/left-pad/dist-tags/beta", auth.Edit},
 		{"DELETE", "-/package/left-pad/dist-tags/beta", auth.Edit},
-		{"PUT", "left-pad/-rev/undefined", auth.Public},
-		{"DELETE", "left-pad/-/left-pad-1.0.0.tgz/-rev/x", auth.Public},
+		{"PUT", "left-pad/-rev/undefined", auth.Delete}, // npm unpublish
+		{"DELETE", "left-pad/-rev/undefined", auth.Delete},
+		{"DELETE", "left-pad/-/left-pad-1.0.0.tgz/-rev/x", auth.Delete},
+		{"GET", "left-pad/-rev/undefined", auth.Read},
 		{"DELETE", "-/user/token/cc_x", auth.Public},
 	}
 	for _, c := range cases {
@@ -277,6 +279,21 @@ func TestErrorBeforeOutputIsCleanJSON(t *testing.T) {
 	}
 	if w.Header().Get("Last-Modified") != "" {
 		t.Fatalf("stale Last-Modified on error: %v", w.Header())
+	}
+}
+
+// QA L-1: npm login is throttled like every password check: 429 with
+// Retry-After, even for the right password, until the refusal ends.
+func TestLoginThrottled(t *testing.T) {
+	e := newEnv(t)
+	for i := 0; i < 5; i++ {
+		if w := e.do("PUT", "npm-all", "-/user/org.couchdb.user:ci", `{"name":"ci","password":"bad"}`, anon); w.Code != 401 {
+			t.Fatalf("attempt %d: %d", i+1, w.Code)
+		}
+	}
+	w := e.do("PUT", "npm-all", "-/user/org.couchdb.user:ci", `{"name":"ci","password":"pw"}`, anon)
+	if w.Code != 429 || w.Header().Get("Retry-After") == "" || jsonBody(t, w)["token"] != nil {
+		t.Fatalf("throttled login: %d %v %q", w.Code, w.Header(), w.Body.String())
 	}
 }
 

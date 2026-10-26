@@ -260,7 +260,7 @@ async function policyForm(view, name) {
   const cur = p || { name: "", format: "all", componentAgeDays: 30, lastDownloadedDays: 0, releaseType: "any", namePattern: "", repositories: [] };
   const back = h("a", { class: "btn", href: polLink() }, t("pol.back"));
 
-  const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 200 });
+  const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 64 });
   const format = sel([["all", t("pol.allFormats")]].concat(FORMATS.map((f) => [f, FORMAT_NAMES[f]])), cur.format);
   const age = numIn(cur.componentAgeDays, 0, 36500);
   const lastDl = numIn(cur.lastDownloadedDays, 0, 36500);
@@ -545,7 +545,7 @@ async function taskForm(view, id) {
   for (const p of (pols && pols.policies) || []) for (const r of p.repositories || []) policyOf[r] = p.name;
   const types = (list.types || []).map((x) => [x.type, typeLabel(x.type, x.name)]);
 
-  const nameIn = textIn(task ? task.name : "", { required: true, maxlength: 200 });
+  const nameIn = textIn(task ? task.name : "", { required: true, maxlength: 100 });
   const typeSel = creating ? sel(types, CLEANUP) : textIn(typeLabel(task.type, task.typeName), { readonly: true });
   const sched = scheduleEditor(task ? task.schedule : "daily:02:00");
   const enabled = h("input", { type: "checkbox", checked: task ? !!task.enabled : true });

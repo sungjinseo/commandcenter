@@ -36,9 +36,9 @@ func (u *UI) blobStoreRoutes(mux *http.ServeMux) {
 // with the registry lock held (a test hook).
 var blobStoreDeleteHook func()
 
-// blobStoreRequest is the body of POST. An empty or relative path puts the
-// store under <dataDir>/blobstores/<name> (recorded relative to the data
-// directory); an absolute path is used as given.
+// blobStoreRequest is the body of POST. An empty path puts the store under
+// <dataDir>/blobstores/<name> (recorded relative to the data directory); an
+// absolute path is used as given; a relative one is refused (QA N-22).
 type blobStoreRequest struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
@@ -46,6 +46,7 @@ type blobStoreRequest struct {
 
 // blobStoreJSON is one store's wire shape. Path is the directory the store
 // opens at. FsTotal/FsFree are null when the filesystem cannot be queried.
+// Warning is set when the store lies outside the data directory (QA N-23).
 type blobStoreJSON struct {
 	Name      string  `json:"name"`
 	Path      string  `json:"path"`
@@ -54,6 +55,7 @@ type blobStoreJSON struct {
 	FsTotal   *uint64 `json:"fsTotal"`
 	FsFree    *uint64 `json:"fsFree"`
 	RepoCount int     `json:"repoCount"`
+	Warning   string  `json:"warning,omitempty"`
 }
 
 // blobStoreView builds the DTO for one stored row: usage scoped to the store's
@@ -72,6 +74,11 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 	}
 	if total, free, ok := sysinfo.DiskUsage(filepath.Join(root, "blobs")); ok {
 		out.FsTotal, out.FsFree = &total, &free
+	}
+	dd, err1 := realPath(u.DataDir)
+	rt, err2 := realPath(root)
+	if err1 == nil && err2 == nil && !isSubpath(dd, rt) {
+		out.Warning = "outside the data directory " + u.DataDir + ": mount and back it up separately"
 	}
 	return out, nil
 }
@@ -131,8 +138,13 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row := meta.BlobStore{Name: body.Name, Path: filepath.Join("blobstores", body.Name)}
-	if filepath.IsAbs(body.Path) {
+	switch {
+	case filepath.IsAbs(body.Path):
 		row.Path = filepath.Clean(body.Path)
+	case body.Path != "":
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{
+			"blob store path must be absolute; leave it empty for <dataDir>/blobstores/" + body.Name}})
+		return
 	}
 	err := u.Repos.WithWriteLock(func(*repo.Snapshot) error {
 		ctx := r.Context()

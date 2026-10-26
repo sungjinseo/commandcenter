@@ -107,37 +107,59 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 }
 
 // indexFormatVersion is mixed into every ETag; bump it when the generated
-// index body changes shape for the same rows.
+// index body changes shape for the same source.
 const indexFormatVersion = "1"
 
-// conditional computes the ETag of a hosted index and reports whether the
-// request is already satisfied (304, which carries the ETag). On a miss it
-// returns the ETag for the caller to send with the 200 response only, so error
-// responses never carry one.
+// indexSource is where an index body comes from: the rows of a hosted
+// repository, or the cached upstream file (res) of a proxy. tag identifies
+// what the body is generated from, and the ETag is its hash.
+type indexSource struct {
+	rp  *repo.Repository
+	res proxy.Result
+	tag string
+}
+
+// source finds where name's index in rp comes from; ok is false when rp does
+// not have the crate. A group answers from the first online member that has
+// the crate, alone: mixing versions from several members would offer ones the
+// download cannot match. Only "not found" moves on to the next member; any
+// other member error fails the request so a later (public) member never
+// silently stands in.
 //
-// The ETag hashes row metadata (version, yanked, created_at) instead of the
-// generated body, so no body has to be buffered. COUPLING: the body is built
-// from each row's Attrs, and the only Attrs change that keeps the other columns
-// is a yank, which also updates the yanked column (see yank). Any new code that
-// rewrites cargo Attrs must also change a hashed column, or the ETag goes stale.
-// Only ETag/If-None-Match is supported: created_at does not change on yank, so
-// Last-Modified could produce a stale 304.
-func (h *Handler) conditional(w http.ResponseWriter, r *http.Request, rp *repo.Repository, name string) (done bool, etag string, err error) {
-	if rp.Type != "hosted" {
-		return false, "", nil // group and proxy bodies depend on remote and member state
+// A hosted tag hashes row metadata (version, yanked, created_at) instead of
+// the generated body, so no body has to be buffered. COUPLING: the body is
+// built from each row's Attrs, and the only Attrs change that keeps the other
+// columns is a yank, which also updates the yanked column (see yank). Any new
+// code that rewrites cargo Attrs must also change a hashed column, or the ETag
+// goes stale. A proxy's tag is its cached file's sha256, and a group's is the
+// answering member's name and tag.
+func (h *Handler) source(ctx context.Context, rp *repo.Repository, name string) (indexSource, bool, error) {
+	switch rp.Type {
+	case "hosted":
+		st, err := h.Store.DB.PackageStamp(ctx, rp.Name, name)
+		return indexSource{rp: rp, tag: st.Hash}, err == nil && st.Count > 0, err
+	case "proxy":
+		path := IndexPath(name)
+		res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey(path), Remote: path}, proxy.Metadata)
+		if repo.StatusOf(err) == http.StatusNotFound {
+			return indexSource{}, false, nil
+		}
+		// An empty file lists no versions: like a 404, a group moves on.
+		return indexSource{rp: rp, res: res, tag: "proxy\x00" + res.Asset.BlobSHA256}, err == nil && res.Asset.Size > 0, err
+	case "group":
+		for _, m := range rp.OnlineMembers() {
+			src, ok, err := h.source(ctx, m, name)
+			if err != nil {
+				return indexSource{}, false, memberFailure(rp, m, name, err)
+			}
+			if ok {
+				src.tag = "group\x00" + m.Name + "\x00" + src.tag
+				return src, true, nil
+			}
+		}
+		return indexSource{}, false, nil
 	}
-	st, err := h.Store.DB.PackageStamp(r.Context(), rp.Name, name)
-	if err != nil || st.Count == 0 {
-		return false, "", err
-	}
-	sum := sha256.Sum256([]byte(indexFormatVersion + "\x00" + st.Hash))
-	etag = `"` + hex.EncodeToString(sum[:]) + `"`
-	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatches(inm, etag) {
-		w.Header().Set("ETag", etag)
-		w.WriteHeader(http.StatusNotModified)
-		return true, etag, nil
-	}
-	return false, etag, nil
+	return indexSource{}, false, fmt.Errorf("unknown repository type %q", rp.Type)
 }
 
 // etagMatches implements the weak comparison of If-None-Match.
@@ -151,24 +173,37 @@ func etagMatches(header, etag string) bool {
 	return false
 }
 
-// index streams the crate's index file, merging group members line by line.
+// index streams the crate's index file. The ETag is computed from the source
+// before the body is read from that same source (a proxy's very file, a
+// group's answering member), so a cached copy is never validated against
+// another source's body; error responses carry none. Only ETag/If-None-Match
+// is supported: created_at does not change on yank and a group can change
+// members, so Last-Modified could produce a stale 304.
 func (h *Handler) index(w http.ResponseWriter, r *http.Request, rp *repo.Repository, name string) error {
-	done, etag, err := h.conditional(w, r, rp, name)
-	if done || err != nil {
+	src, ok, err := h.source(r.Context(), rp, name)
+	if err != nil {
 		return err
+	}
+	if !ok {
+		return repo.Errorf(http.StatusNotFound, "crate %q not found", name)
+	}
+	sum := sha256.Sum256([]byte(indexFormatVersion + "\x00" + src.tag))
+	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatches(inm, etag) {
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusNotModified)
+		return nil
 	}
 	seen := map[string]bool{}
 	var bw *bufio.Writer
-	err = h.walk(r.Context(), rp, name, func(line []byte) error {
+	err = h.walk(r.Context(), src, name, func(line []byte) error {
 		v, err := lineVersion(line)
 		if err != nil || seen[v] {
 			return nil // unreadable lines and shadowed versions are skipped
 		}
 		seen[v] = true
 		if bw == nil {
-			if etag != "" {
-				w.Header().Set("ETag", etag)
-			}
+			w.Header().Set("ETag", etag)
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
 			bw = bufio.NewWriterSize(w, 32*1024)
@@ -193,87 +228,40 @@ func (h *Handler) index(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	return nil
 }
 
-// callbackError marks errors returned by a walk callback.
-type callbackError struct{ err error }
-
-func (e callbackError) Error() string { return e.err.Error() }
-func (e callbackError) Unwrap() error { return e.err }
-
-// walk calls fn for each index line of name in rp. Groups walk members in
-// order and skip failing members while another member has the crate.
-func (h *Handler) walk(ctx context.Context, rp *repo.Repository, name string, fn func(line []byte) error) error {
-	call := func(line []byte) error {
-		if err := fn(line); err != nil {
-			return callbackError{err}
-		}
-		return nil
-	}
-	switch rp.Type {
-	case "hosted":
-		pkgs, err := h.Store.DB.ListPackages(ctx, rp.Name, name)
+// walk calls fn for each line of name's index in src.
+func (h *Handler) walk(ctx context.Context, src indexSource, name string, fn func(line []byte) error) error {
+	if src.rp.Type == "hosted" {
+		pkgs, err := h.Store.DB.ListPackages(ctx, src.rp.Name, name)
 		if err != nil {
 			return err
 		}
 		for _, p := range pkgs {
-			if err := call([]byte(p.Attrs)); err != nil {
+			if err := fn([]byte(p.Attrs)); err != nil {
 				return err
 			}
 		}
 		return nil
-	case "proxy":
-		path := IndexPath(name)
-		res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey(path), Remote: path}, proxy.Metadata)
-		if repo.StatusOf(err) == http.StatusNotFound {
+	}
+	f, err := h.Store.Open(src.res.Asset)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	br := bufio.NewReaderSize(f, 64*1024)
+	for {
+		line, err := readLine(br)
+		if len(line) > 0 {
+			if err := fn(line); err != nil {
+				return err
+			}
+		}
+		if err == io.EOF {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		f, err := h.Store.Open(res.Asset)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		br := bufio.NewReaderSize(f, 64*1024)
-		for {
-			line, err := readLine(br)
-			if len(line) > 0 {
-				if err := call(line); err != nil {
-					return err
-				}
-			}
-			if err == io.EOF {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-		}
-	case "group":
-		// The first member that has the crate answers alone: mixing versions
-		// from several members would offer ones the download cannot match. Only
-		// "not found" moves on to the next member; any other member error fails
-		// the request so a later (public) member never silently stands in.
-		for _, m := range rp.OnlineMembers() {
-			n := 0
-			err := h.walk(ctx, m, name, func(line []byte) error {
-				n++
-				return fn(line)
-			})
-			var ce callbackError
-			if err != nil && errors.As(err, &ce) {
-				return err
-			}
-			if n > 0 {
-				return nil
-			}
-			if err != nil {
-				return memberFailure(rp, m, name, err)
-			}
-		}
-		return nil
 	}
-	return fmt.Errorf("unknown repository type %q", rp.Type)
 }
 
 // readLine reads one index line (without the newline), capped at maxLine.
@@ -309,19 +297,22 @@ func (h *Handler) download(ctx context.Context, rp *repo.Repository, name, versi
 			return proxy.Result{}, err
 		}
 		var found indexLine
-		ok := false
-		err = h.walk(ctx, rp, name, func(line []byte) error {
-			var l indexLine
-			if json.Unmarshal(line, &l) == nil && l.Vers == version && ValidName(l.Name) && strings.EqualFold(l.Name, name) {
-				found, ok = l, true
-				return errStop
-			}
-			return nil
-		})
+		hit := false
+		src, ok, err := h.source(ctx, rp, name)
+		if ok {
+			err = h.walk(ctx, src, name, func(line []byte) error {
+				var l indexLine
+				if json.Unmarshal(line, &l) == nil && l.Vers == version && ValidName(l.Name) && strings.EqualFold(l.Name, name) {
+					found, hit = l, true
+					return errStop
+				}
+				return nil
+			})
+		}
 		if err != nil && !errors.Is(err, errStop) {
 			return proxy.Result{}, err
 		}
-		if !ok {
+		if !hit {
 			return proxy.Result{}, repo.ErrNotFound
 		}
 		if !validCksum(found.Cksum) {

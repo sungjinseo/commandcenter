@@ -207,8 +207,9 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 		}()
 		// Before authentication, so no answer (401, 404, 503, ...) leaves a
 		// stalled body holding the connection (QA N-5). On a copy of r:
-		// net/http checks its own r.Body after the handler.
-		r = r.WithContext(r.Context())
+		// net/http checks its own r.Body after the handler. The address
+		// keys the sign-in throttle (behind a proxy it is the proxy's).
+		r = r.WithContext(auth.WithClientAddr(r.Context(), r.RemoteAddr))
 		get := r.Method == http.MethodGet || r.Method == http.MethodHead
 		if limit := s.maxUpload(); limit > 0 && !get {
 			// Inside the idle body, which a handler's own IdleBody (npm
@@ -239,7 +240,9 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			// the body is what counts there.
 			p, err = auth.Principal{}, nil
 		}
-		if err != nil {
+		if wait := auth.RetryAfter(rec.Header(), err); wait > 0 {
+			repo.WriteError(rec, r, repo.Errorf(http.StatusTooManyRequests, "too many failed sign-ins; try again in %d seconds", wait))
+		} else if err != nil {
 			if r.Header.Get(auth.UIHeader) != "1" { // the web UI handles 401 itself: no browser dialog
 				rec.Header().Set("WWW-Authenticate", realm)
 			}

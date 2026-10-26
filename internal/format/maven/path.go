@@ -64,6 +64,13 @@ func ParsePath(p string) (Path, error) {
 	return out, nil
 }
 
+// fetchable reports whether a proxy may fetch and cache p: a Maven file (an
+// artifact, signatures included, a maven-metadata.xml, the prefix list or the
+// archetype catalog) or a checksum of one.
+func (p Path) fetchable() bool {
+	return p.Coords != nil || p.Metadata || p.Main == prefixesPath || p.Main == "archetype-catalog.xml"
+}
+
 // validateWritePath refuses names a new upload may not use: control
 // characters and URL delimiters (query, fragment, matrix parameters) never
 // belong to a Maven file name (QA L-13). It applies to writes only, so assets

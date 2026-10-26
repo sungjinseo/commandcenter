@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"commandcenter/internal/repo"
@@ -91,6 +92,52 @@ func TestReadPublishErrors(t *testing.T) {
 	}
 	if _, _, _, err := readPublish(bytes.NewReader(publishBody(t, `{"name":"ok","vers":"1.0"}`, []byte("x")))); repo.StatusOf(err) != 400 {
 		t.Errorf("invalid version: %v", err)
+	}
+}
+
+// TestReadPublishValidatesIndexFields: dependency fields that cargo cannot
+// read back from an index line are 400s (QA L-19).
+func TestReadPublishValidatesIndexFields(t *testing.T) {
+	read := func(name string, dep map[string]any) error {
+		d := map[string]any{"name": "itoa", "version_req": "^1", "kind": "normal"}
+		for k, v := range dep {
+			d[k] = v
+		}
+		b, _ := json.Marshal(map[string]any{"name": name, "vers": "1.0.0", "deps": []any{d}})
+		_, _, _, err := readPublish(bytes.NewReader(publishBody(t, string(b), []byte("x"))))
+		return err
+	}
+	bad := map[string][]any{
+		"name":                  {"", "9itoa", "it oa", "itoa!", "-itoa", strings.Repeat("a", 65)},
+		"explicit_name_in_toml": {"my serde", "9x"},
+		"version_req": {"", " ", "^", "1.0 2.0", ">=1.0 <2.0", "~>1", "v1", "1.0-alpha", "1.*.0", "*, >1", "01.0",
+			"=1.0.0-01", "1.2.3.4", "^1,", "1.0,,2", ">=*", "\t1.0", "18446744073709551616"},
+		"kind":     {"Normal", "runtime", "dev "},
+		"target":   {"", "cfg(unix", "cfg()", "cfg(unix, windows)", "cfg(not(a, b))", "cfg(not())", "cfg(all)", "cfg(a = b)", "cfg(a = \"b)", "cfg(target-os)", "x86 64", "junk("},
+		"registry": {"", "crates.io-index", "not a url"},
+	}
+	for field, values := range bad {
+		for _, v := range values {
+			if err := read("qa", map[string]any{field: v}); repo.StatusOf(err) != 400 {
+				t.Errorf("%s %q: %v, want 400", field, v, err)
+			}
+		}
+	}
+	good := map[string][]any{
+		"name":                  {"_private", "serde_json", "proc-macro2", "Inflector"},
+		"explicit_name_in_toml": {"", "my_serde", "_x"},
+		"version_req": {"^1", "^1.0", "~1.2.3", ">=1.0, <2.0", " >= 1.2 , < 2 ", "=1.2.3-rc.1", "*", "x", "1.*", "1.*.*",
+			"1.2.*", "1.x", "<=0.4.0+build.01", "0.0.1", ">1.0.0-alpha.1"},
+		"kind":     {"", "dev", "build"},
+		"target":   {"cfg(unix)", `cfg(target_os = "linux")`, `cfg(all(unix, not(target_os = "macos")))`, "cfg(any())", `cfg(any(feature = "a b", windows,))`, "x86_64-unknown-linux-gnu", "thumbv7em-none-eabihf"},
+		"registry": {"https://github.com/rust-lang/crates.io-index", "sparse+https://index.example.com/"},
+	}
+	for field, values := range good {
+		for _, v := range values {
+			if err := read("qa", map[string]any{field: v}); err != nil {
+				t.Errorf("%s %q: %v", field, v, err)
+			}
+		}
 	}
 }
 

@@ -48,6 +48,14 @@ func ValidName(name string) bool {
 	return len(name) <= 214 && nameRE.MatchString(name) && !strings.Contains(name, "..")
 }
 
+// validNewName reports whether npm accepts a ValidName for a new package
+// (validate-npm-package-name): ValidName already refuses a leading dot or
+// underscore, URL-unsafe characters and more than 214 characters, which leaves
+// upper case and the two reserved names.
+func validNewName(name string) bool {
+	return name == strings.ToLower(name) && name != "node_modules" && name != "favicon.ico"
+}
+
 // ParseRoute classifies a path relative to /repository/{name}/.
 func ParseRoute(path string) (Route, error) {
 	notFound := repo.Errorf(http.StatusNotFound, "not found: %s", path)

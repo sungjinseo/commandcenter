@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/blob"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
@@ -91,14 +92,23 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 		repo.WriteError(w, r, repo.ErrNotFound)
 		return
 	}
+	if rp.Type != "hosted" && !p.fetchable() {
+		// Only Maven files are fetched and cached: a directory path would
+		// cache the upstream's HTML listing as a file (QA L-12).
+		repo.WriteError(w, r, repo.ErrNotFound)
+		return
+	}
+	// A text/html answer for a file not named .html is an upstream directory
+	// listing or error page: it is not found and not cached (QA L-12).
+	t := proxy.Target{Key: p.Main, Remote: p.Main, NotHTML: !strings.HasSuffix(p.Main, ".html")}
 	if p.Metadata && rp.Type == "group" {
-		a, err = h.Resolver.Merged(ctx, rp, p.Main, "application/xml", mergeMetadata)
+		a, err = h.Resolver.MergedTarget(ctx, rp, t, "application/xml", mergeMetadata)
 	} else {
 		kind := proxy.Content
 		if p.Metadata {
 			kind = proxy.Metadata
 		}
-		res, err = h.Resolver.Lookup(ctx, rp, p.Main, kind)
+		res, err = h.Resolver.LookupTarget(ctx, rp, t, kind)
 		a = res.Asset
 	}
 	if err != nil {
@@ -189,7 +199,7 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 // storeArtifact writes the asset. The per-asset lock makes the writePolicy
 // and privilege checks and the write atomic: overwriting an existing asset
 // (writePolicy allow) needs Edit, a new one only the Add the server checked
-// (plan 12 Decision 2).
+// (plan 12 Decision 2). A POM is checked once on disk, before it is recorded.
 func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path, body io.Reader) error {
 	unlock := h.locks.Lock("asset\x00" + rp.Name + "\x00" + p.Main)
 	defer unlock()
@@ -202,8 +212,29 @@ func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path
 	case err != nil && !errors.Is(err, repo.ErrNotFound):
 		return err
 	}
-	_, err = h.Store.Put(ctx, rp.Name, p.Main, ContentType(p.Main), body)
-	return err
+	var verify func(blob.Sums) error
+	if c := p.Coords; c.Extension == "pom" && c.Classifier == "" {
+		body = http.MaxBytesReader(nil, io.NopCloser(body), maxPOMSize)
+		verify = func(s blob.Sums) error {
+			select {
+			case pomSem <- struct{}{}:
+				defer func() { <-pomSem }()
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			f, err := h.Store.Open(meta.Asset{Repo: rp.Name, BlobSHA256: s.SHA256})
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			return checkPOM(f, c)
+		}
+	}
+	sums, err := h.Store.WriteBlob(rp.Name, body, verify)
+	if err != nil {
+		return err
+	}
+	return h.Store.DB.PutAsset(ctx, h.Store.NewAsset(rp.Name, p.Main, ContentType(p.Main), sums))
 }
 
 func (h *Handler) delete(r *http.Request, rp *repo.Repository, p Path) error {

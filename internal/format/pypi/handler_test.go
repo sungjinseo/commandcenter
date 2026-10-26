@@ -123,7 +123,7 @@ func TestProxyProjectPageAndDownload(t *testing.T) {
 	e := newEnv(t)
 	w := e.do("GET", "py-proxy", "simple/six/", "")
 	body := w.Body.String()
-	want := baseURL + "/repository/py-proxy/packages/six/six-1.16.0-py2.py3-none-any.whl#sha256=" + sha("six-wheel")
+	want := "/repository/py-proxy/packages/six/six-1.16.0-py2.py3-none-any.whl#sha256=" + sha("six-wheel")
 	if w.Code != 200 || w.Header().Get("Content-Type") != htmlType || !strings.Contains(body, `href="`+want+`"`) {
 		t.Fatalf("%d %s", w.Code, body)
 	}
@@ -172,7 +172,7 @@ func TestHostedAndGroup(t *testing.T) {
 	e.seedHosted(t, "internal-pkg", "internal_pkg-1.0.tar.gz", "internal")
 
 	w := e.do("GET", "py-hosted", "simple/six/", "")
-	if !strings.Contains(w.Body.String(), baseURL+"/repository/py-hosted/packages/six/six-2.0.0.tar.gz#sha256="+sha("internal six")) ||
+	if !strings.Contains(w.Body.String(), `href="/repository/py-hosted/packages/six/six-2.0.0.tar.gz#sha256=`+sha("internal six")) ||
 		!strings.Contains(w.Body.String(), `data-requires-python="&gt;=3.9"`) {
 		t.Fatalf("hosted page: %s", w.Body.String())
 	}
@@ -236,17 +236,31 @@ func TestMethodsAndHead(t *testing.T) {
 	}
 }
 
+// QA L-5: file links are host-relative, so pip fetches files from the host
+// (with the credentials) it used for the index, whatever baseURL's host is;
+// the path of the live baseURL is kept. This replaces the absolute URLs
+// built from baseURL that the test used to pin.
 func TestFileURLUsesLiveBaseURL(t *testing.T) {
 	e := newEnv(t)
 	cur := "https://one.example/"
 	e.h.BaseURL = func() string { return cur }
 	rp := e.repos["py-hosted"]
-	if got := e.h.fileURL(rp, "p", "f.whl"); got != "https://one.example/repository/py-hosted/packages/p/f.whl" {
+	if got := e.h.fileURL(rp, "p", "f.whl"); got != "/repository/py-hosted/packages/p/f.whl" {
 		t.Fatalf("first: %s", got)
 	}
-	cur = "https://two.example"
-	if got := e.h.fileURL(rp, "p", "f.whl"); got != "https://two.example/repository/py-hosted/packages/p/f.whl" {
+	cur = "https://two.example/cc/my%20repo/"
+	if got := e.h.fileURL(rp, "p", "f.whl"); got != "/cc/my%20repo/repository/py-hosted/packages/p/f.whl" {
 		t.Fatalf("after change: %s", got)
+	}
+	e.seedHosted(t, "six", "six-2.0.0.tar.gz", "internal six")
+	html := e.do("GET", "py-all", "simple/six/", "").Body.String()
+	var doc struct{ Files []struct{ URL string } }
+	if err := json.Unmarshal(e.do("GET", "py-all", "simple/six/", pipAccept).Body.Bytes(), &doc); err != nil || len(doc.Files) != 1 {
+		t.Fatalf("json page: %v %+v", err, doc)
+	}
+	want := "/cc/my%20repo/repository/py-all/packages/six/six-2.0.0.tar.gz"
+	if !strings.Contains(html, `href="`+want+`#sha256=`) || doc.Files[0].URL != want || strings.Contains(html, "two.example") {
+		t.Fatalf("pages: %s %+v", html, doc)
 	}
 }
 

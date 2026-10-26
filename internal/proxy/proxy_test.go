@@ -33,6 +33,7 @@ type remote struct {
 	delay    time.Duration
 	inflight atomic.Int32 // requests currently being served
 	peak     atomic.Int32 // highest value inflight has reached
+	ctype    string       // Content-Type of the bodies, if set
 }
 
 func (rm *remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +60,9 @@ func (rm *remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", `"v1"`)
+	if rm.ctype != "" {
+		w.Header().Set("Content-Type", rm.ctype)
+	}
 	io.WriteString(w, "body of "+r.URL.Path)
 }
 
@@ -179,6 +183,30 @@ func TestFetchNegativeCache(t *testing.T) {
 	f.Fetch(ctx, rp, "missing", Content)
 	if rm.hits.Load() != 2 {
 		t.Fatalf("hits after ttl = %d, want 2", rm.hits.Load())
+	}
+}
+
+// QA L-12: for a NotHTML target a text/html answer (an upstream directory
+// listing or error page) is a 404, negative-cached and not stored. Other
+// targets still store web pages (a PyPI simple page is one).
+func TestFetchTargetNotHTML(t *testing.T) {
+	rm := &remote{ctype: "Text/HTML; charset=utf-8"}
+	f, rp, _ := setup(t, rm)
+	tg := Target{Key: "g/a.jar", Remote: "g/a.jar", NotHTML: true}
+	for i := 0; i < 2; i++ {
+		if _, err := f.FetchTarget(ctx, rp, tg, Content); repo.StatusOf(err) != 404 {
+			t.Fatalf("fetch %d: %v", i, err)
+		}
+	}
+	if rm.hits.Load() != 1 {
+		t.Fatalf("hits = %d, want 1 (negative-cached)", rm.hits.Load())
+	}
+	if _, err := f.Store.Get(ctx, "p", "g/a.jar"); !errors.Is(err, repo.ErrNotFound) {
+		t.Fatalf("web page cached: %v", err)
+	}
+	res, err := f.Fetch(ctx, rp, "simple/a/", Metadata)
+	if err != nil || read(t, f, res.Asset) != "body of /maven2/simple/a/" {
+		t.Fatalf("page without NotHTML: %+v %v", res, err)
 	}
 }
 

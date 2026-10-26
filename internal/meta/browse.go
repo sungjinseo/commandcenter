@@ -282,6 +282,23 @@ func (d *DB) DeleteTokenByHash(ctx context.Context, hash string) error {
 	return nil
 }
 
+// DeleteUserTokens removes every token of the given owners and returns how
+// many it removed.
+func (d *DB) DeleteUserTokens(ctx context.Context, owners ...string) (int64, error) {
+	if len(owners) == 0 {
+		return 0, nil
+	}
+	args := make([]any, len(owners))
+	for i, o := range owners {
+		args[i] = o
+	}
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM tokens WHERE user IN (?`+strings.Repeat(",?", len(owners)-1)+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // VersionInfo is a package version without its attrs document.
 type VersionInfo struct {
 	Version string

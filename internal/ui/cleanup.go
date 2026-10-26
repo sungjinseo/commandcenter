@@ -312,7 +312,7 @@ func (u *UI) previewPolicy(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "cleanup applies to hosted and proxy repositories only")
 			return
 		case rp.Format == "cargo" && rp.Type == "hosted":
-			writeError(w, http.StatusBadRequest, "cleanup is not supported for cargo hosted repositories (crates are immutable; yank them instead)")
+			writeError(w, http.StatusBadRequest, "cleanup is not supported for cargo hosted repositories (yank crates, or delete versions in the web UI)")
 			return
 		case !cleanup.FormatMatches(p.Format, rp.Format):
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("cleanup policy %q is for %s repositories", p.Name, p.Format))

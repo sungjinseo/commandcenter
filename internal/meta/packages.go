@@ -28,7 +28,8 @@ var ErrExists = errors.New("already exists")
 
 // Tx is a write transaction.
 type Tx struct {
-	q *sql.Tx
+	q   *sql.Tx
+	box sealer
 }
 
 // Tx runs fn in a transaction. An error or panic from fn rolls it back.
@@ -43,7 +44,7 @@ func (d *DB) Tx(ctx context.Context, fn func(*Tx) error) error {
 			panic(p)
 		}
 	}()
-	if err := fn(&Tx{q: tx}); err != nil {
+	if err := fn(&Tx{q: tx, box: d.box}); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -257,6 +258,19 @@ WHERE repo = ? AND replace(lower(name), '_', '-') = ? ORDER BY name`, repo, cano
 		out = append(out, n)
 	}
 	return out, rows.Err()
+}
+
+// PublishedName returns the "name" in the attrs of one of a package's rows,
+// or "" when it has none. Cargo stores a crate's name lowercased for lookups;
+// its index lines in attrs keep the spelling it was published with.
+func (d *DB) PublishedName(ctx context.Context, repo, name string) (string, error) {
+	var n sql.NullString
+	err := d.sql.QueryRowContext(ctx, `SELECT json_extract(attrs, '$.name') FROM packages
+WHERE repo = ? AND name = ? LIMIT 1`, repo, name).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return n.String, err
 }
 
 // PackageStamp summarizes the versions of one package without reading attrs.

@@ -156,6 +156,10 @@ func TestSMTPPutValidation(t *testing.T) {
 		`{"host":"h","port":0,"security":"starttls","from":"cc@example.com","enabled":true}`,
 		`{"host":"h","port":587,"security":"ssl","from":"cc@example.com","enabled":true}`,
 		`{"host":"h","port":587,"security":"tls","from":"nope","enabled":true}`,
+		// QA N-17: no CR/LF, control character or space in the host, enabled or not
+		`{"host":"smtp.example.com\r\nRCPT TO:<x@q.r>","port":587,"security":"starttls","from":"cc@example.com","enabled":true}`,
+		`{"host":"smtp.example.com\nx","enabled":false}`,
+		`{"host":"smtp example.com","enabled":false}`,
 	} {
 		r := e.admin(t, "PUT", "/-/api/settings/smtp", body)
 		wantStatus(t, r, http.StatusBadRequest)

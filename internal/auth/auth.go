@@ -151,6 +151,8 @@ type Authenticator struct {
 
 	mu    sync.Mutex
 	cache map[string]time.Time // user + "\x00" + sha256(hash, password) -> expiry
+	fails map[string]failRec   // sign-in throttle (throttle.go)
+	gates map[string]*failGate // names being checked (throttle.go)
 
 	// LDAP is the directory client; nil uses ldap.Client.
 	LDAP Directory
@@ -246,9 +248,10 @@ func (a *Authenticator) Snapshot() *Snapshot { return a.snap.Load() }
 // OnUserChanged invalidates what was derived from user id: its UI sessions
 // and its cached password successes, and the same for the LDAP user with
 // that id (whose override row may have changed). Tokens are checked against
-// the snapshot on every use, so no token principal is cached. Call it after
-// Reload when a password changed or the user was disabled or deleted
-// (Decision 1).
+// the snapshot on every use, so no token principal is cached. It also ends
+// a sign-in refusal of the name, so a password reset lets the user in. Call
+// it after Reload when a password changed or the user was disabled or
+// deleted (Decision 1).
 func (a *Authenticator) OnUserChanged(id string) {
 	if a.Sessions != nil {
 		a.Sessions.DeleteUser(id)
@@ -262,6 +265,7 @@ func (a *Authenticator) OnUserChanged(id string) {
 			delete(a.cache, k)
 		}
 	}
+	delete(a.fails, nameKey(id))
 	a.mu.Unlock()
 }
 
@@ -289,6 +293,11 @@ func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 			}
 			if err != nil && !errors.Is(err, ErrBadCredentials) {
 				return Principal{}, err
+			}
+			if tokenShaped(pass) {
+				// A revoked or mistyped token, not a password guess: CI
+				// retrying one must not get its owner's sign-ins throttled.
+				return Principal{}, ErrBadCredentials
 			}
 		}
 		return a.CheckPassword(r.Context(), user, pass)
@@ -381,13 +390,18 @@ func (a *Authenticator) lookup(ctx context.Context, name string) (Principal, boo
 // users and users without a local password fail the local realm. A realm
 // that errors (LDAP unreachable) is logged and the next one is tried. If
 // ctx ends while waiting for a bcrypt slot, the check fails with
-// ErrBadCredentials.
+// ErrBadCredentials. A name with too many recent failures is refused with a
+// *ThrottledError before any realm is asked (throttle.go).
 func (a *Authenticator) CheckPassword(ctx context.Context, user, pass string) (Principal, error) {
 	if len(user) > maxLoginName || len(pass) > maxLoginPassword {
 		// Never sent to any realm: no stored id or password is this long,
 		// and an oversized value must not reach (and upset) the directory.
 		return Principal{}, ErrBadCredentials
 	}
+	return a.throttle(ctx, user, func() (Principal, bool) { return a.checkRealms(ctx, user, pass) })
+}
+
+func (a *Authenticator) checkRealms(ctx context.Context, user, pass string) (Principal, bool) {
 	s := a.snap.Load()
 	compared := false
 	for _, r := range s.settings.Realms {
@@ -398,28 +412,26 @@ func (a *Authenticator) CheckPassword(ctx context.Context, user, pass string) (P
 		case meta.RealmLocal:
 			compared = true
 			if p, ok := a.localPassword(ctx, s, user, pass); ok {
-				return p, nil
+				return p, true
 			}
 		case meta.RealmLDAP:
 			if p, ok := a.ldapPassword(ctx, s, user, pass); ok {
-				return p, nil
+				return p, true
 			}
 		}
 	}
 	if !compared {
 		compareHash(ctx, dummyHash, pass) // the same cost whichever realms are on
 	}
-	return Principal{}, ErrBadCredentials
+	return Principal{}, false
 }
 
 // CheckLocalPassword verifies a stored local user's password through the
 // local realm only (for proving the current password before changing it:
-// a same-named LDAP user's password must not do).
+// a same-named LDAP user's password must not do). It is throttled like
+// CheckPassword.
 func (a *Authenticator) CheckLocalPassword(ctx context.Context, user, pass string) (Principal, error) {
-	if p, ok := a.localPassword(ctx, a.snap.Load(), user, pass); ok {
-		return p, nil
-	}
-	return Principal{}, ErrBadCredentials
+	return a.throttle(ctx, user, func() (Principal, bool) { return a.localPassword(ctx, a.snap.Load(), user, pass) })
 }
 
 // localPassword is the local realm's check.
@@ -578,10 +590,23 @@ func (a *Authenticator) CreateToken(ctx context.Context, user string) (id, token
 	return a.storeToken(ctx, user)
 }
 
-// TokenRevoker deletes a token by its hash (implemented by *meta.DB). It is
-// separate from TokenStore so stores that never revoke need not implement it.
+// TokenRevoker deletes tokens (implemented by *meta.DB): one by its hash, or
+// every token of some owners. It is separate from TokenStore so stores that
+// never revoke need not implement it.
 type TokenRevoker interface {
 	DeleteTokenByHash(ctx context.Context, hash string) error
+	DeleteUserTokens(ctx context.Context, owners ...string) (int64, error)
+}
+
+// RevokeUserTokens deletes every API token of user id: the stored user's and
+// those of the LDAP user with that id ("ldap:<id>"), as OnUserChanged ends
+// both users' sessions. It returns how many it deleted (QA N-16).
+func (a *Authenticator) RevokeUserTokens(ctx context.Context, id string) (int64, error) {
+	rv, ok := a.tokens.(TokenRevoker)
+	if !ok {
+		return 0, errors.New("auth: the token store cannot revoke tokens")
+	}
+	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id)
 }
 
 // RevokeToken deletes token when p owns it (npm logout). A token that does not
@@ -627,6 +652,8 @@ func CheckNewPassword(pw string) error {
 		return fmt.Errorf("password must be at least %d characters", MinPasswordRunes)
 	case len(pw) > MaxPasswordBytes:
 		return fmt.Errorf("password must be at most %d bytes", MaxPasswordBytes)
+	case strings.TrimSpace(pw) == "":
+		return errors.New("password must not be only spaces")
 	}
 	return nil
 }
@@ -656,6 +683,16 @@ func WithPrincipal(ctx context.Context, p Principal) context.Context {
 func FromContext(ctx context.Context) Principal {
 	p, _ := ctx.Value(ctxKey{}).(Principal)
 	return p
+}
+
+// tokenShaped reports whether s has the form of an issued token: a token
+// prefix and 64 hex digits (storeToken).
+func tokenShaped(s string) bool {
+	if len(s) != len(tokenPrefix)+64 || (!strings.HasPrefix(s, tokenPrefix) && !strings.HasPrefix(s, legacyTokenPrefix)) {
+		return false
+	}
+	_, err := hex.DecodeString(s[len(tokenPrefix):])
+	return err == nil
 }
 
 func hashToken(tok string) string {

@@ -172,7 +172,7 @@ echo "$me" | grep -q '"admin":true' || fail "me admin (cc-admins -> admin): $me"
 expect 400 "$(status -b "$jar" "${ui[@]}" -X PUT -d "{\"currentPassword\":\"$alicepw\",\"newPassword\":\"another-password\"}" "$base/-/api/account/password")" "own password of an LDAP user"
 
 echo "== Basic auth to a repository"
-printf '<project>ldap-smoke</project>\n' > "$work/hello-1.0.0.pom"
+printf '<project><groupId>com.example</groupId><artifactId>hello</artifactId><version>1.0.0</version></project>\n' > "$work/hello-1.0.0.pom"
 url="$base/repository/maven-releases/com/example/hello/1.0.0/hello-1.0.0.pom"
 expect 201 "$(status -u "alice:$alicepw" -X PUT --data-binary @"$work/hello-1.0.0.pom" "$url")" "maven PUT as LDAP alice"
 expect 200 "$(status -u "alice:$alicepw" "$url")" "maven GET as LDAP alice"

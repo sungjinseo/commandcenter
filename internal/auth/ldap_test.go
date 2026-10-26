@@ -769,7 +769,9 @@ func TestLDAPOversizedCredentialsNeverReachTheDirectory(t *testing.T) {
 func TestLDAPNoticeAfterServiceBindIsNotAnOutage(t *testing.T) {
 	f := ldapFirst(t)
 	f.srv.SetNoticeOnSearch(true)
-	for i := 0; i < 5; i++ {
+	// More than ldapDialFailures, fewer than accountLimit: the sign-in
+	// throttle must not be what refuses alice afterwards.
+	for i := 0; i < accountLimit-1; i++ {
 		if _, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); !errors.Is(err, ErrBadCredentials) {
 			t.Fatal(err)
 		}

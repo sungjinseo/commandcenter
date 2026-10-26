@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +39,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/repositories/{name}/asset", u.asset)
 	mux.HandleFunc("GET /-/api/repositories/{name}/packages", u.packages)
 	mux.HandleFunc("GET /-/api/repositories/{name}/packages/{pkg...}", u.packageVersions)
+	mux.HandleFunc("DELETE /-/api/repositories/{name}/components", u.deleteComponent)
 	mux.HandleFunc("GET /-/api/search", u.search)
 	mux.HandleFunc("GET /-/api/search/components", u.searchComponents)
 	u.infoRoutes(mux)
@@ -167,6 +169,10 @@ func (u *UI) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, err := u.Auth.CheckPassword(r.Context(), body.User, body.Password)
+	if wait := auth.RetryAfter(w.Header(), err); wait > 0 {
+		writeThrottled(w, wait)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid user name or password")
 		return
@@ -176,6 +182,13 @@ func (u *UI) login(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, c)
 	u.expireCookies(w, c.Name)
 	writeJSON(w, http.StatusOK, map[string]any{"user": p.User, "admin": p.Admin})
+}
+
+// writeThrottled answers a sign-in the throttle refused; the UI shows
+// retryAfter (seconds, also in the Retry-After header).
+func writeThrottled(w http.ResponseWriter, wait int) {
+	writeJSON(w, http.StatusTooManyRequests, map[string]any{
+		"error": fmt.Sprintf("too many failed sign-ins; try again in %d seconds", wait), "retryAfter": wait})
 }
 
 // logout ends the sessions named by the cookies, if any, and clears the
@@ -223,6 +236,7 @@ type repoJSON struct {
 	Members     []string `json:"members"`
 	WriteMember string   `json:"writeMember"`
 	CanWrite    bool     `json:"canWrite"`
+	CanDelete   bool     `json:"canDelete"`
 	Online      bool     `json:"online"`
 	Assets      int64    `json:"assets"`
 	Bytes       int64    `json:"bytes"`
@@ -277,6 +291,8 @@ func (u *UI) describe(p auth.Principal, rp *repo.Repository, st meta.RepoStat) r
 	}
 	// The UI upload adds; an offline target refuses writes (503).
 	out.CanWrite = targetOnline && u.Auth.Can(p, target, auth.Add)
+	// The UI deletes components of hosted repositories (deleteComponent).
+	out.CanDelete = rp.Type == "hosted" && rp.IsOnline() && rp.WritePolicy != "deny" && u.Auth.Can(p, rp.Name, auth.Delete)
 	return out
 }
 
@@ -465,7 +481,23 @@ func (u *UI) packages(w http.ResponseWriter, r *http.Request) {
 		names = append(names, found...)
 		truncated = tr
 	}
+	if rp.Format == "cargo" {
+		for i, n := range names {
+			names[i] = u.cargoName(r.Context(), rp.Name, n)
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"packages": names, "truncated": truncated})
+}
+
+// cargoName is the spelling a crate was published with. Cargo rows and paths
+// hold it lowercased, but cargo matches dependency names exactly, so what
+// clients see (and copy into `cargo add`) must keep it (QA L-20). Proxies
+// have no rows, and any failure keeps name.
+func (u *UI) cargoName(ctx context.Context, repoName, name string) string {
+	if n, err := u.DB.PublishedName(ctx, repoName, strings.ToLower(name)); err == nil && strings.EqualFold(n, name) {
+		return n
+	}
+	return name
 }
 
 type versionJSON struct {
@@ -477,6 +509,7 @@ type versionJSON struct {
 // packageVersions lists a package's versions, newest first, at most
 // versionsLimit (Decision 9). PyPI rows hold file names in Version, so its
 // responses say "kind":"files"; PyPI names are PEP 503 normalized first.
+// Cargo names are looked up in any case and answered as published.
 func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 	rp, ok := u.lookup(w, r)
 	if !ok {
@@ -484,8 +517,11 @@ func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 	}
 	name := r.PathValue("pkg")
 	kind := "versions"
-	if rp.Format == "pypi" {
+	switch rp.Format {
+	case "pypi":
 		name, kind = pypi.Normalize(name), "files"
+	case "cargo":
+		name = strings.ToLower(name)
 	}
 	var list []meta.VersionInfo
 	truncated := false
@@ -514,6 +550,9 @@ func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 		for _, t := range dt {
 			tags[t.Tag] = t.Version
 		}
+	}
+	if rp.Format == "cargo" {
+		name = u.cargoName(r.Context(), rp.Name, name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"name": name, "kind": kind, "versions": versions, "tags": tags, "truncated": truncated})
 }

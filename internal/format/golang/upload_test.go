@@ -41,6 +41,9 @@ func TestUploadRejects(t *testing.T) {
 	}{
 		"mod declares other module": {"example.com/a/@v/v1.0.0.mod", "module example.com/b\n", 400},
 		"mod without directive":     {"example.com/a/@v/v1.0.0.mod", "go 1.21\n", 400},
+		"mod, unbalanced block":     {"example.com/a/@v/v1.0.0.mod", "module example.com/a\nrequire (\n", 400},
+		"mod, unknown directive":    {"example.com/a/@v/v1.0.0.mod", "module example.com/a\nrequre example.com/b v1.0.0\n", 400},
+		"zip, broken go.mod":        {"example.com/a/@v/v1.0.0.zip", string(moduleZip(t, "example.com/a", "v1.0.0", "module example.com/a\n)\n")), 400},
 		"info for other version":    {"example.com/a/@v/v1.0.0.info", `{"Version":"v2.0.0"}`, 400},
 		"info not json":             {"example.com/a/@v/v1.0.0.info", `nope`, 400},
 		"info bad time":             {"example.com/a/@v/v1.0.0.info", `{"Version":"v1.0.0","Time":"yesterday"}`, 400},
@@ -105,6 +108,13 @@ func TestUploadMajorVersionSuffix(t *testing.T) {
 		{"gopkg.in/yaml.v3", "v3.0.1", 201},
 		{"gopkg.in/yaml.v3", "v2.0.0", 400},
 		{"gopkg.in/yaml.v0", "v0.1.0", 201},
+		// QA L-22: like x/mod SplitPathVersion, only /v2 and up are suffixes
+		{"example.com/hello/v1", "v1.0.0", 400},
+		{"example.com/hello/v0", "v0.1.0", 400},
+		{"example.com/hello/v01", "v1.0.0", 400},
+		{"example.com/hello/v1.2", "v1.2.0", 400},
+		{"example.com/hello/v10", "v10.0.0", 201},
+		{"example.com/v1x", "v1.0.0", 201},
 	}
 	for _, c := range cases {
 		e := newEnv(t)
@@ -149,12 +159,70 @@ func TestZipOnlyUploadDerivesMod(t *testing.T) {
 	if w := e.do("GET", "go-hosted", "example.com/bare/@v/v1.0.0.mod", nil); w.Body.String() != "module example.com/bare\n" {
 		t.Fatalf("stub mod: %q", w.Body.String())
 	}
-	// an existing .mod is left alone
+	// an existing, different .mod is left alone and the zip refused (QA L-22;
+	// this used to store the zip and keep the mismatched .mod)
 	e.do("PUT", "go-hosted", "example.com/kept/@v/v1.0.0.mod", strings.NewReader("module example.com/kept\n\n// mine\n"))
 	z3 := moduleZip(t, "example.com/kept", "v1.0.0", "module example.com/kept\n")
-	e.do("PUT", "go-hosted", "example.com/kept/@v/v1.0.0.zip", bytes.NewReader(z3))
+	if w := e.do("PUT", "go-hosted", "example.com/kept/@v/v1.0.0.zip", bytes.NewReader(z3)); w.Code != 409 {
+		t.Fatalf("zip with a different go.mod: %d %s", w.Code, w.Body.String())
+	}
 	if w := e.do("GET", "go-hosted", "example.com/kept/@v/v1.0.0.mod", nil); !strings.Contains(w.Body.String(), "// mine") {
 		t.Fatalf("existing mod replaced: %q", w.Body.String())
+	}
+}
+
+// QA L-22: a zip uploaded after its .mod must carry the same go.mod, or no
+// go.mod when the .mod is the stub the go command derives for such a zip.
+func TestZipMustMatchUploadedMod(t *testing.T) {
+	e := newEnv(t)
+	put := func(path string, body io.Reader) int {
+		t.Helper()
+		return e.do("PUT", "go-hosted", path, body).Code
+	}
+	zipOf := func(module, version, gomod string) io.Reader {
+		return bytes.NewReader(moduleZip(t, module, version, gomod))
+	}
+	mod := "module example.com/m\n\ngo 1.21\n"
+	if c := put("example.com/m/@v/v1.0.0.mod", strings.NewReader(mod)); c != 201 {
+		t.Fatalf("mod: %d", c)
+	}
+	if c := put("example.com/m/@v/v1.0.0.zip", zipOf("example.com/m", "v1.0.0", "module example.com/m\n\ngo 1.22\n")); c != 409 {
+		t.Fatalf("zip with a different go.mod: %d", c)
+	}
+	if w := e.do("GET", "go-hosted", "example.com/m/@v/list", nil); w.Code != 404 {
+		t.Fatalf("refused zip was stored: %d %q", w.Code, w.Body.String())
+	}
+	if c := put("example.com/m/@v/v1.0.0.zip", zipOf("example.com/m", "v1.0.0", mod)); c != 201 {
+		t.Fatalf("zip with the same go.mod: %d", c)
+	}
+	put("example.com/s/@v/v1.0.0.mod", strings.NewReader("module example.com/s\n\ngo 1.21\n"))
+	if c := put("example.com/s/@v/v1.0.0.zip", makeZip(t, map[string]string{"example.com/s@v1.0.0/s.go": "package s\n"})); c != 409 {
+		t.Fatalf("zip without go.mod after a full .mod: %d", c)
+	}
+	put("example.com/s/@v/v1.1.0.mod", strings.NewReader("module example.com/s\n"))
+	if c := put("example.com/s/@v/v1.1.0.zip", makeZip(t, map[string]string{"example.com/s@v1.1.0/s.go": "package s\n"})); c != 201 {
+		t.Fatalf("zip without go.mod after the stub .mod: %d", c)
+	}
+
+	// the zip's go.mod is held to the .mod limit even when a .mod exists
+	old := maxModUpload
+	maxModUpload = 64
+	put("example.com/big/@v/v1.0.0.mod", strings.NewReader("module example.com/big\n"))
+	c := put("example.com/big/@v/v1.0.0.zip", zipOf("example.com/big", "v1.0.0", "module example.com/big\n"+strings.Repeat("// pad\n", 10)))
+	maxModUpload = old
+	if c != 400 {
+		t.Fatalf("zip go.mod over the limit after a .mod: %d", c)
+	}
+
+	// writePolicy allow: the zip's go.mod replaces the .mod
+	e.repos["go-hosted"].WritePolicy = "allow"
+	gomod := "module example.com/m\n\ngo 1.23\n"
+	put("example.com/m/@v/v1.1.0.mod", strings.NewReader(mod))
+	if c := put("example.com/m/@v/v1.1.0.zip", zipOf("example.com/m", "v1.1.0", gomod)); c != 201 {
+		t.Fatalf("allow, different go.mod: %d", c)
+	}
+	if w := e.do("GET", "go-hosted", "example.com/m/@v/v1.1.0.mod", nil); w.Body.String() != gomod {
+		t.Fatalf("allow: .mod is %q, want the zip's", w.Body.String())
 	}
 }
 
@@ -293,6 +361,10 @@ func TestModOnlyVersionNotListed(t *testing.T) {
 		if w := e.do("GET", repoName, "example.com/modonly/@latest", nil); w.Code == 200 {
 			t.Fatalf("%s @latest serves a .mod-only version: %s", repoName, w.Body.String())
 		}
+		// QA N-15: nor its .info
+		if w := e.do("GET", repoName, "example.com/modonly/@v/v1.0.0.info", nil); w.Code != 404 {
+			t.Fatalf("%s .info of a .mod-only version: %d %s", repoName, w.Code, w.Body.String())
+		}
 	}
 	z := moduleZip(t, "example.com/modonly", "v1.0.0", mod)
 	if w := e.do("PUT", "go-hosted", "example.com/modonly/@v/v1.0.0.zip", bytes.NewReader(z)); w.Code != 201 {
@@ -303,6 +375,11 @@ func TestModOnlyVersionNotListed(t *testing.T) {
 	}
 	if w := e.do("GET", "go-all", "example.com/modonly/@latest", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"v1.0.0"`) {
 		t.Fatalf("@latest after zip: %d %s", w.Code, w.Body.String())
+	}
+	for _, repoName := range []string{"go-hosted", "go-all"} {
+		if w := e.do("GET", repoName, "example.com/modonly/@v/v1.0.0.info", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"v1.0.0"`) {
+			t.Fatalf("%s .info after zip: %d %s", repoName, w.Code, w.Body.String())
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"unicode"
 
 	"commandcenter/internal/config"
 )
@@ -76,7 +77,12 @@ type SMTP struct {
 
 // ValidateSMTP checks c. A disabled configuration may be partial; an enabled
 // one needs a host, a port, a known security mode and a valid From address.
+// A host with a space or a control character (CR, LF) is refused either way
+// (QA N-17).
 func ValidateSMTP(c SMTP) error {
+	if strings.ContainsFunc(c.Host, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
+		return fmt.Errorf("smtp host must not contain spaces or control characters")
+	}
 	if !c.Enabled {
 		return nil
 	}
@@ -136,9 +142,13 @@ func SettingsFromConfig(cfg *config.Config) Settings {
 }
 
 // GetSettingJSON decodes the JSON value of key into v. It reports false (and
-// leaves v alone) when the key is unset.
+// leaves v alone) when the key is unset. A secret in v is opened.
 func (d *DB) GetSettingJSON(ctx context.Context, key string, v any) (bool, error) {
-	return getSettingJSON(ctx, d.sql, key, v)
+	found, err := getSettingJSON(ctx, d.sql, key, v)
+	if found && err == nil {
+		err = d.box.openValue(key, v)
+	}
+	return found, err
 }
 
 func getSettingJSON(ctx context.Context, q querier, key string, v any) (bool, error) {
@@ -157,13 +167,21 @@ func getSettingJSON(ctx context.Context, q querier, key string, v any) (bool, er
 }
 
 // SetSettingJSON stores v as the JSON value of key. The realms key is
-// validated (ValidateRealms).
+// validated (ValidateRealms). A secret in v (SMTP, LDAP) is sealed.
 func (d *DB) SetSettingJSON(ctx context.Context, key string, v any) error {
+	v, err := d.box.sealValue(v)
+	if err != nil {
+		return err
+	}
 	return setSettingJSON(ctx, d.sql, key, v)
 }
 
 // SetSettingJSON stores v as the JSON value of key within the transaction.
 func (t *Tx) SetSettingJSON(ctx context.Context, key string, v any) error {
+	v, err := t.box.sealValue(v)
+	if err != nil {
+		return err
+	}
 	return setSettingJSON(ctx, t.q, key, v)
 }
 
@@ -190,10 +208,18 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, string(b))
 }
 
 // LoadSettings reads every general setting, using the default for unset
-// keys. A stored value that does not decode, or an invalid realm list, is an
-// error.
-func (d *DB) LoadSettings(ctx context.Context) (Settings, error) { return loadSettings(ctx, d.sql) }
+// keys. A stored value that does not decode, an invalid realm list or a
+// secret that does not open is an error.
+func (d *DB) LoadSettings(ctx context.Context) (Settings, error) {
+	s, err := loadSettings(ctx, d.sql)
+	if err == nil {
+		err = d.box.openSettings(&s)
+	}
+	return s, err
+}
 
+// loadSettings leaves the secrets as stored (sealed or not): the realm
+// recovery needs no key.
 func loadSettings(ctx context.Context, q querier) (Settings, error) {
 	s := DefaultSettings()
 	for _, f := range []struct {
@@ -225,9 +251,17 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 
 // SaveSettings stores every general setting in one transaction.
 func (d *DB) SaveSettings(ctx context.Context, s Settings) error {
+	var err error
+	if s.SMTP.Password, err = d.box.seal(s.SMTP.Password); err != nil {
+		return err
+	}
+	if s.LDAP.BindPassword, err = d.box.seal(s.LDAP.BindPassword); err != nil {
+		return err
+	}
 	return d.Tx(ctx, func(tx *Tx) error { return saveSettings(ctx, tx.q, s) })
 }
 
+// saveSettings stores the secrets as given: callers seal them.
 func saveSettings(ctx context.Context, q querier, s Settings) error {
 	realms := s.Realms
 	if realms == nil {
@@ -279,6 +313,9 @@ func (d *DB) LoadAccess(ctx context.Context) (AccessData, error) {
 		return AccessData{}, fmt.Errorf("load roles: %w", err)
 	}
 	if out.Settings, err = loadSettings(ctx, tx); err != nil {
+		return AccessData{}, fmt.Errorf("load settings: %w", err)
+	}
+	if err := d.box.openSettings(&out.Settings); err != nil {
 		return AccessData{}, fmt.Errorf("load settings: %w", err)
 	}
 	return out, nil

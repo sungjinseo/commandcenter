@@ -124,7 +124,7 @@ export async function viewSearch(view, kind, criteria) {
     }
     if (!live() || n !== seq) return;
     const comps = data.components || [];
-    const rows = comps.map((comp) => {
+    const rowOf = (comp) => {
       const nameBtn = h("button", { type: "button", class: "link-btn" }, h("strong", null, comp.name));
       nameBtn.addEventListener("click", () => drill(comp));
       const tr = h("tr", { class: "clickable" },
@@ -135,14 +135,44 @@ export async function viewSearch(view, kind, criteria) {
         h("td", { class: "act muted", "aria-hidden": "true" }, "→"));
       tr.addEventListener("click", (ev) => { if (!ev.target.closest("a, button")) drill(comp); });
       return tr;
+    };
+    const table = tbl([t("comp.component"), t("col.version"), t("col.repo"), t("col.updated"), { t: h("span", { class: "sr-only" }, t("col.open")), cls: "act" }],
+      comps.map(rowOf), t("search.none"));
+    // Pages of 100 (QA L-23): "more" appends the next page while the API
+    // returns a continuationToken; the note shows once the last page says
+    // the search reached its limits.
+    const count = h("span", { class: "small muted", role: "status" });
+    const more = h("button", { type: "button", class: "btn" }, t("search.loadMore"));
+    const foot = h("div", null, h("div", { class: "toolbar end" }, more));
+    let shown = comps.length, token = "";
+    const tail = (d) => {
+      token = d.continuationToken || "";
+      count.textContent = t("search.count", { n: shown + (d.truncated ? "+" : "") });
+      if (!token) put(foot, d.truncated ? truncNote(t("search.truncated")) : null);
+    };
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      let d;
+      try {
+        d = await api("search/components?" + q.toString() + "&continuationToken=" + enc(token));
+      } catch (e) {
+        more.disabled = false;
+        if (more.isConnected) handleError(e);
+        return;
+      }
+      const rows = (d.components || []).map(rowOf);
+      table.querySelector("tbody").append(...rows);
+      shown += rows.length;
+      more.disabled = false;
+      tail(d);
+      // The last page removes the focused button: keep focus in the results.
+      if (!token && rows.length) rows[0].querySelector("button").focus();
     });
+    tail(data);
     saved = [
       h("section", { class: "card" },
-        h("div", { class: "toolbar" }, h("span", { class: "small muted", role: "status" }, t("search.count", { n: comps.length + (data.truncated ? "+" : "") })),
-          h("span", { class: "end" }, t("search.pick"))),
-        tbl([t("comp.component"), t("col.version"), t("col.repo"), t("col.updated"), { t: h("span", { class: "sr-only" }, t("col.open")), cls: "act" }],
-          rows, t("search.none"))),
-      data.truncated ? truncNote(t("search.truncated")) : null,
+        h("div", { class: "toolbar" }, count, h("span", { class: "end" }, t("search.pick"))), table),
+      foot,
     ];
     put(out, saved);
   }
@@ -162,7 +192,7 @@ export async function viewSearch(view, kind, criteria) {
   }
 
   // folderOf maps a component to the folder that holds all of its files, or
-  // "" when the format has no such folder. Only Maven hosted can delete, and a
+  // "" when the format has no such folder. Maven deletes file by file, and a
   // Maven component lives in group/artifact/version/.
   const folderOf = (comp) => (comp.format === "maven" && comp.name && comp.version
     ? (comp.group ? comp.group.split(".").join("/") + "/" : "") + comp.name + "/" + comp.version : "");
@@ -195,10 +225,10 @@ export async function viewSearch(view, kind, criteria) {
     const r = await repoOf(comp);
     if (!live() || n !== seq) return;
     const assets = comp.assets || [];
-    // The result holds at most 50 assets per component, so deleting re-lists
-    // the component's folder instead of trusting it.
-    const opts = Object.assign(optsFor(r, comp), { fresh: freshAssets(comp) },
-      folderOf(comp) ? {} : { incomplete: t("del.searchFormat") });
+    // The result holds at most 50 assets per component, so deleting a Maven
+    // component re-lists its folder instead of trusting it; the other formats
+    // delete the whole version on the server.
+    const opts = comp.format === "maven" ? Object.assign(optsFor(r, comp), { fresh: freshAssets(comp) }) : optsFor(r, comp);
     put(out,
       h("nav", { class: "crumbs", "aria-label": t("crumb.aria") }, backBtn(), sep(), h("span", { "aria-current": "page" }, label(comp))),
       componentView(r, comp, assets, opts));

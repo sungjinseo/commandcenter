@@ -219,7 +219,7 @@ func TestGroupTarballOwnerRuleHoldsForCachedTarballs(t *testing.T) {
 	if w := e.do("GET", "g-up", tgz110, "", anon); w.Code != 404 {
 		t.Fatalf("proxy tarball of a hosted package: %d %q, want 404", w.Code, w.Body.String())
 	}
-	if w := e.do("GET", "g-up", "left-pad/-/left-pad-1.0.0.tgz", "", anon); w.Code != 200 || w.Body.String() != "hosted-tgz" {
+	if w := e.do("GET", "g-up", "left-pad/-/left-pad-1.0.0.tgz", "", anon); w.Code != 200 || w.Body.String() != string(testTarball("left-pad", "1.0.0", []byte("hosted-tgz"))) {
 		t.Fatalf("hosted tarball: %d %q", w.Code, w.Body.String())
 	}
 	off := false

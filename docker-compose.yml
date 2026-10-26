@@ -13,6 +13,7 @@ services:
     environment:
       GOMEMLIMIT: 80MiB
       # HTTPS_PROXY: http://proxy.example.com:3128   # set if a corporate proxy is required
+      # COMMANDCENTER_SECRET_KEY: ${COMMANDCENTER_SECRET_KEY:?}   # encrypts stored SMTP/LDAP/remoteAuth secrets (shell or .env); back it up apart from the volume
     mem_limit: 128m
     restart: unless-stopped
     # On SIGTERM the server drains requests for up to 30 s, then flushes metrics

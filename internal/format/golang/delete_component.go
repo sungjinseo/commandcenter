@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
@@ -66,4 +68,36 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		h.Store.EmitAs("delete", actor, rp.Name, c.Label(), fmt.Sprintf("assets=%d", res.Assets))
 	}
 	return res, nil
+}
+
+// deleteVersion answers DELETE of a version's .mod, .info or .zip in a hosted
+// repository (the delete privilege, Access): the whole version goes, as
+// DeleteComponent removes it, so no half version is left behind. 204, or 404
+// when the version has no file.
+func (h *Handler) deleteVersion(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
+	if rt.Kind != KindMod && rt.Kind != KindZip && rt.Kind != KindInfo {
+		return repo.MethodNotAllowed("GET, HEAD", "only a version's .mod, .zip or .info can be deleted")
+	}
+	if rp.WritePolicy == "deny" {
+		return repo.Errorf(http.StatusBadRequest, "repository %q is read-only", rp.Name)
+	}
+	module, err := Unescape(rt.Module)
+	if err != nil {
+		return repo.Errorf(http.StatusBadRequest, "invalid module path: %v", err)
+	}
+	version, err := Unescape(rt.Version)
+	if err != nil {
+		return repo.Errorf(http.StatusBadRequest, "invalid version: %v", err)
+	}
+	ctx := r.Context()
+	c := component.Component{Repo: rp.Name, Format: "go", Name: module, Version: version}
+	res, err := h.DeleteComponent(ctx, rp, c, auth.FromContext(ctx).Owner())
+	if err != nil {
+		return err
+	}
+	if res.Assets == 0 {
+		return repo.Errorf(http.StatusNotFound, "%s@%s not found", module, version)
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return nil
 }

@@ -86,7 +86,7 @@ docker compose build
 docker run --rm -i commandcenter:latest hash-password
 ```
 
-`config.example.yaml`을 `config.yaml`로 복사하고, 위 명령이 출력한 해시를 `passwordHash` 자리에 넣습니다.
+비밀번호(8자 이상, 72바이트 이하)를 입력하고 Enter를 누르면 해시가 나옵니다. `config.example.yaml`을 `config.yaml`로 복사하고, 그 해시를 `passwordHash` 자리에 넣습니다.
 
 ```bash
 cp config.example.yaml config.yaml
@@ -106,7 +106,7 @@ docker compose up -d
 
 - TLS는 리버스 프록시에서 끝내고 `baseURL`을 `https://` 주소로 둡니다.
 - 사내 전용이면 익명 읽기(`anonymousRead`)를 끕니다.
-- 프록시에서 업로드 크기, 본문 수신 타임아웃, 연결 수를 제한합니다.
+- 프록시에서 업로드 크기, 본문 수신·응답 전송 타임아웃, 연결 수를 제한합니다.
 - `meta.db`는 로컬 디스크나 블록 스토리지에 둡니다. NFS·SMB는 안 됩니다. 인스턴스는 하나만 띄웁니다.
 - 중지 대기 시간을 60초로 둡니다. 들어 있는 compose 파일은 이미 `stop_grace_period: 60s`이고, `docker run`(`--stop-timeout 60`)이나 Kubernetes에서는 직접 정합니다.
 - 정기적으로, 그리고 업그레이드 전에 백업합니다. 다운그레이드는 지원하지 않습니다.

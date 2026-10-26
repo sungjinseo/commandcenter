@@ -102,6 +102,7 @@ type Config struct {
 	MemoryLimitMiB      int             `yaml:"memoryLimitMiB"`
 	MaxUploadMiB        int             `yaml:"maxUploadMiB"`
 	MetricsFlushSeconds int             `yaml:"metricsFlushSeconds"` // hidden: how often download/request counters are written (default 30)
+	SecretKeyFile       string          `yaml:"secretKeyFile"`       // file holding the key that encrypts stored secrets (or COMMANDCENTER_SECRET_KEY)
 	AnonymousRead       bool            `yaml:"anonymousRead"`
 	Users               []User          `yaml:"users"`
 	Roles               map[string]Role `yaml:"roles"`
@@ -431,11 +432,18 @@ type namedDuration struct {
 
 // ValidateDefinition checks the rules that apply only to a definition being
 // created or updated (API/UI, or the one-time import of the config file): no
-// negative duration other than "-1" (never) and no group member listed twice
-// (QA L-9). Rows that older builds stored are not held to them; the app
-// loads those through NormalizeStored instead (final review C1).
+// negative duration other than "-1" (never), no group member listed twice,
+// no remote (or remoteAuth) except on a proxy and no versionPolicy on a
+// group (QA L-9). Rows that older builds stored are not held to them; the
+// app loads those through NormalizeStored instead (final review C1).
 func ValidateDefinition(r Repository) error {
 	var errs []error
+	if r.Type != "proxy" && (r.Remote != "" || r.RemoteAuth != nil) {
+		errs = append(errs, fmt.Errorf("repository %q: remote and remoteAuth are only valid for proxy repositories", r.Name))
+	}
+	if r.Type == "group" && r.VersionPolicy != "" {
+		errs = append(errs, fmt.Errorf("repository %q: versionPolicy is not valid for group repositories", r.Name))
+	}
 	for _, f := range durationFields(&r) {
 		if *f.d < 0 && *f.d != Never {
 			errs = append(errs, fmt.Errorf("repository %q: %s %q must not be negative (use \"-1\" for never)", r.Name, f.name, f.d.Text()))
@@ -454,11 +462,20 @@ func ValidateDefinition(r Repository) error {
 
 // NormalizeStored makes a stored definition that an older build accepted
 // usable: a negative duration other than "-1" becomes 0, which the proxy
-// treats as never fresh / expiring at once (as those builds behaved), and a
-// group member listed twice is kept once. It returns one note per change for
-// the caller's warning; the stored row is not rewritten.
+// treats as never fresh / expiring at once (as those builds behaved), a
+// group member listed twice is kept once, and a remote outside a proxy or a
+// group's versionPolicy (both unused) is dropped. It returns one note per
+// change for the caller's warning; the stored row is not rewritten.
 func NormalizeStored(r *Repository) []string {
 	var notes []string
+	if r.Type != "proxy" && (r.Remote != "" || r.RemoteAuth != nil) {
+		notes = append(notes, "remote ignored: only proxy repositories have one")
+		r.Remote, r.RemoteAuth = "", nil
+	}
+	if r.Type == "group" && r.VersionPolicy != "" {
+		notes = append(notes, fmt.Sprintf("versionPolicy %q ignored: groups have none", r.VersionPolicy))
+		r.VersionPolicy = ""
+	}
 	for _, f := range durationFields(r) {
 		if *f.d < 0 && *f.d != Never {
 			notes = append(notes, fmt.Sprintf("%s %q is negative, treated as 0 (no caching)", f.name, f.d.Text()))
@@ -537,7 +554,7 @@ func ValidateRepositories(list []Repository) error {
 			case r.Type != "hosted" && r.Type != "proxy":
 				add("repository %q: cleanupPolicy is only valid for hosted and proxy repositories", r.Name)
 			case r.Format == "cargo" && r.Type == "hosted":
-				add("repository %q: cleanup is not supported for cargo hosted repositories (crates are immutable; yank them instead)", r.Name)
+				add("repository %q: cleanup is not supported for cargo hosted repositories (yank crates, or delete versions in the web UI)", r.Name)
 			}
 		}
 	}

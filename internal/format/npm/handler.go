@@ -39,10 +39,9 @@ func (h *Handler) Access(r *http.Request, rp *repo.Repository, path string) auth
 		switch rt.Kind {
 		case KindLogin, KindWebLogin:
 			return auth.Public // npm logs in without a token
-		case KindRev, KindToken:
-			// The handler answers these itself: unpublish is refused for
-			// every caller (405, not a 401/403 that npm would retry with
-			// credentials), and logout needs only the caller's own token.
+		case KindToken:
+			// The handler answers it itself: logout needs only the
+			// caller's own token.
 			return auth.Public
 		case KindWhoami, KindPing, KindAudit:
 			// A public ping or audit would tell a hidden repository from
@@ -55,6 +54,8 @@ func (h *Handler) Access(r *http.Request, rp *repo.Repository, path string) auth
 	}
 	if rt, err := ParseRoute(path); err == nil {
 		switch rt.Kind {
+		case KindRev:
+			return auth.Delete // npm unpublish, by PUT or DELETE
 		case KindDistTag, KindDistTags:
 			return auth.Edit
 		case KindPackument:
@@ -161,10 +162,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		return repo.Errorf(http.StatusNotImplemented, "npm audit is not supported by this registry")
 	case KindRev:
 		// npm reads a 404 here as "already deleted" and reports success
-		// (QA H-2); unpublish is not supported (plan 13 Decision 1), and the
-		// message names only a means that exists (QA N-10).
-		// The resource accepts no method: an empty Allow (RFC 9110 15.5.6).
-		return repo.MethodNotAllowed("", "unpublish is not supported by this registry; use npm deprecate instead")
+		// (QA H-2): unpublish deletes for real or fails visibly (QA N-10).
+		return h.unpublish(w, r, rp, rt)
 	case KindToken:
 		return h.logout(w, r, rt.Token)
 	case KindWebLogin:
@@ -280,7 +279,7 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 		}
 		src = target
 	}
-	_, res, err := h.packument(ctx, src, rt.Package)
+	owner, res, err := h.packument(ctx, src, rt.Package)
 	if err != nil {
 		return err
 	}
@@ -295,10 +294,11 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 	if !a.LastModified.IsZero() {
 		w.Header().Set("Last-Modified", a.LastModified.UTC().Format(http.TimeFormat))
 	}
-	if rt.Kind == KindDistTags {
+	if rt.Kind == KindDistTags || owner.Type == "hosted" {
 		// npm caches responses with Last-Modified heuristically, so
-		// `npm dist-tag ls` right after `npm dist-tag add` saw the old tags.
-		// Dist-tags are tiny and mutable: always revalidate.
+		// `npm dist-tag ls` right after `npm dist-tag add` saw the old tags,
+		// and a warm cache kept offering an unpublished version. Dist-tags
+		// and hosted documents change in place: always revalidate.
 		cc := "no-cache"
 		if prev := w.Header().Get("Cache-Control"); prev != "" {
 			cc = prev + ", " + cc
@@ -336,6 +336,9 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request, user string) err
 		return repo.Errorf(http.StatusBadRequest, "user name %q does not match URL %q", body.Name, user)
 	}
 	p, err := h.Auth.CheckPassword(r.Context(), user, body.Password)
+	if wait := auth.RetryAfter(w.Header(), err); wait > 0 {
+		return repo.Errorf(http.StatusTooManyRequests, "too many failed sign-ins; try again in %d seconds", wait)
+	}
 	if err != nil {
 		return repo.Errorf(http.StatusUnauthorized, "invalid user name or password")
 	}

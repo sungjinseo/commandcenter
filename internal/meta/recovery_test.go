@@ -2,7 +2,9 @@ package meta
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +80,9 @@ func TestResetLocalPassword(t *testing.T) {
 
 	if _, err := db.ResetLocalPassword(ctx, "bad:id", "h", false); err == nil {
 		t.Fatal("invalid id accepted")
+	}
+	// QA N-18: no look-alike of an existing user is created; the error names it.
+	if _, err := db.ResetLocalPassword(ctx, "RESCUE", "h8", true); !errors.Is(err, ErrExists) || !strings.Contains(err.Error(), `"rescue"`) {
+		t.Fatalf("case variant: %v", err)
 	}
 }

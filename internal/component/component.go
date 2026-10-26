@@ -46,7 +46,7 @@ type Asset struct {
 }
 
 // ErrNotSupported is returned by a deleter for repositories whose components
-// cannot be deleted (Cargo hosted: crates are immutable, yank instead).
+// cannot be deleted (groups, or a repository of another format or type).
 var ErrNotSupported = errors.New("component deletion is not supported for this repository")
 
 // Result is what one component delete removed: only rows actually deleted

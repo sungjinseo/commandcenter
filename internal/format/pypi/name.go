@@ -4,6 +4,7 @@ package pypi
 import (
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 
 	"commandcenter/internal/repo"
@@ -86,11 +87,21 @@ func validFile(s string) bool {
 
 // fileMatches reports whether a distribution file name belongs to project
 // (a normalized name): wheels and modern sdists use "_" for separators, older
-// sdists keep "-", so both are compared in normalized form. The version that
-// follows the name must start with a digit.
+// sdists keep "-", so both are compared in normalized form. A version must
+// follow the name (see versionAt).
 func fileMatches(project, filename string) bool {
 	rest, ok := strings.CutPrefix(Normalize(filename), project+"-")
-	return ok && rest != "" && rest[0] >= '0' && rest[0] <= '9'
+	return ok && versionAt(rest, 0)
+}
+
+// versionAt reports whether a version starts at s[i]: a digit, or a digit
+// after the "v" PEP 440 tolerates, so that "x-v1.3.tar.gz" is reported as an
+// invalid version rather than as another project's file.
+func versionAt(s string, i int) bool {
+	if i < len(s) && (s[i] == 'v' || s[i] == 'V') {
+		i++
+	}
+	return i < len(s) && s[i] >= '0' && s[i] <= '9'
 }
 
 // fileKey is the asset path of a distribution file.
@@ -124,10 +135,8 @@ func fileVersion(project, filename string) (string, bool) {
 		}
 		return fields[1], true
 	}
-	for i := 0; i < len(base)-1; i++ {
-		if base[i] == '-' && base[i+1] >= '0' && base[i+1] <= '9' && Normalize(base[:i]) == project {
-			return base[i+1:], true
-		}
+	if i := sdistSplit(project, base); i >= 0 {
+		return base[i+1:], true
 	}
 	return "", false
 }
@@ -137,61 +146,94 @@ func fileVersion(project, filename string) (string, bool) {
 func canonicalFile(filename string) string { return canonicalKey("", filename) }
 
 // canonicalKey builds the identity from parsed fields: the normalized project,
-// the canonical version (trailing ".0" release segments dropped), for wheels
-// the remaining tag fields kept apart (build, python, abi, platform), and the
-// lowercased extension. project may be "" when unknown. A name that does not
+// the canonical version, for wheels the normalized tag fields (see wheelTags),
+// and for sdists one marker whatever the extension, as a release has one
+// sdist (PEP 527). project may be "" when unknown. A name that does not
 // parse falls back to its normalized form.
 func canonicalKey(project, filename string) string {
 	base, ext, ok := splitUploadExt(filename)
 	if !ok {
 		return "\x01" + Normalize(filename)
 	}
-	var name, version string
-	var tags []string
+	var name, version, rest string
 	if ext == ".whl" {
 		f := strings.Split(base, "-")
 		if len(f) < 2 {
 			return "\x01" + Normalize(filename)
 		}
-		name, version, tags = f[0], f[1], f[2:]
+		name, version = f[0], f[1]
+		tags, ok := wheelTags(f[2:])
+		if !ok { // a legacy name that is no valid wheel name: compared as spelled
+			tags = strings.Join(f[2:], "\x00")
+		}
+		rest = tags + "\x00" + ext
 	} else {
 		i := sdistSplit(project, base)
 		if i < 0 {
 			return "\x01" + Normalize(filename)
 		}
-		name, version = base[:i], base[i+1:]
+		name, version, rest = base[:i], base[i+1:], "sdist"
 	}
-	parts := append([]string{Normalize(name), canonicalVersion(version)}, tags...)
-	return strings.ToLower(strings.Join(parts, "\x00")) + "\x00" + ext
+	return strings.ToLower(Normalize(name) + "\x00" + canonicalVersion(version) + "\x00" + rest)
+}
+
+// wheelTags normalizes the fields after a wheel's name and version (PEP 427):
+// an optional build tag, which must start with a digit and compares by that
+// number ("01" is "1"), then the python, abi and platform tags, each a set
+// ("py3.py2" is "py2.py3", "py3.py3" is "py3"). ok is false when the fields
+// are not that.
+func wheelTags(f []string) (key string, ok bool) {
+	if len(f) != 3 && len(f) != 4 {
+		return "", false
+	}
+	var out []string
+	if len(f) == 4 {
+		rest := strings.TrimLeft(f[0], "0123456789")
+		if len(rest) == len(f[0]) {
+			return "", false
+		}
+		out = append(out, trimZeros(f[0][:len(f[0])-len(rest)])+rest)
+		f = f[1:]
+	}
+	for _, t := range f {
+		set := strings.Split(strings.ToLower(t), ".")
+		slices.Sort(set)
+		if set = slices.Compact(set); set[0] == "" {
+			return "", false
+		}
+		out = append(out, strings.Join(set, "."))
+	}
+	return strings.Join(out, "\x00"), true
 }
 
 // sdistSplit returns the index of the dash between project name and version in
 // the base of an sdist file name, or -1. A known project must match exactly.
 func sdistSplit(project, base string) int {
 	for i := 0; i < len(base)-1; i++ {
-		if base[i] == '-' && base[i+1] >= '0' && base[i+1] <= '9' && (project == "" || Normalize(base[:i]) == project) {
+		if base[i] == '-' && versionAt(base, i+1) && (project == "" || Normalize(base[:i]) == project) {
 			return i
 		}
 	}
 	return -1
 }
 
-// canonicalVersion lowercases v and drops trailing ".0" release segments
-// (1.0.0 and 1.0 are the same version), keeping at least one segment.
+// canonicalVersion is the normal form of v without trailing ".0" release
+// segments, so versions PEP 440 calls equal are equal strings (1.0, 1.0.0 and
+// 1.0-0 are 1, 1.0-1 is 1.post1). An invalid v is returned unchanged; it
+// never equals the canonical form of a valid one.
 func canonicalVersion(v string) string {
-	v = strings.ToLower(v)
-	i := 0
-	if j := strings.IndexByte(v, '!'); j >= 0 {
-		i = j + 1
+	n, ok := normalizeVersion(v)
+	if !ok {
+		return v
 	}
+	i := strings.IndexByte(n, '!') + 1
 	j := i
-	for j < len(v) && (v[j] == '.' || v[j] >= '0' && v[j] <= '9') {
+	for j < len(n) && (n[j] >= '0' && n[j] <= '9' || n[j] == '.' && j+1 < len(n) && n[j+1] >= '0' && n[j+1] <= '9') {
 		j++
 	}
-	release, rest := v[i:j], v[j:]
-	release = strings.TrimRight(release, ".")
+	release := n[i:j]
 	for strings.HasSuffix(release, ".0") {
 		release = strings.TrimSuffix(release, ".0")
 	}
-	return v[:i] + release + rest
+	return n[:i] + release + n[j:]
 }
