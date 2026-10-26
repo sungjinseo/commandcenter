@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -312,11 +314,13 @@ func (d *spaceFoldDir) Find(_ context.Context, _ meta.LDAP, id string) (ldap.Use
 // spelling would be a fresh count of accountLimit guesses. So only a
 // printable ASCII name without leading, trailing or repeated spaces
 // reaches a realm; any other fails like a wrong password, unchecked and
-// uncounted.
+// uncounted, and logged once at Debug level (never with the password).
 func TestThrottleLDAPNameSpellings(t *testing.T) {
 	f := newLDAPFixture(t)
 	d := &spaceFoldDir{binds: map[string]int{}}
 	f.a.LDAP = d
+	var logs strings.Builder
+	f.a.Log = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx := context.Background()
 	for i := 0; i < 30; i++ {
 		name := strings.Repeat(" ", i) + "alice" // the same directory entry every time
@@ -337,8 +341,11 @@ func TestThrottleLDAPNameSpellings(t *testing.T) {
 	if d.logins != logins {
 		t.Fatalf("%d refused spellings reached the directory", d.logins-logins)
 	}
+	if n := strings.Count(logs.String(), `level=DEBUG msg="sign-in refused`); n != 29+1+8 || strings.Contains(logs.String(), "-pw") || strings.Contains(logs.String(), "wrong") {
+		t.Fatalf("%d of 38 refusals logged at Debug level, or a password logged:\n%s", n, logs.String())
+	}
 	for _, name := range []string{"Alice Smith", "alice@example.org", "a.b_c-d~"} {
-		if !plainName(name) {
+		if !PlainLoginName(name) {
 			t.Errorf("%q refused", name)
 		}
 	}
@@ -402,6 +409,119 @@ func TestThrottleLDAPParallelRightPassword(t *testing.T) {
 	f.a.CheckPassword(short, "l0", "wrong")
 	if short.Err() == nil {
 		t.Fatal("a wrong password skipped the local realm's compare")
+	}
+}
+
+// slowNoUserDir is a directory that knows none of the local users and
+// takes slowNoUserDelay to say so (service bind plus search, as over
+// LDAPS). It counts the logins it is asked for.
+type slowNoUserDir struct{ logins atomic.Int64 }
+
+const slowNoUserDelay = 30 * time.Millisecond
+
+func (d *slowNoUserDir) Authenticate(ctx context.Context, _ meta.LDAP, _, _ string) (ldap.User, error) {
+	d.logins.Add(1)
+	select {
+	case <-time.After(slowNoUserDelay):
+	case <-ctx.Done():
+	}
+	return ldap.User{}, ldap.ErrNoSuchUser
+}
+
+func (d *slowNoUserDir) Find(context.Context, meta.LDAP, string) (ldap.User, error) {
+	return ldap.User{}, ldap.ErrNoSuchUser
+}
+
+// Re-review rr-auth-2: with the ldap realm ordered before local (the
+// Realms screen allows it, and the order is the priority), every check of
+// a LOCAL user asks the directory first, which caches no "no such user".
+// The per-name gate ran those directory calls one at a time, so one CI
+// user's parallel requests (a Maven build) took N directory round trips
+// where N different users take one.
+func TestThrottleLDAPFirstParallelLocalUser(t *testing.T) {
+	f := newLDAPFixture(t)
+	f.a.LDAP = &slowNoUserDir{}
+	f.settings.Realms = []meta.Realm{{ID: meta.RealmLDAP, Enabled: true}, {ID: meta.RealmLocal, Enabled: true}, {ID: meta.RealmToken, Enabled: true}}
+	f.apply()
+	ctx := context.Background()
+	users := []string{"admin", "adder", "editor", "npmdel", "browser", "plain"}
+	for _, u := range users { // warm the local success cache: later checks need no bcrypt
+		if _, err := f.a.CheckPassword(ctx, u, "pw"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(name func(i int) string) time.Duration {
+		var wg sync.WaitGroup
+		start := time.Now()
+		for i := range users {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if _, err := f.a.CheckPassword(ctx, name(i), "pw"); err != nil {
+					t.Errorf("%s: %v", name(i), err)
+				}
+			}()
+		}
+		wg.Wait()
+		return time.Since(start)
+	}
+	distinct := run(func(i int) string { return users[i] })
+	one := run(func(int) string { return "plain" })
+	// Both runs now take well under one directory round trip; the floor
+	// keeps scheduler noise in two such short runs from failing the ratio.
+	if one > 3*distinct && one > 3*slowNoUserDelay {
+		t.Fatalf("%d parallel right-password requests: %d local users %v, one local user %v (ldap realm first)",
+			len(users), len(users), distinct.Round(time.Millisecond), one.Round(time.Millisecond))
+	}
+}
+
+// With ldap ordered before local, parallel right-password requests of a
+// local user whose cached login has expired make one directory call, not
+// one each in turn: the requests that waited at the name's gate take the
+// first one's cached success. A cached success does not wait for the gate
+// at all, and it forgets the name's failures as a checked one does, while
+// a wrong password still waits for its turn.
+func TestThrottleLDAPFirstOneDirectoryCall(t *testing.T) {
+	f := ldapFirst(t)
+	d := &slowNoUserDir{}
+	f.a.LDAP = d
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if p, err := f.a.CheckPassword(ctx, "plain", "pw"); err != nil || p.User != "plain" {
+				t.Errorf("a parallel right password: %+v %v", p, err)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := d.logins.Load(); n > 1 {
+		t.Fatalf("8 parallel right-password requests of a local user made %d directory calls, want at most 1", n)
+	}
+	unlock, err := f.a.lockName(ctx, nameKey("plain")) // a slow check of the name in progress
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiting, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if p, err := f.a.CheckPassword(waiting, "plain", "pw"); err != nil || p.User != "plain" {
+		t.Fatalf("a cached right password waited for the name's gate: %+v %v", p, err)
+	}
+	short, stop := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer stop()
+	if _, err := f.a.CheckPassword(short, "plain", "wrong"); !errors.Is(err, ErrBadCredentials) || short.Err() == nil {
+		t.Fatalf("a wrong password did not wait for the gate: %v", err)
+	}
+	unlock()
+	for round := 1; round <= 2; round++ {
+		for i := 0; i < accountLimit-1; i++ {
+			f.a.CheckPassword(ctx, "plain", "wrong")
+		}
+		if _, err := f.a.CheckPassword(ctx, "plain", "pw"); err != nil {
+			t.Fatalf("round %d: the cached success did not forget the failures: %v", round, err)
+		}
 	}
 }
 

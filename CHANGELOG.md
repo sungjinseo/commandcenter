@@ -45,9 +45,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - LDAP: a login name that is not printable ASCII, or that has leading, trailing or repeated spaces,
   is now refused like a wrong password (see Security). If your `userFilter` finds users by a
   non-ASCII value such as a Korean `cn`, they can no longer sign in with it; make the filter match
-  an ASCII attribute such as `uid`, `sAMAccountName` or `mail`. Local users are not affected.
+  an ASCII attribute such as `uid`, `sAMAccountName` or `mail`. Local users are not affected. The
+  LDAP connection test reports such a name as a failing `name` step.
 - A proxy's `remoteAuth` credentials no longer follow a redirect to another scheme, port or
-  subdomain, where such a remote typically answers 401 (`remote status 401` in the log): make the
+  subdomain (a same-host move from `http` on port 80 to `https` on port 443 keeps them), where such
+  a remote typically answers 401 (`remote status 401` in the log): make the
   remote redirect within its own `https` origin, or point `remote` at the final `https` address. A
   proxy whose `remote` host is not ASCII must be changed to its punycode form (`xn--…`), or all its
   fetches are refused (see Changed and Security).
@@ -79,11 +81,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `npm unpublish pkg@version` and `npm unpublish pkg --force` delete from a hosted repository, or
   through a group's `writeMember`, with the delete privilege (QA H-2, N-10). Dist-tags of removed
   versions go, `latest` moves to the newest remaining release, and an unpublish that would delete a
-  version published after npm read the package is refused with 409 instead: the PUT checks the
-  document npm sends back, and every unpublish request that would delete a stored version checks the
-  `_rev` that hosted package documents now carry (made from their versions and publish times,
-  unchanged by dist-tag and deprecate edits). A document written by an older build has no `_rev`;
-  npm then sends `undefined`, which is not checked, until the package next changes.
+  version published, or published again, after npm read the package is refused with 409 instead:
+  the PUT checks the document npm sends back, and every unpublish request checks the versions it
+  would delete against the `_rev` that hosted package documents now carry (the publish time of
+  their newest version, in milliseconds). Versions removed meanwhile and dist-tag or deprecate
+  edits do not refuse it, so concurrent unpublishes of different versions all succeed. A document
+  written by an older build has no `_rev`; npm then sends `undefined`, which, like any rev that is
+  not a number, is not checked, until the package next changes. A new version is stamped at least
+  1 ms after the package's newest stored one, so the rule holds within one millisecond.
 - Go hosted repositories accept `DELETE` of a version's `.mod`, `.info` or `.zip`. It removes the
   whole version, also one that has only a `.mod`, and needs the delete privilege (QA M-11).
 - `DELETE /-/api/repositories/{name}/components?group=&name=&version=` deletes one component
@@ -396,7 +401,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Proxy `remoteAuth` credentials followed a redirect from the remote to the same host name on
   another port or scheme, or to a subdomain, so a remote redirecting from `https` to `http` sent
   them in clear text. Redirects now keep them only on the remote's own scheme, host and port (an
-  omitted port counts as the default); other redirects are still followed, without credentials.
+  omitted port counts as the default), or on a same-host move from `http` on port 80 to `https` on
+  port 443; other redirects are still followed, without credentials.
 - Dependency confusion: npm and PyPI groups could serve a same-named public package in place of an
   internal one (QA N-1, N-11).
 - Denial of service: stalled or slowly trickled request bodies, even without credentials (QA N-5),

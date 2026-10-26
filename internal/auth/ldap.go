@@ -133,15 +133,6 @@ func ldapPassKey(name, pass string) string {
 	return "ldap\x00" + hex.EncodeToString(sum[:])
 }
 
-// ldapPassCached reports whether name and pass are a live cached LDAP
-// password success.
-func (a *Authenticator) ldapPassCached(name, pass string) bool {
-	a.ldapMu.Lock()
-	hit, ok := a.ldapPass[ldapPassKey(name, pass)]
-	a.ldapMu.Unlock()
-	return ok && a.clock().Before(hit.exp)
-}
-
 // clearLDAP drops every cached LDAP user and password success.
 func (a *Authenticator) clearLDAP() {
 	a.ldapMu.Lock()
@@ -164,8 +155,9 @@ func (a *Authenticator) dropLDAP(id string) {
 	a.ldapMu.Unlock()
 }
 
-// ldapPassword is the ldap realm's password check.
-func (a *Authenticator) ldapPassword(ctx context.Context, s *Snapshot, name, pass string) (Principal, bool) {
+// ldapPassword is the ldap realm's password check; with cachedOnly it only
+// answers a live cached success.
+func (a *Authenticator) ldapPassword(ctx context.Context, s *Snapshot, name, pass string, cachedOnly bool) (Principal, bool) {
 	if name == "" || pass == "" || len(name) > maxLoginName || len(pass) > maxLoginPassword || !ldapUsable(s) {
 		return Principal{}, false // never an unauthenticated bind
 	}
@@ -179,6 +171,9 @@ func (a *Authenticator) ldapPassword(ctx context.Context, s *Snapshot, name, pas
 			p.Via = ViaPassword
 			return p, true
 		}
+		return Principal{}, false
+	}
+	if cachedOnly {
 		return Principal{}, false
 	}
 	a.ldapMu.Lock()

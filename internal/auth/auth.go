@@ -386,23 +386,26 @@ func (a *Authenticator) lookup(ctx context.Context, name string) (Principal, boo
 
 // CheckPassword verifies a user's password through the enabled password
 // realms (local, ldap) in the order of the realm list; the first that
-// accepts wins. Local checks use a short-lived cache of successes; disabled
-// users and users without a local password fail the local realm. A realm
-// that errors (LDAP unreachable) is logged and the next one is tried. If
-// ctx ends while waiting for a bcrypt slot, the check fails with
-// ErrBadCredentials. A name with too many recent failures is refused with a
-// *ThrottledError, and one that is not plainName fails, before any realm
-// is asked (throttle.go).
+// accepts wins. Both realms cache successes for a minute, and a cached
+// success is answered first, in the same order, without checking a
+// password; disabled users and users without a local password fail the
+// local realm. A realm that errors (LDAP unreachable) is logged and the
+// next one is tried. If ctx ends while waiting for a bcrypt slot, the check
+// fails with ErrBadCredentials. A name with too many recent failures is
+// refused with a *ThrottledError, and one that is not PlainLoginName
+// fails, before any realm is asked (throttle.go).
 func (a *Authenticator) CheckPassword(ctx context.Context, user, pass string) (Principal, error) {
 	if len(user) > maxLoginName || len(pass) > maxLoginPassword {
 		// Never sent to any realm: no stored id or password is this long,
 		// and an oversized value must not reach (and upset) the directory.
 		return Principal{}, ErrBadCredentials
 	}
-	return a.throttle(ctx, user, func() (Principal, bool) { return a.checkRealms(ctx, user, pass) })
+	return a.throttle(ctx, user, func(cachedOnly bool) (Principal, bool) { return a.checkRealms(ctx, user, pass, cachedOnly) })
 }
 
-func (a *Authenticator) checkRealms(ctx context.Context, user, pass string) (Principal, bool) {
+// checkRealms asks the enabled password realms in order. With cachedOnly a
+// realm only answers a live cached success, and no password is checked.
+func (a *Authenticator) checkRealms(ctx context.Context, user, pass string, cachedOnly bool) (Principal, bool) {
 	s := a.snap.Load()
 	compared := false
 	for _, r := range s.settings.Realms {
@@ -412,16 +415,16 @@ func (a *Authenticator) checkRealms(ctx context.Context, user, pass string) (Pri
 		switch r.ID {
 		case meta.RealmLocal:
 			compared = true
-			if p, ok := a.localPassword(ctx, s, user, pass); ok {
+			if p, ok := a.localPassword(ctx, s, user, pass, cachedOnly); ok {
 				return p, true
 			}
 		case meta.RealmLDAP:
-			if p, ok := a.ldapPassword(ctx, s, user, pass); ok {
+			if p, ok := a.ldapPassword(ctx, s, user, pass, cachedOnly); ok {
 				return p, true
 			}
 		}
 	}
-	if !compared {
+	if !compared && !cachedOnly {
 		compareHash(ctx, dummyHash, pass) // the same cost whichever realms are on
 	}
 	return Principal{}, false
@@ -432,19 +435,18 @@ func (a *Authenticator) checkRealms(ctx context.Context, user, pass string) (Pri
 // a same-named LDAP user's password must not do). It is throttled like
 // CheckPassword.
 func (a *Authenticator) CheckLocalPassword(ctx context.Context, user, pass string) (Principal, error) {
-	return a.throttle(ctx, user, func() (Principal, bool) { return a.localPassword(ctx, a.snap.Load(), user, pass) })
+	return a.throttle(ctx, user, func(cachedOnly bool) (Principal, bool) {
+		return a.localPassword(ctx, a.snap.Load(), user, pass, cachedOnly)
+	})
 }
 
-// localPassword is the local realm's check.
-func (a *Authenticator) localPassword(ctx context.Context, s *Snapshot, user, pass string) (Principal, bool) {
+// localPassword is the local realm's check; with cachedOnly it only answers
+// a live cached success.
+func (a *Authenticator) localPassword(ctx context.Context, s *Snapshot, user, pass string, cachedOnly bool) (Principal, bool) {
 	u, ok := s.users[user]
 	if !ok || !s.canPasswordLogin(u) {
-		// The compare only hides which names exist, so an LDAP user whose
-		// password the ldap realm has cached skips it; otherwise each of
-		// the user's parallel requests would pay one, in turn, behind the
-		// throttle's gate.
-		if !a.ldapPassCached(user, pass) {
-			compareHash(ctx, dummyHash, pass)
+		if !cachedOnly {
+			compareHash(ctx, dummyHash, pass) // only hides which names exist
 		}
 		return Principal{}, false
 	}
@@ -460,7 +462,7 @@ func (a *Authenticator) localPassword(ctx context.Context, s *Snapshot, user, pa
 	if hit && now.Before(exp) {
 		return passwordPrincipal(u), true
 	}
-	if compareHash(ctx, []byte(u.PasswordHash), pass) != nil {
+	if cachedOnly || compareHash(ctx, []byte(u.PasswordHash), pass) != nil {
 		return Principal{}, false
 	}
 	a.mu.Lock()

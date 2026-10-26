@@ -648,6 +648,7 @@ func TestLDAPLoginOutageBackoff(t *testing.T) {
 	f.srv.SetDown(true)
 	d0 := f.srv.Dials()
 	for i := 0; i < ldapDialFailures; i++ { // three consecutive dial failures start it
+		f.a.clearPassCacheForTest()
 		if _, err := f.a.CheckPassword(ctx, "admin", "pw"); err != nil {
 			t.Fatal(err)
 		}
@@ -656,6 +657,7 @@ func TestLDAPLoginOutageBackoff(t *testing.T) {
 		t.Fatalf("first logins: %d dials", n)
 	}
 	for i := 0; i < 3; i++ {
+		f.a.clearPassCacheForTest()
 		if _, err := f.a.CheckPassword(ctx, "admin", "pw"); err != nil {
 			t.Fatal(err)
 		}
@@ -800,6 +802,7 @@ func TestLDAPBackoffNeedsThreeDialFailures(t *testing.T) {
 	f := ldapFirst(t)
 	ctx := context.Background()
 	login := func() {
+		f.a.clearPassCacheForTest()
 		if _, err := f.a.CheckPassword(ctx, "admin", "pw"); err != nil {
 			t.Fatal(err)
 		}
@@ -823,8 +826,13 @@ func TestLDAPBackoffNeedsThreeDialFailures(t *testing.T) {
 	}
 }
 
+// clearPassCacheForTest drops the cached password successes of both
+// realms, so the next check asks the realms (a cached one asks none).
 func (a *Authenticator) clearPassCacheForTest() {
 	a.ldapMu.Lock()
 	a.ldapPass = map[string]ldapPassHit{}
 	a.ldapMu.Unlock()
+	a.mu.Lock()
+	a.cache = map[string]time.Time{}
+	a.mu.Unlock()
 }

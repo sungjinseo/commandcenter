@@ -19,14 +19,16 @@ import (
 // A success forgets the name's failures, and so does an hour without one.
 // Names are compared case-insensitively (directories match uid that way)
 // and unknown names count like real ones, so a refusal does not reveal
-// which exist. A name that is not plainName fails like a wrong password
-// before any of this, unchecked and uncounted: a directory also ignores
-// width, Unicode form and extra spaces when it matches a name (RFC 4518),
-// so each such spelling of one entry would get a count of its own. Checks
-// of one name run one at a time, so a burst of parallel guesses cannot all
-// start before the first failures are counted, while parallel requests
-// with the right password (a build whose cached login expired) wait for
-// the first and then hit the password cache.
+// which exist. A name that is not PlainLoginName fails like a wrong
+// password before any of this, unchecked and uncounted (logged at Debug
+// level): a directory also ignores width, Unicode form and extra spaces
+// when it matches a name (RFC 4518), so each such spelling of one entry
+// would get a count of its own. Checks of one name run one at a time, so a
+// burst of parallel guesses cannot all start before the first failures are
+// counted. A password that a realm has cached as a recent success (a wrong
+// one never is) needs no check: it does not wait for that turn, and the
+// requests that waited behind the check that cached it (a build whose
+// cached login expired) take it from the cache, in either realm order.
 //
 // A client address with addrLimit failures within addrWindow of its first
 // one may make only one failed attempt per name: a password spray from one
@@ -102,11 +104,12 @@ type failGate struct {
 func nameKey(name string) string { return "u\x00" + strings.ToLower(name) }
 func addrKey(addr string) string { return "a\x00" + addr }
 
-// plainName reports whether name is printable ASCII without leading,
-// trailing or repeated spaces. For such a name a directory's
-// case-insensitive match is plain ASCII case folding, so nameKey gives
-// all the spellings it matches one count.
-func plainName(name string) bool {
+// PlainLoginName reports whether sign-in accepts name: printable ASCII
+// without leading, trailing or repeated spaces. For such a name a
+// directory's case-insensitive match is plain ASCII case folding, so
+// nameKey gives all the spellings it matches one count. The LDAP
+// connection test applies it too.
+func PlainLoginName(name string) bool {
 	for i := 0; i < len(name); i++ {
 		if name[i] < ' ' || name[i] > '~' {
 			return false
@@ -123,32 +126,48 @@ func lapsed(k string, r failRec, now time.Time) bool {
 	return now.Sub(r.at) > failForget
 }
 
-// throttle runs check for name unless the name is being refused, and
-// records the outcome. An attempt whose caller went away is not counted.
-func (a *Authenticator) throttle(ctx context.Context, name string, check func() (Principal, bool)) (Principal, error) {
-	if !plainName(name) {
-		return Principal{}, ErrBadCredentials
-	}
+// throttle checks name's password with check unless the name is being
+// refused, and records the outcome. check(true) only answers a live cached
+// success, which no wrong password has: it is asked before the name's gate,
+// so a cached login never queues behind the checks of its name, and again
+// at the gate, where the check ahead may just have cached it. Only then
+// does check(false) check the password. An attempt whose caller went away
+// is not counted.
+func (a *Authenticator) throttle(ctx context.Context, name string, check func(cachedOnly bool) (Principal, bool)) (Principal, error) {
 	remote, _ := ctx.Value(clientAddrKey{}).(string)
 	addr, k := throttleAddr(remote), nameKey(name)
-	unlock, err := a.lockName(ctx, k)
-	if err != nil {
+	if !PlainLoginName(name) {
+		a.logger().Debug("sign-in refused: the name is not printable ASCII without leading, trailing or double spaces",
+			"user", strconv.Quote(name), "remote", addr)
 		return Principal{}, ErrBadCredentials
 	}
-	defer unlock()
 	if wait := a.refusal(k, addr); wait > 0 {
 		return Principal{}, &ThrottledError{Wait: wait}
 	}
-	if p, ok := check(); ok {
-		a.mu.Lock()
-		delete(a.fails, k)
-		a.mu.Unlock()
-		return p, nil
+	p, ok := check(true)
+	if !ok {
+		unlock, err := a.lockName(ctx, k)
+		if err != nil {
+			return Principal{}, ErrBadCredentials
+		}
+		defer unlock()
+		if wait := a.refusal(k, addr); wait > 0 {
+			return Principal{}, &ThrottledError{Wait: wait}
+		}
+		if p, ok = check(true); !ok {
+			p, ok = check(false)
+		}
 	}
-	if ctx.Err() == nil {
-		a.noteFailure(name, k, addr)
+	if !ok {
+		if ctx.Err() == nil {
+			a.noteFailure(name, k, addr)
+		}
+		return Principal{}, ErrBadCredentials
 	}
-	return Principal{}, ErrBadCredentials
+	a.mu.Lock()
+	delete(a.fails, k)
+	a.mu.Unlock()
+	return p, nil
 }
 
 // lockName waits, until ctx ends, for the checks of name key k to be ours.

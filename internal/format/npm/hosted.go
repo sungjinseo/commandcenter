@@ -2,14 +2,12 @@ package npm
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -125,7 +123,18 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 			return err
 		}
 	}
+	// A new version is newer than every stored one, by a millisecond if the
+	// clock has not moved on: unpublish refuses to delete a version newer than
+	// the _rev a client read (packumentRev).
+	// ponytail: only stored versions count, so the newest version, deleted and
+	// published again before the clock passes its first publish time, is no
+	// newer than a _rev read in between. A per-package high-water mark fixes it.
 	now := h.Now()
+	for _, p := range existing {
+		if now.UnixMilli() <= p.CreatedAt.UnixMilli() {
+			now = p.CreatedAt.Add(time.Millisecond)
+		}
+	}
 
 	var added []string
 	edited := false // an existing version's deprecation or a dist-tag changed
@@ -367,15 +376,16 @@ func buildPackument(w io.Writer, name string, pkgs []meta.Package, tags []meta.D
 	return tw.Flush()
 }
 
-// packumentRev is the _rev of the document for pkgs: a digest of the versions
-// and when each was published, so dist-tag and deprecation edits keep it. npm
-// sends it back in unpublish URLs ({pkg}/-rev/{rev}).
+// packumentRev is the _rev of the document for pkgs: when its newest version
+// was published, in Unix milliseconds. npm sends it back in unpublish URLs
+// ({pkg}/-rev/{rev}), and unpublish refuses to delete a version published
+// after it; removals and dist-tag and deprecation edits never do.
 func packumentRev(pkgs []meta.Package) string {
-	h := sha256.New()
+	var newest int64
 	for _, p := range pkgs {
-		fmt.Fprintf(h, "%s %d\n", p.Version, p.CreatedAt.UnixMilli())
+		newest = max(newest, p.CreatedAt.UnixMilli())
 	}
-	return hex.EncodeToString(h.Sum(nil)[:16])
+	return strconv.FormatInt(newest, 10)
 }
 
 func npmTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000Z") }

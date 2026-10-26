@@ -238,6 +238,40 @@ func TestLDAPTestEndpoint(t *testing.T) {
 	}
 }
 
+// Re-review rr-auth-1: sign-in refuses a name that is not plain printable
+// ASCII (auth.PlainLoginName) with the generic 401, before any realm. The
+// LDAP test, the admin's tool for "why can't this user sign in", applies
+// the same rule to the name as sent: it never reports such a name as
+// working, and its first step says why sign-in refuses it.
+func TestLDAPTestAgreesWithSignIn(t *testing.T) {
+	e, s := ldapEnv(t)
+	s.Add(ldaptest.Entry{DN: "uid=juergen,ou=people,dc=example,dc=org", Password: "j-pw", Attrs: map[string][]string{
+		"uid": {"juergen"}, "cn": {"Jürgen"}, "mail": {"jürgen@example.org"}}})
+	wantStatus(t, e.admin(t, "PUT", "/-/api/realms/ldap", ldapBody(s.URL("ldap"), `,"userFilter":"(mail={user})"`)), http.StatusOK)
+	wantStatus(t, e.admin(t, "PUT", "/-/api/realms", `{"realms":[{"id":"local","enabled":true},{"id":"token","enabled":true},{"id":"ldap","enabled":true}]}`), http.StatusOK)
+	for _, c := range []struct{ user, pw string }{
+		{"jürgen@example.org", "j-pw"},     // the filter matches a non-ASCII value
+		{" alice@example.org", "alice-pw"}, // outer spaces, as an API client sends them (the UI trims)
+		{"alice@example.org ", "alice-pw"},
+		{"alice@example.org", "alice-pw"}, // a plain name works in both
+	} {
+		body := fmt.Sprintf(`{"user":%q,"password":%q}`, c.user, c.pw)
+		r := e.admin(t, "POST", "/-/api/realms/ldap/test", body)
+		wantStatus(t, r, http.StatusOK)
+		m := r.json(t)
+		login := e.req(t, "POST", "/-/api/login", body, "", nil, true)
+		refused := login.status != http.StatusOK
+		if (m["ok"] == true) == refused {
+			t.Errorf("%q: the LDAP test answers %s, but signing in answers %d %s", c.user, r.body, login.status, login.body)
+			continue
+		}
+		first := m["steps"].([]any)[0].(map[string]any)
+		if refused != (first["step"] == "name") || refused && (first["ok"] != false || !strings.Contains(r.body, "sign-in refuses this name")) {
+			t.Errorf("%q: %s", c.user, r.body)
+		}
+	}
+}
+
 func TestLDAPLoginThroughAPI(t *testing.T) {
 	e, s := ldapEnv(t)
 	configureLDAP(t, e, s)

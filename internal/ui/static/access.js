@@ -452,7 +452,7 @@ export async function viewRoles(view, id) {
 
 // ---- realms and LDAP -------------------------------------------------------------
 
-const STEPS = { connect: "ldap.step.connect", starttls: "ldap.step.starttls", bind: "ldap.step.bind", search: "ldap.step.search", userBind: "ldap.step.userBind", groups: "ldap.step.groups" };
+const STEPS = { name: "ldap.step.name", connect: "ldap.step.connect", starttls: "ldap.step.starttls", bind: "ldap.step.bind", search: "ldap.step.search", userBind: "ldap.step.userBind", groups: "ldap.step.groups" };
 
 export async function viewRealms(view) {
   const isLive = alive();

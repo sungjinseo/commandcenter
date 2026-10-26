@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 
 	"commandcenter/internal/auth"
@@ -146,10 +147,12 @@ func (h *Handler) deleteVersions(ctx context.Context, rp *repo.Repository, name,
 // with DELETE {pkg}/-rev/{rev}. Each request removes whole versions
 // (deleteVersions), so the PUT already takes the tarball and the DELETE that
 // follows answers 404, which npm reads as done. rev is the document's _rev
-// (packumentRev): a request that would delete a stored version is refused
-// (409) when the versions changed since npm read the document, so one
-// published meanwhile is never deleted. npm sends "undefined" for a document
-// an older build wrote without _rev, and that is not checked.
+// (packumentRev): a request is refused (409) when a version it would delete
+// was published, or published again, after that rev, so such a version is
+// never deleted; removals and dist-tag or deprecate edits since npm read the
+// document do not refuse it. npm sends "undefined" for a document an older
+// build wrote without _rev; that, and any rev this build did not write (not
+// a number), is not checked, as the request's own safety net is all it is.
 func (h *Handler) unpublish(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
 	if !repo.AcceptsWrites(rp) {
 		// The resource accepts no method here: an empty Allow.
@@ -192,15 +195,19 @@ func (h *Handler) unpublish(w http.ResponseWriter, r *http.Request, rp *repo.Rep
 			return err
 		}
 	}
-	if rt.Rev != "undefined" {
+	if seen, err := strconv.ParseInt(rt.Rev, 10, 64); err == nil {
 		inner := pick
 		pick = func(tx *meta.Tx, stored []meta.Package) ([]string, error) {
 			drop, err := inner(tx, stored)
-			deletes := slices.ContainsFunc(stored, func(p meta.Package) bool { return slices.Contains(drop, p.Version) })
-			if err == nil && deletes && packumentRev(stored) != rt.Rev {
-				return nil, repo.Errorf(http.StatusConflict, "package %q changed after revision %q was read: read the package again and retry", rt.Package, rt.Rev)
+			if err != nil {
+				return nil, err
 			}
-			return drop, err
+			for _, p := range stored {
+				if p.CreatedAt.UnixMilli() > seen && slices.Contains(drop, p.Version) {
+					return nil, repo.Errorf(http.StatusConflict, "%s@%s was published after revision %q was read: read the package again and retry", rt.Package, p.Version, rt.Rev)
+				}
+			}
+			return drop, nil
 		}
 	}
 	n, _, err := h.deleteVersions(ctx, target, rt.Package, auth.FromContext(ctx).Owner(), pick)
@@ -221,10 +228,12 @@ func (h *Handler) unpublish(w http.ResponseWriter, r *http.Request, rp *repo.Rep
 // that removes the stored versions it no longer lists under "versions". Such
 // a version must be under "time" (npm leaves it there): one missing from both
 // was published after the document was read, and the PUT is refused (409),
-// so a concurrent publish is never lost. dist-tags in the document are
-// ignored; deleteVersions moves them. The body is capped like a publish
-// manifest and decoded in a publish slot; only keys naming stored versions are
-// kept, so memory is bounded by the stored package, not by the body.
+// so a concurrent publish is never lost. A version deleted and published
+// again since is under "time" too; the rev check in unpublish refuses that
+// one. dist-tags in the document are ignored; deleteVersions moves them. The
+// body is capped like a publish manifest and decoded in a publish slot; only
+// keys naming stored versions are kept, so memory is bounded by the stored
+// package, not by the body.
 func (h *Handler) unpublishPick(ctx context.Context, w http.ResponseWriter, r *http.Request, rp *repo.Repository, name string) (func(*meta.Tx, []meta.Package) ([]string, error), error) {
 	stored, err := h.Store.DB.ListPackages(ctx, rp.Name, name)
 	if err != nil {
