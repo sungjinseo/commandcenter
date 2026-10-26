@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -220,8 +221,9 @@ func (f *fakeDB) attemptCount() int {
 func TestNoRetryStormAfterFailure(t *testing.T) {
 	db := &fakeDB{failAll: true, flushedCh: make(chan struct{}, 1)}
 	r := New(db)
-	now := time.Unix(1_700_000_000, 0)
-	r.Now = func() time.Time { return now } // time stands still: always inside the backoff
+	var clock atomic.Int64 // Run reads it from its own goroutine
+	clock.Store(1_700_000_000)
+	r.Now = func() time.Time { return time.Unix(clock.Load(), 0) } // time stands still: always inside the backoff
 	r.MaxKeys = 3
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -247,7 +249,7 @@ func TestNoRetryStormAfterFailure(t *testing.T) {
 		t.Fatalf("retry storm: %d attempts", n)
 	}
 	// After the backoff the threshold works again, and the failed counts were kept.
-	now = now.Add(FailBackoff + time.Second)
+	clock.Add(int64((FailBackoff + time.Second) / time.Second))
 	db.mu.Lock()
 	db.failAll = false
 	db.mu.Unlock()

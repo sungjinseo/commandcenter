@@ -110,6 +110,7 @@ docker compose up -d
 - `meta.db`는 로컬 디스크나 블록 스토리지에 둡니다. NFS·SMB는 안 됩니다. 인스턴스는 하나만 띄웁니다.
 - 중지 대기 시간을 60초로 둡니다. 들어 있는 compose 파일은 이미 `stop_grace_period: 60s`이고, `docker run`(`--stop-timeout 60`)이나 Kubernetes에서는 직접 정합니다.
 - 정기적으로, 그리고 업그레이드 전에 백업합니다. 다운그레이드는 지원하지 않습니다.
+- 저장된 비밀값(SMTP·LDAP·프록시 비밀번호)을 암호화하려면 `COMMANDCENTER_SECRET_KEY`나 `secretKeyFile`로 키를 주고, 키는 백업과 따로 보관합니다.
 - Kubernetes용 참조 매니페스트는 [deploy/kubernetes](deploy/kubernetes/commandcenter.yaml)에 있습니다.
 
 ## 얼마나 가볍나요

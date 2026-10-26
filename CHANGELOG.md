@@ -29,6 +29,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - If browsers reach the web UI over plain HTTP through a reverse proxy that rewrites `Host`
   (nginx's default), make `baseURL` exactly the address they open (scheme, host and port, without a
   default port such as `:80`), or the web UI's writes are refused with 403 (see Changed).
+- To encrypt the stored SMTP password, LDAP bind password and proxy `remoteAuth` credentials, give
+  the server a key: 32 random bytes in base64 (`head -c 32 /dev/urandom | base64`) in
+  `COMMANDCENTER_SECRET_KEY`, or in a file named by the new `secretKeyFile` key. Back the key up
+  apart from `meta.db`: once the secrets are encrypted the server does not start without it, and
+  versions before this one cannot use them ("저장된 비밀값 암호화" in the operations guide).
+- Uploads are now checked against what is inside them: npm tarballs, PyPI wheels and sdists, Maven
+  POMs, Go `go.mod` files, and the `Cargo.toml` and dependencies of crates (see Changed and Fixed).
+  Automation that uploads placeholder or hand-made files can now get 400; files already stored are
+  not re-checked.
+- Build tools and scripts that sign in with a password get `429 Too Many Requests` after five
+  failures of that name in a row; give CI an API token. Scripts that create a role with a `repo:`
+  privilege before its repository, a blob store with a relative path, or a user or role whose id
+  differs from an existing one only in case now get 400 or 409 (see Changed and Security).
 
 ### Added
 
@@ -54,6 +67,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Dependabot: weekly updates for Go modules, the Docker base images and GitHub Actions.
 - `COMMANDCENTER_VERSION` sets the version a compose build reports (`commandcenter version`, web
   UI); without it the version is `dev`.
+- `npm unpublish pkg@version` and `npm unpublish pkg --force` delete from a hosted repository, or
+  through a group's `writeMember`, with the delete privilege (QA H-2, N-10). Dist-tags of removed
+  versions go, `latest` moves to the newest remaining release, and an unpublish whose document
+  misses a version published meanwhile is refused with 409 instead of deleting that version.
+- Go hosted repositories accept `DELETE` of a version's `.mod`, `.info` or `.zip`. It removes the
+  whole version, also one that has only a `.mod`, and needs the delete privilege (QA M-11).
+- `DELETE /-/api/repositories/{name}/components?group=&name=&version=` deletes one component
+  version of a hosted repository in any format with the delete privilege, so PyPI and Cargo
+  versions, which their clients cannot delete, can be removed. Cleanup policies still skip Cargo
+  hosted repositories.
+- The web UI offers "Delete component" in npm, PyPI, Go and Cargo hosted repositories, and the
+  server deletes the whole version; Maven still deletes file by file. The repository API reports
+  `canDelete`.
+- "Revoke all tokens" on a user's page (`DELETE /-/api/users/<id>/tokens`) revokes every API token
+  of that user, including those of the LDAP user with the same id, and reports how many (QA N-16).
+  Password changes and resets still leave tokens valid; the reset message now says so.
+- Paging for the component search (QA L-23): `GET /-/api/search/components` returns a
+  `continuationToken` when more than 100 components match; send it back with the same criteria for
+  the next 100, in repository, group, name and version order. The Search screen has a "Show the
+  next 100" button, and `truncated` still means the response does not hold every match.
+- Optional encryption at rest for stored secrets (QA N-29): with a key in
+  `COMMANDCENTER_SECRET_KEY` or in the file the new `secretKeyFile` key names, the SMTP password,
+  the LDAP bind password and proxy `remoteAuth` passwords and bearer tokens are stored with
+  AES-256-GCM, and plain-text ones are encrypted on the next start. Without a key they stay plain
+  text and every start logs the warning `no secret key is configured`.
 
 ### Changed
 
@@ -135,6 +173,82 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reloads users, roles and settings every 5 s and ends the sessions of users whose password changed
   or who were disabled or removed. Use `docker compose exec -T commandcenter commandcenter user
   reset-password …`; stopping the server is no longer needed.
+- **New npm package names follow npm's rules for new packages** (QA L-15): the first publish of a
+  name with upper case, or of `node_modules` or `favicon.ico`, is refused with 400. Packages
+  already stored, including legacy upper-case names, still accept new versions, and such names stay
+  readable through proxies and groups.
+- **PyPI checks what is inside an upload** (QA M-9): a wheel must be a zip with one `*.dist-info`
+  directory whose `METADATA` names the upload's project and version, and an sdist (`.tar.gz` or
+  `.zip`) must keep a matching `PKG-INFO` in the release's `<name>-<version>/` directory. Anything
+  else, such as a text file or another project's metadata, is a 400, as are zips with over 10,000
+  entries or a central directory over 2 MiB, and `.tar.gz` sdists without `PKG-INFO` in their first
+  512 MiB uncompressed.
+- **PyPI accepts every PEP 440 version spelling and stores it normalized** (QA N-7): `1.0-1`,
+  `01.2`, `2.0a`, `1.0post2`, `1.0.dev` and `1.0RC2` upload as `1.0.post1`, `1.2`, `2.0a0`,
+  `1.0.post2`, `1.0.dev0` and `1.0rc2`. A leading `v` is still refused, now as an invalid version
+  instead of "does not belong to project".
+- **PyPI project pages link files with host-relative URLs** (QA L-5):
+  `/repository/<repo>/packages/…` behind the path of `baseURL`, in the HTML and PEP 691 JSON pages,
+  so pip downloads from the host it used for the index and keeps sending its credentials. For PyPI
+  only the path of `baseURL` matters now.
+- **Go `.mod` files and the `go.mod` in module zips must parse** (QA L-22): balanced blocks, `//`
+  comments only, quoted strings that end on their line, exactly one `module` directive, at most one
+  well-formed `go` directive, and only directives Go 1.26 knows unless the `go` directive names a
+  newer Go. Anything else is 400; the arguments of other directives are not checked.
+- **A Go module zip uploaded after its `.mod` must carry the same `go.mod`** (QA L-22), byte for
+  byte; a zip without `go.mod` matches only the one-line `module <path>` stub. Otherwise the zip
+  gets 409. Under `writePolicy: allow` the zip's `go.mod` replaces the `.mod` instead, which needs
+  the edit privilege (403 without it).
+- **Maven hosted repositories check uploaded POMs** (QA N-6): a `.pom` without a classifier must be
+  well-formed XML of at most 1 MiB (413 beyond) with one `<project>` root. Its `groupId` (or the
+  parent's) and `artifactId`, with `${...}` references replaced from its own `<properties>`, and
+  its `version` (or the parent's) must match its path; anything else gets 400 and stores nothing. A
+  version that holds a `${...}` reference is not compared, so a CI-friendly `${revision}` set with
+  `mvn -Drevision=… deploy` is accepted without flatten-maven-plugin.
+- **Maven proxies fetch and cache only Maven files** (QA L-12): artifacts, signatures,
+  `maven-metadata.xml`, `.meta/prefixes.txt`, `archetype-catalog.xml` and their checksums. Other
+  paths, such as directories, answer 404 through proxies and groups without asking the remote; a
+  `text/html` answer for a file not named `.html` is taken as not found and negative-cached; and
+  directory listings cached by older builds are no longer served but stay in Browse until the proxy
+  is re-created.
+- **Cargo proxy and group index responses carry an `ETag`** (QA L-21) and answer a matching
+  `If-None-Match` with 304, like hosted ones, so cargo stops downloading them again on every
+  resolve. No Cargo index response sends `Last-Modified`.
+- **A version refuses to start on a `meta.db` written by a newer version** (QA N-30): the database
+  now records its schema version (SQLite `user_version`), and the error names both versions and
+  points to restoring the pre-upgrade backup. Versions before this one do not check.
+- **Garbage collection of the default blob store keeps every blob any repository references** (QA
+  N-30), including blobs that only a repository on a named store references, which a version
+  without named stores may have written there.
+- User and role ids that differ from an existing one only in case are refused with 409 `already
+  exists as "<id>"`, and `admin` is a reserved role id in any case (QA N-18). Ids already stored
+  are kept; a first-start import of a `config.yaml` with such ids fails.
+- User names, e-mail addresses and role descriptions refuse control characters such as CR and LF, a
+  user's e-mail must be one plain address, and the SMTP host refuses spaces and control characters
+  even while e-mail is off (QA N-17). Values stored by older versions are only checked when they
+  change.
+- A password made only of spaces is refused everywhere (web UI, `hash-password`, `user
+  reset-password`), and the self-service change refuses the current password as the new one (QA
+  N-21).
+- A role privilege on `repo:<name>` needs an existing repository (400 `unknown repository`);
+  targets the stored role already has may stay. A role cannot name the same target twice (QA N-25,
+  L-9).
+- Blob store paths must be absolute: a relative path is refused instead of silently becoming
+  `<dataDir>/blobstores/<name>`, and a store outside the data directory carries a `warning` in the
+  API and on its page (QA N-22, N-23).
+- `remote` and `remoteAuth` are refused on hosted and group repositories, and `versionPolicy` on
+  groups (QA L-9). Stored definitions that have them load with those unused values dropped and a
+  startup warning. The Maven group form has no version policy field, and web UI input limits match
+  the server (repository, cleanup policy and blob store names 64, task names 100, LDAP timeout
+  1-60 s).
+- The web UI's delete buttons follow the delete privilege (`canDelete`) instead of the add
+  privilege, also for Maven.
+- Deletes (`npm unpublish`, Go `DELETE`, the components API) are refused with 400 in repositories
+  with `writePolicy: deny`, as Maven `DELETE` is.
+- Hosted npm package documents are sent with `Cache-Control: no-cache`, so npm does not offer an
+  unpublished version from its cache.
+- Notification e-mail carries its own `Message-ID` (random, at the From address's domain) next to
+  `Date` (QA N-28).
 - `docker-compose.yml` waits 60 s before it kills the container (`stop_grace_period`), so the 30 s
   request drain and the final writes finish. Give `docker run` (`--stop-timeout 60`) and Kubernetes
   (`terminationGracePeriodSeconds: 60`) the same.
@@ -151,8 +265,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (QA N-11).
 - npm publish accepted `3.0.0+a` next to `3.0.0`, which npm treats as the same version, so installs
   failed. New versions with build metadata are rejected with 400 (QA N-12).
-- `npm unpublish` answered 405 with a message pointing to a web UI and an admin route that do not
-  exist for npm. It now says to use `npm deprecate` (QA H-2, N-10).
+- `npm unpublish` answered 405 for every caller, with a message pointing to a web UI and an admin
+  route that did not exist for npm. It now deletes (see Added) (QA H-2, N-10).
+- npm publish stored any attachment as the tarball: an empty file, one that was not gzip or not
+  tar, one without `package.json`, or one packed for another name or version (QA L-15). The server
+  now reads the stored tarball and answers 400 unless exactly one regular `package.json` of at most
+  1 MiB sits in its top directory (`package/` from `npm pack`; any name is accepted) with the
+  published name and version, and it reads at most 1 GiB uncompressed.
+- npm publish accepted a new version whose manifest `name` differed from the package name; it now
+  answers 400 (QA L-15).
+- PyPI duplicate detection missed wheels that only respelled their compressed tag set (`py3.py3`)
+  or build number (`01`), and a `.zip` sdist next to the `.tar.gz` of a release. They now get 400
+  `File already exists` naming the existing file, a release has one sdist, and malformed wheel file
+  names are a 400 (QA M-8).
+- PyPI uploads ignored `blake2_256_digest`; a mismatch is now a 400 like `sha256_digest` and
+  `md5_digest` (QA L-18).
+- An invalid `Requires-Python` in a wheel's `METADATA` or an sdist's `PKG-INFO` was silently
+  dropped; it is now a 400 like an invalid form value (QA N-9).
+- Go module zips with a corrupt entry (wrong CRC-32) or forged sizes were accepted, and the 500 MiB
+  uncompressed limit trusted the sizes in the headers. Every entry is now read back, and the limit
+  counts the bytes really read (QA N-3).
+- Go module zips with directory entries, as `zip -r` writes them (`module@version/`, `sub/`), were
+  rejected with a contradictory message (QA N-13).
+- A Go module zip could hold a root `LICENSE` over 16 MiB, and a `go.mod` over 16 MiB when the
+  `.mod` had been uploaded first; the go command refuses both (QA N-14).
+- Go module paths ending in `/v0`, `/v1`, `/v01` or `/v1.2`, which the go command rejects, were
+  accepted (QA L-22).
+- The `.info` of a Go version without its `.zip` answered 200 while `list` and `@latest` hid the
+  version. It is now 404, and a group asks its next member (QA N-15).
+- Cargo publish accepted a `.crate` whose `Cargo.toml` declares another `[package]` name or version
+  than the publish metadata, or leaves either to workspace inheritance (`cargo publish` always
+  resolves it). It is now a 400; the manifest is read up to 1 MiB (QA N-4).
+- Cargo publish copied dependency fields into the index unchecked, and new crates could take the
+  names of Windows devices (`con`, `nul`, `com1`, …) or standard library crates (`std`, `core`,
+  `alloc`, `proc_macro`, `test`). Each dependency's name, `version_req`, `kind`, `target` and
+  `registry` are now checked, and such new crates get 400; crates that already exist under such a
+  name keep publishing (QA L-19).
+- Mixed-case crate names showed in lower case in the web UI (search results and `cargo add`
+  snippets), the packages API and upload events. They keep their published spelling now, while
+  lookups stay case-insensitive (QA L-20).
+- A Maven hosted repository accepted any content as a `.pom`, such as plain text or a POM naming
+  other coordinates, while it rejected a broken `maven-metadata.xml` (QA N-6).
+- Maven proxies cached upstream HTML directory listings under the directory's name, served them as
+  files forever and listed them in Browse as both a file and a folder (QA L-12).
 - Clients that sent headers and then stalled their bodies, even without credentials, could fill the
   128 MiB container with idle connections (QA N-5).
 - A body that stalled past the idle timeout answered 500 and logged an ERROR (QA N-8).
@@ -216,5 +371,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A password reset with `user reset-password` did not reach a running server, so the old password
   and the user's sessions kept working until a restart (QA N-2). Response times no longer reveal
   accounts whose stored hash is not a bcrypt hash.
+- Password guessing: failed sign-ins were not limited (QA L-1). After 5 failed password checks of
+  one login name with no success in between (Basic auth, web UI login, `npm login`, the current
+  password of a password change; local and LDAP), the name is now refused with 429 and
+  `Retry-After` for 1 minute after its last failure, doubling per further failure up to 15 minutes;
+  a success or an hour without failures forgets them. An address with 20 failures in 15 minutes
+  gets one failed attempt per name. Checks of one name run one at a time, tokens and existing
+  sessions are not affected, and a revoked token sent as a Basic password is not counted.
+- A PyPI deployer could publish a text file or another project's wheel as a release, which broke
+  `pip install` for that name, or shadow a release file by respelling its wheel tags or adding a
+  second sdist (QA M-8, M-9).
 
 [Unreleased]: https://github.com/sungjinseo/commandcenter/commits/main
