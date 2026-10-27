@@ -214,7 +214,7 @@ func TestReadPOMInfoAllocs(t *testing.T) {
 	runtime.ReadMemStats(&after)
 	mb := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
 	t.Logf("pom %d bytes: %.1f MiB allocated in one ReadPOMInfo", len(pom), mb)
-	if mb > 50 {
+	if mb > 50 && !raceEnabled { // the race detector's instrumentation multiplies allocations
 		t.Fatalf("%.0f MiB allocated for a %d byte POM", mb, len(pom))
 	}
 	if len(info.Dependencies) != 2000 || info.Dependencies[1999].Version != "v" {
