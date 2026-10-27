@@ -381,9 +381,9 @@ func (h *Handler) putMetadata(ctx context.Context, rp *repo.Repository, path str
 // rebuildGA updates groupId/artifactId/maven-metadata.xml from the stored artifacts.
 // Everything but <plugins> is the server's and regenerated (QA L-11); the
 // plugins of the stored document (a groupId directory that is also a GA) are
-// kept. With replace, the document is regenerated from scratch (used after
-// deletes), or removed when no artifact is left; without, a GA without
-// artifacts gets no document.
+// kept. With replace (used after deletes), a GA without artifacts loses its
+// versioning: the document is removed, or keeps only its plugins; without, a
+// GA without artifacts gets no document.
 func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, artifactID string, replace bool) error {
 	gaDir := strings.ReplaceAll(groupID, ".", "/") + "/" + artifactID
 	unlock := h.locks.Lock(rp.Name + "\x00" + gaDir)
@@ -407,26 +407,28 @@ func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, a
 		return err
 	}
 	path := gaDir + "/maven-metadata.xml"
-	if replace {
-		if len(versions) == 0 {
-			if err := h.Store.Delete(ctx, rp.Name, path); err != nil && !errors.Is(err, repo.ErrNotFound) {
-				return err
-			}
-			return nil
-		}
-		return h.storeMetadata(ctx, rp, path, ForVersions(groupID, artifactID, versions, h.Now()))
-	}
-	if len(versions) == 0 {
+	if len(versions) == 0 && !replace {
 		return nil
 	}
 	existing, err := h.loadMetadata(ctx, rp, path)
 	if err != nil {
 		return err
 	}
-	m := ForVersions(groupID, artifactID, versions, h.Now())
+	var plugins []Plugin
 	if existing != nil {
-		m.Plugins = existing.Plugins
+		plugins = existing.Plugins
 	}
+	if len(versions) == 0 {
+		if len(plugins) > 0 {
+			return h.storeMetadata(ctx, rp, path, Merge(&Metadata{Plugins: plugins}))
+		}
+		if err := h.Store.Delete(ctx, rp.Name, path); err != nil && !errors.Is(err, repo.ErrNotFound) {
+			return err
+		}
+		return nil
+	}
+	m := ForVersions(groupID, artifactID, versions, h.Now())
+	m.Plugins = plugins
 	return h.storeMetadata(ctx, rp, path, m)
 }
 

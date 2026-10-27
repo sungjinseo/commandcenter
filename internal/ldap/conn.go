@@ -112,6 +112,7 @@ type Conn struct {
 	id      int64
 	timeout time.Duration
 	host    string
+	ctx     context.Context
 	stop    func() bool
 }
 
@@ -176,7 +177,7 @@ func (c *Conn) watch(ctx context.Context) {
 		c.stop()
 	}
 	nc := c.nc
-	c.stop = context.AfterFunc(ctx, func() { nc.SetDeadline(time.Unix(1, 0)) })
+	c.ctx, c.stop = ctx, context.AfterFunc(ctx, func() { nc.SetDeadline(time.Unix(1, 0)) })
 }
 
 func tlsConfig(host string, o DialOptions) *tls.Config {
@@ -200,6 +201,9 @@ func (c *Conn) send(op []byte) (int64, error) {
 	c.id++
 	if err := c.nc.SetDeadline(time.Now().Add(c.timeout)); err != nil {
 		return 0, err
+	}
+	if err := c.ctx.Err(); err != nil { // the new deadline replaced the one watch set when ctx ended
+		return 0, fmt.Errorf("ldap: %w", err)
 	}
 	if _, err := c.nc.Write(ber.TLV(ber.TagSequence, ber.Int(ber.TagInteger, c.id), op)); err != nil {
 		return 0, fmt.Errorf("ldap: write: %w", err)

@@ -258,3 +258,110 @@ func TestPurgeUnfetchable(t *testing.T) {
 		t.Fatalf("hosted: %s", got)
 	}
 }
+
+// GA org:example and the plugins of groupId org.example share
+// org/example/maven-metadata.xml. Rebuilding the GA's versioning from
+// scratch, by rebuild-metadata, a DELETE or a component delete, keeps the
+// <plugins>, also when the GA's last version goes.
+func TestRebuildKeepsPluginsBesideGA(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	const path = "org/example/maven-metadata.xml"
+	plugin := `<metadata><plugins><plugin><name>a</name><prefix>a</prefix><artifactId>a-maven-plugin</artifactId></plugin></plugins></metadata>`
+	if w := e.do("PUT", "releases", path, plugin); w.Code != 201 {
+		t.Fatalf("PUT plugin-group metadata: %d %s", w.Code, w.Body)
+	}
+	e.putAll(t, "releases", "org/example/1.0/example-1.0.pom", "org/example/2.0/example-2.0.pom", "org/example/3.0/example-3.0.pom")
+	doc := func() string {
+		t.Helper()
+		w := e.do("GET", "releases", path, "")
+		m, err := ParseMetadata(w.Body)
+		if w.Code != 200 || err != nil {
+			t.Fatalf("metadata: %d %v %s", w.Code, err, w.Body)
+		}
+		var out []string
+		for _, p := range m.Plugins {
+			out = append(out, p.Prefix+"="+p.ArtifactID)
+		}
+		if m.Versioning != nil {
+			out = append(out, m.GroupID+":"+m.ArtifactID+" "+strings.Join(m.Versioning.Versions, ","))
+		}
+		return strings.Join(out, " ")
+	}
+	if _, err := e.h.RebuildMetadata(ctx, e.repos["releases"], 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := doc(); got != "a=a-maven-plugin org:example 1.0,2.0,3.0" {
+		t.Fatalf("after rebuild-metadata: %s", got)
+	}
+	if w := e.do("DELETE", "releases", "org/example/3.0/example-3.0.pom", ""); w.Code != 204 {
+		t.Fatalf("DELETE: %d %s", w.Code, w.Body)
+	}
+	if got := doc(); got != "a=a-maven-plugin org:example 1.0,2.0" {
+		t.Fatalf("after a DELETE: %s", got)
+	}
+	c := component.Component{Format: "maven", Group: "org", Name: "example", Version: "2.0"}
+	if _, err := e.h.DeleteComponent(ctx, e.repos["releases"], c, "system"); err != nil {
+		t.Fatal(err)
+	}
+	if got := doc(); got != "a=a-maven-plugin org:example 1.0" {
+		t.Fatalf("after a component delete: %s", got)
+	}
+	if w := e.do("DELETE", "releases", "org/example/1.0/example-1.0.pom", ""); w.Code != 204 {
+		t.Fatalf("DELETE: %d %s", w.Code, w.Body)
+	}
+	if got := doc(); got != "a=a-maven-plugin" {
+		t.Fatalf("after deleting the last version: %s", got)
+	}
+}
+
+// An orphan GA document loses its versions whatever groupId and artifactId
+// it names (older builds stored uploads as sent, so one may name no GA or
+// another), also inside the directory of another GA. A plugin-group
+// document keeps its <plugins>.
+func TestRebuildRemovesOrphanVersions(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.putAll(t, "releases", "org/example/1.0/example-1.0.pom", "org/example.app/1.0/example.app-1.0.pom")
+	versions := `<versioning><versions><version>9.9</version></versions></versioning>`
+	orphans := map[string]string{
+		"org/example/app": `<metadata><groupId>org.example</groupId><artifactId>app</artifactId>` + versions + `</metadata>`, // under GA org:example
+		"org/plain/lib":   `<metadata>` + versions + `</metadata>`,
+		"org/foreign/lib": `<metadata><groupId>evil</groupId><artifactId>other</artifactId>` + versions + `</metadata>`,
+		"org/plugins":     `<metadata><plugins><plugin><prefix>p</prefix><artifactId>p-maven-plugin</artifactId></plugin></plugins>` + versions + `</metadata>`,
+	}
+	for d, doc := range orphans {
+		e.seed(t, "releases", d+"/maven-metadata.xml", doc)
+	}
+	// No GA has the directory org/example.app/1.0 (groupId org.example.app is
+	// org/example/app): this document is not a GA's and stays.
+	const notGA = "org/example.app/1.0/maven-metadata.xml"
+	e.seed(t, "releases", notGA, `<metadata><groupId>org</groupId><artifactId>example.app</artifactId><version>1.0</version>`+versions+`</metadata>`)
+
+	res, err := e.h.RebuildMetadata(ctx, e.repos["releases"], 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.GAs != 2 || res.Removed != len(orphans) || res.Failed != 0 {
+		t.Fatalf("result: %+v", res)
+	}
+	for d := range orphans {
+		w := e.do("GET", "releases", d+"/maven-metadata.xml", "")
+		if d != "org/plugins" {
+			if w.Code != 404 {
+				t.Errorf("%s: %d %s", d, w.Code, w.Body)
+			}
+			continue
+		}
+		m, err := ParseMetadata(w.Body)
+		if w.Code != 200 || err != nil || m.Versioning != nil || len(m.Plugins) != 1 || m.Plugins[0].Prefix != "p" {
+			t.Errorf("%s: %d %v %s", d, w.Code, err, w.Body)
+		}
+	}
+	if w := e.do("GET", "releases", notGA, ""); w.Code != 200 {
+		t.Errorf("%s: %d", notGA, w.Code)
+	}
+	if w := e.do("GET", "releases", "org/example/maven-metadata.xml", ""); w.Code != 200 || strings.Contains(w.Body.String(), "9.9") {
+		t.Errorf("GA org:example: %d %s", w.Code, w.Body)
+	}
+}
