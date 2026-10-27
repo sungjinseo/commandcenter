@@ -157,7 +157,7 @@ const TYPES = { hosted: "hosted", proxy: "proxy", group: "group" };
 export const fmtBadge = (f) => h("span", { class: "badge" + (FORMATS.includes(f) ? " f-" + f : "") }, f);
 export const typeBadge = (ty) => h("span", { class: "badge" + (TYPES[ty] ? " t-" + ty : "") }, ty);
 export const FORMAT_NAMES = { maven: "Maven", npm: "npm", pypi: "PyPI", go: "Go", cargo: "Cargo", docker: "Docker", raw: "Raw", helm: "Helm" };
-const TILES = { maven: "mvn", npm: "npm", pypi: "Py", go: "Go", cargo: "Rs", docker: "dkr", raw: "raw", helm: "H" };
+const TILES = { maven: "M", npm: "npm", pypi: "py", go: "go", cargo: "rs", docker: "dk", raw: "raw", helm: "hm" };
 // fmtTile is the concept's coloured format tile.
 export const fmtTile = (f) => h("span", { class: "format" + (FORMATS.includes(f) ? " " + f : ""), "aria-hidden": "true" },
   FORMATS.includes(f) ? TILES[f] : String(f || "?").slice(0, 1));

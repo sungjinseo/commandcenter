@@ -151,7 +151,7 @@ export function trendCard(isLive, range, title, subText) {
     put(body, h("div", { class: "empty" }, t("chart.failed")));
     if (e.status !== 403) handleError(e);
   });
-  return card(title, subText, body, badge(label));
+  return card(title, subText, body);
 }
 
 // ---- repository operations ----------------------------------------------------------
@@ -160,6 +160,11 @@ const RANGE_MS = { "1h": 3600000, "24h": 86400000, "7d": 604800000 };
 const rangeOptions = () => [["1h", t("repoOps.1h")], ["24h", t("repoOps.24h")], ["7d", t("repoOps.7d")]];
 const metric = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
 const percent = (v) => (v * 100).toLocaleString(locale(), { maximumFractionDigits: 2 }) + "%";
+const collectedTime = (value) => {
+  const d = new Date(value);
+  if (isNaN(d)) return dash;
+  return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+};
 
 export function repositoryStatsCard(isLive) {
   const range = sel(rangeOptions(), "24h", { "aria-label": t("repoOps.range") });
@@ -182,8 +187,7 @@ export function repositoryStatsCard(isLive) {
       if (!d || !Array.isArray(d.repositories)) throw new Error("Invalid repository statistics");
       panel.hidden = false;
       put(collected, t("repoOps.collected", {
-        range: rangeOptions().find(([value]) => value === selected)[1],
-        at: d.collectedAt ? fmtDate(d.collectedAt) : dash,
+        at: d.collectedAt ? collectedTime(d.collectedAt) : dash,
       }));
       put(body, tbl([
         t("col.repo"), t("col.status"), ...[
@@ -193,7 +197,8 @@ export function repositoryStatsCard(isLive) {
       ], d.repositories.map((r) => {
         const href = "#admin/support/status?" + new URLSearchParams({ repo: r.name, range: selected });
         const cell = (v, format = fmtNum) => h("td", { class: "num" }, metric(v)
-          ? h("a", { class: "metric-link", href, title: t("repoOps.openLogs", { repo: r.name }) }, format(v)) : dash);
+          ? v === 0 ? h("span", { class: "muted" }, format(v))
+            : h("a", { class: "metric-link", href, title: t("repoOps.openLogs", { repo: r.name }) }, format(v)) : dash);
         const latencyCell = (avg, max) => cell(avg, (v) => fmtNum(v) + " / " + (metric(max) ? fmtNum(max) : dash) + " ms");
         const proxy = r.type === "proxy";
         const cacheTotal = metric(r.cacheHits) && metric(r.cacheMisses) ? r.cacheHits + r.cacheMisses : 0;
@@ -208,7 +213,7 @@ export function repositoryStatsCard(isLive) {
         },
           h("td", null, nameCell(r.format, h("a", { href: open }, h("strong", null, r.name)), r.format + " · " + r.type)),
           h("td", null, badge([h("i", { class: "dot", "aria-hidden": "true" }), status], bad ? "red" : r.requests > 0 ? "green" : null)),
-          cell(r.requests), cell(r.errorRate, percent), cell(proxy ? r.upstreamFailures : null),
+          cell(r.requests), cell(r.requests > 0 ? r.errorRate : null, percent), cell(proxy ? r.upstreamFailures : null),
           latencyCell(proxy ? r.upstreamLatencyAvgMs : null, r.upstreamLatencyMaxMs),
           cell(proxy && cacheTotal > 0 ? r.cacheHits / cacheTotal : null, percent),
           cell(r.bytesIn, fmtBytes), cell(r.bytesOut, fmtBytes), latencyCell(r.latencyAvgMs, r.latencyMaxMs));

@@ -174,7 +174,7 @@ function memberPicker(candidates, initial, onChange) {
 
 // ---- delete ---------------------------------------------------------------------
 
-function deleteDialog(name, isLive) {
+export function deleteDialog(name, isLive) {
   let busy = false; // a request is in flight: typing must not re-enable Delete
   const id = uid("del");
   const input = h("input", { id, type: "text", autocomplete: "off", spellcheck: "false", autofocus: true });
@@ -211,7 +211,10 @@ function deleteDialog(name, isLive) {
     }
     m.close();
     await loadRepos(true);
-    if (isLive()) location.hash = adminRepoLink();
+    if (isLive()) {
+      if (location.hash === adminRepoLink()) rerender();
+      else location.hash = adminRepoLink();
+    }
   });
 }
 

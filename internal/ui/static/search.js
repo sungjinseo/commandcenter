@@ -74,6 +74,7 @@ export async function viewSearch(view, kind, criteria) {
   const reset = h("button", { type: "button", class: "btn" }, t("search.reset"));
   // The submit button lets Enter search at once; typing searches after a pause.
   const form = h("form", { class: "card search-console", role: "search", "aria-label": k.title },
+    h("header", { class: "card-head" }, h("h2", null, t("search.keyword"))),
     h("div", { class: "card-body" }, body, h("button", { type: "submit", class: "sr-only", tabindex: "-1" }, t("nav.search"))));
   const out = h("div", { class: "search-out" });
   put(view, pageHead(k.title, h("p", null, t("search.sub")), h("div", { class: "actions" }, reset), { eyebrow: t("search.eyebrow") }), form, out);

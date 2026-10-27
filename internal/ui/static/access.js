@@ -139,7 +139,7 @@ async function userCreate(view) {
     field(t("users.source"), source),
     pwF, pw2F,
     field(t("col.status"), status),
-    groupField(t("users.roles"), rg.el)), ldapNote, h("div", { class: "actions end" }, save));
+    groupField(t("users.roles"), rg.el)), ldapNote, h("div", { class: "savebar" }, save));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     fs.clear();
@@ -254,7 +254,7 @@ async function userDetail(view, id) {
       field(t("users.id"), idIn), field(t("users.source"), srcIn),
       field(t("users.name"), nameIn), field(t("users.email"), emailIn),
       field(t("col.status"), status), groupField(t("users.roles"), rg.el, ldap ? t("users.overrideHelp") : null)),
-    ldap ? notice(t("users.ldapNote")) : null, h("div", { class: "actions end" }, save));
+    ldap ? notice(t("users.ldapNote")) : null, h("div", { class: "savebar" }, save));
     const send = (patch) => api("users/" + enc(id), { method: "PUT", body: Object.assign({ name: u.name, email: u.email, roles: u.roles || [], status: u.status || "active" }, patch) });
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
@@ -329,6 +329,15 @@ export async function viewRoles(view, id) {
   let cur = creating ? { id: "", description: "", privileges: [] } : roles.find((r) => r.id === id) || (id === undefined ? roles[0] : null);
   const add = h("a", { class: "btn primary", href: roleLink("create") }, t("roles.create"));
   const eb = eyebrow();
+  if (id === undefined) {
+    const panel = card(t("nav.roles"), null, null);
+    panel.appendChild(tbl([t("roles.id"), t("roles.desc"), t("roles.privs")], roles.map((r) => row([
+      [h("a", { href: roleLink(r.id) }, h("strong", null, r.id))],
+      [r.description || dash], [(r.privileges || []).length, "num"],
+    ])), t("roles.none")));
+    put(view, pageHead(t("nav.roles"), sub(t("roles.sub")), acts(add), eb), panel);
+    return;
+  }
   if (!cur && !creating) {
     put(view, pageHead(t("nav.roles"), sub(t("roles.sub")), acts(add), eb), notFound(id === undefined ? t("roles.none") : t("roles.notFound", { id })));
     return;
@@ -418,7 +427,7 @@ export async function viewRoles(view, id) {
       card(creating ? t("roles.createTitle") : cur.id, t("roles.infoSub"), fields(
         field(t("roles.id"), idIn, creating ? t("roles.idHelp") : null, { req: creating }), field(t("roles.desc"), descIn))),
       card(t("roles.privs"), t("roles.privsEditSub"), [rowsBox, h("div", { class: "actions" }, addBtn), notice(t("roles.overwriteNote"))]),
-      h("div", { class: "actions end" }, cancel, save));
+      h("div", { class: "savebar" }, cancel, save));
     main.onsubmit = async (ev) => {
       ev.preventDefault();
       fs.clear();
@@ -456,11 +465,10 @@ const STEPS = { name: "ldap.step.name", connect: "ldap.step.connect", starttls: 
 
 export async function viewRealms(view) {
   const isLive = alive();
-  const [rd, ld, rl] = await Promise.all([api("realms"), api("realms/ldap"), api("roles")]);
+  const rd = await api("realms");
   if (!isLive()) return;
   const avail = rd.available && rd.available.length ? rd.available : ["local", "token", "ldap"];
   let active = (rd.realms || []).filter((r) => r.enabled).map((r) => r.id);
-  const root = h("div", { class: "stack" });
   const realmBox = h("div", { class: "stack" });
   const fsR = formState(realmBox); // the realm lists and the LDAP form each keep their own edits
   const activeBox = h("div"), availBox = h("div"), noLocal = notice(t("realms.noLocal"), "amber");
@@ -509,6 +517,45 @@ export async function viewRealms(view) {
     }
   });
 
+  put(realmBox, fsR.err, fsR.ok,
+    h("div", { class: "equal" }, card(t("realms.active"), t("realms.activeSub"), activeBox), card(t("realms.available"), t("realms.availableSub"), availBox)),
+    noLocal, notice(t("realms.lockNote"), "amber"), h("div", { class: "savebar" }, saveR));
+  // Each type owns its API, fields and dirty state. OIDC can register its
+  // editor when the server's field contract is available.
+  const editors = {
+    ldap: async () => {
+      const [ld, rl] = await Promise.all([api("realms/ldap"), api("roles")]);
+      if (!isLive()) return [];
+      return ldapSettings(ld, rl, isLive);
+    },
+    oidc: async () => [card("OIDC", null, notice(t("realms.pending")))],
+  };
+  const types = avail.filter((id) => editors[id]);
+  const panels = new Map();
+  const config = h("div", { class: "stack" });
+  const type = sel(types.map((id) => [id, realmName(id)]), types[0]);
+  const showType = async () => {
+    const id = type.value;
+    if (!editors[id]) return;
+    if (!panels.has(id)) {
+      const panel = h("div", { class: "stack", "data-realm-type": id }, loading());
+      panels.set(id, panel);
+      config.appendChild(panel);
+      editors[id]().then((nodes) => { if (isLive()) put(panel, nodes); }, (e) => {
+        panels.delete(id);
+        panel.remove();
+        if (isLive()) handleError(e);
+      });
+    }
+    for (const [key, panel] of panels) panel.hidden = key !== id;
+  };
+  type.addEventListener("change", showType);
+  put(view, pageHead(t("nav.realms"), sub(t("realms.sub")), null, eyebrow()), realmBox,
+    types.length ? card(t("realms.settings"), null, fields(field(t("col.type"), type))) : null, config);
+  await showType();
+}
+
+function ldapSettings(ld, rl, isLive) {
   // ---- LDAP form
   const roleOpts = roleItems(rl.roles || []);
   const form = h("form", { novalidate: true });
@@ -579,7 +626,7 @@ export async function viewRealms(view) {
       groupField(t("ldap.defaults"), defaults.el, t("ldap.defaultsHelp"))),
     insecureWarn,
     h("h3", { class: "card-title" }, t("ldap.maps")), h("p", { class: "hint" }, t("ldap.mapsHelp")), mapBox,
-    h("div", { class: "actions" }, addMapBtn), adminCnWarn, adminDefWarn, saveHint, h("div", { class: "actions end" }, save));
+    h("div", { class: "actions" }, addMapBtn), adminCnWarn, adminDefWarn, saveHint, h("div", { class: "savebar" }, save));
   syncWarn();
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -646,12 +693,7 @@ export async function viewRealms(view) {
   const testCard = card(t("ldap.testTitle"), t("ldap.testSub"), [
     fields(field(t("ldap.testUser"), tUser, t("ldap.testUserHelp")), field(t("ldap.testPw"), tPw)),
     h("div", { class: "actions end" }, run), result]);
-  // the test fields are not part of the settings: they must not mark the page busy
-  put(realmBox, fsR.err, fsR.ok,
-    h("div", { class: "equal" }, card(t("realms.active"), t("realms.activeSub"), activeBox), card(t("realms.available"), t("realms.availableSub"), availBox)),
-    noLocal, notice(t("realms.lockNote"), "amber"));
-  put(root, realmBox, card(t("ldap.title"), t("ldap.sub"), form));
-  put(view, pageHead(t("nav.realms"), sub(t("realms.sub")), acts(saveR), eyebrow()), root, testCard);
+  return [card(t("ldap.title"), t("ldap.sub"), form), testCard];
 }
 
 // ---- account ---------------------------------------------------------------------
@@ -671,7 +713,7 @@ export async function viewAccount(view) {
     const fs = formState(form);
     const save = h("button", { type: "submit", class: "btn primary" }, t("acct.pwSave"));
     put(form, fs.err, fs.ok, fields(field(t("acct.current"), cur, null, { full: true }), field(t("users.newPw"), pw, t("users.pwHelp")), field(t("users.pwConfirm"), pw2)),
-      h("div", { class: "actions end" }, save));
+      h("div", { class: "savebar" }, save));
     form.addEventListener("submit", async (ev) => {
       ev.preventDefault();
       fs.clear();

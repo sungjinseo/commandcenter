@@ -49,7 +49,7 @@ export async function viewTokens(view, admin) {
   const form = h("form", null,
     userInput ? h("div", { class: "field" }, h("label", { for: "tok-user" }, t("tok.user")), userInput, h("small", null, t("tok.userHelp"))) : null,
     h("div", { class: "notice" }, t("tok.about")),
-    h("div", { class: "actions end" }, btn));
+    h("div", { class: "savebar" }, btn));
 
   const load = async () => {
     const data = await api("tokens");
@@ -117,7 +117,7 @@ export async function viewTokens(view, admin) {
   put(view,
     pageHead(t("nav.tokens"), sub(admin ? t("tok.subAdmin") : t("tok.sub", { user: me.user })), null, { eyebrow: t("users.eyebrow") }),
     created,
-    h("div", { class: "two" }, list, card(t("tok.new"), t("tok.newSub"), form)));
+    h("div", { class: "stack" }, list, card(t("tok.new"), t("tok.newSub"), form)));
   await load();
 }
 
@@ -130,14 +130,15 @@ let statusUser = null; // whose samples these are
 function sparkline(values) {
   const W = 300, H = 60;
   const svg = s("svg", { class: "spark", viewBox: "0 0 " + W + " " + H, preserveAspectRatio: "none", role: "img", "aria-label": t("st.rssAria") });
-  if (values.length < 2) return svg;
+  if (!values.length) return h("div", { class: "empty" }, t("st.noRss"));
   let min = Math.min(...values), max = Math.max(...values);
   if (max - min < 1) { max += 1; min -= 1; }
   const pad = (max - min) * 0.1;
   min -= pad; max += pad;
-  const step = W / 59;
-  const x0 = W - (values.length - 1) * step;
+  const step = W / Math.max(1, values.length - 1);
+  const x0 = 0;
   const pts = values.map((v, i) => (x0 + i * step).toFixed(1) + "," + (H - (v - min) / (max - min) * H).toFixed(1));
+  if (values.length === 1) pts.push(W + "," + (H - (values[0] - min) / (max - min) * H).toFixed(1));
   svg.appendChild(s("polygon", { class: "area", points: x0.toFixed(1) + "," + H + " " + pts.join(" ") + " " + W + "," + H }));
   svg.appendChild(s("polyline", { class: "line", points: pts.join(" ") }));
   return svg;
@@ -152,7 +153,7 @@ function metrics(isLive, onData) {
     statusUser = state.me.user;
   }
   const stats = h("div", { class: "stats" }, loading());
-  const spark = h("div", null);
+  const spark = h("div", null, h("div", { class: "empty" }, t("st.noRss")));
   const updated = h("span", { class: "badge", "aria-live": "polite" }, "");
   const render = (st) => {
     const last = rssSamples.length ? rssSamples[rssSamples.length - 1] : 0;
@@ -203,15 +204,7 @@ function metrics(isLive, onData) {
 }
 
 const statusLink = (name) => "#admin/support/status" + (name ? ":" + enc(name) : "");
-const healthBadge = (ok) => badge("● " + (ok ? t("st.ok") : t("st.bad")), ok ? "green" : "red");
-
-function healthBox(c) {
-  return h("div", { class: "healthbox" + (c.healthy ? "" : " bad") },
-    h("h3", null, h("a", { href: statusLink(c.name) }, c.name)),
-    healthBadge(c.healthy),
-    h("p", { class: "tiny muted hb-msg" }, c.message || dash),
-    h("p", { class: "tiny muted" }, t("st.checked", { time: fmtDate(c.lastChecked), ms: fmtNum(c.durationMs) })));
-}
+const healthBadge = (ok) => badge([h("span", { class: "dot " + (ok ? "ok" : "err"), "aria-hidden": "true" }), ok ? t("st.ok") : t("st.bad")]);
 
 async function viewStatus(view, name, criteria) {
   const isLive = alive();
@@ -235,10 +228,13 @@ async function viewStatus(view, name, criteria) {
       return;
     }
     const bad = checks.filter((c) => !c.healthy).length;
-    put(box,
-      h("div", { class: bad ? "attention" : "notice green", role: "status" },
-        h("strong", null, bad ? t("st.sumBad", { n: fmtNum(bad) }) : t("st.sumOk", { n: fmtNum(checks.length) }))),
-      checks.length ? h("div", { class: "health-grid" }, checks.map(healthBox)) : notFound(t("st.none")));
+    const table = card(t("st.checks"), null, null);
+    table.appendChild(tbl([t("col.name"), t("col.status"), t("st.message"), t("st.lastChecked")], checks.map((c) => row([
+      [h("a", { href: statusLink(c.name) }, c.name)], [healthBadge(c.healthy)], [c.message || dash],
+      [h("span", { title: t("st.duration") + ": " + fmtNum(c.durationMs) + " ms" }, fmtDate(c.lastChecked)), "nowrap"],
+    ])), t("st.none")));
+    put(box, checks.length ? h("p", { class: "status-summary" + (bad ? " bad" : ""), role: "status" },
+      bad ? t("st.sumBad", { n: fmtNum(bad) }) : t("st.sumOk", { n: fmtNum(checks.length) })) : null, table);
   };
 
   const load = async () => {
@@ -262,11 +258,12 @@ async function viewStatus(view, name, criteria) {
 
   const ops = name === undefined; // the request chart and the logs belong to the overview
   put(view, pageHead(t("nav.status"), sub(t("st.sub")), acts(refresh, dl), { eyebrow: t("sys.eyebrow") }),
-    h("h2", { class: "section-title" }, t("st.checks")), box,
-    ops ? [h("h2", { class: "section-title" }, t("st.activity")),
+    box,
+    ops ? [
       h("div", { class: "two" }, trendCard(isLive, "24h", t("st.trend"), t("st.trendSub")), m.card),
       logsCard(isLive, criteria)] : null,
-    h("h2", { class: "section-title" }, t("st.metrics")), m.stats, ops ? null : m.card);
+    h("h2", { class: "section-title" }, t("st.metrics")), m.stats, ops ? null : m.card,
+    ops ? systemInfoDisclosure(isLive) : null);
   if (criteria && criteria.has("repo")) view.querySelector("#repository-logs").scrollIntoView({ block: "start" });
   await load();
 }
@@ -285,18 +282,48 @@ function sysValue(k, v) {
   return String(v);
 }
 
+function systemInfoTable(d) {
+  const names = SYS_SECTIONS.filter((n) => d[n]).concat(Object.keys(d).filter((n) => !SYS_SECTIONS.includes(n)).sort());
+  return tbl([t("sys.section"), t("col.name"), t("sys.value")], names.flatMap((n) =>
+    Object.entries(d[n] || {}).map(([k, v]) => row([
+      [SYS_SECTIONS.includes(n) ? tk("sys", n.replace(/^[a-z]+-/, "")) : n],
+      [k], [sysValue(k, v)],
+    ]))));
+}
+
+function systemInfoDisclosure(isLive) {
+  const body = h("div", null);
+  const details = h("details", { class: "card system-info" },
+    h("summary", { class: "card-head" }, t("nav.sysinfo")), body);
+  let loaded = false, busy = false;
+  details.addEventListener("toggle", async () => {
+    if (!details.open || loaded || busy) return;
+    busy = true;
+    put(body, loading());
+    try {
+      const d = await api("systeminformation");
+      if (!isLive()) return;
+      const dl = h("button", { type: "button", class: "btn small", onclick: () => downloadJSON("sysinfo.json", d) }, t("common.download"));
+      put(body, h("div", { class: "toolbar" }, h("span", { class: "grow" }, t("sys.sub")), dl), systemInfoTable(d));
+      loaded = true;
+    } catch (e) {
+      if (isLive()) { put(body, h("div", { class: "empty" }, e.message)); handleError(e); }
+    } finally { busy = false; }
+  });
+  return details;
+}
+
 async function viewSysInfo(view) {
   const isLive = alive();
   const d = await api("systeminformation");
   if (!isLive()) return;
   const dl = h("button", { type: "button", class: "btn" }, t("common.download"));
   dl.addEventListener("click", () => downloadJSON("sysinfo.json", d));
-  const names = SYS_SECTIONS.filter((n) => d[n]).concat(Object.keys(d).filter((n) => !SYS_SECTIONS.includes(n)).sort());
-  const title = (n) => (SYS_SECTIONS.includes(n) ? tk("sys", n.replace(/^[a-z]+-/, "")) : n);
+  const panel = card(t("nav.sysinfo"), t("sys.sub"), null);
+  panel.appendChild(systemInfoTable(d));
   put(view,
     pageHead(t("nav.sysinfo"), sub(t("sys.sub")), acts(dl), { eyebrow: t("sys.eyebrow") }),
-    h("div", { class: "equal sysinfo" }, names.map((n) => card(title(n), n,
-      Object.entries(d[n] || {}).map(([k, v]) => kv(k, h("span", { class: "mono" }, sysValue(k, v))))))));
+    panel);
 }
 
 // ---- settings router ------------------------------------------------------------------

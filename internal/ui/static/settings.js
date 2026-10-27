@@ -40,16 +40,16 @@ export async function viewBlobStores(view, name) {
   put(view,
     pageHead(t("nav.blobstores"), sub(t("blob.sub")), acts(h("a", { class: "btn primary", href: storeLink("create") }, t("blob.create"))), { eyebrow: t("blob.eyebrow") }),
     fs.ok,
-    list.length ? h("div", { class: "equal" }, list.map((s) => {
-      const p = pctOf(s.usedBytes, s.fsTotal);
-      return card(s.name, storeType(s) + " · " + t("blob.repoCount", { n: fmtNum(s.repoCount || 0) }), [
-        h("div", { class: "stat-value" }, known(s.fsTotal) ? fmtBytes(s.usedBytes || 0) + " / " + fmtBytes(s.fsTotal) : fmtBytes(s.usedBytes || 0),
-          known(s.fsTotal) ? null : h("small", null, t("blob.capUnknown"))),
-        known(s.fsTotal) ? bar(p, p > 70 ? "amber" : null) : null,
-        kv(t("blob.count"), fmtNum(s.blobCount || 0)),
-        kv(t("blob.path"), h("span", { class: "mono" }, storeLocation(s))),
-      ], h("a", { class: "btn small", href: storeLink(s.name) }, t("common.details")));
-    })) : notFound(t("blob.none")),
+    card(t("nav.blobstores"), null, tbl([
+      t("col.name"), t("col.type"), t("blob.path"),
+      { t: t("blob.usage"), cls: "num" }, { t: t("blob.count"), cls: "num" },
+      { t: t("pol.repos"), cls: "num" },
+    ], list.map((s) => h("tr", null,
+      h("td", null, h("a", { href: storeLink(s.name) }, h("strong", null, s.name))),
+      h("td", null, storeType(s)), h("td", null, h("code", null, storeLocation(s))),
+      h("td", { class: "num" }, fmtBytes(s.usedBytes || 0), known(s.fsTotal) ? " / " + fmtBytes(s.fsTotal) : null),
+      h("td", { class: "num" }, fmtNum(s.blobCount || 0)),
+      h("td", { class: "num" }, fmtNum(s.repoCount || 0)))), t("blob.none"))),
     notice(t("blob.note")));
 }
 
@@ -346,11 +346,11 @@ export async function viewGeneral(view) {
       field(t("gen.lang"), lang, t("gen.langHelp")))),
     card(t("gen.session"), t("gen.sessionSub"), fields(field(t("gen.idle"), idle, t("gen.idleHelp")))),
     card(t("gen.upload"), t("gen.uploadSub"), fields(field(t("gen.maxUpload"), maxUp, t("gen.maxUploadHelp")))),
-    card(t("smtp.title"), t("smtp.sub"), mailBox)));
+    card(t("smtp.title"), t("smtp.sub"), mailBox)), h("div", { class: "savebar" }, save));
 
   const help = h("aside", { class: "form-help" }, h("h3", null, t("gen.helpTitle")), h("p", null, t("gen.helpLive")), h("p", null, t("gen.helpMail")));
   put(view,
-    pageHead(t("nav.general"), sub(t("gen.sub")), acts(save), { eyebrow: t("gen.eyebrow") }),
+    pageHead(t("nav.general"), sub(t("gen.sub")), null, { eyebrow: t("gen.eyebrow") }),
     fs.ok,
     h("div", { class: "form-layout" }, form, help));
 }

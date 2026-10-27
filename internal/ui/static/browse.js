@@ -2,11 +2,12 @@
 // asset detail views (search reuses the detail views). Plan 10 Decision 8
 // gives the layout; the tree, deletion and history rules are plan 8's.
 import {
-  state, h, put, api, APIError, apiRepo, enc, encPath, browseLink, searchLink, adminRepoLink, fmtBytes, fmtNum, fmtDate,
+  state, h, put, api, APIError, apiRepo, enc, encPath, browseLink, searchLink, adminRepoLink, fmtBytes, fmtNum, fmtDate, alive,
   fmtBadge, typeBadge, fmtTile, nameCell, onlineBadge, FORMATS, FORMAT_NAMES, canUpload, uploadLink, repoBase, copyButton, copyLine,
   pageHead, loading, truncNote, card, kv, tbl, handleError, showError, icon,
 } from "./util.js";
-import { modal } from "./shell.js";
+import { modal, dropdown } from "./shell.js";
+import { deleteDialog } from "./repoform.js";
 import { t } from "./i18n.js";
 
 let uidN = 0;
@@ -20,7 +21,9 @@ const full = (b) => { b.classList.remove("small"); return b; }; // a full-size b
 // With admin it is the settings list (#admin/repository/repositories): names
 // open the settings form, and the head offers "Create repository".
 export async function viewRepos(view, admin) {
+  const isLive = alive();
   const data = await api("repositories");
+  if (!isLive()) return;
   const repos = data.repositories || [];
   state.repos = repos;
   const q = h("input", { id: "repo-filter", type: "search", placeholder: t("repos.filter"), autocomplete: "off" });
@@ -30,17 +33,30 @@ export async function viewRepos(view, admin) {
     ["hosted", "proxy", "group"].filter((ty) => repos.some((r) => r.type === ty)).map((ty) => h("option", { value: ty }, ty)));
   const count = h("span", { class: "end", role: "status" });
   const rows = repos.map((r) => {
-    const tr = h("tr", null,
+    const open = admin ? adminRepoLink(r.name) : browseLink(r.name);
+    const more = h("button", { type: "button", class: "btn small ghost", "aria-label": t("repos.actionsFor", { name: r.name }), title: t("col.actions") }, "…");
+    const menu = dropdown(more, () => {
+      const copy = copyButton(r.url, null, t("repos.copyUrlFor", { name: r.name }), t("repos.copyUrl"));
+      copy.className = "menu-item";
+      copy.setAttribute("role", "menuitem");
+      return [
+        h("a", { class: "menu-item", role: "menuitem", href: browseLink(r.name) }, t("repos.browse")), copy,
+        admin ? h("button", { type: "button", class: "menu-item", role: "menuitem", onclick: () => deleteDialog(r.name, isLive) }, t("common.delete")) : null,
+      ];
+    });
+    const tr = h("tr", { class: "clickable", tabindex: 0, "aria-label": r.name,
+      onclick: (ev) => { if (!ev.target.closest("a,button,.menu")) location.hash = open; },
+      onkeydown: (ev) => {
+        if (ev.target === ev.currentTarget && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); location.hash = open; }
+      },
+    },
       h("td", { class: "name" }, nameCell(r.format, h("a", { href: admin ? adminRepoLink(r.name) : browseLink(r.name) }, h("strong", null, r.name)), FORMAT_NAMES[r.format] || r.format)),
       h("td", null, typeBadge(r.type)),
       admin ? h("td", null, r.type === "group" ? "—" : r.blobStore || "default") : null,
       h("td", null, onlineBadge(r.online)),
       h("td", { class: "num" }, r.type === "group" ? "—" : fmtNum(r.assets)),
       h("td", { class: "num" }, r.type === "group" ? "—" : fmtBytes(r.bytes)),
-      h("td", { class: "act" }, h("div", { class: "actions" },
-        admin ? h("a", { class: "btn small", href: adminRepoLink(r.name) }, t("repos.settings")) : null,
-        h("a", { class: "btn small", href: browseLink(r.name) }, t("repos.browse")),
-        copyButton(r.url, null, t("repos.copyUrlFor", { name: r.name }), t("repos.copyUrl")))));
+      h("td", { class: "act" }, menu));
     tr.dataset.name = r.name.toLowerCase();
     tr.dataset.format = r.format;
     tr.dataset.type = r.type;
@@ -67,14 +83,14 @@ export async function viewRepos(view, admin) {
     pageHead(admin ? t("nav.repositories") : t("nav.browse"), h("p", null, admin ? t("repos.adminSub") : t("repos.sub")),
       up ? h("div", { class: "actions" }, up) : null, { eyebrow: admin ? t("rf.eyebrow") : t("repos.eyebrow") }),
     h("section", { class: "card" },
-      h("div", { class: "toolbar" },
+      h("header", { class: "card-head toolbar" },
         h("label", { for: "repo-filter", class: "sr-only" }, t("repos.filter")), q,
         h("label", { for: "repo-format", class: "sr-only" }, t("col.format")), fmtSel,
-        h("label", { for: "repo-type", class: "sr-only" }, t("col.type")), typeSel, count),
+        h("label", { for: "repo-type", class: "sr-only" }, t("col.type")), typeSel, count,
+        h("p", { class: "toolbar-note" }, t("repos.typesNote"), admin ? [" ", t("repos.liveNote")] : null)),
       tbl([t("col.repo"), t("col.type"), admin ? t("col.blobStore") : null, t("col.status"), { t: t("col.files"), cls: "num" }, { t: t("col.size"), cls: "num" }, { t: t("col.actions"), cls: "act" }].filter(Boolean),
         rows, state.me.anonymous ? t("repo.noneAnon") : t("repo.none")),
-      none),
-    h("div", { class: "notice" }, t("repos.typesNote"), admin ? [" ", t("repos.liveNote")] : null));
+      none));
   apply();
 }
 
@@ -477,6 +493,7 @@ export function componentView(r, c, assets, opts) {
   const assetRows = assets.map((a) => h("tr", null,
     h("td", { class: "name" }, h("span", { class: "row-ico" }, icon("file")), assetLink(a.path, opts)),
     h("td", { class: "num" }, fmtBytes(a.size)),
+    h("td", { class: "nowrap" }, a.lastModified ? fmtDate(a.lastModified) : "—"),
     h("td", { class: "num", title: a.lastDownloaded ? t("comp.lastDownloaded") + ": " + fmtDate(a.lastDownloaded) : null }, a.downloads === undefined ? "—" : fmtNum(a.downloads)),
     h("td", { class: "act" }, h("a", { class: "btn small", href: sameOrigin(r, a.path), download: "" }, t("asset.download")))));
   const mainCard = h("section", { class: "card" },
@@ -490,7 +507,7 @@ export function componentView(r, c, assets, opts) {
         known.length ? kv(t("comp.lastDownloaded"), lastDl ? fmtDate(lastDl) : t("comp.neverDownloaded")) : null,
         usageBlock(r.format, c)]],
       [t("meta.title"), once(() => metadataBox(r, c))],
-      [t("comp.assets", { n: assets.length }), () => tbl([t("col.file"), { t: t("col.bytes"), cls: "num" }, { t: t("comp.downloads"), cls: "num" }, { t: t("col.actions"), cls: "act" }], assetRows, t("comp.noAssets"))],
+      [t("comp.assets", { n: assets.length }), () => tbl([t("col.file"), { t: t("col.bytes"), cls: "num" }, t("col.updated"), { t: t("comp.downloads"), cls: "num" }, { t: t("col.actions"), cls: "act" }], assetRows, t("comp.noAssets"))],
       [t("comp.versions"), once(() => versionsBox(r, c, opts))],
     ])));
   return h("div", { class: "two detail" }, mainCard,
@@ -954,6 +971,18 @@ export async function viewTree(view, name, path) {
     incomplete: node.truncated || (node.synthetic && node.parent.truncated) ? t("del.truncated") : null,
   });
 
+  function folderFiles(node) {
+    const panel = card(t("col.files"), node.path || r.name, null);
+    panel.appendChild(tbl([t("col.name"), { t: t("col.size"), cls: "num" }, t("col.updated"), t("asset.download")],
+      (node.children || []).filter((k) => k.kind !== "more").map((k) => h("tr", null,
+        h("td", null, h("a", { href: browseLink(name, k.path), onclick: (ev) => { ev.preventDefault(); run(() => reveal(k.path, true)); } },
+          icon(k.kind === "asset" ? "file" : "folder"), " ", k.label)),
+        h("td", { class: "num" }, k.kind === "asset" ? fmtBytes(k.size) : "—"),
+        h("td", { class: "nowrap" }, k.mod ? fmtDate(k.mod) : "—"),
+        h("td", null, k.kind === "asset" ? h("a", { class: "btn small", href: sameOrigin(r, k.path), download: "" }, t("asset.download")) : "—"))), t("tree.empty")));
+    return panel;
+  }
+
   function rootDetail() {
     const n = root.children ? root.children.filter((k) => k.kind !== "more").length : 0;
     return h("div", { class: "stack" },
@@ -963,7 +992,7 @@ export async function viewTree(view, name, path) {
         r.remote ? kv(t("repo.remote"), h("code", null, r.remote)) : null,
         kv(t("col.files"), fmtNum(r.assets)), kv(t("col.size"), fmtBytes(r.bytes)),
         kv(t("tree.children"), root.truncated ? n + "+" : String(n))]),
-      setupCard(r));
+      folderFiles(root), setupCard(r));
   }
 
   function folderDetail(node) {
@@ -972,7 +1001,7 @@ export async function viewTree(view, name, path) {
       card(node.label, t("tree.folder"), [
         kv(t("col.repo"), repoLink(r.name)), kv(t("asset.path"), copyLine(node.path + "/", t("asset.copyPath"))),
         kv(t("tree.children"), node.truncated ? n + "+" : String(n))]),
-      node.truncated ? truncNote(t("tree.moreText")) : null);
+      folderFiles(node), node.truncated ? truncNote(t("tree.moreText")) : null);
   }
 
   async function renderDetail(node) {

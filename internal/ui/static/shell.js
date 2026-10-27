@@ -17,7 +17,7 @@ function toast(text) {
   els.toast.textContent = text;
   els.toast.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => els.toast.classList.remove("show"), 5000);
+  toastTimer = setTimeout(() => els.toast.classList.remove("show"), 3000);
 }
 
 // ---- storage (best effort: private windows may throw) -----------------------
@@ -115,13 +115,13 @@ export function openLogin() {
   const btn = h("button", { type: "submit", class: "btn primary", form: "login-form" }, t("login.submit"));
   const cancel = h("button", { type: "button", class: "btn" }, t("login.cancel"));
   const form = h("form", { id: "login-form", class: "login-form", novalidate: true },
-    h("div", { class: "login-brand" }, h("div", { class: "brandmark" }, brandMark()),
-      h("div", null, h("strong", null, t("brand.name")), h("p", { class: "muted" }, t("login.lead")))),
     h("div", { class: "field" }, h("label", { for: "login-user" }, t("login.user")), user),
     h("div", { class: "field" }, h("label", { for: "login-pass" }, t("login.pass")), pass),
     msg,
-    h("p", { class: "tiny muted" }, t("login.tokensNote")));
-  const m = modal(t("login.title"), form, [cancel, btn], {
+    h("p", { class: "tiny muted" }, t("login.tokensNote")),
+    h("div", { class: "actions end" }, cancel, btn));
+  const sso = h("div", { class: "login-sso", hidden: true });
+  const m = modal(t("login.title"), [form, sso], null, {
     cls: "modal-login",
     onClose: () => {
       loginOpen = null;
@@ -129,6 +129,14 @@ export function openLogin() {
     },
   });
   loginOpen = m;
+  api("auth/sso").then((data) => {
+    if (loginOpen !== m || !data || !Array.isArray(data.providers)) return;
+    const providers = data.providers.filter((p) => p && typeof p.name === "string" && typeof p.url === "string" && p.url.startsWith("/-/sso/"));
+    if (!providers.length) return;
+    put(sso, h("div", { class: "login-divider" }, t("login.or")), providers.map((p) =>
+      h("button", { type: "button", class: "btn", onclick: () => { location.href = p.url + "?next=" + encodeURIComponent(location.hash); } }, t("login.sso", { name: p.name }))));
+    sso.hidden = false;
+  }).catch(() => {}); // Older servers and instances without SSO keep the password form.
   cancel.addEventListener("click", m.close);
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
@@ -161,13 +169,14 @@ let openMenu = null;
 function closeMenu() {
   if (!openMenu) return;
   openMenu.btn.setAttribute("aria-expanded", "false");
+  if (openMenu.list.matches(":popover-open")) openMenu.list.hidePopover();
   openMenu.list.hidden = true;
   openMenu = null;
 }
 
 // dropdown wires btn to a role=menu list built by build() on every open.
 export function dropdown(btn, build) {
-  const list = h("div", { class: "menu", role: "menu", hidden: true });
+  const list = h("div", { class: "menu", role: "menu", popover: "manual", hidden: true });
   const wrap = h("div", { class: "menu-wrap" }, btn, list);
   btn.setAttribute("aria-haspopup", "menu");
   btn.setAttribute("aria-expanded", "false");
@@ -177,6 +186,10 @@ export function dropdown(btn, build) {
     closeMenu();
     put(list, build());
     list.hidden = false;
+    list.showPopover();
+    const rect = btn.getBoundingClientRect();
+    list.style.left = Math.max(8, Math.min(rect.right - list.offsetWidth, innerWidth - list.offsetWidth - 8)) + "px";
+    list.style.top = Math.max(8, rect.bottom + list.offsetHeight + 8 > innerHeight ? rect.top - list.offsetHeight - 8 : rect.bottom + 8) + "px";
     btn.setAttribute("aria-expanded", "true");
     openMenu = { btn, list };
     const first = list.querySelector("[role=menuitem]");
@@ -399,8 +412,7 @@ function navSections() {
   if (me.admin) {
     out.push([t("nav.sec.system"), [
       ["#admin/system/general", t("nav.general"), "settings", is("admin/system/general")],
-      ["#admin/support/status", t("nav.status"), "health", is("admin/support/status")],
-      ["#admin/support/systeminformation", t("nav.sysinfo"), "info", is("admin/support/systeminformation")],
+      ["#admin/support/status", t("nav.status"), "health", is("admin/support/status", "admin/support/systeminformation")],
     ]]);
   }
   return out;
@@ -531,6 +543,8 @@ export function initShell(rerender) {
     }
   });
   document.addEventListener("click", (ev) => { if (openMenu && !openMenu.list.parentNode.contains(ev.target)) closeMenu(); });
+  window.addEventListener("resize", closeMenu);
+  document.addEventListener("scroll", (ev) => { if (openMenu && !openMenu.list.contains(ev.target)) closeMenu(); }, true);
   document.addEventListener("keydown", (ev) => {
     const side = document.getElementById("side");
     if (side.classList.contains("open")) {
