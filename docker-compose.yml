@@ -1,10 +1,18 @@
+# The published image (default): set COMMANDCENTER_VERSION to a release without the "v"
+# (images are tagged 1.2.3) in a .env file next to this one, so every compose command sees it.
+#   echo COMMANDCENTER_VERSION=1.2.3 >> .env
+#   docker compose up -d
+# To upgrade, change the version in .env and run docker compose up -d again: it pulls first.
+#
+# A local build of this checkout instead:
+#   docker build --build-arg VERSION=dev -t commandcenter:dev .
+# then set COMMANDCENTER_IMAGE=commandcenter and COMMANDCENTER_VERSION=dev in .env and run
+# docker compose up -d. COMMANDCENTER_IMAGE can also name a mirror in your own registry.
+# There is no build: section on purpose: with one, compose builds this checkout whenever the
+# pull fails (a mistyped version, no access to ghcr.io) and runs it under the release's name.
 services:
   commandcenter:
-    build:
-      context: .
-      args:
-        VERSION: ${COMMANDCENTER_VERSION:-dev}   # what `commandcenter version` and the UI report
-    image: commandcenter:latest
+    image: ${COMMANDCENTER_IMAGE:-ghcr.io/sungjinseo/commandcenter}:${COMMANDCENTER_VERSION:?set it in .env to a release such as 1.2.3}
     container_name: commandcenter
     ports: ["8081:8081"]
     volumes:

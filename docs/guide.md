@@ -4,7 +4,7 @@
 
 ## 소개
 
-Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나뿐인 오픈소스입니다. Go 단일 바이너리이며 Docker로 실행하고, 설정 파일은 `config.yaml` 하나입니다.
+Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나뿐인 오픈소스입니다. Go 단일 바이너리이며 Kubernetes(Helm 차트)나 Docker로 실행하고, 설정 파일은 `config.yaml` 하나입니다.
 업계에서 널리 쓰이는 `/repository/<저장소이름>/...` 경로 규칙을 따르므로, 이미 이 규칙으로 설정한 클라이언트는 호스트만 바꾸면 됩니다.
 
 지원 포맷과 저장소 유형:
@@ -28,19 +28,39 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
 
 ## 빠른 시작
 
-1. 이미지를 빌드합니다. 이렇게 빌드한 이미지의 버전(`commandcenter version`과 UI에 표시)은 `dev`이고, `COMMANDCENTER_VERSION=v1.2.3 docker compose build`처럼 지정할 수 있습니다. 직접 빌드하지 않고 릴리스 이미지를 쓰려면 "릴리스 이미지와 바이너리"를 보세요.
+Kubernetes에는 Helm 차트로 설치합니다("Kubernetes" 참고). 여기서는 Docker compose로 한 대에 띄우며, compose 파일은 릴리스 이미지 `ghcr.io/sungjinseo/commandcenter`를 씁니다. 아래의 `1.2.3`과 `v1.2.3`은 쓸 [릴리스](https://github.com/sungjinseo/commandcenter/releases)의 버전으로 바꾸세요.
+
+1. 쓸 버전의 태그로 Git 저장소를 받습니다. `docker-compose.yml`과 `config.example.yaml`도 그 버전의 것이어야 합니다(설정 파일에 모르는 키가 있으면 서버가 시작하지 않습니다).
 
    ```bash
-   docker compose build
+   git clone --depth 1 --branch v1.2.3 https://github.com/sungjinseo/commandcenter.git
+   cd commandcenter
    ```
 
-2. 사용자 비밀번호 해시를 만듭니다. 명령을 실행한 뒤 비밀번호(8자 이상, 72바이트 이하)를 입력하고 Enter를 누르세요.
+2. `docker-compose.yml`과 같은 폴더에 `.env` 파일을 만들고 쓸 버전을 적습니다. 이미지 태그에는 `v`가 없습니다. compose는 모든 명령에서 이 파일을 읽고, 버전이 없으면 시작하지 않습니다.
+
+   ```
+   COMMANDCENTER_VERSION=1.2.3
+   ```
+
+   **소스에서 빌드**하려면 이 checkout을 빌드하고 `.env`에 그 이미지를 적습니다. 빌드 인자 `VERSION`이 `commandcenter version`과 UI에 나오는 버전이 됩니다(지정하지 않으면 `dev`).
 
    ```bash
-   docker run --rm -i commandcenter:latest hash-password
+   docker build --build-arg VERSION=dev -t commandcenter:dev .
    ```
 
-3. `config.example.yaml`을 `config.yaml`로 복사하고 `passwordHash` 자리에 2번의 출력값을 넣습니다.
+   ```
+   COMMANDCENTER_IMAGE=commandcenter
+   COMMANDCENTER_VERSION=dev
+   ```
+
+3. 사용자 비밀번호 해시를 만듭니다. 명령을 실행한 뒤 비밀번호(8자 이상, 72바이트 이하)를 입력하고 Enter를 누르세요. 직접 빌드했다면 이미지 이름은 `commandcenter:dev`입니다.
+
+   ```bash
+   docker run --rm -i ghcr.io/sungjinseo/commandcenter:1.2.3 hash-password
+   ```
+
+4. `config.example.yaml`을 `config.yaml`로 복사하고 `passwordHash` 자리에 3번의 출력값을 넣습니다.
 
    ```bash
    # Git Bash / macOS / Linux
@@ -54,13 +74,264 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
 
    > `docker compose up` 전에 `config.yaml`이 반드시 존재해야 합니다. 없으면 Docker가 같은 이름의 디렉터리를 만들어 서버 시작에 실패합니다.
 
-4. 실행합니다.
+5. 실행합니다.
 
    ```bash
    docker compose up -d
    ```
 
    상태 확인: `http://localhost:8081/service/rest/v1/status` 가 200을 반환하면 정상입니다.
+
+## Kubernetes
+
+Kubernetes에는 Helm 차트로 설치합니다. 차트는 서버 Pod 하나(StatefulSet), `/data`의 ReadWriteOnce 볼륨, `config.yaml`을 담은 Secret, Service, 그리고 켜면 Ingress를 만듭니다. 차트는 릴리스마다 `oci://ghcr.io/sungjinseo/charts/commandcenter`에 올라갑니다. 차트 버전은 릴리스 버전(`v1.2.3`이면 `1.2.3`)과 같고, 기본 이미지도 같은 버전의 `ghcr.io/sungjinseo/commandcenter`입니다. OCI 레지스트리의 차트를 받으려면 Helm 3.8 이상이 필요합니다. 차트의 원본은 [`deploy/helm/commandcenter`](../deploy/helm/commandcenter)이고, Helm 없이 설치하려면 "참조 매니페스트"를 보세요.
+
+이 절의 명령은 네임스페이스와 릴리스 이름으로 모두 `commandcenter`를 씁니다. 그러면 StatefulSet과 Service는 `commandcenter`, Pod는 `commandcenter-0`, PVC는 `data-commandcenter-0`, 설정 Secret은 `commandcenter-config`입니다. 릴리스 이름에 `commandcenter`가 들어 있지 않으면 이름이 `<릴리스 이름>-commandcenter`가 됩니다.
+
+### Helm 차트로 설치
+
+1. 관리자 비밀번호의 해시를 만듭니다. 명령을 실행한 뒤 비밀번호(8자 이상, 72바이트 이하)를 입력하고 Enter를 누르세요. Docker가 없으면 GitHub Release의 linux 바이너리로 `commandcenter hash-password`를 실행해도 됩니다.
+
+   ```bash
+   docker run --rm -i ghcr.io/sungjinseo/commandcenter:1.2.3 hash-password
+   ```
+
+2. 네임스페이스와 비밀값 키 Secret을 만듭니다. 서버는 이 키로 SMTP 비밀번호, LDAP bind 비밀번호, proxy `remoteAuth`를 암호화해 저장합니다("저장된 비밀값 암호화" 참고). 마지막 명령으로 키 값을 꺼내 볼륨 백업과 **다른 곳**에 보관하세요. 키를 잃으면 서버가 시작하지 않고 저장된 비밀값은 되살릴 수 없습니다. 이 Secret은 Helm이 만든 것이 아니라서 `helm uninstall`로는 지워지지 않지만, 네임스페이스를 지우면 함께 지워집니다.
+
+   ```bash
+   kubectl create namespace commandcenter
+   kubectl -n commandcenter create secret generic commandcenter-secret-key \
+     --from-literal=key="$(head -c 32 /dev/urandom | base64)"
+   kubectl -n commandcenter get secret commandcenter-secret-key -o jsonpath='{.data.key}' | base64 -d
+   ```
+
+3. 값 파일(예: `commandcenter-values.yaml`)을 만듭니다. 앞의 세 값은 반드시 정합니다("차트 값" 참고). 관리자 비밀번호의 해시가 들어 있으니 비밀번호처럼 다루고, 업그레이드할 때도 이 파일을 다시 씁니다.
+
+   ```yaml
+   config:
+     baseURL: https://repo.example.com          # 클라이언트가 접속하는 주소
+     adminPasswordHash: '<1번의 출력>'            # 작은따옴표로 감쌉니다
+   persistence:
+     storageClass: <블록 스토리지 StorageClass>    # NFS·SMB는 안 됩니다
+   secretKey:
+     existingSecret: commandcenter-secret-key
+   ingress:
+     enabled: true
+     className: nginx
+     annotations:                               # "Ingress와 큰 업로드" 참고
+       nginx.ingress.kubernetes.io/proxy-body-size: "0"
+       nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+       nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+       nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+     hosts:
+       - host: repo.example.com
+         paths: [/]
+     tls:
+       - secretName: repo-example-com-tls       # 인증서 Secret(cert-manager 등으로 만듭니다)
+         hosts: [repo.example.com]
+   ```
+
+4. 설치하고 테스트합니다. `--wait`는 Pod가 준비될 때까지 기다립니다.
+
+   ```bash
+   helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 1.2.3 \
+     -n commandcenter -f commandcenter-values.yaml --wait
+   helm test commandcenter -n commandcenter
+   ```
+
+   `https://repo.example.com/`에서 `admin`과 1번의 비밀번호로 로그인합니다. 클라이언트도 이 주소를 씁니다.
+
+### 차트 값
+
+모든 값은 차트의 `values.yaml`에 주석과 함께 있습니다(`helm show values oci://ghcr.io/sungjinseo/charts/commandcenter --version 1.2.3`).
+
+- **`config.baseURL`(필수)**: 클라이언트가 접속하는 주소입니다. TLS를 Ingress에서 끝내면 그 `https://` 주소입니다("TLS와 리버스 프록시" 참고).
+- **`config.adminPasswordHash`(필수)**: `admin` 사용자의 bcrypt 해시(`hash-password`의 출력)입니다. 필수 값이 비어 있으면 차트가 설치를 거부합니다.
+- **`persistence.storageClass`(반드시 정하기)**: `/data` 볼륨의 StorageClass입니다. **블록 스토리지만 됩니다.** `meta.db`는 WAL 모드의 SQLite라서 NFS·SMB 같은 네트워크 파일시스템에서는 깨질 수 있습니다("저장 공간과 인스턴스" 참고). 비워 두면 클러스터의 기본 StorageClass를 쓰는데 그것이 NFS인 클러스터도 있으니 이름을 직접 적으세요. `kubectl get storageclass`의 PROVISIONER를 보고 고릅니다.
+  - 됩니다: 클라우드 블록 디스크(AWS EBS `ebs.csi.aws.com`, GCE PD `pd.csi.storage.gke.io`, Azure Disk `disk.csi.azure.com`, NKS의 `nks-block-storage`), Ceph RBD, Longhorn, iSCSI, 로컬 볼륨
+  - 안 됩니다: NFS(`nfs.csi.k8s.io`, nfs-subdir-external-provisioner), NAS 상품, AWS EFS, Azure Files, GKE Filestore, CephFS
+  - `-`를 적으면 `storageClassName: ""`이 되어 미리 만들어 둔 PV에 묶입니다.
+- **첫 시작에만 쓰는 값**: `config`의 `baseURL`, `adminPasswordHash`, `anonymousRead`, `repositories`, 그리고 `config.extra`에 넣은 `users`, `roles`, `maxUploadMiB`는 처음 시작할 때 한 번만 DB로 가져옵니다("설정 레퍼런스" 참고). 설치한 뒤에는 웹 UI에서 바꾸세요. 값 파일에서 바꿔 `helm upgrade`를 해도 Pod만 다시 시작되고 반영되지 않습니다.
+- `secretKey.existingSecret`, `secretKey.key`(기본 `key`): 비밀값 키가 든 Secret의 이름과 그 안의 키 이름입니다. 서버에는 환경변수 `COMMANDCENTER_SECRET_KEY`로 들어갑니다. 비워 두면 비밀값을 평문으로 저장합니다.
+- `ingress.enabled`, `ingress.className`, `ingress.annotations`, `ingress.hosts`, `ingress.tls`: "Ingress와 큰 업로드" 참고.
+- `persistence.size`(기본 `50Gi`): blob과 `meta.db`가 들어갑니다. proxy 캐시는 Cleanup 정책이 지울 때까지 계속 커집니다. `persistence`의 값은 설치한 뒤 `helm upgrade`로 바꿀 수 없습니다("차트 업그레이드" 참고).
+- `config.anonymousRead`(기본 `false`), `config.repositories`(첫 시작에 만들 저장소, `config.example.yaml`의 형식), `config.extra`(그 밖의 `config.yaml` 최상위 키. `users` 목록을 넣으면 `admin` 사용자 대신 그 목록을 씁니다), `config.existingSecret`(직접 만든 Secret의 `config.yaml` 키를 그대로 씁니다. 이때 다른 `config` 값은 비워 둡니다).
+- `image.repository`, `image.tag`(기본은 차트의 appVersion), `imagePullSecrets`: 사내 레지스트리로 옮긴 이미지나 직접 빌드한 이미지를 쓸 때 바꿉니다. 태그는 버전으로 고정하고 `latest`는 쓰지 마세요.
+- `resources`(기본: 메모리 요청과 한도 `128Mi`, CPU 요청 `100m`, CPU 한도 없음), `goMemLimit`(기본 `80MiB`): 메모리 한도를 올리면 `goMemLimit`도 한도의 60~65 % 정도로 함께 올립니다("리소스", "메모리 설정" 참고).
+- `proxy.http`, `proxy.https`, `proxy.noProxy`: proxy 저장소가 사내 프록시를 거쳐 원격에 접속할 때 씁니다(`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`). 클러스터 안의 원격은 `proxy.noProxy`에 넣으세요(예: `.svc,.cluster.local`).
+- `extraEnv`: 예약 작업의 시간대(`TZ`, "예약 작업" 참고) 같은 환경변수입니다. 예: `extraEnv: [{name: TZ, value: Asia/Seoul}]`
+- `extraVolumes`, `extraVolumeMounts`: 이름 붙은 blob store를 둘 볼륨입니다. blob은 NFS에 둘 수 있지만 `meta.db`는 안 됩니다("저장 공간과 인스턴스" 참고).
+- `terminationGracePeriodSeconds`(기본 60), `startupProbe`, `readinessProbe`, `livenessProbe`, `podSecurityContext`, `securityContext`: 바꿀 일이 거의 없습니다("동작 방식" 참고).
+- 그 밖에 `service`, `serviceAccount`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `nameOverride`, `fullnameOverride`가 있습니다. 릴리스 이름과 `nameOverride`·`fullnameOverride`는 처음 설치할 때 정합니다. 바꾸면 빈 볼륨을 가진 새 StatefulSet이 생깁니다. Pod 수를 정하는 값은 일부러 두지 않았습니다.
+
+### Ingress와 큰 업로드
+
+서버는 평문 HTTP만 받으므로 TLS는 Ingress(또는 Gateway)에서 끝내고, `config.baseURL`을 그 `https://` 주소와 똑같이 둡니다("TLS와 리버스 프록시" 참고). 컨트롤러의 기본값은 패키지 업로드에 맞지 않습니다. ingress-nginx는 기본으로 요청 본문을 1 MiB까지만 받아 큰 jar, tarball, wheel, crate 업로드가 413으로 끊기고, 서버의 응답을 60초까지만 기다립니다. ingress-nginx라면 `ingress.annotations`에 다음을 넣으세요(위 값 파일의 예).
+
+| 어노테이션 | 값 | 뜻 |
+|---|---|---|
+| `nginx.ingress.kubernetes.io/proxy-body-size` | `"0"` | 본문 크기를 Ingress에서 보지 않고 서버의 `maxUploadMiB`(기본 1024 MiB, 넘으면 413)에 맡깁니다. Ingress에서도 막으려면 `maxUploadMiB` 이상(예: `"1024m"`)으로 둡니다. |
+| `nginx.ingress.kubernetes.io/proxy-request-buffering` | `"off"` | 업로드를 컨트롤러에 다 받아 두지 않고 바로 서버로 넘깁니다. 켜 두면 업로드마다 그 크기만큼의 임시 디스크가 컨트롤러 Pod에 필요하므로, 크기 제한을 `"0"`으로 둘 때는 꼭 끕니다. |
+| `nginx.ingress.kubernetes.io/proxy-read-timeout` | `"300"` | 서버의 응답을 기다리는 시간(초). proxy 저장소가 원격에서 처음 받아 오는 요청은 응답이 늦을 수 있습니다. |
+| `nginx.ingress.kubernetes.io/proxy-send-timeout` | `"300"` | 서버가 요청 본문을 받아 가기를 기다리는 시간(초). |
+
+- 본문 수신 타임아웃과 클라이언트 IP당 연결 수("TLS와 리버스 프록시"의 "프록시에서 제한할 것")는 ingress-nginx ConfigMap의 `client-body-timeout`(기본 60초)과 어노테이션 `nginx.ingress.kubernetes.io/limit-connections`로 겁니다. 연결 수 제한은 컨트롤러가 실제 클라이언트 주소를 볼 때만 쓰세요. 로드밸런서의 주소로 보이면 모든 클라이언트가 한 주소로 묶여 제한됩니다.
+- Gateway API(HTTPRoute)를 쓰면 `ingress.enabled: false`로 두고 `httpRoute.enabled: true`, `httpRoute.parentRefs`(붙을 Gateway, 예: `[{name: traefik-gateway, namespace: traefik}]`), `httpRoute.hostnames`를 정합니다. 차트가 Service의 8081 포트로 가는 HTTPRoute를 만듭니다. 본문 크기와 타임아웃은 Gateway 구현에서 정합니다. 예를 들어 Traefik v3는 요청 전체를 읽는 시간(entryPoint의 `transport.respondingTimeouts.readTimeout`)이 기본 60초라서 그보다 오래 걸리는 업로드가 끊기므로 늘려야 합니다.
+
+### 설치 확인(helm test)
+
+```bash
+helm test commandcenter -n commandcenter
+```
+
+테스트 Pod(`commandcenter-test-status`)가 서버 이미지의 `commandcenter healthcheck -url`로 Service를 거쳐 `GET /service/rest/v1/status`를 부르고, 200이면 성공합니다. 서버 이미지만 쓰므로 폐쇄망에서도 다른 이미지가 필요 없습니다. 성공한 테스트 Pod는 지워지고 실패한 Pod는 남으므로 `kubectl -n commandcenter logs commandcenter-test-status`로 원인을 봅니다. HTTP 서버가 Service 뒤에서 응답하는지만 보며, DB와 디스크는 관리자 화면의 시스템 상태에서 확인합니다.
+
+### 차트 업그레이드
+
+1. 올릴 버전의 [CHANGELOG](../CHANGELOG.md)를 읽습니다.
+2. 백업합니다("Kubernetes에서 백업" 참고). 업그레이드한 뒤 되돌릴 수 있는 방법은 이 백업뿐입니다.
+3. 설치 때의 값 파일로 새 차트 버전을 적용하고 테스트합니다.
+
+   ```bash
+   helm upgrade commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 1.2.4 \
+     -n commandcenter -f commandcenter-values.yaml --wait
+   helm test commandcenter -n commandcenter
+   ```
+
+- StatefulSet은 이전 Pod가 끝난 뒤에(최대 60초, "정상 종료" 참고) 새 Pod를 띄우므로 그사이 서비스가 잠시 멈춥니다. 새 버전은 처음 시작할 때 `meta.db`를 새 구조로 바꾸며, startupProbe가 5분까지 기다립니다.
+- 이미지는 차트 버전을 따라갑니다. `image.tag`를 정해 두었다면 함께 바꾸세요.
+- `persistence`의 값(`storageClass`, `size`, `accessModes`)은 바꾸지 않습니다. StatefulSet의 볼륨 템플릿은 만든 뒤 바꿀 수 없어서 `helm upgrade`가 `Forbidden: updates to statefulset spec for fields other than …` 오류로 실패합니다. 볼륨을 늘리려면 StorageClass가 `allowVolumeExpansion: true`일 때 PVC를 직접 늘리고, 값 파일의 `size`는 그대로 둡니다.
+
+  ```bash
+  kubectl -n commandcenter patch pvc data-commandcenter-0 -p '{"spec":{"resources":{"requests":{"storage":"100Gi"}}}}'
+  ```
+
+- **버전을 올린 업그레이드를 `helm rollback`으로 되돌리지 마세요.** 다운그레이드는 지원하지 않습니다("업그레이드" 참고). 되돌려야 하면 "Kubernetes에서 백업"의 복원으로 업그레이드 전의 스냅샷을 되살리되, 마지막 `--replicas=1` 대신 이전 차트 버전으로 `helm upgrade`를 실행합니다. 차트가 Pod를 이전 이미지로 다시 띄웁니다. 값만 바꾼 리비전은 `helm rollback`해도 됩니다.
+
+### Kubernetes에서 백업
+
+`meta.db`와 blob은 같은 시점의 것이어야 하므로("백업과 복원" 참고) Pod를 멈추고 받습니다. 클러스터가 CSI 볼륨 스냅샷을 지원하면(`kubectl get volumesnapshotclass`) 스냅샷이 가장 빠르며, 서비스는 스냅샷이 준비될 때까지 멈춥니다.
+
+```bash
+NS=commandcenter SNAP=commandcenter-$(date +%Y%m%d-%H%M)
+kubectl -n $NS scale statefulset commandcenter --replicas=0
+kubectl -n $NS wait --for=delete pod/commandcenter-0 --timeout=120s
+kubectl -n $NS apply -f - <<EOF
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: $SNAP
+spec:
+  volumeSnapshotClassName: <VolumeSnapshotClass>   # 기본 클래스를 쓰면 이 줄을 지웁니다
+  source:
+    persistentVolumeClaimName: data-commandcenter-0
+EOF
+kubectl -n $NS wait volumesnapshot/$SNAP --for=jsonpath='{.status.readyToUse}'=true --timeout=30m
+kubectl -n $NS scale statefulset commandcenter --replicas=1
+```
+
+- 백업하는 동안에는 `helm upgrade`를 하지 마세요(GitOps 도구의 자동 동기화도 멈춥니다). 차트가 Pod를 다시 띄웁니다.
+- `extraVolumes`에 둔 blob store가 있으면 같은 정지 시간에 그 볼륨도 찍습니다.
+- VolumeSnapshot은 네임스페이스에 속합니다. 네임스페이스를 지우면 함께 지워지고, VolumeSnapshotClass의 `deletionPolicy`가 `Delete`이면 스토리지의 스냅샷도 사라집니다. 오래 둘 백업은 `Retain` 클래스로 찍거나 클러스터 밖에도 두세요.
+- 비밀값 키 Secret과 값 파일은 스냅샷에 들어가지 않습니다. 따로 보관하되 키는 스냅샷과 다른 곳에 둡니다.
+
+**복원**: Pod를 멈추고 PVC를 스냅샷에서 다시 만듭니다. StatefulSet은 이름이 같은 PVC를 그대로 씁니다. 지금 PVC의 데이터는 지워지므로 필요하면 먼저 지금 상태도 스냅샷으로 남기세요.
+
+```bash
+kubectl -n $NS scale statefulset commandcenter --replicas=0
+kubectl -n $NS wait --for=delete pod/commandcenter-0 --timeout=120s
+kubectl -n $NS delete pvc data-commandcenter-0
+kubectl -n $NS apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-commandcenter-0
+spec:
+  storageClassName: <persistence.storageClass와 같은 값>
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 50Gi            # 스냅샷의 RESTORESIZE(kubectl get volumesnapshot) 이상
+  dataSource:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: $SNAP
+EOF
+kubectl -n $NS scale statefulset commandcenter --replicas=1
+```
+
+**스냅샷을 쓸 수 없을 때**: "백업과 복원"의 멈추고 복사 방법을 "서버를 멈춰야 하는 작업"의 일회용 Pod에서 실행합니다. 복원은 볼륨을 비운 뒤에 풉니다(오래된 `meta.db-wal`·`-shm`이 섞이지 않게).
+
+```bash
+kubectl -n $NS exec commandcenter-maint -- tar czf - -C / data > data.tgz                                            # 백업
+kubectl -n $NS exec -i commandcenter-maint -- sh -c 'find /data -mindepth 1 -delete && tar xzf - -C /' < data.tgz   # 복원
+```
+
+### 서버를 멈춰야 하는 작업
+
+멈춘 상태의 백업·복원, 비밀값 키 교체, 키를 잃었을 때의 정리("저장된 비밀값 암호화" 참고)는 서버 Pod를 내리고, 같은 PVC를 마운트해 서버와 같은 UID 65532로 도는 일회용 Pod에서 합니다. 다른 UID로 돌리면 그 사용자 소유의 파일이 볼륨에 남아 서버가 열지 못할 수 있습니다.
+
+```bash
+kubectl -n commandcenter scale statefulset commandcenter --replicas=0
+kubectl -n commandcenter wait --for=delete pod/commandcenter-0 --timeout=120s
+kubectl -n commandcenter apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: commandcenter-maint
+spec:
+  restartPolicy: Never
+  securityContext: {runAsNonRoot: true, runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532, seccompProfile: {type: RuntimeDefault}}
+  containers:
+    - name: maint
+      image: busybox:1.37
+      command: ["sleep", "86400"]
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+      volumeMounts: [{name: data, mountPath: /data}]
+  volumes:
+    - name: data
+      persistentVolumeClaim: {claimName: data-commandcenter-0}
+EOF
+kubectl -n commandcenter wait --for=condition=Ready pod/commandcenter-maint
+# 작업: kubectl -n commandcenter exec -it commandcenter-maint -- sh
+kubectl -n commandcenter delete pod commandcenter-maint
+kubectl -n commandcenter scale statefulset commandcenter --replicas=1
+```
+
+서버의 명령(`secret-key rotate` 등)은 busybox 대신 지금 버전의 서버 이미지로 돌립니다. `command` 대신 `args`에 명령을 주고, 설정 Secret `commandcenter-config`를 `/etc/commandcenter`에 마운트하며, 지금 키를 `COMMANDCENTER_SECRET_KEY`(Secret 참조)로 줍니다. 명령이 끝나면 Pod가 멈추므로 출력은 `kubectl -n commandcenter logs commandcenter-maint`로 봅니다.
+
+### 삭제(helm uninstall)
+
+```bash
+helm uninstall commandcenter -n commandcenter
+```
+
+StatefulSet, Service, Ingress, 설정 Secret은 지워지지만 **PVC `data-commandcenter-0`와 데이터는 남습니다.** StatefulSet이 만든 PVC는 Helm 릴리스에 속하지 않기 때문입니다. 같은 네임스페이스에 같은 릴리스 이름으로 다시 설치하면 이 PVC를 그대로 쓰고, `config`의 첫 시작 값은 다시 가져오지 않습니다. 직접 만든 비밀값 키 Secret도 남습니다(스냅샷을 보관한다면 키도 보관하세요). 데이터까지 지우려면 PVC를 지웁니다. 되돌릴 수 없고, StorageClass의 `reclaimPolicy`가 `Delete`이면 디스크도 지워집니다.
+
+```bash
+kubectl -n commandcenter delete pvc data-commandcenter-0
+```
+
+### 동작 방식
+
+- **StatefulSet, Pod 하나**: StatefulSet은 이전 Pod가 완전히 끝난 뒤에 새 Pod를 띄우므로 업데이트 중에도 두 프로세스가 같은 `meta.db`를 열지 않습니다(Deployment의 롤링 업데이트는 겹칠 수 있습니다). `replicas`를 늘리면 Pod마다 빈 볼륨이 따로 생겨, 데이터가 서로 다른 서버가 여러 대 생깁니다. 차트에 Pod 수를 정하는 값이 없는 것도 이 때문입니다.
+- **볼륨**: `/data`는 ReadWriteOnce PVC(`data-commandcenter-0`, 기본 50Gi)이며 블록 스토리지여야 합니다("차트 값"의 `persistence.storageClass`).
+- **노드 장애**: Pod가 `Terminating`이나 `Unknown`에 머물러도 `kubectl delete pod --force --grace-period=0`으로 지우지 마세요. 이전 노드에서 프로세스가 아직 돌고 있으면 같은 볼륨을 두 프로세스가 쓰게 될 수 있습니다.
+- **프로브**: startupProbe와 readinessProbe는 `GET /service/rest/v1/status`(인증 없이 200)입니다. HTTP 서버가 응답하는지만 보고 DB나 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. livenessProbe는 포트에 TCP 연결만 해 봅니다(`tcpSocket`). TCP 연결은 서버의 연결 자리 1024개가 모두 차 있어도 커널이 받아 주므로(커널 대기열이 넘치지 않는 한), 서버가 바쁘거나 공격을 받아 느려졌다고 Pod가 재시작되어 진행 중인 전송이 모두 끊기지는 않습니다. 그동안 readinessProbe가 실패하면 Pod는 Service에서 잠시 빠졌다가 다시 들어옵니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
+- **보안**: UID 65532(non-root), 읽기 전용 루트 파일시스템, 모든 capability 제거, seccomp `RuntimeDefault`로 Pod Security Standards의 `restricted` 기준에 맞습니다. SQLite 임시 파일은 `/tmp`(emptyDir)에 씁니다. 이름 붙은 blob store는 경로를 비우면 `/data/blobstores/<이름>`에 만들어지고, `/data` 밖의 절대 경로에 두려면 그 경로에 볼륨을 따로 마운트해야 합니다(`extraVolumes`, `extraVolumeMounts`). 루트 파일시스템이 읽기 전용이라 다른 경로에는 만들 수 없고, `/tmp`는 Pod가 다시 만들어지면 비워집니다.
+- **리소스**: 메모리 요청과 한도 128Mi, `GOMEMLIMIT=80MiB`(`goMemLimit`)입니다. CPU는 요청(100m)만 두고 한도는 두지 않습니다.
+- **운영 명령**: "운영"의 `docker compose exec commandcenter …`는 `kubectl -n commandcenter exec commandcenter-0 -- …`로 바꿔 씁니다(예: `kubectl -n commandcenter exec commandcenter-0 -- commandcenter token create -user ci`). 로그는 `kubectl -n commandcenter logs commandcenter-0`입니다.
+- **비상 복구**: `user reset-password`는 실행 중인 Pod에서 돌립니다(`printf '%s\n' "$PW" | kubectl exec -i -n commandcenter commandcenter-0 -- commandcenter user reset-password -user admin -admin`). 서버가 5초 안에 반영합니다("비상 복구" 참고).
+
+### 참조 매니페스트
+
+Helm 없이 설치하려면 [`deploy/kubernetes/commandcenter.yaml`](../deploy/kubernetes/commandcenter.yaml)을 씁니다. ConfigMap(`config.yaml`), Service, StatefulSet으로 되어 있고 Pod 구성(볼륨, 프로브, 보안, 리소스, 중지 대기 시간)은 차트와 같습니다. 파일 맨 위 주석대로 이미지, `config.yaml`의 `baseURL`과 관리자 `passwordHash`, `storageClassName`을 채운 뒤 적용합니다. 이미지는 버전을 고정한 릴리스 이미지(`ghcr.io/sungjinseo/commandcenter:1.2.3`, "릴리스 이미지와 바이너리" 참고)나 직접 빌드해 올린 이미지입니다.
+
+```bash
+kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
+```
+
+이름(`commandcenter`, `commandcenter-0`, `data-commandcenter-0`)이 차트와 같으므로 위의 백업, 서버를 멈춰야 하는 작업, 동작 방식이 그대로 적용됩니다. 업그레이드는 이미지 태그를 바꿔 다시 적용하고, Ingress와 비밀값 키(주석 처리된 `COMMANDCENTER_SECRET_KEY` 항목)는 직접 넣습니다.
 
 ## 프로덕션 배포
 
@@ -74,7 +345,7 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
 4. 프록시에서 요청 본문 크기, 본문 수신·응답 전송 타임아웃, 클라이언트당 연결 수를 제한합니다.
 5. `meta.db`가 있는 `dataDir`는 로컬 디스크나 블록 스토리지에 둡니다. NFS·SMB에는 두지 않습니다. 인스턴스는 하나만 띄웁니다.
 6. 메모리 한도와 `GOMEMLIMIT`을 함께 정합니다.
-7. 중지 대기 시간을 60초로 둡니다(compose 파일과 참조 매니페스트에는 들어 있습니다. "정상 종료" 참고).
+7. 중지 대기 시간을 60초로 둡니다(compose 파일, Helm 차트, 참조 매니페스트에는 들어 있습니다. "정상 종료" 참고).
 8. 정기 백업을 돌리고, 복원도 한 번 해 봅니다("백업과 복원" 참고).
 9. 저장된 비밀값을 암호화할 키(`COMMANDCENTER_SECRET_KEY` 또는 `secretKeyFile`)를 정하고, 키는 `meta.db` 백업과 따로 보관합니다("저장된 비밀값 암호화" 참고).
 
@@ -142,25 +413,7 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
 
 - compose: 들어 있는 `docker-compose.yml`에 `stop_grace_period: 60s`가 있습니다. 다른 compose 파일을 쓰면 서비스에 넣으세요.
 - `docker run`으로 띄웠다면: `docker run --stop-timeout 60 …`으로 띄우거나 `docker stop -t 60 commandcenter`로 멈춥니다.
-- Kubernetes: `terminationGracePeriodSeconds: 60`(참조 매니페스트에 들어 있습니다)
-
-### Kubernetes
-
-[`deploy/kubernetes/commandcenter.yaml`](../deploy/kubernetes/commandcenter.yaml)은 ConfigMap(`config.yaml`), Service, StatefulSet으로 된 참조 매니페스트입니다. 파일 맨 위 주석대로 이미지, `config.yaml`의 `baseURL`과 관리자 `passwordHash`, `storageClassName`을 채운 뒤 적용합니다. 이미지는 버전을 고정한 릴리스 이미지(`ghcr.io/sungjinseo/commandcenter:1.2.3`, "릴리스 이미지와 바이너리" 참고)나 직접 빌드해 올린 이미지입니다.
-
-```bash
-kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
-```
-
-- **StatefulSet, `replicas: 1`**: StatefulSet은 이전 Pod가 완전히 끝난 뒤에 새 Pod를 띄우므로 업데이트 중에도 두 프로세스가 같은 `meta.db`를 열지 않습니다(Deployment의 롤링 업데이트는 겹칠 수 있습니다). `replicas`를 늘리면 Pod마다 빈 볼륨이 따로 생겨, 데이터가 서로 다른 서버가 여러 대 생깁니다.
-- **볼륨**: `/data`는 ReadWriteOnce PVC(50Gi)입니다. `storageClassName`을 비워 두면 클러스터의 기본 StorageClass를 쓰므로, 그것이 NFS 계열이 아닌지 확인하세요.
-- **노드 장애**: Pod가 `Terminating`이나 `Unknown`에 머물러도 `kubectl delete pod --force --grace-period=0`으로 지우지 마세요. 이전 노드에서 프로세스가 아직 돌고 있으면 같은 볼륨을 두 프로세스가 쓰게 될 수 있습니다.
-- **프로브**: startupProbe와 readinessProbe는 `GET /service/rest/v1/status`(인증 없이 200)입니다. HTTP 서버가 응답하는지만 보고 DB나 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. livenessProbe는 포트에 TCP 연결만 해 봅니다(`tcpSocket`). TCP 연결은 서버의 연결 자리 1024개가 모두 차 있어도 커널이 받아 주므로(커널 대기열이 넘치지 않는 한), 서버가 바쁘거나 공격을 받아 느려졌다고 Pod가 재시작되어 진행 중인 전송이 모두 끊기지는 않습니다. 그동안 readinessProbe가 실패하면 Pod는 Service에서 잠시 빠졌다가 다시 들어옵니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
-- **보안**: UID 65532(non-root), 읽기 전용 루트 파일시스템, 모든 capability 제거, seccomp `RuntimeDefault`로 Pod Security Standards의 `restricted` 기준에 맞습니다. SQLite 임시 파일은 `/tmp`(emptyDir)에 씁니다. 이름 붙은 blob store는 경로를 비우면 `/data/blobstores/<이름>`에 만들어지고, `/data` 밖의 절대 경로에 두려면 그 경로에 볼륨을 따로 마운트해야 합니다. 루트 파일시스템이 읽기 전용이라 다른 경로에는 만들 수 없고, `/tmp`는 Pod가 다시 만들어지면 비워집니다.
-- **리소스**: 메모리 요청과 한도 128Mi, `GOMEMLIMIT=80MiB`입니다. CPU는 요청(100m)만 두고 한도는 두지 않습니다.
-- **노출**: Service는 평문 HTTP입니다. Ingress나 Gateway에서 TLS를 끝내고, "TLS와 리버스 프록시"의 제한(본문 크기, 타임아웃, 연결 수)을 쓰는 컨트롤러의 설정으로 겁니다.
-- **비상 복구**: `user reset-password`는 실행 중인 Pod에서 돌립니다(`printf '%s\n' "$PW" | kubectl exec -i -n <네임스페이스> commandcenter-0 -- commandcenter user reset-password -user admin -admin`). 서버가 5초 안에 반영합니다("비상 복구" 참고).
-- **서버를 멈춰야 하는 작업**(멈춘 상태의 백업, 비밀값 키 교체): `kubectl scale statefulset commandcenter --replicas=0`으로 Pod를 내리고, 같은 PVC(`data-commandcenter-0`)와 ConfigMap을 마운트하고 같은 UID 65532로 도는 일회용 Pod에서 실행한 다음 `--replicas=1`로 되돌립니다.
+- Kubernetes: `terminationGracePeriodSeconds: 60`(차트의 기본값이고 참조 매니페스트에도 들어 있습니다)
 
 ## repolite에서 이전하기
 
@@ -172,7 +425,7 @@ kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
    docker compose down --remove-orphans   # -v는 붙이지 마세요. 볼륨이 지워집니다
    ```
 
-   그다음 compose 파일을 새 버전으로 받고 볼륨 이름을 지정해 올립니다. compose의 기본 볼륨 이름이 `commandcenter-data`로 바뀌었으므로 그냥 `docker compose up`을 하면 빈 볼륨이 새로 생깁니다. 기존 데이터를 쓰려면 `COMMANDCENTER_VOLUME`에 이전 볼륨 이름을 지정하세요. 이름은 `docker volume ls`로 찾습니다. 보통 `repolite_repolite-data`(compose 프로젝트 이름 + 볼륨 이름)입니다.
+   그다음 compose 파일을 새 버전으로 받고, 쓸 버전을 `.env`의 `COMMANDCENTER_VERSION`에 적은 뒤("빠른 시작"의 2번) 볼륨 이름을 지정해 올립니다. compose의 기본 볼륨 이름이 `commandcenter-data`로 바뀌었으므로 그냥 `docker compose up`을 하면 빈 볼륨이 새로 생깁니다. 기존 데이터를 쓰려면 `COMMANDCENTER_VOLUME`에 이전 볼륨 이름을 지정하세요. 이름은 `docker volume ls`로 찾습니다. 보통 `repolite_repolite-data`(compose 프로젝트 이름 + 볼륨 이름)입니다.
 
    ```bash
    docker volume ls | grep repolite
@@ -192,6 +445,7 @@ kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
    매번 지정하기 번거로우면 `docker-compose.yml`과 같은 폴더의 `.env` 파일에 적어 두세요. compose가 자동으로 읽습니다.
 
    ```
+   COMMANDCENTER_VERSION=1.2.3
    COMMANDCENTER_VOLUME=repolite_repolite-data
    ```
 
@@ -200,7 +454,7 @@ kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
 3. **토큰.** 이전에 발급한 `rl_` 토큰은 계속 동작합니다(Bearer, Cargo 토큰, Basic 비밀번호 자리 모두). 새로 발급하는 토큰은 `cc_`로 시작합니다. 클라이언트 설정을 바꿀 필요는 없습니다.
 4. **UI 세션 초기화.** 세션 쿠키 이름이 `cc_session`(`baseURL`이 https면 `__Host-cc_session`)으로 바뀌고 세션은 원래 메모리에만 있으므로, 업그레이드하면 모두 로그아웃되어 한 번 다시 로그인해야 합니다. 로그인과 로그아웃 때 이전 `repolite_session` 쿠키는 만료시켜 지웁니다.
    - **클라이언트 설정의 id.** 웹 UI와 이 문서의 새 클라이언트 설정 예시는 서버 id와 레지스트리 이름으로 `commandcenter`를 씁니다. `repolite`를 쓰는 기존 `settings.xml`과 cargo 설정은 그대로 동작합니다. 다만 `settings.xml`에서는 `<server>`의 `<id>`와 저장소(`<repository>`, `<mirror>`)의 id가 서로 같아야 인증이 붙습니다. 새 이름으로 바꾸려면 둘을 함께 바꾸세요.
-5. **이미지와 컨테이너 이름.** 이미지는 `commandcenter:latest`, compose 서비스와 컨테이너는 `commandcenter`입니다. `docker logs commandcenter`, `docker exec commandcenter ...`처럼 이름을 쓰는 스크립트와 모니터링을 고치세요. 바이너리 서브커맨드(`commandcenter hash-password`, `token create`, `gc`, `healthcheck`)도 같은 이름입니다. `token create`는 `-config`를 생략하면 기본 경로(`/etc/commandcenter/config.yaml`)를 쓰고, 없으면 이전 경로로 대체하므로 예시에서는 `-config`를 쓰지 않습니다. 다른 경로의 파일을 쓸 때만 `-config <경로>`를 붙이세요.
+5. **이미지와 컨테이너 이름.** 이미지는 `ghcr.io/sungjinseo/commandcenter:<버전>`(직접 빌드했다면 `.env`의 `COMMANDCENTER_IMAGE`에 적은 이름), compose 서비스와 컨테이너는 `commandcenter`입니다. `docker logs commandcenter`, `docker exec commandcenter ...`처럼 이름을 쓰는 스크립트와 모니터링을 고치세요. 바이너리 서브커맨드(`commandcenter hash-password`, `token create`, `gc`, `healthcheck`)도 같은 이름입니다. `token create`는 `-config`를 생략하면 기본 경로(`/etc/commandcenter/config.yaml`)를 쓰고, 없으면 이전 경로로 대체하므로 예시에서는 `-config`를 쓰지 않습니다. 다른 경로의 파일을 쓸 때만 `-config <경로>`를 붙이세요.
 
 ## 웹 UI
 
@@ -497,7 +751,7 @@ printf '%s\n' "$PW" | docker compose run --rm -T commandcenter user reset-passwo
 SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비밀번호와 Bearer 토큰은 원격 서버에 그대로 보내야 하므로 사용자 비밀번호나 토큰처럼 해시로 저장할 수 없습니다. **비밀값 키를 정하면** 이 값들을 AES-256-GCM으로 암호화해 `meta.db`에 저장하고(`enc:v1:`로 시작하는 값) 쓸 때 풉니다. 그러면 `meta.db`, 볼륨 복사본, 백업 파일이 새어도 키 없이는 비밀값을 알 수 없습니다. 키가 없으면 평문으로 저장하고, 시작할 때마다 WARN 로그(`no secret key is configured`)가 한 줄 남습니다.
 
 - **키 만들기**: 32바이트 난수를 base64로 적은 값입니다. `head -c 32 /dev/urandom | base64`나 `openssl rand -base64 32`로 만들고, 셸이 없는 PC에서는 `docker run --rm busybox sh -c 'head -c 32 /dev/urandom | base64'`를 씁니다.
-- **키 주기**: 환경변수 `COMMANDCENTER_SECRET_KEY`에 그 값을 넣거나, 그 값을 담은 파일을 `config.yaml`의 `secretKeyFile`로 가리킵니다(파일은 서버 UID 65532만 읽을 수 있게 두세요). 둘 다 주면 시작하지 않습니다. compose는 `docker-compose.yml`의 주석 처리된 `COMMANDCENTER_SECRET_KEY` 줄을, Kubernetes는 참조 매니페스트의 주석 처리된 `COMMANDCENTER_SECRET_KEY`(Secret 참조) 항목을 쓰면 됩니다. `gc`, `token create` 명령도 같은 키가 필요하고(`docker exec`는 컨테이너의 환경변수를 물려받습니다), `user reset-password`는 키 없이도 됩니다.
+- **키 주기**: 환경변수 `COMMANDCENTER_SECRET_KEY`에 그 값을 넣거나, 그 값을 담은 파일을 `config.yaml`의 `secretKeyFile`로 가리킵니다(파일은 서버 UID 65532만 읽을 수 있게 두세요). 둘 다 주면 시작하지 않습니다. compose는 `docker-compose.yml`의 주석 처리된 `COMMANDCENTER_SECRET_KEY` 줄을 쓰면 됩니다. Kubernetes에서는 키를 Secret으로 만들고 차트의 `secretKey.existingSecret`에 그 이름을 적습니다("Helm 차트로 설치" 참고. 참조 매니페스트라면 주석 처리된 `COMMANDCENTER_SECRET_KEY`(Secret 참조) 항목). `gc`, `token create` 명령도 같은 키가 필요하고(`docker exec`는 컨테이너의 환경변수를 물려받습니다), `user reset-password`는 키 없이도 됩니다.
 - **처음 켤 때**: 키를 주고 시작하면 평문으로 남아 있던 비밀값을 그 자리에서 암호화하고 INFO 로그(`encrypted the stored secrets that were plain text`)를 남깁니다. 그 뒤 저장하는 값은 바로 암호화됩니다. 키와 비밀값은 로그에 남지 않습니다.
 - **`remote` URL에 넣은 인증 정보는 암호화하지 않습니다.** `https://user:token@host/…`처럼 URL에 넣은 사용자 이름·비밀번호나 `?token=…` 같은 쿼리는 키를 정해도 `meta.db`에 평문으로 남습니다. 사용자 이름과 비밀번호는 URL에서 빼고 `remoteAuth`의 `username`/`password`에 넣으세요(원격이 Bearer 토큰을 받으면 `bearerToken`). 키를 정했는데 이런 proxy가 있으면 시작할 때마다 그 저장소 이름을 적은 WARN 로그(`the remote URL of these proxies holds a user name, password or query…`)가 한 줄 남습니다. URL은 로그에 남지 않습니다. 쿼리로만 토큰을 받는 원격은 옮길 곳이 없으니 `meta.db`와 백업의 접근을 제한하세요.
 - **키를 잃으면 비밀값을 되살릴 수 없습니다.** 키는 반드시 백업하되 `meta.db` 백업과 **다른 곳**에 두세요. 키 없이 시작하면 `it is encrypted, and no secret key is set`, 다른 키로 시작하면 `it was encrypted with another key` 오류로 시작하지 않습니다(다른 키로는 아무것도 다시 쓰지 않습니다). 키를 정말 잃었다면 서버를 멈추고, "백업과 복원"에서처럼 같은 UID로 `sqlite3 /data/meta.db`를 열어 암호화된 값을 지운 뒤 새 키로 시작하고 UI에서 비밀번호를 다시 입력합니다.
@@ -523,7 +777,7 @@ SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비�
   - 출력은 개수뿐이며 키와 비밀값은 나오지 않습니다(예: `re-encrypted 3 stored secrets with the new key and encrypted 1 that were plain text`). 마지막 줄은 `done; start the server with the new key in COMMANDCENTER_SECRET_KEY or secretKeyFile`입니다.
   - `.env`의 값을 바꿨다면 `docker compose start`가 아니라 `docker compose up -d`로 시작하세요. `start`는 컨테이너를 만들 때의 환경변수를 그대로 씁니다. Git Bash에서는 "백업과 복원"처럼 `MSYS_NO_PATHCONV=1`을 앞에 붙이고 `"$(pwd -W)/new.key:/run/new.key:ro"`를 씁니다.
   - 교체 전에 받은 백업은 이전 키로만 풀립니다. 그 백업을 보관하는 동안은 이전 키도 따로 보관하세요. `new.key`는 키를 옮긴 뒤 지웁니다.
-  - Kubernetes에서는 "서버를 멈춰야 하는 작업"처럼 일회용 Pod에서 실행하고(지금 키의 `COMMANDCENTER_SECRET_KEY` Secret 참조와 새 키 파일 마운트를 함께 둡니다), Secret을 새 키로 바꾼 뒤 `--replicas=1`로 되돌립니다.
+  - Kubernetes에서는 "서버를 멈춰야 하는 작업"의 일회용 Pod를 서버 이미지로 바꿔 실행하고(지금 키의 `COMMANDCENTER_SECRET_KEY` Secret 참조, 설정 Secret과 새 키 파일의 마운트를 함께 둡니다), 키 Secret(차트의 `secretKey.existingSecret`)을 새 키로 바꾼 뒤 `--replicas=1`로 되돌립니다.
 - 키를 켠 뒤 이 기능이 없는 이전 버전으로 내리면, 이전 버전은 암호화된 값을 그대로 비밀번호로 보내 원격·SMTP·LDAP 인증이 실패합니다("업그레이드" 참고).
 - 키가 없을 때는 `enc:v1:`로 시작하는 비밀번호를 저장하지 않습니다(암호화된 값과 구별할 수 없기 때문입니다).
 
@@ -851,10 +1105,12 @@ crate 이름은 올린 표기(대소문자 포함) 그대로 인덱스, 웹 UI(�
 | 메모리 확인 | `docker stats commandcenter` |
 | 사용하지 않는 blob 정리 | `docker compose exec commandcenter commandcenter gc` |
 | API 토큰 발급 | `docker compose exec commandcenter commandcenter token create -user ci` |
-| 비밀번호 해시(첫 가져오기용) | `docker run --rm -i commandcenter:latest hash-password` |
+| 비밀번호 해시(첫 가져오기용) | `docker run --rm -i ghcr.io/sungjinseo/commandcenter:1.2.3 hash-password` |
 | 관리자 비상 복구 | `docker compose exec -T commandcenter commandcenter user reset-password -user admin -admin`(서버가 멈춰 있으면 `docker compose run --rm -T commandcenter user reset-password -user admin -admin`) |
 | 비밀값 키 교체 | 서버를 멈추고 `docker compose run --rm -v "${PWD}/new.key:/run/new.key:ro" commandcenter secret-key rotate -new-key-file /run/new.key`, 그다음 키 설정을 새 키로 바꿔 `docker compose up -d`("저장된 비밀값 암호화"의 키 교체 참고) |
-| 버전 확인 | `docker compose exec commandcenter commandcenter version` (릴리스 이미지·바이너리는 태그 이름(예: `v1.2.3`), 직접 빌드한 이미지는 빌드 때의 `COMMANDCENTER_VERSION`, 지정하지 않았으면 `dev`) |
+| 버전 확인 | `docker compose exec commandcenter commandcenter version` (릴리스 이미지·바이너리는 태그 이름(예: `v1.2.3`), 직접 빌드한 이미지는 빌드 인자 `VERSION`의 값, 지정하지 않았으면 `dev`) |
+
+Kubernetes에서는 `docker compose exec commandcenter` 대신 `kubectl -n <네임스페이스> exec commandcenter-0 --`를 씁니다("Kubernetes"의 "동작 방식" 참고).
 
 ### 로그
 
@@ -956,6 +1212,8 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 
 ### 백업과 복원
 
+Kubernetes의 명령은 "Kubernetes에서 백업"에 있습니다. 원칙은 이 절과 같습니다.
+
 데이터는 named volume에 있습니다. 볼륨 이름은 기본 `commandcenter-data`이며 `COMMANDCENTER_VOLUME`으로 바꿀 수 있습니다. 이전 repolite 설치의 데이터를 쓰려면 `COMMANDCENTER_VOLUME=repolite_repolite-data`(또는 `docker volume ls`에 보이는 이름)를 지정하세요.
 
 - **백업 대상**: `meta.db`(저장소 정의, 사용자, 역할, 토큰 해시, 설정, 파일 목록)와 모든 blob store입니다. default store는 같은 볼륨의 `blobs/`에, 경로를 비워 만든 이름 붙은 store는 같은 볼륨의 `blobstores/<이름>`에 있습니다. 절대 경로로 만든 store는 그 경로에 있으니 따로 챙기세요. `meta.db`와 blob은 같은 시점의 것이어야 합니다. `config.yaml`도 함께 보관하세요.
@@ -1007,7 +1265,8 @@ Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이�
 
 - **이미지** `ghcr.io/sungjinseo/commandcenter`(linux/amd64, linux/arm64). `v1.2.3`이면 `1.2.3` 태그가 붙고, 움직이는 태그 `1.2`, `1`, `latest`는 이 버전이 각 범위(1.2.x, 1.x, 전체)의 정식 릴리스 중 가장 높을 때만 이 버전으로 옮겨집니다. 예를 들어 `v1.3.0` 다음에 유지보수 릴리스 `v1.2.5`를 내면 `1.2.5`와 `1.2`만 바뀌고 `1`과 `latest`는 1.3.0에 남습니다. `v0.x`에는 `0` 태그가 없고, `v1.3.0-rc.1`처럼 `-`가 들어간 프리릴리스에는 자기 태그(`1.3.0-rc.1`)만 붙으며 가장 높은 버전을 따질 때도 세지 않습니다. GitHub Release의 "Latest" 표시도 `latest` 태그와 같은 버전에 붙습니다.
 - **운영에서는 `1.2.3`처럼 정확한 버전을 고정하세요.** 새 버전이 DB를 바꾼 뒤에는 이전 버전으로 되돌리기 어려우므로 `latest`나 `1` 같은 움직이는 태그로 의도치 않게 올라가면 안 됩니다.
-- compose로 쓰려면 `docker-compose.yml`에서 `build:` 블록을 지우고 `image: ghcr.io/sungjinseo/commandcenter:1.2.3`으로 바꾼 뒤 `docker compose pull && docker compose up -d`를 실행합니다. 이 가이드의 다른 명령에 나오는 `commandcenter:latest`도 이 이미지 이름으로 바꿔 쓰세요.
+- **Helm 차트** `oci://ghcr.io/sungjinseo/charts/commandcenter`: 차트 버전과 appVersion은 릴리스 버전(`1.2.3`)이고, 기본 이미지 태그도 그 버전입니다(`helm show chart oci://ghcr.io/sungjinseo/charts/commandcenter --version 1.2.3`으로 확인). `--version`으로 고정해서 씁니다("Kubernetes" 참고). 차트도 이미지와 같은 방법으로 서명하므로, 아래 `cosign verify`의 이미지 이름을 `ghcr.io/sungjinseo/charts/commandcenter:1.2.3`으로 바꿔 확인합니다.
+- compose 파일은 이 이미지를 씁니다. `.env`의 `COMMANDCENTER_VERSION`에 버전(`1.2.3`, `v` 없이)을 적고, 사내 레지스트리로 옮긴 사본을 쓰려면 `COMMANDCENTER_IMAGE`에 그 이름(태그 없이)을 적습니다("빠른 시작" 참고). 직접 빌드했거나 사본을 쓴다면 이 가이드의 `docker run` 명령에 나오는 `ghcr.io/sungjinseo/commandcenter:1.2.3`도 그 이름으로 바꿔 쓰세요.
 - **SBOM과 provenance**: 이미지에 SPDX SBOM과 빌드 provenance 증명이 함께 올라갑니다. `docker buildx imagetools inspect ghcr.io/sungjinseo/commandcenter:1.2.3 --format '{{ json .SBOM }}'`(provenance는 `.Provenance`)로 확인합니다.
 - **이미지 서명**: 이미지는 cosign으로 키 없이(keyless) 서명합니다. 서명 인증서에는 서명한 워크플로와 태그(`https://github.com/sungjinseo/commandcenter/.github/workflows/release.yml@refs/tags/v1.2.3`)가 적히고, 서명은 Sigstore의 공개 투명성 로그에 남습니다. 서명은 태그가 가리키는 이미지(여러 플랫폼을 묶은 인덱스)의 digest에 붙고, 플랫폼별 이미지의 digest에는 붙지 않습니다. cosign 3 이상으로 다음처럼 확인합니다.
 
@@ -1023,13 +1282,13 @@ Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이�
 
 1. 올릴 버전의 [CHANGELOG](../CHANGELOG.md)를 읽습니다. 설정이나 운영 절차가 바뀌면 거기에 적습니다.
 2. 백업합니다("백업과 복원" 참고). 업그레이드한 뒤 되돌릴 수 있는 방법은 이 백업뿐입니다.
-3. 새 버전으로 바꿉니다. 소스에서 빌드한다면 다음과 같습니다(`COMMANDCENTER_VERSION`은 `commandcenter version`과 UI에 나오는 버전이 됩니다).
+3. 새 버전으로 바꿉니다. `.env`의 `COMMANDCENTER_VERSION`을 새 버전으로 고치고 다시 올리면, compose가 새 이미지를 받은 뒤 컨테이너를 바꿉니다("릴리스 이미지와 바이너리" 참고).
 
    ```bash
-   COMMANDCENTER_VERSION=v1.2.3 docker compose build && docker compose up -d
+   docker compose up -d
    ```
 
-   릴리스 이미지를 쓴다면 `docker-compose.yml`의 `image:` 태그를 새 버전으로 바꾸고 `docker compose pull && docker compose up -d`를 실행합니다("릴리스 이미지와 바이너리" 참고). 이전 컨테이너는 진행 중인 요청을 마친 뒤 끝납니다("정상 종료" 참고).
+   소스에서 빌드한다면 새 버전의 checkout에서 이미지를 빌드하고(`docker build --build-arg VERSION=v1.2.4 -t commandcenter:1.2.4 .`) `.env`의 `COMMANDCENTER_VERSION`을 그 태그(`1.2.4`)로 바꿔 올립니다. 이전 컨테이너는 진행 중인 요청을 마친 뒤 끝납니다("정상 종료" 참고). Helm 차트로 설치했다면 "차트 업그레이드"를 따릅니다.
 
    데이터 볼륨은 그대로 유지되고, 새 버전은 처음 시작할 때 `meta.db`를 필요한 만큼 새 구조로 바꿉니다. 구조 변경과 DB 구조 버전 기록은 한 트랜잭션으로 하므로, 도중에 중단되어도 `meta.db`는 이전 상태로 남고 다음 시작 때 다시 바꿉니다.
 4. 시작 로그에 ERROR가 없는지 보고, 로그인·다운로드·업로드를 한 번씩 확인합니다. UI 세션은 재시작으로 끊기고 API 토큰은 유지됩니다.
@@ -1109,6 +1368,7 @@ docker compose start
 - **proxy가 502이고 로그에 `address refused by the remote egress policy`**: 원격, 원격의 리다이렉트, 또는 원격 인덱스가 준 파일 URL이 허용되지 않은 내부 주소로 향했거나, 호스트가 `10.1`, `167772161`처럼 네 부분의 십진수가 아닌 숫자 표기이거나 ASCII가 아닌 이름입니다("저장소 키"의 "원격 접속 제한" 참고). 사내 미러를 쓰려면 `remote`를 그 미러의 사내 주소(사설 IP로 해석되는 이름)로 지정하고, IP 주소는 `10.0.0.1`처럼 네 부분으로, 국제화 도메인은 퓨니코드(`xn--…`)로 적으세요.
 - **로그에 `stopped after 5 redirects`**: 원격이 리다이렉트를 5번 넘게 이어 갔습니다. `remote`를 최종 주소로 바꾸세요.
 - **`remoteAuth`를 쓰는 proxy의 로그에 `remote status 401`(또는 403)**: 클라이언트는 502(만료된 캐시가 있으면 그 캐시)를 받습니다. 자격 증명이 맞다면, 원격이 다른 포트, `http`, 하위 도메인으로 리다이렉트해서 그 요청에 자격 증명을 보내지 않은 것일 수 있습니다(`remoteAuth` 참고. 같은 호스트의 `http`에서 `https`로 옮기는 리다이렉트는 자격 증명을 유지합니다). TLS를 끝내는 앞단 뒤의 원격이 `http://…:8081/` 같은 주소로 리다이렉트하는 경우가 흔하니, 원격이 자기 `https` 주소로 리다이렉트하게 고치세요(앞단이 `X-Forwarded-Proto`를 넘기게 하는 등). 최종 주소가 `https`라면 `remote`를 그 주소로 바꿔도 됩니다.
+- **Kubernetes에서 Pod가 `CreateContainerConfigError`**: `secretKey.existingSecret`이 가리키는 Secret이나 그 안의 키(`secretKey.key`)가 없습니다. Secret을 만들면 Pod가 곧 시작합니다("Helm 차트로 설치" 참고).
 - **`config.yaml`이 디렉터리**: `config.yaml` 없이 `docker compose up`을 하면 Docker가 같은 이름의 디렉터리를 만듭니다. `docker compose down`, 디렉터리 삭제, 파일 복사 후 다시 실행하세요.
 - **Windows 경로**: Git Bash에서 `docker run -v`에 `/c/...` 같은 경로를 쓰면 경로가 변환되어 마운트가 어긋날 수 있습니다. `MSYS_NO_PATHCONV=1`을 설정하고 `$(pwd -W)`(또는 PowerShell의 `${PWD}`)를 쓰세요. 데이터는 바인드 마운트보다 named volume(compose 기본값)이 SQLite 잠금과 I/O에 안정적입니다.
 - **시작 실패 / 동작 이상**: 먼저 `docker logs commandcenter`(또는 `docker compose logs`)를 확인하세요. 설정 오류는 시작할 때 항목별로 출력됩니다.
@@ -1119,7 +1379,7 @@ docker compose start
 
 로컬에 Go를 설치하지 않고 컨테이너(golang:1.26)에서 테스트합니다.
 
-main에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/ci.yml`)가 gofmt, `go vet`, `go test`(배포 바이너리처럼 CGO 끔), `go test -race`, govulncheck, UI 스크립트 구문 검사, 이미지 빌드(linux/amd64·arm64)를 실행합니다. `ci.yml`의 `go-version`이 Dockerfile의 `golang` 태그(현재 1.26.10)와 다르거나, `THIRD_PARTY_LICENSES.txt`가 바이너리에 링크되는 모듈·Go 버전과 맞지 않으면(`scripts/third-party-licenses.sh --check`) CI가 실패합니다. Dependabot이 Go 모듈, 베이스 이미지, Actions 업데이트를 매주 PR로 올리는데, 링크되는 모듈이나 `golang` 태그를 바꾸는 PR은 이 검사에서 실패합니다. 그 PR 브랜치에서 `bash scripts/third-party-licenses.sh`로 `THIRD_PARTY_LICENSES.txt`를 다시 만들어 커밋하고(스크립트는 Dockerfile의 `golang` 이미지에서 돌므로 Docker만 있으면 됩니다), `golang` 태그가 바뀌었으면 `ci.yml`의 `go-version`도 같은 버전으로 올리세요.
+main에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/ci.yml`)가 gofmt, `go vet`, `go test`(배포 바이너리처럼 CGO 끔), `go test -race`, govulncheck, UI 스크립트 구문 검사, 이미지 빌드(linux/amd64·arm64), Helm 차트와 참조 매니페스트 검사(`helm lint`, `helm template`, kubeconform)를 실행합니다. `ci.yml`의 `go-version`이 Dockerfile의 `golang` 태그(현재 1.26.10)와 다르거나, `THIRD_PARTY_LICENSES.txt`가 바이너리에 링크되는 모듈·Go 버전과 맞지 않으면(`scripts/third-party-licenses.sh --check`) CI가 실패합니다. Dependabot이 Go 모듈, 베이스 이미지, Actions 업데이트를 매주 PR로 올리는데, 링크되는 모듈이나 `golang` 태그를 바꾸는 PR은 이 검사에서 실패합니다. 그 PR 브랜치에서 `bash scripts/third-party-licenses.sh`로 `THIRD_PARTY_LICENSES.txt`를 다시 만들어 커밋하고(스크립트는 Dockerfile의 `golang` 이미지에서 돌므로 Docker만 있으면 됩니다), `golang` 태그가 바뀌었으면 `ci.yml`의 `go-version`도 같은 버전으로 올리세요.
 
 릴리스는 태그를 푸시하면 됩니다(`git tag v1.2.3 && git push origin v1.2.3`). 결과물은 "릴리스 이미지와 바이너리"를 보세요. 여러 버전을 함께 낼 때(예: `v1.3.0`과 유지보수 릴리스 `v1.2.5`)는 태그를 한 번에 푸시하세요(`git push origin v1.2.5 v1.3.0`). 각 실행은 시작할 때 본 태그로 움직이는 태그를 정하므로, 낮은 버전의 실행이 높은 버전의 태그를 보지 못하면 `latest`가 낮은 버전으로 돌아갈 수 있습니다.
 

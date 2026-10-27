@@ -61,6 +61,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote redirect within its own `https` origin, or point `remote` at the final `https` address. A
   proxy whose `remote` host is not ASCII must be changed to its punycode form (`xn--…`), or all its
   fetches are refused (see Changed and Security).
+- docker compose: `docker-compose.yml` now runs the release image and no longer builds the
+  checkout, and it does not start until `.env` next to it names the version, such as
+  `COMMANDCENTER_VERSION=1.2.3` (no `v`). To keep running your own build, build it with
+  `docker build` and set `COMMANDCENTER_IMAGE` and `COMMANDCENTER_VERSION` to it ("빠른 시작" in the
+  operations guide).
 
 ### Added
 
@@ -70,6 +75,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reference Kubernetes manifests in `deploy/kubernetes/`. Liveness is a TCP connect, so a full
   connection table does not restart the pod; startup and readiness ask
   `GET /service/rest/v1/status`.
+- A Helm chart, `deploy/helm/commandcenter`, published with each release as
+  `oci://ghcr.io/sungjinseo/charts/commandcenter` (chart version and appVersion are the release
+  version) and signed with cosign like the image. CI lints and renders it and checks it and the
+  reference manifest with kubeconform. It runs one pod: a StatefulSet with no replicas setting, a ReadWriteOnce volume for
+  `/data`, `config.yaml` in a Secret, the secret key from an existing Secret
+  (`secretKey.existingSecret`), a non-root user with a read-only root filesystem, and a `helm test`
+  that asks the status API through the Service with the image's own
+  `commandcenter healthcheck -url`. It is published through an Ingress (`ingress.*`) or a Gateway
+  API HTTPRoute (`httpRoute.*`). `config.baseURL` and `config.adminPasswordHash` are required,
+  and `persistence.storageClass` must name block storage, never NFS or SMB. "Kubernetes" in the
+  operations guide covers installing, ingress settings for large uploads, upgrades, backups with
+  the pod stopped, and uninstalling, which keeps the volume. The README quick start now uses the
+  release image on Kubernetes and with docker compose; building from source is still described.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, this changelog, and issue and pull request templates.
 - Continuous integration (`.github/workflows/ci.yml`) on every push to `main` and every pull
   request: gofmt, `go vet`, `go test` (also with the race detector), govulncheck, a syntax check of
@@ -90,8 +108,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   index that the release's tags point to and is recorded in Sigstore's public transparency log.
   Check it with `cosign verify` and cosign 3 or later (command in the operations guide).
 - Dependabot: weekly updates for Go modules, the Docker base images and GitHub Actions.
-- `COMMANDCENTER_VERSION` sets the version a compose build reports (`commandcenter version`, web
-  UI); without it the version is `dev`.
+- `COMMANDCENTER_VERSION` and `COMMANDCENTER_IMAGE` choose the image docker compose runs: by
+  default `ghcr.io/sungjinseo/commandcenter` at the version in `COMMANDCENTER_VERSION`, or a mirror
+  or local build named by `COMMANDCENTER_IMAGE`. The compose file has no `build:` section, so a
+  mistyped version or an unreachable registry fails instead of quietly building the checkout. A
+  local build reports the version given as `docker build --build-arg VERSION=…`, `dev` without
+  it.
 - `npm unpublish pkg@version` and `npm unpublish pkg --force` delete from a hosted repository, or
   through a group's `writeMember`, with the delete privilege (QA H-2, N-10). Dist-tags of removed
   versions go, `latest` moves to the newest remaining release, and an unpublish that would delete a

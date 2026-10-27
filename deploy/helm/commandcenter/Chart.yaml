@@ -1,0 +1,11 @@
+apiVersion: v2
+name: commandcenter
+description: Command Center, a self-hosted artifact registry for Maven, npm, PyPI, Go modules and Cargo
+type: application
+# The release workflow sets version and appVersion to the release tag (without the "v").
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/sungjinseo/commandcenter
+sources:
+  - https://github.com/sungjinseo/commandcenter
+keywords: [artifact-registry, maven, npm, pypi, go, cargo, nexus]

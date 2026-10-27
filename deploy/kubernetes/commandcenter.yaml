@@ -1,7 +1,15 @@
 # Command Center: reference Kubernetes deployment (one instance).
 #
+# The recommended way to install Command Center on Kubernetes is the Helm chart
+# (deploy/helm/commandcenter; guide: "Kubernetes"), published with every release:
+#   helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter \
+#     --version <version> -n <namespace> -f <your values file>
+# It runs the same single-pod StatefulSet, keeps config.yaml in a Secret and can add an Ingress.
+# This file is the plain-manifest form, for clusters where Helm is not used.
+#
 # Read "프로덕션 배포" in docs/guide.md first. Before applying, set:
-#   1. image             a released image, or your own build pushed to your registry:
+#   1. image             VERSION in the image below: a release, such as 1.2.3 (image tags have no "v").
+#                        Or your own build, pushed to your registry:
 #                        docker build --build-arg VERSION=<version> -t <registry>/commandcenter:<version> .
 #   2. config.yaml       baseURL and the admin passwordHash (docker run --rm -i <image> hash-password).
 #                        Repositories you want created on the first start can be copied from
@@ -85,7 +93,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: commandcenter
-          image: registry.example.com/commandcenter:VERSION # pin a version, never latest
+          image: ghcr.io/sungjinseo/commandcenter:VERSION # pin a release such as 1.2.3, never latest
           ports:
             - name: http
               containerPort: 8081

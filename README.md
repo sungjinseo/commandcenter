@@ -76,27 +76,59 @@ Human Edition에 기본으로 들어 있는 것들입니다. 추가 결제 단�
 
 ## 빠른 시작
 
+Kubernetes에는 Helm 차트로, 서버 한 대에는 Docker compose로 띄웁니다. 둘 다 릴리스 이미지 `ghcr.io/sungjinseo/commandcenter`를 씁니다. 아래의 `1.2.3`은 [릴리스](https://github.com/sungjinseo/commandcenter/releases)의 버전으로 바꾸세요.
+
+먼저 관리자 비밀번호의 해시를 만듭니다. 비밀번호(8자 이상, 72바이트 이하)를 입력하고 Enter를 누르면 해시가 나옵니다.
+
+```bash
+docker run --rm -i ghcr.io/sungjinseo/commandcenter:1.2.3 hash-password
+```
+
+### Kubernetes (Helm)
+
+`my-values.yaml`에 세 값을 정합니다.
+
+```yaml
+config:
+  baseURL: http://localhost:8081              # 클라이언트가 접속하는 주소
+  adminPasswordHash: '<위에서 나온 해시>'
+persistence:
+  storageClass: <블록 스토리지 StorageClass>   # kubectl get storageclass. NFS·SMB는 안 됩니다
+```
+
+```bash
+helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 1.2.3 \
+  --namespace commandcenter --create-namespace -f my-values.yaml --wait
+helm test commandcenter -n commandcenter
+kubectl -n commandcenter port-forward svc/commandcenter 8081:8081
+```
+
+`http://localhost:8081/`을 열고 `admin`으로 로그인합니다. 팀에서 쓸 때는 Ingress의 `https://` 주소를 `baseURL`로 둡니다(설치한 뒤에는 웹 UI의 일반 설정에서 바꿉니다). Ingress와 TLS, 비밀값 키, 업그레이드, 백업, 삭제는 운영 가이드의 [Kubernetes](docs/guide.md#kubernetes)에 있습니다.
+
+### Docker compose
+
 Docker만 있으면 됩니다.
 
 ```bash
-docker compose build
-```
-
-```bash
-docker run --rm -i commandcenter:latest hash-password
-```
-
-비밀번호(8자 이상, 72바이트 이하)를 입력하고 Enter를 누르면 해시가 나옵니다. `config.example.yaml`을 `config.yaml`로 복사하고, 그 해시를 `passwordHash` 자리에 넣습니다.
-
-```bash
+git clone --depth 1 --branch v1.2.3 https://github.com/sungjinseo/commandcenter.git
+cd commandcenter
+echo COMMANDCENTER_VERSION=1.2.3 >> .env
 cp config.example.yaml config.yaml
 ```
+
+`.env`의 버전(이미지 태그라서 `v`가 없습니다)으로 compose가 릴리스 이미지를 받습니다. `config.yaml`의 `passwordHash` 자리에 해시를 넣고 띄웁니다.
 
 ```bash
 docker compose up -d
 ```
 
 `http://localhost:8081/`을 열면 끝입니다. 라이선스 키를 묻는 화면은 나오지 않습니다. 원래 없으니까요.
+
+### 소스에서 빌드
+
+`docker build --build-arg VERSION=dev -t commandcenter:dev .`로 빌드하고 `.env`에 `COMMANDCENTER_IMAGE=commandcenter`와 `COMMANDCENTER_VERSION=dev`를 적으면 compose가 그 이미지를 씁니다. 해시는 `docker run --rm -i commandcenter:dev hash-password`로 만들고, 나머지는 위와 같습니다. Kubernetes에서는 빌드한 이미지를 사내 레지스트리에 올리고 차트의 `image.repository`와 `image.tag`를 그 이미지로 정합니다.
+
+### 클라이언트 설정
 
 포맷별 클라이언트 설정(Maven `settings.xml`, `.npmrc`, `pip.conf`, `GOPROXY`, Cargo `config.toml`)은 웹 UI의 저장소 화면과 [운영 가이드](docs/guide.md#포맷별-클라이언트-설정)에 복사해서 쓸 수 있는 형태로 있습니다.
 
@@ -107,11 +139,11 @@ docker compose up -d
 - TLS는 리버스 프록시에서 끝내고 `baseURL`을 `https://` 주소로 둡니다.
 - 사내 전용이면 익명 읽기(`anonymousRead`)를 끕니다.
 - 프록시에서 업로드 크기, 본문 수신·응답 전송 타임아웃, 연결 수를 제한합니다.
-- `meta.db`는 로컬 디스크나 블록 스토리지에 둡니다. NFS·SMB는 안 됩니다. 인스턴스는 하나만 띄웁니다.
-- 중지 대기 시간을 60초로 둡니다. 들어 있는 compose 파일은 이미 `stop_grace_period: 60s`이고, `docker run`(`--stop-timeout 60`)이나 Kubernetes에서는 직접 정합니다.
+- `meta.db`는 로컬 디스크나 블록 스토리지에 둡니다(차트에서는 `persistence.storageClass`). NFS·SMB는 안 됩니다. 인스턴스는 하나만 띄웁니다.
+- 중지 대기 시간을 60초로 둡니다. 들어 있는 compose 파일과 Helm 차트에는 이미 들어 있고, `docker run`에서는 `--stop-timeout 60`으로 직접 정합니다.
 - 정기적으로, 그리고 업그레이드 전에 백업합니다. 다운그레이드는 지원하지 않습니다.
 - 저장된 비밀값(SMTP·LDAP·프록시 비밀번호)을 암호화하려면 `COMMANDCENTER_SECRET_KEY`나 `secretKeyFile`로 키를 주고, 키는 백업과 따로 보관합니다.
-- Kubernetes용 참조 매니페스트는 [deploy/kubernetes](deploy/kubernetes/commandcenter.yaml)에 있습니다.
+- Kubernetes에는 [Helm 차트](deploy/helm/commandcenter)를 씁니다. Helm 없이 쓰는 [참조 매니페스트](deploy/kubernetes/commandcenter.yaml)도 있습니다.
 
 ## 얼마나 가볍나요
 
@@ -155,8 +187,8 @@ MIT 또는 Apache-2.0 중 원하는 쪽으로 쓰시면 됩니다. 상업적 사
 
 ## 문서
 
-- [운영 가이드](docs/guide.md): 설치, 프로덕션 배포, 설정 레퍼런스, 인증·권한, LDAP, blob store, 포맷별 클라이언트 설정, 백업과 업그레이드
-- [Kubernetes 참조 매니페스트](deploy/kubernetes/commandcenter.yaml)
+- [운영 가이드](docs/guide.md): 설치, Kubernetes(Helm), 프로덕션 배포, 설정 레퍼런스, 인증·권한, LDAP, blob store, 포맷별 클라이언트 설정, 백업과 업그레이드
+- [Helm 차트](deploy/helm/commandcenter)와 [Kubernetes 참조 매니페스트](deploy/kubernetes/commandcenter.yaml)
 - [변경 기록](CHANGELOG.md): 릴리스마다 고친 것과 바뀐 것
 - [기여 안내](CONTRIBUTING.md)와 [행동 강령](CODE_OF_CONDUCT.md)
 - [보안 정책](SECURITY.md): 취약점 신고 방법

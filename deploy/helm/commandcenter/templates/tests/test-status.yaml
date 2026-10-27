@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "commandcenter.fullname" . }}-test-status
+  labels:
+    {{- include "commandcenter.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- toYaml .Values.podSecurityContext | nindent 4 }}
+  containers:
+    # The server image's own health check, so no other image needs to be reachable.
+    - name: status
+      image: {{ include "commandcenter.image" . | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      args: ["healthcheck", "-url", "http://{{ include "commandcenter.fullname" . }}:{{ .Values.service.port }}/service/rest/v1/status"]
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      resources:
+        # Requests too, for namespaces whose ResourceQuota demands them.
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          memory: 32Mi

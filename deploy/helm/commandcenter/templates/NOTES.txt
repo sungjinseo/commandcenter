@@ -1,0 +1,27 @@
+Command Center {{ include "commandcenter.tag" . }} is starting as {{ include "commandcenter.fullname" . }} in {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  Web UI and repositories: {{ if $.Values.ingress.tls }}https{{ else }}http{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "commandcenter.fullname" . }} 8081:{{ .Values.service.port }}
+  then open http://127.0.0.1:8081/
+{{- end }}
+
+Sign in as admin with the password whose hash you set. Clients must use the address in
+config.baseURL{{ if not .Values.config.existingSecret }} ({{ .Values.config.baseURL }}){{ end }}: npm, PyPI and Cargo answers name it.
+{{- if .Release.IsUpgrade }}
+
+baseURL, anonymousRead, the users (adminPasswordHash), roles, maxUploadMiB and repositories were
+imported into meta.db on the first start, so changing them in the values does nothing now: use the
+web UI, or "commandcenter user reset-password" for a lost admin password (docs/guide.md).
+{{- end }}
+{{- if and (not .Values.persistence.storageClass) (not .Values.persistence.existingClaim) }}
+
+The volume uses the cluster's default StorageClass. It must be block storage, never NFS or SMB.
+{{- end }}
+{{- if not .Values.secretKey.existingSecret }}
+
+Stored SMTP, LDAP and remoteAuth secrets are kept in plain text: set secretKey.existingSecret.
+{{- end }}
