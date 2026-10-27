@@ -1,0 +1,144 @@
+package ui
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"commandcenter/internal/blob"
+	"commandcenter/internal/config"
+	"commandcenter/internal/meta"
+	"commandcenter/internal/repo"
+)
+
+// TestComponentMetadata: the metadata API reads what each format stored
+// (POM, npm manifest, Cargo index line, go.mod), tells "nothing collected"
+// apart from "no dependencies", and needs read access.
+func TestComponentMetadata(t *testing.T) {
+	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
+		c.Repositories = append(c.Repositories,
+			config.Repository{Name: "cargo-hosted", Format: "cargo", Type: "hosted"},
+			config.Repository{Name: "go-hosted", Format: "go", Type: "hosted"})
+	})
+	ctx := context.Background()
+	bs, err := blob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &repo.Store{Blobs: map[string]*blob.Store{repo.DefaultStore: bs}, DB: e.db, Now: time.Now}
+	e.ui.Store = store
+	put := func(repoName, path, body string) {
+		t.Helper()
+		if _, err := store.Put(ctx, repoName, path, "", strings.NewReader(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pkg := func(repoName, format, name, version, attrs string) {
+		t.Helper()
+		if err := e.db.Tx(ctx, func(tx *meta.Tx) error {
+			return tx.InsertPackage(ctx, meta.Package{Repo: repoName, Format: format, Name: name, Version: version, Attrs: attrs, CreatedAt: t0})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("maven-releases", "org/example/app/1.0/app-1.0.pom", `<?xml version="1.0"?>
+<project><modelVersion>4.0.0</modelVersion><groupId>org.example</groupId><artifactId>app</artifactId><version>1.0</version>
+<description>An app</description><url>https://example.org/app</url>
+<licenses><license><name>Apache-2.0</name></license><license><name>MIT</name></license></licenses>
+<scm><url>https://git.example.org/app</url></scm>
+<properties><guava.version>33.0.0-jre</guava.version></properties>
+<dependencies>
+  <dependency><groupId>com.google.guava</groupId><artifactId>guava</artifactId><version>${guava.version}</version></dependency>
+  <dependency><groupId>junit</groupId><artifactId>junit</artifactId><version>4.13.2</version><scope>test</scope><optional>true</optional></dependency>
+</dependencies>
+<build><plugins><plugin><groupId>x</groupId><artifactId>y</artifactId><dependencies><dependency><groupId>not</groupId><artifactId>counted</artifactId><version>1</version></dependency></dependencies></plugin></plugins></build>
+</project>`)
+	put("maven-releases", "org/example/nopom/1.0/nopom-1.0.jar", "jar")
+	pkg("npm-hosted", "npm", "web", "2.0.0", `{"name":"web","version":"2.0.0","description":"Web thing","license":{"type":"ISC"},"homepage":"https://example.org/web","repository":{"type":"git","url":"git+https://git.example.org/web.git"},"dependencies":{"express":"^4.18.0","lodash":"~4.17.21"},"devDependencies":{"jest":"^29"},"peerDependencies":{"react":">=18"},"optionalDependencies":{"fsevents":"^2"}}`)
+	pkg("cargo-hosted", "cargo", "qa-crate", "0.1.0", `{"name":"qa-crate","vers":"0.1.0","deps":[{"name":"serde","req":"^1.0","features":[],"optional":false,"default_features":true,"target":null,"kind":"normal"},{"name":"rand_core","req":"^0.6","features":[],"optional":true,"default_features":true,"target":null,"kind":"dev","package":"rand-core"}],"cksum":"x","features":{},"yanked":false}`)
+	put("go-hosted", "example.com/mod/@v/v1.2.0.mod", "module example.com/mod\n\ngo 1.22\n\nrequire github.com/google/uuid v1.6.0 // indirect\n\nrequire (\n\tgolang.org/x/text v0.21.0\n\tgopkg.in/yaml.v3 v3.0.1\n)\n")
+
+	get := func(user, repoName, query string) (int, componentMetadata) {
+		t.Helper()
+		r := e.req(t, "GET", "/-/api/repositories/"+repoName+"/components/metadata?"+query, "", user, nil, false)
+		var m componentMetadata
+		if r.status == 200 {
+			if err := json.Unmarshal([]byte(r.body), &m); err != nil {
+				t.Fatalf("%s: %v: %s", query, err, r.body)
+			}
+		}
+		return r.status, m
+	}
+	deps := func(m componentMetadata) string {
+		var parts []string
+		for _, d := range m.Dependencies {
+			parts = append(parts, d.Scope+":"+d.Group+":"+d.Name+":"+d.Requirement+":"+map[bool]string{false: "req", true: "opt"}[d.Optional])
+		}
+		return strings.Join(parts, " ")
+	}
+
+	st, m := get("admin", "maven-releases", "group=org.example&name=app&version=1.0")
+	if st != 200 || !m.Collected || m.Resolved || *m.Description != "An app" || *m.License != "Apache-2.0, MIT" || *m.Homepage != "https://example.org/app" || *m.RepositoryURL != "https://git.example.org/app" {
+		t.Fatalf("maven: %d %+v", st, m)
+	}
+	if got := deps(m); got != "compile:com.google.guava:guava:33.0.0-jre:req test:junit:junit:4.13.2:opt" {
+		t.Fatalf("maven deps: %s", got)
+	}
+	if st, m := get("admin", "maven-releases", "group=org.example&name=nopom&version=1.0"); st != 200 || m.Collected || len(m.Dependencies) != 0 {
+		t.Fatalf("maven without a POM: %d %+v", st, m)
+	}
+	if st, _ := get("admin", "maven-releases", "group=org.example&name=app&version=9.9"); st != 404 {
+		t.Fatalf("maven missing: %d", st)
+	}
+	if st, _ := get("admin", "maven-releases", "name=app&version=1.0"); st != 400 {
+		t.Fatalf("maven without group: %d", st)
+	}
+
+	st, m = get("admin", "npm-hosted", "name=web&version=2.0.0")
+	if st != 200 || !m.Collected || *m.License != "ISC" || *m.RepositoryURL != "git+https://git.example.org/web.git" || *m.Description != "Web thing" {
+		t.Fatalf("npm: %d %+v", st, m)
+	}
+	if got := deps(m); got != "runtime::express:^4.18.0:req runtime::lodash:~4.17.21:req optional::fsevents:^2:opt peer::react:>=18:req dev::jest:^29:req" {
+		t.Fatalf("npm deps: %s", got)
+	}
+
+	st, m = get("admin", "cargo-hosted", "name=QA-Crate&version=0.1.0")
+	if st != 200 || !m.Collected || m.License != nil {
+		t.Fatalf("cargo: %d %+v", st, m)
+	}
+	if got := deps(m); got != "normal::serde:^1.0:req dev::rand-core:^0.6:opt" {
+		t.Fatalf("cargo deps: %s", got)
+	}
+
+	st, m = get("admin", "go-hosted", "name=example.com/mod&version=v1.2.0")
+	if st != 200 || !m.Collected {
+		t.Fatalf("go: %d %+v", st, m)
+	}
+	if got := deps(m); got != "runtime::github.com/google/uuid:v1.6.0:req runtime::golang.org/x/text:v0.21.0:req runtime::gopkg.in/yaml.v3:v3.0.1:req" {
+		t.Fatalf("go deps: %s", got)
+	}
+	if st, _ := get("admin", "go-hosted", "name=example.com/mod&version=v9.0.0"); st != 404 {
+		t.Fatalf("go missing: %d", st)
+	}
+
+	// pypi stores nothing usable beyond existence
+	pkg("pypi-hosted", "pypi", "meta-pkg", "meta_pkg-1.0.tar.gz", `{"filename":"meta_pkg-1.0.tar.gz","version":"1.0","sha256":"x"}`)
+	if st, m := get("admin", "pypi-hosted", "name=Meta.Pkg&version=1.0"); st != 200 || m.Collected {
+		t.Fatalf("pypi: %d %+v", st, m)
+	}
+
+	// Read access is required. Signed-in users read every repository when
+	// authenticatedRead is on (the default); anonymous callers only the ones
+	// with anonymousRead, and a private one looks missing to them.
+	if st, _ := get("reader", "cargo-hosted", "name=qa-crate&version=0.1.0"); st != 200 {
+		t.Fatalf("signed-in reader: %d", st)
+	}
+	if st, _ := get("", "cargo-hosted", "name=qa-crate&version=0.1.0"); st != 401 && st != 403 && st != 404 {
+		t.Fatalf("anonymous on a private repository: %d", st)
+	}
+	if st, _ := get("", "npm-hosted", "name=web&version=2.0.0"); st != 200 {
+		t.Fatalf("anonymous on a public repository: %d", st)
+	}
+}
