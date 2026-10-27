@@ -1462,11 +1462,10 @@ docker compose start
 
 ## 제한 사항
 
-- 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML, Go·Cargo 업로드 화면은 없습니다. 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. Docker proxy·group, S3 등 원격 blob 저장소, 포맷 고유의 검색(`npm search` 포함)도 없습니다.
+- 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML과 Go·Cargo 업로드 화면은 없습니다(Go·Cargo는 클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. Docker proxy·group, S3 등 원격 blob 저장소, 포맷 고유의 검색(`npm search` 포함)도 없습니다.
 - **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
 - HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
 - **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**, 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기, S3 같은 원격 blob store(경로는 로컬 디렉터리만), 이미 만든 저장소의 blob store 이동.
-- PyPI는 PEP 658 메타데이터 파일과 `/pypi/<프로젝트>/json`을 제공하지 않습니다.
 - Go 체크섬 DB(`sumdb/`)는 프록시하지 않습니다. 사내 모듈에는 `GONOSUMDB`를 쓰세요.
 - Go zip 검사는 go 명령의 규칙을 전부 옮기지는 않았습니다. 하위 디렉터리의 `go.mod`, 루트의 `GO.MOD`처럼 대소문자가 다른 `go.mod`, 파일 이름의 `*`·`?`·`"`·`'`·`<`·`>`·`|`·백틱과 제어 문자, `.`으로 끝나는 이름, 다른 항목의 상위 디렉터리와 이름이 같은 파일(`a`와 `a/b.go`)은 받아들이지만, go 명령은 이런 zip을 내려받을 때 거부합니다. 이런 zip은 올리지 마세요.
 - 삭제는 hosted 저장소에서만 됩니다(`npm unpublish`와 Go `DELETE`는 group으로 보내면 `writeMember`에서 지웁니다). proxy의 캐시는 Cleanup 정책으로만 지웁니다. twine과 cargo에는 삭제 명령이 없으므로 PyPI와 Cargo는 웹 UI나 API로 지우고, 패키지 문서가 10 MiB를 넘는 npm 패키지는 버전 하나를 지우는 `npm unpublish`가 413이므로 역시 웹 UI나 API로 지웁니다("컴포넌트 삭제" 참고).
