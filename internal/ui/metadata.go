@@ -78,6 +78,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.pypiMetadata(r.Context(), rp, name, version, &m)
 	case "go":
 		found, err = u.goMetadata(r.Context(), rp, name, version, &m)
+	case "helm":
+		found, err = u.helmMetadata(r.Context(), rp, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -271,6 +273,31 @@ func (u *UI) cargoMetadata(ctx context.Context, rp *repo.Repository, name, versi
 			kind = "normal"
 		}
 		m.Dependencies = append(m.Dependencies, dependencyJS{Scope: kind, Name: n, Requirement: d.Req, Optional: d.Optional})
+	}
+	return true, nil
+}
+
+// helmMetadata reads the index entry a helm hosted row holds: its Chart.yaml
+// (description, home, dependencies) plus created, digest and urls.
+func (u *UI) helmMetadata(ctx context.Context, rp *repo.Repository, name, version string, m *componentMetadata) (bool, error) {
+	p, ok, err := u.storedPackage(ctx, rp, name, version)
+	if err != nil || !ok {
+		return ok, err
+	}
+	var e struct {
+		Description  string `json:"description"`
+		Home         string `json:"home"`
+		Dependencies []struct {
+			Name, Version, Repository, Condition string
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal([]byte(p.Attrs), &e); err != nil {
+		return true, nil
+	}
+	m.Collected = true
+	m.Description, m.Homepage = optStr(e.Description), optStr(e.Home)
+	for _, d := range e.Dependencies {
+		m.Dependencies = append(m.Dependencies, dependencyJS{Scope: "chart", Group: d.Repository, Name: d.Name, Requirement: d.Version, Optional: d.Condition != ""})
 	}
 	return true, nil
 }

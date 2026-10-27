@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"commandcenter/internal/blob"
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta/metatest"
 )
@@ -40,13 +41,17 @@ func storeSecrets(t *testing.T, db *DB) {
 			t.Fatal(err)
 		}
 	}
+	if err := db.CreateBlobStore(ctx, BlobStore{Name: "s", Path: "blobstores/s", Type: BlobStoreS3,
+		S3: &blob.S3Config{Bucket: "bkt", AccessKey: "ak", SecretKey: "s3-secret"}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // rawSecrets returns the stored rows that hold secrets.
 func rawSecrets(t *testing.T, db *DB) []string {
 	t.Helper()
-	const set, repo = `SELECT value FROM settings WHERE key = ?`, `SELECT config FROM repositories WHERE name = ?`
-	return []string{rawRow(t, db, set, SettingSMTP), rawRow(t, db, set, SettingLDAP), rawRow(t, db, repo, "p"), rawRow(t, db, repo, "q")}
+	const set, repo, store = `SELECT value FROM settings WHERE key = ?`, `SELECT config FROM repositories WHERE name = ?`, `SELECT config FROM blob_stores WHERE name = ?`
+	return []string{rawRow(t, db, set, SettingSMTP), rawRow(t, db, set, SettingLDAP), rawRow(t, db, repo, "p"), rawRow(t, db, repo, "q"), rawRow(t, db, store, "s")}
 }
 
 func checkSecretsRead(t *testing.T, db *DB) {
@@ -67,6 +72,14 @@ func checkSecretsRead(t *testing.T, db *DB) {
 	if err != nil || len(defs) != 3 || defs[1].RemoteAuth.Password != "remote-secret" || defs[2].RemoteAuth.BearerToken != "bearer-secret" {
 		t.Fatalf("ListRepositories: %+v, %v", defs, err)
 	}
+	bs, err := db.GetBlobStore(ctx, "s")
+	if err != nil || bs.Type != BlobStoreS3 || bs.S3 == nil || bs.S3.SecretKey != "s3-secret" || bs.S3.AccessKey != "ak" {
+		t.Fatalf("GetBlobStore: %+v, %v", bs, err)
+	}
+	stores, err := db.ListBlobStores(ctx)
+	if err != nil || len(stores) != 1 || stores[0].S3.SecretKey != "s3-secret" {
+		t.Fatalf("ListBlobStores: %+v, %v", stores, err)
+	}
 }
 
 // QA N-29: with a key the secrets are sealed in their rows and open on
@@ -84,7 +97,7 @@ func TestSecretsSealedAtRest(t *testing.T) {
 	}
 	storeSecrets(t, db)
 	for _, raw := range rawSecrets(t, db) {
-		if strings.Contains(raw, "secret") || !strings.Contains(raw, sealedPrefix) {
+		if strings.Contains(raw, "-secret") || !strings.Contains(raw, sealedPrefix) {
 			t.Errorf("stored row is not sealed: %s", raw)
 		}
 	}
@@ -94,7 +107,7 @@ func TestSecretsSealedAtRest(t *testing.T) {
 	if err := db.UpdateRepository(ctx, def); err != nil || def.RemoteAuth.Password != "remote-secret" {
 		t.Fatalf("UpdateRepository: %v; caller's password now %q", err, def.RemoteAuth.Password)
 	}
-	if raw := rawSecrets(t, db)[2]; strings.Contains(raw, "secret") {
+	if raw := rawSecrets(t, db)[2]; strings.Contains(raw, "-secret") {
 		t.Fatalf("updated row is not sealed: %s", raw)
 	}
 
@@ -111,7 +124,9 @@ func TestSecretsSealedAtRest(t *testing.T) {
 		_, err1 := other.LoadSettings(ctx)
 		_, err2 := other.ListRepositories(ctx)
 		_, err3 := other.LoadAccess(ctx)
-		for _, err := range []error{err1, err2, err3} {
+		_, err4 := other.ListBlobStores(ctx)
+		_, err5 := other.GetBlobStore(ctx, "s")
+		for _, err := range []error{err1, err2, err3, err4, err5} {
 			if err == nil || strings.Contains(err.Error(), "-secret") {
 				t.Errorf("%s: read error %v", name, err)
 			}
@@ -133,18 +148,18 @@ func TestSealSecretsMigratesPlainText(t *testing.T) {
 	db := openTest(t)
 	storeSecrets(t, db)
 	for _, raw := range rawSecrets(t, db) {
-		if !strings.Contains(raw, "secret") {
+		if !strings.Contains(raw, "-secret") {
 			t.Fatalf("without a key the secret must be stored as given: %s", raw)
 		}
 	}
 	if err := db.SetSecretKey(bytes.Repeat([]byte{3}, 32)); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := db.SealSecrets(ctx); err != nil || n != 4 {
-		t.Fatalf("SealSecrets = %d, %v; want 4 rows (smtp, ldap, p, q)", n, err)
+	if n, err := db.SealSecrets(ctx); err != nil || n != 5 {
+		t.Fatalf("SealSecrets = %d, %v; want 5 rows (smtp, ldap, p, q, s)", n, err)
 	}
 	for _, raw := range rawSecrets(t, db) {
-		if strings.Contains(raw, "secret") || !strings.Contains(raw, sealedPrefix) {
+		if strings.Contains(raw, "-secret") || !strings.Contains(raw, sealedPrefix) {
 			t.Errorf("row still plain: %s", raw)
 		}
 	}
@@ -214,11 +229,11 @@ func TestRotateSecretKey(t *testing.T) {
 	if err := a.UpdateRepository(ctx, q); err != nil { // q sealed with key 1 too
 		t.Fatal(err)
 	}
-	if resealed, plain, err := a.RotateSecretKey(ctx, newKey); err != nil || resealed != 3 || plain != 1 {
-		t.Fatalf("RotateSecretKey = %d, %d, %v; want 3 sealed (smtp, p, q) and 1 plain (ldap)", resealed, plain, err)
+	if resealed, plain, err := a.RotateSecretKey(ctx, newKey); err != nil || resealed != 3 || plain != 2 {
+		t.Fatalf("RotateSecretKey = %d, %d, %v; want 3 sealed (smtp, p, q) and 2 plain (ldap, s)", resealed, plain, err)
 	}
 	for _, raw := range rawSecrets(t, a) {
-		if strings.Contains(raw, "secret") || !strings.Contains(raw, sealedPrefix) {
+		if strings.Contains(raw, "-secret") || !strings.Contains(raw, sealedPrefix) {
 			t.Errorf("row not sealed: %s", raw)
 		}
 	}

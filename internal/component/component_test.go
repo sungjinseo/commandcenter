@@ -137,6 +137,9 @@ func TestDeriveAsset(t *testing.T) {
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.zip", "", "demo-pkg", "1.2.0", true},
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.egg", "", "demo-pkg", "1.2.0", true},
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.bz2", "", "demo-pkg", "1.2.0", true},
+		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0-py3-none-any.whl.metadata", "", "demo-pkg", "1.2.0", true},
+		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.gz.metadata", "", "demo-pkg", "1.2.0", true},
+		{"pypi", "packages/demo-pkg/.metadata", "", "", "", false},
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.txt", "", "", "", false},
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.gz.sha256", "", "", "", false},
 		{"pypi", "simple/demo-pkg/", "", "", "", false},
@@ -144,6 +147,13 @@ func TestDeriveAsset(t *testing.T) {
 		{"cargo", "crates/serde/1.0.0.crate", "", "serde", "1.0.0", true},
 		{"cargo", "crates/serde/1.0.0", "", "", "", false},
 		{"cargo", "index/se/rd/serde", "", "", "", false},
+		{"helm", "demo-1.0.0.tgz", "", "demo", "1.0.0", true},
+		{"helm", "ingress-nginx-4.10.0-rc.1.tgz", "", "ingress-nginx", "4.10.0-rc.1", true}, // "-" in the name and the prerelease
+		{"helm", "demo-1.0.0_build.2.tgz", "", "demo", "1.0.0+build.2", true},               // helm package writes "+" as "_"
+		{"helm", "demo-1.0.tgz", "", "", "", false},                                         // not SemVer 2
+		{"helm", "index.yaml", "", "", "", false},
+		{"helm", "upstream/index.yaml", "", "", "", false},
+		{"helm", "a/demo-1.0.0.tgz", "", "", "", false},
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"unknown", "a/b", "", "", "", false},

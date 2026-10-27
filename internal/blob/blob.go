@@ -1,4 +1,5 @@
-// Package blob stores content-addressed files on disk, keyed by SHA-256.
+// Package blob stores content-addressed files keyed by SHA-256, on disk
+// (Open) or in an S3 bucket (OpenS3).
 package blob
 
 import (
@@ -31,9 +32,41 @@ type Sums struct {
 	Size                      int64
 }
 
+// Store is one blob store: a tmp directory under root for uploads in
+// progress (Write spools there, Docker sessions live there) and a backend
+// that holds the committed blobs.
 type Store struct {
 	root string
+	be   backend
 }
+
+// backend holds committed blobs. put stores the closed, synced temp file tmp
+// (digests sums) under sums.SHA256, replacing or refreshing an existing copy
+// so that Walk and Stat report a fresh modTime; tmp is removed on every
+// return. Everything else is the Store method of the same name.
+type backend interface {
+	put(tmp string, sums Sums) error
+	open(sha string) (File, error)
+	stat(sha string) (Info, error)
+	remove(sha string) error
+	walk(fn func(sha string, modTime time.Time) error) error
+	check() error
+}
+
+// File is an open blob: http.ServeContent needs Seek, zip readers ReadAt.
+type File interface {
+	io.ReadSeekCloser
+	io.ReaderAt
+}
+
+// Info is what Stat reports about a blob.
+type Info struct {
+	Size    int64
+	ModTime time.Time
+}
+
+// dir is the filesystem backend: blobs/sha256/xx/yy/<sha> under root.
+type dir struct{ root string }
 
 var bufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
 
@@ -59,12 +92,18 @@ const SessionMaxAge = 24 * time.Hour
 
 // Open prepares the blob directories under root and sweeps stale temp files.
 func Open(root string) (*Store, error) {
-	for _, d := range []string{"blobs/sha256", "tmp"} {
-		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
-			return nil, err
-		}
+	if err := os.MkdirAll(filepath.Join(root, "blobs", "sha256"), 0o755); err != nil {
+		return nil, err
 	}
-	s := &Store{root: root}
+	return open(root, dir{root})
+}
+
+// open prepares root/tmp for a store on be and sweeps stale temp files.
+func open(root string, be backend) (*Store, error) {
+	if err := os.MkdirAll(filepath.Join(root, "tmp"), 0o755); err != nil {
+		return nil, err
+	}
+	s := &Store{root: root, be: be}
 	s.SweepTmp() // best effort: what it cannot remove now, the next sweep retries
 	return s, nil
 }
@@ -114,8 +153,8 @@ func (s *Store) SessionPath(id string) string {
 	return filepath.Join(s.root, "tmp", sessionPrefix+id)
 }
 
-func (s *Store) path(sha string) string {
-	return filepath.Join(s.root, "blobs", "sha256", sha[:2], sha[2:4], sha)
+func (d dir) path(sha string) string {
+	return filepath.Join(d.root, "blobs", "sha256", sha[:2], sha[2:4], sha)
 }
 
 // Write streams r to a temp file while hashing it, then commits the file
@@ -148,6 +187,15 @@ func (s *Store) Write(r io.Reader) (Sums, error) {
 	return s.commit(tmp, sums)
 }
 
+// commit hands the closed, synced temp file to the backend; tmp is removed
+// on every return.
+func (s *Store) commit(tmp string, sums Sums) (Sums, error) {
+	if err := s.be.put(tmp, sums); err != nil {
+		return Sums{}, mapErr(err)
+	}
+	return sums, nil
+}
+
 // CommitFile hashes the file at path (a SessionPath the caller wrote and
 // synced) and commits it under its SHA-256 like Write, without copying it
 // again; path is gone on return, whatever happens.
@@ -178,39 +226,34 @@ func hashTo(w io.Writer, r io.Reader) (Sums, error) {
 	return Sums{SHA256: sum(h256), SHA1: sum(h1), MD5: sum(h5), SHA512: sum(h512), Size: n}, nil
 }
 
-// commit moves the closed, synced file tmp with digests sums to its blob
-// path; tmp is removed on every return.
-func (s *Store) commit(tmp string, sums Sums) (Sums, error) {
-	dst := s.path(sums.SHA256)
+// put moves the closed, synced file tmp with digests sums to its blob path.
+func (d dir) put(tmp string, sums Sums) error {
+	defer os.Remove(tmp)
+	dst := d.path(sums.SHA256)
 	// A size mismatch means the stored blob is corrupt (e.g. truncated by a
 	// crash); do not dedup against it, replace it with the fresh copy.
 	if info, err := os.Stat(dst); err == nil && info.Size() == sums.Size {
-		os.Remove(tmp)
 		// Refresh mtime so GC's age guard protects a re-upload that is not yet
 		// recorded as an asset.
 		now := time.Now()
-		if err := os.Chtimes(dst, now, now); err != nil {
-			return Sums{}, mapErr(err)
-		}
-		return sums, nil
+		return os.Chtimes(dst, now, now)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		os.Remove(tmp)
-		return Sums{}, mapErr(err)
+		return err
 	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
-		return Sums{}, mapErr(err)
-	}
-	return sums, nil
+	return os.Rename(tmp, dst)
 }
 
 // Open opens the blob with the given SHA-256 for reading.
-func (s *Store) Open(sha string) (*os.File, error) {
+func (s *Store) Open(sha string) (File, error) {
 	if !validSHA(sha) {
 		return nil, fmt.Errorf("invalid blob id %q", sha)
 	}
-	f, err := os.Open(s.path(sha))
+	return s.be.open(sha)
+}
+
+func (d dir) open(sha string) (File, error) {
+	f, err := os.Open(d.path(sha))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, ErrNotFound
 	}
@@ -222,7 +265,11 @@ func (s *Store) Remove(sha string) error {
 	if !validSHA(sha) {
 		return fmt.Errorf("invalid blob id %q", sha)
 	}
-	err := os.Remove(s.path(sha))
+	return s.be.remove(sha)
+}
+
+func (d dir) remove(sha string) error {
+	err := os.Remove(d.path(sha))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -231,15 +278,19 @@ func (s *Store) Remove(sha string) error {
 
 // Walk calls fn for every stored blob.
 func (s *Store) Walk(fn func(sha string, modTime time.Time) error) error {
-	return filepath.WalkDir(filepath.Join(s.root, "blobs", "sha256"), func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !validSHA(d.Name()) {
+	return s.be.walk(fn)
+}
+
+func (d dir) walk(fn func(sha string, modTime time.Time) error) error {
+	return filepath.WalkDir(filepath.Join(d.root, "blobs", "sha256"), func(p string, e fs.DirEntry, err error) error {
+		if err != nil || e.IsDir() || !validSHA(e.Name()) {
 			return err
 		}
-		info, err := d.Info()
+		info, err := e.Info()
 		if err != nil {
 			return err
 		}
-		return fn(d.Name(), info.ModTime())
+		return fn(e.Name(), info.ModTime())
 	})
 }
 
@@ -264,14 +315,22 @@ func mapErr(err error) error {
 	return err
 }
 
-// Stat returns the blob's file info, or ErrNotFound if it is missing.
-func (s *Store) Stat(sha string) (fs.FileInfo, error) {
+// Stat returns the blob's size and modification time, or ErrNotFound if it
+// is missing.
+func (s *Store) Stat(sha string) (Info, error) {
 	if !validSHA(sha) {
-		return nil, fmt.Errorf("invalid blob id %q", sha)
+		return Info{}, fmt.Errorf("invalid blob id %q", sha)
 	}
-	info, err := os.Stat(s.path(sha))
+	return s.be.stat(sha)
+}
+
+func (d dir) stat(sha string) (Info, error) {
+	info, err := os.Stat(d.path(sha))
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, ErrNotFound
+		return Info{}, ErrNotFound
 	}
-	return info, err
+	if err != nil {
+		return Info{}, err
+	}
+	return Info{Size: info.Size(), ModTime: info.ModTime()}, nil
 }

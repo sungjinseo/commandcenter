@@ -25,17 +25,20 @@ func ValidName(name string) bool { return len(name) <= 200 && nameRE.MatchString
 type Kind int
 
 const (
-	KindUpload  Kind = iota // POST /
-	KindRoot                // /simple/
-	KindProject             // /simple/{project}/
-	KindFile                // /packages/{project}/{file} or /packages/{project}/{version}/{file}
+	KindUpload   Kind = iota // POST /
+	KindRoot                 // /simple/
+	KindProject              // /simple/{project}/
+	KindFile                 // /packages/{project}/{file} or /packages/{project}/{version}/{file}
+	KindMetadata             // /packages/{project}/{file}.metadata (PEP 658)
+	KindJSON                 // /pypi/{project}/json or /pypi/{project}/{version}/json
 )
 
 // Route is a parsed request path. Name is normalized.
 type Route struct {
-	Kind Kind
-	Name string
-	File string
+	Kind    Kind
+	Name    string
+	File    string
+	Version string // KindJSON: the release asked for, "" for the project
 }
 
 func ParseRoute(path string) (Route, error) {
@@ -52,6 +55,18 @@ func ParseRoute(path string) (Route, error) {
 			return Route{}, invalidName(segs[1])
 		}
 		return Route{Kind: KindProject, Name: Normalize(segs[1])}, nil
+	case segs[0] == "pypi" && (len(segs) == 3 || len(segs) == 4) && segs[len(segs)-1] == "json":
+		if !ValidName(segs[1]) {
+			return Route{}, invalidName(segs[1])
+		}
+		rt := Route{Kind: KindJSON, Name: Normalize(segs[1])}
+		if len(segs) == 4 {
+			if !validFile(segs[2]) {
+				return Route{}, repo.Errorf(http.StatusBadRequest, "invalid version %q", segs[2])
+			}
+			rt.Version = segs[2]
+		}
+		return rt, nil
 	case segs[0] == "packages" && (len(segs) == 3 || len(segs) == 4):
 		name, file := segs[1], segs[len(segs)-1]
 		if !ValidName(name) {
@@ -62,7 +77,11 @@ func ParseRoute(path string) (Route, error) {
 				return Route{}, repo.Errorf(http.StatusBadRequest, "invalid path segment %q", s)
 			}
 		}
-		return Route{Kind: KindFile, Name: Normalize(name), File: file}, nil
+		rt := Route{Kind: KindFile, Name: Normalize(name), File: file}
+		if f, ok := strings.CutSuffix(file, ".metadata"); ok && f != "" {
+			rt.Kind, rt.File = KindMetadata, f
+		}
+		return rt, nil
 	}
 	return Route{}, repo.Errorf(http.StatusNotFound, "not found: %s", path)
 }
@@ -106,6 +125,9 @@ func versionAt(s string, i int) bool {
 
 // fileKey is the asset path of a distribution file.
 func fileKey(project, file string) string { return "packages/" + project + "/" + file }
+
+// metadataKey is the asset path of a file's PEP 658 core metadata sidecar.
+func metadataKey(project, file string) string { return fileKey(project, file) + ".metadata" }
 
 // uploadExts are the distribution extensions accepted for new uploads.
 var uploadExts = []string{".whl", ".tar.gz", ".zip"}

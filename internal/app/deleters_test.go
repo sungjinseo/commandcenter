@@ -17,12 +17,14 @@ import (
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
 	"commandcenter/internal/format/cargo"
+	"commandcenter/internal/format/helm"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/meta"
 )
 
 func TestDeletersWired(t *testing.T) {
 	a, err := New(testConfig(t, `  - { name: cargo-hosted, format: cargo, type: hosted }
+  - { name: helm-hosted, format: helm, type: hosted }
   - { name: npm-proxy, format: npm, type: proxy, remote: "https://registry.example.org" }
 `), quiet())
 	if err != nil {
@@ -56,6 +58,11 @@ func TestDeletersWired(t *testing.T) {
 	c := component.Component{Format: "cargo", Name: "serde", Version: "1.0.0"}
 	if res, err := a.Deleters.Delete(context.Background(), a.Registry.Get("cargo-hosted"), c, "system"); err != nil || res.Assets != 0 {
 		t.Fatalf("cargo hosted: %+v %v", res, err)
+	}
+	if d, err := a.Deleters.For(a.Registry.Get("helm-hosted")); err != nil {
+		t.Fatalf("helm hosted deleter: %T %v", d, err)
+	} else if _, ok := d.(*helm.Handler); !ok {
+		t.Fatalf("helm hosted deleter: %T", d)
 	}
 	if _, err := a.Deleters.For(a.Registry.Get("maven-public")); !errors.Is(err, cleanup.ErrNotSupported) {
 		t.Fatalf("group: %v", err)

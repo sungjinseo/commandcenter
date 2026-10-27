@@ -51,7 +51,17 @@ func fakeIndex(hits *atomic.Int32) http.HandlerFunc {
  {"filename":"six-1.0.0.tar.gz","url":"/files/six-1.0.0.tar.gz","hashes":{"sha256":"`+sha("something else")+`"}}]}`)
 		case "/simple/legacy/":
 			w.Header().Set("Content-Type", "text/html")
-			io.WriteString(w, `<a href="../../files/legacy-1.0.tar.gz#sha256=`+sha("legacy")+`" data-requires-python="&gt;=3.8">legacy-1.0.tar.gz</a>`)
+			io.WriteString(w, `<a href="../../files/legacy-1.0.tar.gz#sha256=`+sha("legacy")+`" data-requires-python="&gt;=3.8" data-dist-info-metadata="sha256=`+sha("legacy-metadata")+`">legacy-1.0.tar.gz</a>`)
+		case "/simple/real/": // a real wheel, whose metadata the upstream does not advertise
+			w.Header().Set("Content-Type", jsonType)
+			io.WriteString(w, `{"meta":{"api-version":"1.0"},"name":"real","files":[{"filename":"real-1.0-py3-none-any.whl","url":"/files/real-1.0-py3-none-any.whl","hashes":{"sha256":"`+sha(string(realWheel))+`"}}]}`)
+		case "/files/real-1.0-py3-none-any.whl":
+			w.Write(realWheel)
+		case "/files/legacy-1.0.tar.gz.metadata":
+			io.WriteString(w, "legacy-metadata")
+		case "/pypi/six/json", "/pypi/six/1.16.0/json":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"info":{"name":"six","version":"1.16.0","summary":"Python 2 and 3 compatibility utilities"},"last_serial":1,"releases":{"1.0.0":[{"filename":"six-1.0.0.tar.gz","url":"https://files.example/six-1.0.0.tar.gz","digests":{"sha256":"`+sha("something else")+`"}}],"1.16.0":[{"filename":"six-1.16.0-py2.py3-none-any.whl","url":"https://files.example/six-1.16.0-py2.py3-none-any.whl","digests":{"sha256":"`+sha("six-wheel")+`"}}]},"urls":[{"filename":"six-1.16.0-py2.py3-none-any.whl","url":"https://files.example/six-1.16.0-py2.py3-none-any.whl","digests":{"sha256":"`+sha("six-wheel")+`"}}],"vulnerabilities":[]}`)
 		case "/files/six-1.16.0-py2.py3-none-any.whl":
 			hits.Add(1)
 			io.WriteString(w, "six-wheel")

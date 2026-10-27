@@ -9,8 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 
+	"commandcenter/internal/blob"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
@@ -200,7 +200,7 @@ func (r *Resolver) MergedTargetSalted(ctx context.Context, rp *repo.Repository, 
 	}
 
 	members := make([]io.ReadSeeker, 0, len(results))
-	var files []*os.File
+	var files []blob.File
 	defer func() {
 		for _, f := range files {
 			f.Close()

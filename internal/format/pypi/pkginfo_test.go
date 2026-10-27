@@ -44,7 +44,8 @@ func sdistBytes(t *testing.T, files map[string]string) []byte {
 
 // readMeta runs readMetadata for a distribution of project x at version 1.0.
 func readMeta(b []byte, filename string) (distMeta, error) {
-	return readMetadata(bytes.NewReader(b), int64(len(b)), filename, "x", "1.0")
+	md, _, err := readMetadata(bytes.NewReader(b), int64(len(b)), filename, "x", "1.0")
+	return md, err
 }
 
 func TestReadMetadata(t *testing.T) {

@@ -17,8 +17,9 @@ import (
 )
 
 // Blob-store admin API (plan 12 Decision 7). Reads need an admin; mutations
-// need an interactive admin and the UI header. A store's path is immutable
-// (no PUT). Deleting a store leaves its files on disk.
+// need an interactive admin and the UI header. A store's path and bucket
+// are immutable (no PUT). Deleting a store leaves its files on disk and its
+// objects in the bucket.
 //
 // Create and delete run under the registry's write lock, which repository
 // create and update hold while they check that a store exists: a store cannot
@@ -36,26 +37,44 @@ func (u *UI) blobStoreRoutes(mux *http.ServeMux) {
 // with the registry lock held (a test hook).
 var blobStoreDeleteHook func()
 
-// blobStoreRequest is the body of POST. An empty path puts the store under
-// <dataDir>/blobstores/<name> (recorded relative to the data directory); an
-// absolute path is used as given; a relative one is refused (QA N-22).
+// blobStoreRequest is the body of POST. Type is "file" (the default) or
+// "s3", which takes the bucket in S3. An empty path puts the store (for an
+// S3 store: its temp files) under <dataDir>/blobstores/<name> (recorded
+// relative to the data directory); an absolute path is used as given; a
+// relative one is refused (QA N-22).
 type blobStoreRequest struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	Name string         `json:"name"`
+	Path string         `json:"path"`
+	Type string         `json:"type"`
+	S3   *blob.S3Config `json:"s3"`
 }
 
 // blobStoreJSON is one store's wire shape. Path is the directory the store
-// opens at. FsTotal/FsFree are null when the filesystem cannot be queried.
-// Warning is set when the store lies outside the data directory (QA N-23).
+// opens at. FsTotal/FsFree are null when the filesystem cannot be queried,
+// and for an S3 store, whose bucket S3 describes (without the secret key).
+// Warning is set when a file store lies outside the data directory (QA N-23).
 type blobStoreJSON struct {
 	Name      string  `json:"name"`
+	Type      string  `json:"type"`
 	Path      string  `json:"path"`
+	S3        *s3JSON `json:"s3,omitempty"`
 	BlobCount int64   `json:"blobCount"`
 	UsedBytes int64   `json:"usedBytes"`
 	FsTotal   *uint64 `json:"fsTotal"`
 	FsFree    *uint64 `json:"fsFree"`
 	RepoCount int     `json:"repoCount"`
 	Warning   string  `json:"warning,omitempty"`
+}
+
+// s3JSON is blob.S3Config without its secret: what GET shows.
+type s3JSON struct {
+	Bucket    string `json:"bucket"`
+	Prefix    string `json:"prefix"`
+	Region    string `json:"region"`
+	Endpoint  string `json:"endpoint"`
+	PathStyle bool   `json:"pathStyle"`
+	AccessKey string `json:"accessKey"`
+	SSE       string `json:"sse"`
 }
 
 // blobStoreView builds the DTO for one stored row: usage scoped to the store's
@@ -69,8 +88,17 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 	}
 	root := repo.StoreRoot(u.DataDir, bs)
 	out := blobStoreJSON{
-		Name: bs.Name, Path: root,
+		Name: bs.Name, Type: bs.Type, Path: root,
 		BlobCount: count, UsedBytes: bytes, RepoCount: len(repos),
+	}
+	if out.Type == "" {
+		out.Type = meta.BlobStoreFile
+	}
+	if bs.Type == meta.BlobStoreS3 && bs.S3 != nil {
+		c := bs.S3
+		out.S3 = &s3JSON{Bucket: c.Bucket, Prefix: c.Prefix, Region: c.Region, Endpoint: c.Endpoint,
+			PathStyle: c.PathStyle, AccessKey: c.AccessKey, SSE: c.SSE}
+		return out, nil
 	}
 	if total, free, ok := sysinfo.DiskUsage(filepath.Join(root, "blobs")); ok {
 		out.FsTotal, out.FsFree = &total, &free
@@ -137,13 +165,31 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.writeBlobStoreError(w, r, err)
 		return
 	}
-	row := meta.BlobStore{Name: body.Name, Path: filepath.Join("blobstores", body.Name)}
+	row := meta.BlobStore{Name: body.Name, Path: filepath.Join("blobstores", body.Name), Type: body.Type}
 	switch {
 	case filepath.IsAbs(body.Path):
 		row.Path = filepath.Clean(body.Path)
 	case body.Path != "":
 		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{
 			"blob store path must be absolute; leave it empty for <dataDir>/blobstores/" + body.Name}})
+		return
+	}
+	switch row.Type {
+	case "":
+		row.Type = meta.BlobStoreFile
+	case meta.BlobStoreFile:
+	case meta.BlobStoreS3:
+		if body.S3 == nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"an s3 blob store needs \"s3\" with at least its bucket"}})
+			return
+		}
+		if err := body.S3.Validate(); err != nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"s3: " + err.Error()}})
+			return
+		}
+		row.S3 = body.S3
+	default:
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`blob store type must be "file" or "s3"`}})
 		return
 	}
 	err := u.Repos.WithWriteLock(func(*repo.Snapshot) error {
@@ -155,18 +201,29 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		root := repo.StoreRoot(u.DataDir, row)
-		if err := u.checkStoreIsolation(ctx, root); err != nil {
-			return err
+		if row.Type == meta.BlobStoreS3 {
+			if err := u.checkS3Isolation(ctx, *row.S3); err != nil {
+				return err
+			}
+		} else {
+			if err := u.checkStoreIsolation(ctx, root); err != nil {
+				return err
+			}
+			if err := checkNoBlobs(root); err != nil {
+				return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: %v", body.Name, err)}}
+			}
 		}
-		if err := checkNoBlobs(root); err != nil {
-			return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: %v", body.Name, err)}}
-		}
-		bs, err := blob.Open(root)
+		bs, err := repo.OpenStore(u.DataDir, row)
 		if err != nil {
 			return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: directory %s is not usable: %v", body.Name, root, err)}}
 		}
 		if err := probeWritable(root); err != nil {
 			return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: directory %s is not writable: %v", body.Name, root, err)}}
+		}
+		if row.Type == meta.BlobStoreS3 {
+			if err := bs.Check(); err != nil {
+				return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: bucket %s is not usable: %v", body.Name, row.S3.Bucket, err)}}
+			}
 		}
 		if err := u.DB.CreateBlobStore(ctx, row); err != nil {
 			return err
@@ -183,7 +240,11 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
-	u.emit(r, "blobstore.create", "", body.Name, repo.StoreRoot(u.DataDir, stored))
+	detail := repo.StoreRoot(u.DataDir, stored)
+	if stored.Type == meta.BlobStoreS3 && stored.S3 != nil {
+		detail = "s3://" + stored.S3.Bucket + "/" + stored.S3.Prefix
+	}
+	u.emit(r, "blobstore.create", "", body.Name, detail)
 	v, err := u.blobStoreView(r.Context(), stored)
 	if err != nil {
 		u.fail(w, r, err)
@@ -237,6 +298,23 @@ func (u *UI) deleteBlobStore(w http.ResponseWriter, r *http.Request) {
 	}
 	u.emit(r, "blobstore.delete", "", name, "")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// checkS3Isolation rejects a new S3 store on the same bucket and prefix (at
+// the same endpoint) as an existing one: their GCs would delete each
+// other's blobs.
+func (u *UI) checkS3Isolation(ctx context.Context, c blob.S3Config) error {
+	rows, err := u.DB.ListBlobStores(ctx)
+	if err != nil {
+		return err
+	}
+	for _, bs := range rows {
+		if o := bs.S3; bs.Type == meta.BlobStoreS3 && o != nil && o.Bucket == c.Bucket && o.Prefix == c.Prefix && o.Endpoint == c.Endpoint {
+			return &repo.ValidationError{Errors: []string{
+				fmt.Sprintf("s3 bucket %s prefix %q is already the %q store's", c.Bucket, c.Prefix, bs.Name)}}
+		}
+	}
+	return nil
 }
 
 // checkStoreIsolation rejects a new store whose blob tree equals, contains or

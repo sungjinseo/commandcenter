@@ -30,6 +30,9 @@ func TestParseRoute(t *testing.T) {
 		{"simple/six", Route{Kind: KindProject, Name: "six"}},
 		{"packages/six/six-1.16.0-py2.py3-none-any.whl", Route{Kind: KindFile, Name: "six", File: "six-1.16.0-py2.py3-none-any.whl"}},
 		{"packages/six/1.16.0/six-1.16.0.tar.gz", Route{Kind: KindFile, Name: "six", File: "six-1.16.0.tar.gz"}},
+		{"packages/six/six-1.16.0.tar.gz.metadata", Route{Kind: KindMetadata, Name: "six", File: "six-1.16.0.tar.gz"}},
+		{"pypi/Six/json", Route{Kind: KindJSON, Name: "six"}},
+		{"pypi/six/1.16.0/json", Route{Kind: KindJSON, Name: "six", Version: "1.16.0"}},
 	}
 	for _, c := range cases {
 		got, err := ParseRoute(c.in)
@@ -37,12 +40,12 @@ func TestParseRoute(t *testing.T) {
 			t.Errorf("%q: got %+v err=%v", c.in, got, err)
 		}
 	}
-	for _, in := range []string{"pypi/six/json", "simple/a/b/", "packages/six", "other"} {
+	for _, in := range []string{"pypi/six", "pypi/six/1.0/x", "pypi/six/1.0/2.0/json", "simple/a/b/", "packages/six", "other"} {
 		if _, err := ParseRoute(in); repo.StatusOf(err) != 404 {
 			t.Errorf("%q: %v, want 404", in, err)
 		}
 	}
-	for _, in := range []string{"simple/-bad/", "packages/six/..", "packages/six/.hidden", "packages/a b/x.whl", "packages/six/a\\b.whl"} {
+	for _, in := range []string{"simple/-bad/", "packages/six/..", "packages/six/.hidden", "packages/a b/x.whl", "packages/six/a\\b.whl", "pypi/-bad/json", "pypi/six/.hidden/json", "packages/six/.metadata"} {
 		if _, err := ParseRoute(in); repo.StatusOf(err) != 400 {
 			t.Errorf("%q: %v, want 400", in, err)
 		}

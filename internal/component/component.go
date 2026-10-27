@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"commandcenter/internal/semver"
 )
 
 // Component is a derived package version.
@@ -84,6 +86,8 @@ func (c Component) Label() string {
 		return c.Group + ":" + c.Name + ":" + c.Version
 	case c.Group != "":
 		return c.Group + "/" + c.Name + "@" + c.Version
+	case c.Version == "": // a raw file
+		return c.Name
 	}
 	return c.Name + "@" + c.Version
 }
@@ -233,7 +237,8 @@ func PyPIDisplayVersion(project, file string) string {
 
 // DeriveAsset derives a component from the path of a stored file for
 // formats whose components come from the assets table. pypi and cargo
-// proxies record no package rows, so their cached files are read the same way.
+// proxies record no package rows, so their cached files are read the same
+// way. A raw file is a component without a version.
 func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	switch format {
 	case "maven":
@@ -248,11 +253,12 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		if segs[0] != "packages" || (len(segs) != 3 && len(segs) != 4) {
 			return "", "", "", false
 		}
-		if _, _, known := pypiSplitExt(segs[len(segs)-1]); !known {
+		file, _ := strings.CutSuffix(segs[len(segs)-1], ".metadata") // the PEP 658 sidecar goes with its file
+		if _, _, known := pypiSplitExt(file); !known {
 			return "", "", "", false
 		}
 		name = segs[1]
-		return "", name, PyPIDisplayVersion(pypiNormalize(name), segs[len(segs)-1]), true
+		return "", name, PyPIDisplayVersion(pypiNormalize(name), file), true
 	case "cargo":
 		segs := strings.Split(p, "/")
 		if len(segs) != 3 || segs[0] != "crates" {
@@ -263,8 +269,35 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 			return "", "", "", false
 		}
 		return "", segs[1], v, true
+	case "raw": // every file is a component of its own, named by its path
+		return "", p, "", p != ""
+	case "helm":
+		name, version, ok = SplitHelm(p)
+		return "", name, version, ok
 	}
 	return "", "", "", false
+}
+
+// helmNameRE is a chart name as the helm format stores it: it starts a
+// `<name>-<version>.tgz` file name, so no "/" and no leading ".".
+var helmNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+
+// SplitHelm splits a chart file name, <name>-<version>.tgz, at the last "-"
+// whose suffix is a strict semver version: names may hold "-" ("ingress-nginx")
+// and so may prerelease versions ("1.0.0-rc.1"). "+" in the version may be
+// written "_", as helm package names the file.
+func SplitHelm(file string) (name, version string, ok bool) {
+	stem, cut := strings.CutSuffix(file, ".tgz")
+	if !cut || strings.Contains(stem, "/") {
+		return "", "", false
+	}
+	for i := strings.LastIndexByte(stem, '-'); i > 0; i = strings.LastIndexByte(stem[:i], '-') {
+		v := strings.Replace(stem[i+1:], "_", "+", 1)
+		if semver.Valid(v) && helmNameRE.MatchString(stem[:i]) {
+			return stem[:i], v, true
+		}
+	}
+	return "", "", false
 }
 
 // PackageComponent maps a packages-table row to a component and the path of
@@ -284,6 +317,8 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, version, "crates/" + name + "/" + version + ".crate"
 	case "docker": // an image's manifest row: version is its digest
 		return "", name, version, name + "/manifests/" + version
+	case "helm":
+		return "", name, version, name + "-" + version + ".tgz"
 	}
 	return "", name, version, ""
 }

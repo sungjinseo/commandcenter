@@ -30,12 +30,17 @@ func New(store *repo.Store, fetcher *proxy.Fetcher, baseURL func() string) *Hand
 	return &Handler{Store: store, Fetcher: fetcher, BaseURL: baseURL, Now: time.Now}
 }
 
-// fileAttrs is the packages.attrs document of a hosted file.
+// fileAttrs is the packages.attrs document of a hosted file. Blake2b256 and
+// MetadataSHA256 (the sha256 of the file's core metadata sidecar, see
+// metadataKey) are absent in rows older builds wrote; the sidecar is then
+// extracted on its first request (see extract).
 type fileAttrs struct {
 	Filename       string `json:"filename"`
 	Version        string `json:"version"`
 	SHA256         string `json:"sha256"`
 	RequiresPython string `json:"requires_python,omitempty"`
+	Blake2b256     string `json:"blake2b_256,omitempty"`
+	MetadataSHA256 string `json:"metadata_sha256,omitempty"`
 }
 
 // errStop ends a walk early once the wanted file is found.
@@ -83,6 +88,28 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		return writeProjects(w, wantsJSON(r.Header.Get("Accept")), names)
 	case KindProject:
 		return h.project(w, r, rp, rt.Name)
+	case KindJSON:
+		owner, err := h.owner(r.Context(), rp, rt.Name)
+		if err != nil {
+			return err
+		}
+		doc, res, err := h.jsonDoc(r.Context(), rp, owner, rt.Name, rt.Version)
+		if err != nil {
+			return err
+		}
+		proxy.SetStaleHeader(w, res)
+		repo.ServeText(w, r, string(doc), "application/json", res.Asset.LastModified)
+		return nil
+	case KindMetadata:
+		res, err := h.metadata(r.Context(), rp, rt.Name, rt.File)
+		if err != nil {
+			return err
+		}
+		proxy.SetStaleHeader(w, res)
+		a := res.Asset
+		a.ContentType = metadataType
+		repo.ServeAsset(w, r, h.Store, a)
+		return nil
 	}
 	res, err := h.file(r.Context(), rp, rt.Name, rt.File)
 	if err != nil {
@@ -156,7 +183,9 @@ func (h *Handler) walk(ctx context.Context, rp *repo.Repository, project string,
 			if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
 				return err
 			}
-			if err := fn(File{Filename: a.Filename, SHA256: a.SHA256, RequiresPython: a.RequiresPython}); err != nil {
+			// Every hosted file has core metadata (extracted on first request
+			// when an older build stored none); its hash is advertised when known.
+			if err := fn(File{Filename: a.Filename, SHA256: a.SHA256, RequiresPython: a.RequiresPython, HasMetadata: true, MetadataSHA256: a.MetadataSHA256}); err != nil {
 				return err
 			}
 		}
@@ -272,29 +301,85 @@ func (h *Handler) file(ctx context.Context, rp *repo.Repository, project, filena
 		}
 		return res, nil
 	case "group":
-		// Only the owner's files, even by direct URL (QA N-1), as in
-		// resolve.OwnerFile: the first member that has the file answers, a
-		// member without it that lists the project owns the project, and
-		// the last member is not asked. So a cached file needs no index,
-		// also while the upstream is down or after it dropped the project.
-		for i, m := range rp.MemberRepos {
-			if !m.IsOnline() {
-				return proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
-			}
-			res, err := h.file(ctx, m, project, filename)
-			if err == nil {
-				return res, nil
-			}
-			if repo.StatusOf(err) == http.StatusNotFound && i < len(rp.MemberRepos)-1 {
-				if _, err = h.owner(ctx, m, project); err == nil {
-					return proxy.Result{}, repo.ErrNotFound // m owns the project, without this file
-				}
-			}
-			if repo.StatusOf(err) != http.StatusNotFound {
-				return proxy.Result{}, memberFailure(rp, m, project, err)
+		return h.fromMember(ctx, rp, project, func(m *repo.Repository) (proxy.Result, error) {
+			return h.file(ctx, m, project, filename)
+		})
+	}
+	return proxy.Result{}, fmt.Errorf("unknown repository type %q", rp.Type)
+}
+
+// fromMember answers a group's request for a file of project with get of
+// the member that has it: only the owner's files, even by direct URL (QA
+// N-1), as in resolve.OwnerFile. The first member that has the file answers,
+// a member without it that lists the project owns the project, and the last
+// member is not asked. So a cached file needs no index, also while the
+// upstream is down or after it dropped the project.
+func (h *Handler) fromMember(ctx context.Context, rp *repo.Repository, project string, get func(*repo.Repository) (proxy.Result, error)) (proxy.Result, error) {
+	for i, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+		}
+		res, err := get(m)
+		if err == nil {
+			return res, nil
+		}
+		if repo.StatusOf(err) == http.StatusNotFound && i < len(rp.MemberRepos)-1 {
+			if _, err = h.owner(ctx, m, project); err == nil {
+				return proxy.Result{}, repo.ErrNotFound // m owns the project, without this file
 			}
 		}
-		return proxy.Result{}, repo.ErrNotFound
+		if repo.StatusOf(err) != http.StatusNotFound {
+			return proxy.Result{}, memberFailure(rp, m, project, err)
+		}
+	}
+	return proxy.Result{}, repo.ErrNotFound
+}
+
+// metadata returns a file's PEP 658 core metadata sidecar. A hosted file's
+// is stored at upload (or extracted from the file on first request). A
+// proxy serves the cached sidecar, extracts it from the cached file, or
+// fetches <file URL>.metadata when the upstream index advertises it
+// (verified against the advertised sha256); a group answers as for files.
+func (h *Handler) metadata(ctx context.Context, rp *repo.Repository, project, filename string) (proxy.Result, error) {
+	switch rp.Type {
+	case "hosted":
+		a, err := h.sidecar(ctx, rp, project, filename)
+		return proxy.Result{Asset: a}, err
+	case "proxy":
+		a, err := h.Store.Get(ctx, rp.Name, metadataKey(project, filename))
+		if err == nil {
+			return proxy.Result{Asset: a}, nil
+		}
+		if !errors.Is(err, repo.ErrNotFound) {
+			return proxy.Result{}, err
+		}
+		if _, err := h.Store.Get(ctx, rp.Name, fileKey(project, filename)); err == nil {
+			a, err := h.extract(ctx, rp, project, filename)
+			return proxy.Result{Asset: a}, err
+		} else if !errors.Is(err, repo.ErrNotFound) {
+			return proxy.Result{}, err
+		}
+		var found File
+		ok := false
+		err = h.walk(ctx, rp, project, func(f File) error {
+			if f.Filename == filename {
+				found, ok = f, true
+				return errStop
+			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, errStop) {
+			return proxy.Result{}, err
+		}
+		if !ok || found.URL == "" || !found.HasMetadata {
+			return proxy.Result{}, repo.ErrNotFound
+		}
+		t := proxy.Target{Key: metadataKey(project, filename), URL: found.URL + ".metadata", SHA256: found.MetadataSHA256, NotHTML: true}
+		return h.Fetcher.FetchTarget(ctx, rp, t, proxy.Content)
+	case "group":
+		return h.fromMember(ctx, rp, project, func(m *repo.Repository) (proxy.Result, error) {
+			return h.metadata(ctx, m, project, filename)
+		})
 	}
 	return proxy.Result{}, fmt.Errorf("unknown repository type %q", rp.Type)
 }
@@ -330,6 +415,15 @@ func (h *Handler) collectProjects(ctx context.Context, rp *repo.Repository, set 
 		}
 		for _, a := range assets {
 			if n, ok := strings.CutSuffix(strings.TrimPrefix(a.Path, "simple/"), "/index"); ok {
+				set[n] = true
+			}
+		}
+		docs, err := h.Store.DB.ListAssets(ctx, rp.Name, "pypi/")
+		if err != nil {
+			return err
+		}
+		for _, a := range docs { // pypi/<project>/json and pypi/<project>/<version>/json
+			if n, _, ok := strings.Cut(strings.TrimPrefix(a.Path, "pypi/"), "/"); ok && strings.HasSuffix(a.Path, "/json") {
 				set[n] = true
 			}
 		}

@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -87,10 +86,11 @@ func OrphanRepos(s *Snapshot, has func(string) bool) []string {
 	return out
 }
 
-// StoreRoot is the directory a stored blob store opens at. The default store
-// always lives at the current data directory (its row's path is only
-// informational); a relative path is relative to the data directory, so it
-// follows a moved dataDir; an absolute path is used as is.
+// StoreRoot is the directory a stored blob store opens at (an S3 store keeps
+// only its temp files there). The default store always lives at the current
+// data directory (its row's path is only informational); a relative path is
+// relative to the data directory, so it follows a moved dataDir; an absolute
+// path is used as is.
 func StoreRoot(dataDir string, bs meta.BlobStore) string {
 	switch {
 	case bs.Name == DefaultStore:
@@ -99,6 +99,19 @@ func StoreRoot(dataDir string, bs meta.BlobStore) string {
 		return filepath.Clean(bs.Path)
 	}
 	return filepath.Join(dataDir, bs.Path)
+}
+
+// OpenStore opens a stored blob store at its StoreRoot: a directory store,
+// or for an S3 row the bucket it names.
+func OpenStore(dataDir string, bs meta.BlobStore) (*blob.Store, error) {
+	root := StoreRoot(dataDir, bs)
+	if bs.Type == meta.BlobStoreS3 {
+		if bs.S3 == nil {
+			return nil, fmt.Errorf("blob store %q has no s3 configuration", bs.Name)
+		}
+		return blob.OpenS3(root, *bs.S3)
+	}
+	return blob.Open(root)
 }
 
 // blobsFor resolves a blob-store name ("" is the default) to its *blob.Store.
@@ -211,7 +224,7 @@ func (s *Store) Get(ctx context.Context, repo, path string) (meta.Asset, error) 
 }
 
 // Open opens the asset's blob from the blob store of the asset's repository.
-func (s *Store) Open(a meta.Asset) (*os.File, error) {
+func (s *Store) Open(a meta.Asset) (blob.File, error) {
 	bs, err := s.BlobStore(a.Repo)
 	if err != nil {
 		return nil, err

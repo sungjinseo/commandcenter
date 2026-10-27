@@ -1,6 +1,7 @@
 package pypi
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -136,7 +137,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		return repo.Errorf(http.StatusBadRequest, "blake2_256_digest does not match the uploaded file")
 	}
 	version, _ := normalizeVersion(fields["version"])
-	md, err := h.fileMetadata(rp, sums, filename, project, version)
+	md, raw, err := h.fileMetadata(rp, sums, filename, project, version)
 	if err != nil {
 		return err
 	}
@@ -150,9 +151,14 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		}
 		requiresPython = md.RequiresPython // the file's own metadata wins over the form
 	}
+	mdSums, err := h.Store.WriteBlob(rp.Name, bytes.NewReader(raw), nil)
+	if err != nil {
+		return err
+	}
 	if err := h.record(r.Context(), rp, project, fileAttrs{
 		Filename: filename, Version: version, SHA256: sums.SHA256, RequiresPython: requiresPython,
-	}, sums); err != nil {
+		Blake2b256: hex.EncodeToString(b2.Sum(nil)), MetadataSHA256: mdSums.SHA256,
+	}, sums, mdSums); err != nil {
 		return err
 	}
 	h.Store.Emit(r, "upload", rp.Name, filename, "")
@@ -160,8 +166,9 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	return nil
 }
 
-// record stores the file row and asset in one transaction.
-func (h *Handler) record(ctx context.Context, rp *repo.Repository, project string, attrs fileAttrs, sums blob.Sums) error {
+// record stores the file row, the file and its core metadata sidecar (PEP
+// 658, blob mdSums) in one transaction.
+func (h *Handler) record(ctx context.Context, rp *repo.Repository, project string, attrs fileAttrs, sums, mdSums blob.Sums) error {
 	unlock := h.locks.Lock(rp.Name + "\x00" + project)
 	defer unlock()
 	doc, err := json.Marshal(attrs)
@@ -185,7 +192,10 @@ func (h *Handler) record(ctx context.Context, rp *repo.Repository, project strin
 		if err != nil {
 			return err
 		}
-		return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, fileKey(project, attrs.Filename), "application/octet-stream", sums))
+		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, fileKey(project, attrs.Filename), "application/octet-stream", sums)); err != nil {
+			return err
+		}
+		return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, metadataKey(project, attrs.Filename), metadataType, mdSums))
 	})
 }
 
@@ -255,14 +265,14 @@ func duplicate(project string, pkgs []meta.Package, filename string) error {
 
 // fileMetadata reads the stored upload's metadata (see readMetadata). Failing
 // to open the blob is server-side (500).
-func (h *Handler) fileMetadata(rp *repo.Repository, sums blob.Sums, filename, project, version string) (distMeta, error) {
+func (h *Handler) fileMetadata(rp *repo.Repository, sums blob.Sums, filename, project, version string) (distMeta, []byte, error) {
 	bs, err := h.Store.BlobStore(rp.Name)
 	if err != nil {
-		return distMeta{}, err
+		return distMeta{}, nil, err
 	}
 	f, err := bs.Open(sums.SHA256)
 	if err != nil {
-		return distMeta{}, err
+		return distMeta{}, nil, err
 	}
 	defer f.Close()
 	return readMetadata(f, sums.Size, filename, project, version)

@@ -20,6 +20,7 @@ func TestComponentMetadata(t *testing.T) {
 	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
 		c.Repositories = append(c.Repositories,
 			config.Repository{Name: "cargo-hosted", Format: "cargo", Type: "hosted"},
+			config.Repository{Name: "helm-hosted", Format: "helm", Type: "hosted"},
 			config.Repository{Name: "go-hosted", Format: "go", Type: "hosted"})
 	})
 	ctx := context.Background()
@@ -121,6 +122,19 @@ func TestComponentMetadata(t *testing.T) {
 	}
 	if st, _ := get("admin", "go-hosted", "name=example.com/mod&version=v9.0.0"); st != 404 {
 		t.Fatalf("go missing: %d", st)
+	}
+
+	// helm: the index entry (Chart.yaml plus created, digest, urls)
+	pkg("helm-hosted", "helm", "demo", "1.0.0", `{"apiVersion":"v2","name":"demo","version":"1.0.0","description":"A demo chart","home":"https://example.org/demo","appVersion":"1.16.0","dependencies":[{"name":"common","version":"2.x.x","repository":"https://charts.example.com","condition":"common.enabled"},{"name":"redis","version":"^18"}],"created":"2026-10-27T12:00:00Z","digest":"x","urls":["demo-1.0.0.tgz"]}`)
+	st, m = get("admin", "helm-hosted", "name=demo&version=1.0.0")
+	if st != 200 || !m.Collected || *m.Description != "A demo chart" || *m.Homepage != "https://example.org/demo" || m.License != nil {
+		t.Fatalf("helm: %d %+v", st, m)
+	}
+	if got := deps(m); got != "chart:https://charts.example.com:common:2.x.x:opt chart::redis:^18:req" {
+		t.Fatalf("helm deps: %s", got)
+	}
+	if st, _ := get("admin", "helm-hosted", "name=demo&version=2.0.0"); st != 404 {
+		t.Fatalf("helm missing: %d", st)
 	}
 
 	// pypi stores nothing usable beyond existence

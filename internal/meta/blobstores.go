@@ -3,22 +3,58 @@ package meta
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
+
+	"commandcenter/internal/blob"
 )
 
 // Blob stores (plan 12 Decision 7). Each is a named directory that holds a
-// blob.Store; a repository routes its blob I/O to the store it names. The
-// "default" row is seeded on startup with the data directory as its path.
+// blob.Store, or an S3 bucket with a directory for uploads in progress; a
+// repository routes its blob I/O to the store it names. The "default" row
+// is seeded on startup with the data directory as its path.
 
-// BlobStore is one named file store.
+// BlobStore is one named store: its blobs are under Path (Type "file") or
+// in the bucket S3 describes (Type "s3"), with Path holding its temp files.
 type BlobStore struct {
 	Name      string
 	Path      string
+	Type      string         // BlobStoreFile or BlobStoreS3; "" reads as file
+	S3        *blob.S3Config // for BlobStoreS3; its SecretKey is sealed in the row
 	CreatedAt time.Time
 }
 
-const blobStoreCols = `name, path, created_at`
+const (
+	BlobStoreFile = "file"
+	BlobStoreS3   = "s3"
+)
+
+const blobStoreCols = `name, path, type, config, created_at`
+
+// row returns what CreateBlobStore stores for bs: its type, and for an S3
+// store its configuration as JSON with the secret key sealed.
+func (s sealer) blobStoreRow(bs BlobStore) (typ, config string, err error) {
+	if bs.Type == "" {
+		bs.Type = BlobStoreFile
+	}
+	if bs.Type != BlobStoreS3 {
+		return bs.Type, "{}", nil
+	}
+	if bs.S3 == nil {
+		return "", "", fmt.Errorf("blob store %q: an s3 store needs its s3 configuration", bs.Name)
+	}
+	c := *bs.S3
+	if c.SecretKey, err = s.seal(c.SecretKey); err != nil {
+		return "", "", fmt.Errorf("blob store %q: secretKey: %w", bs.Name, err)
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return "", "", err
+	}
+	return bs.Type, string(b), nil
+}
 
 // ListBlobStores returns every blob store, ordered by name.
 func (d *DB) ListBlobStores(ctx context.Context) ([]BlobStore, error) {
@@ -29,7 +65,7 @@ func (d *DB) ListBlobStores(ctx context.Context) ([]BlobStore, error) {
 	defer rows.Close()
 	var out []BlobStore
 	for rows.Next() {
-		bs, err := scanBlobStore(rows)
+		bs, err := d.scanBlobStore(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -40,7 +76,7 @@ func (d *DB) ListBlobStores(ctx context.Context) ([]BlobStore, error) {
 
 // GetBlobStore returns one blob store, or ErrNotFound.
 func (d *DB) GetBlobStore(ctx context.Context, name string) (BlobStore, error) {
-	return scanBlobStore(d.sql.QueryRowContext(ctx, `SELECT `+blobStoreCols+` FROM blob_stores WHERE name = ?`, name))
+	return d.scanBlobStore(d.sql.QueryRowContext(ctx, `SELECT `+blobStoreCols+` FROM blob_stores WHERE name = ?`, name))
 }
 
 // CreateBlobStore stores a new blob store; ErrExists if the name is taken. A
@@ -57,8 +93,12 @@ func (d *DB) CreateBlobStore(ctx context.Context, bs BlobStore) error {
 	if bs.CreatedAt.IsZero() {
 		bs.CreatedAt = time.Now()
 	}
-	_, err = d.sql.ExecContext(ctx, `INSERT INTO blob_stores(`+blobStoreCols+`) VALUES(?,?,?)`,
-		bs.Name, bs.Path, toMs(bs.CreatedAt))
+	typ, config, err := d.box.blobStoreRow(bs)
+	if err != nil {
+		return err
+	}
+	_, err = d.sql.ExecContext(ctx, `INSERT INTO blob_stores(`+blobStoreCols+`) VALUES(?,?,?,?,?)`,
+		bs.Name, bs.Path, typ, config, toMs(bs.CreatedAt))
 	return err
 }
 
@@ -66,8 +106,8 @@ func (d *DB) CreateBlobStore(ctx context.Context, bs BlobStore) error {
 // row (its created_at is kept). It is used on every start for the "default"
 // store, whose recorded path tracks the current data directory.
 func (d *DB) SeedBlobStore(ctx context.Context, name, path string) error {
-	_, err := d.sql.ExecContext(ctx, `INSERT INTO blob_stores(`+blobStoreCols+`) VALUES(?,?,?)
-ON CONFLICT(name) DO UPDATE SET path = excluded.path`, name, path, toMs(time.Now()))
+	_, err := d.sql.ExecContext(ctx, `INSERT INTO blob_stores(`+blobStoreCols+`) VALUES(?,?,?,?,?)
+ON CONFLICT(name) DO UPDATE SET path = excluded.path`, name, path, BlobStoreFile, "{}", toMs(time.Now()))
 	return err
 }
 
@@ -83,10 +123,11 @@ func (d *DB) DeleteBlobStore(ctx context.Context, name string) error {
 	return nil
 }
 
-func scanBlobStore(row scanner) (BlobStore, error) {
+func (d *DB) scanBlobStore(row scanner) (BlobStore, error) {
 	var bs BlobStore
 	var created int64
-	err := row.Scan(&bs.Name, &bs.Path, &created)
+	var config string
+	err := row.Scan(&bs.Name, &bs.Path, &bs.Type, &config, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BlobStore{}, ErrNotFound
 	}
@@ -94,5 +135,14 @@ func scanBlobStore(row scanner) (BlobStore, error) {
 		return BlobStore{}, err
 	}
 	bs.CreatedAt = fromMs(created)
+	if bs.Type == BlobStoreS3 {
+		bs.S3 = &blob.S3Config{}
+		if err := json.Unmarshal([]byte(config), bs.S3); err != nil {
+			return BlobStore{}, fmt.Errorf("blob store %q: decode stored configuration: %w", bs.Name, err)
+		}
+		if bs.S3.SecretKey, err = d.box.open(bs.S3.SecretKey); err != nil {
+			return BlobStore{}, fmt.Errorf("blob store %q: secretKey: %w", bs.Name, err)
+		}
+	}
 	return bs, nil
 }

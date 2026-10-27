@@ -14,7 +14,8 @@ import (
 // DeleteComponent removes one version of a hosted project: every file of that
 // version (its packages row and asset) in one incarnation-guarded transaction.
 // A row holds one file, keyed by file name; its version is derived from the
-// name as the component search does. A version that is gone already is not an
+// name as the component search does. The file's core metadata sidecar goes
+// with it. A version that is gone already is not an
 // error, and one that changed since cleanup evaluated it (a file added,
 // replaced or downloaded) is skipped (cleanup.CheckUnchanged). actor is
 // recorded on the event. Cleanup ignores writePolicy.
@@ -64,11 +65,13 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 				return err
 			}
 			rows++
-			switch size, err := tx.DeleteAsset(ctx, rp.Name, fileKey(project, file)); {
-			case err == nil:
-				res.Add(size)
-			case !errors.Is(err, meta.ErrNotFound):
-				return err
+			for _, key := range []string{fileKey(project, file), metadataKey(project, file)} {
+				switch size, err := tx.DeleteAsset(ctx, rp.Name, key); {
+				case err == nil:
+					res.Add(size)
+				case !errors.Is(err, meta.ErrNotFound):
+					return err
+				}
 			}
 		}
 		return nil

@@ -208,7 +208,17 @@ func boolInt(b bool) int {
 
 // ListPackageNames returns the distinct package names of repo, sorted.
 func (d *DB) ListPackageNames(ctx context.Context, repo string) ([]string, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT DISTINCT name FROM packages WHERE repo = ? ORDER BY name`, repo)
+	return listPackageNames(ctx, d.sql, repo)
+}
+
+// ListPackageNames is DB.ListPackageNames inside the transaction (helm
+// rebuilds index.yaml from every row in the transaction that changes one).
+func (t *Tx) ListPackageNames(ctx context.Context, repo string) ([]string, error) {
+	return listPackageNames(ctx, t.q, repo)
+}
+
+func listPackageNames(ctx context.Context, q querier, repo string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, `SELECT DISTINCT name FROM packages WHERE repo = ? ORDER BY name`, repo)
 	if err != nil {
 		return nil, err
 	}

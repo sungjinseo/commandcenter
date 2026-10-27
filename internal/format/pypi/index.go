@@ -29,6 +29,8 @@ type File struct {
 	RequiresPython string
 	Yanked         bool
 	YankedReason   string
+	HasMetadata    bool   // PEP 658: <URL>.metadata holds the core metadata
+	MetadataSHA256 string // its sha256 when advertised
 }
 
 // parseIndex streams the files of an upstream project page: PEP 691 JSON when
@@ -70,6 +72,8 @@ func parseJSONIndex(r io.Reader, base *url.URL, fn func(File) error) error {
 				Hashes         map[string]string `json:"hashes"`
 				RequiresPython *string           `json:"requires-python"`
 				Yanked         json.RawMessage   `json:"yanked"`
+				CoreMetadata   json.RawMessage   `json:"core-metadata"`
+				DistInfoMeta   json.RawMessage   `json:"dist-info-metadata"`
 			}
 			if err := dec.Decode(&jf); err != nil {
 				return err
@@ -86,6 +90,10 @@ func parseJSONIndex(r io.Reader, base *url.URL, fn func(File) error) error {
 				f.RequiresPython = *jf.RequiresPython
 			}
 			f.Yanked, f.YankedReason = parseYanked(jf.Yanked)
+			if jf.CoreMetadata == nil {
+				jf.CoreMetadata = jf.DistInfoMeta // the key before PEP 714
+			}
+			f.HasMetadata, f.MetadataSHA256 = parseJSONMetadata(jf.CoreMetadata)
 			if err := fn(f); err != nil {
 				return err
 			}
@@ -127,6 +135,32 @@ func skipValue(dec *json.Decoder) error {
 		}
 	}
 	return nil
+}
+
+// parseJSONMetadata reads a PEP 691 "core-metadata" value: true, false, or
+// the hashes of the metadata file.
+func parseJSONMetadata(raw json.RawMessage) (bool, string) {
+	var b bool
+	if json.Unmarshal(raw, &b) == nil {
+		return b, ""
+	}
+	var hashes map[string]string
+	if json.Unmarshal(raw, &hashes) == nil && len(hashes) > 0 {
+		return true, cleanSHA256(hashes["sha256"])
+	}
+	return false, ""
+}
+
+// parseHTMLMetadata reads a PEP 658 data-core-metadata attribute: "true" or
+// "<hash name>=<hash>".
+func parseHTMLMetadata(v string, ok bool) (bool, string) {
+	switch {
+	case !ok || strings.EqualFold(v, "false"):
+		return false, ""
+	case strings.HasPrefix(strings.ToLower(v), "sha256="):
+		return true, cleanSHA256(v[len("sha256="):])
+	}
+	return true, ""
 }
 
 func parseYanked(raw json.RawMessage) (bool, string) {
@@ -192,6 +226,11 @@ func parseHTMLIndex(r io.Reader, base *url.URL, fn func(File) error) error {
 		if reason, ok := a["data-yanked"]; ok {
 			f.Yanked, f.YankedReason = true, reason
 		}
+		md, ok := a["data-core-metadata"]
+		if !ok {
+			md, ok = a["data-dist-info-metadata"] // the attribute before PEP 714
+		}
+		f.HasMetadata, f.MetadataSHA256 = parseHTMLMetadata(md, ok)
 		if err := fn(f); err != nil {
 			return err
 		}
@@ -424,6 +463,13 @@ func (r *renderer) File(f File, href string) error {
 				obj["yanked"] = true
 			}
 		}
+		if f.HasMetadata { // both keys: PEP 714
+			var md any = true
+			if f.MetadataSHA256 != "" {
+				md = map[string]string{"sha256": f.MetadataSHA256}
+			}
+			obj["core-metadata"], obj["dist-info-metadata"] = md, md
+		}
 		b, err := json.Marshal(obj)
 		if err != nil {
 			return err
@@ -435,6 +481,13 @@ func (r *renderer) File(f File, href string) error {
 			link += "#sha256=" + f.SHA256
 		}
 		fmt.Fprintf(r.bw, `<a href="%s"`, html.EscapeString(link))
+		if f.HasMetadata { // both attributes: PEP 714
+			md := "true"
+			if f.MetadataSHA256 != "" {
+				md = "sha256=" + f.MetadataSHA256
+			}
+			fmt.Fprintf(r.bw, ` data-core-metadata="%s" data-dist-info-metadata="%s"`, md, md)
+		}
 		if f.RequiresPython != "" {
 			fmt.Fprintf(r.bw, ` data-requires-python="%s"`, html.EscapeString(f.RequiresPython))
 		}

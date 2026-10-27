@@ -1,0 +1,53 @@
+package meta
+
+import (
+	"path/filepath"
+	"testing"
+
+	"commandcenter/internal/blob"
+	"commandcenter/internal/meta/metatest"
+)
+
+// A blob_stores table from schema 1 (no type or config column) reads back
+// as file stores after the upgrade, next to new S3 rows.
+func TestBlobStoreUpgradeFromSchema1(t *testing.T) {
+	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	raw := rawOpen(t, path)
+	for _, q := range []string{
+		`CREATE TABLE blob_stores(name TEXT PRIMARY KEY, path TEXT NOT NULL, created_at BIGINT NOT NULL)`,
+		`INSERT INTO blob_stores(name, path, created_at) VALUES('old', 'blobstores/old', 1)`,
+	} {
+		if _, err := raw.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.CreateBlobStore(ctx, BlobStore{Name: "s3", Path: "blobstores/s3", Type: BlobStoreS3,
+		S3: &blob.S3Config{Bucket: "bkt", Prefix: "p", Region: "eu-west-1", Endpoint: "http://minio:9000", PathStyle: true, SSE: "AES256"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SeedBlobStore(ctx, "default", "/data"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.ListBlobStores(ctx)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("ListBlobStores = %+v, %v", rows, err)
+	}
+	if rows[0].Name != "default" || rows[0].Type != BlobStoreFile || rows[0].S3 != nil {
+		t.Fatalf("seeded: %+v", rows[0])
+	}
+	if rows[1].Name != "old" || rows[1].Type != BlobStoreFile || rows[1].S3 != nil || rows[1].Path != "blobstores/old" {
+		t.Fatalf("upgraded: %+v", rows[1])
+	}
+	if s := rows[2]; s.Type != BlobStoreS3 || s.S3 == nil || s.S3.Bucket != "bkt" || s.S3.Prefix != "p" || s.S3.Region != "eu-west-1" ||
+		s.S3.Endpoint != "http://minio:9000" || !s.S3.PathStyle || s.S3.SSE != "AES256" {
+		t.Fatalf("s3: %+v %+v", s, s.S3)
+	}
+	if err := db.CreateBlobStore(ctx, BlobStore{Name: "bad", Type: BlobStoreS3}); err == nil {
+		t.Fatal("an s3 store without configuration was stored")
+	}
+}

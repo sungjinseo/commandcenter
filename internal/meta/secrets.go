@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"strings"
 
+	"commandcenter/internal/blob"
 	"commandcenter/internal/config"
 )
 
-// The stored secrets are the SMTP password, the LDAP bind password and a
-// proxy's remoteAuth password and bearer token. They must be sent as they
+// The stored secrets are the SMTP password, the LDAP bind password, a
+// proxy's remoteAuth password and bearer token and an S3 blob store's
+// secret key. They must be sent as they
 // are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
 // with AES-256-GCM on write and opened on read, so a copy of meta.db or of a
 // backup does not give them away (QA N-29). A sealed value is sealedPrefix
@@ -314,6 +316,44 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 				return err
 			}
 			if _, err := tx.q.ExecContext(ctx, `UPDATE repositories SET config = ? WHERE name = ?`, string(js), name); err != nil {
+				return err
+			}
+			n++
+		}
+		rows, err = tx.q.QueryContext(ctx, `SELECT name, config FROM blob_stores WHERE type = ?`, BlobStoreS3)
+		if err != nil {
+			return err
+		}
+		stores := map[string]string{}
+		for rows.Next() {
+			var name, js string
+			if err := rows.Scan(&name, &js); err != nil {
+				rows.Close()
+				return err
+			}
+			stores[name] = js
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for name, js := range stores {
+			var c blob.S3Config
+			if err := json.Unmarshal([]byte(js), &c); err != nil {
+				return fmt.Errorf("blob store %q: decode stored configuration: %w", name, err)
+			}
+			changed := false
+			if err := rewrite(&c.SecretKey, &changed); err != nil {
+				return fmt.Errorf("blob store %q: secretKey: %w", name, err)
+			}
+			if !changed {
+				continue
+			}
+			b, err := json.Marshal(c)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.q.ExecContext(ctx, `UPDATE blob_stores SET config = ? WHERE name = ?`, string(b), name); err != nil {
 				return err
 			}
 			n++

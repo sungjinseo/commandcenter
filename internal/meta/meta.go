@@ -73,7 +73,8 @@ CREATE TABLE IF NOT EXISTS repositories(
   name TEXT PRIMARY KEY, format TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS blob_stores(name TEXT PRIMARY KEY, path TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS blob_stores(name TEXT PRIMARY KEY, path TEXT NOT NULL, created_at INTEGER NOT NULL,
+  type TEXT NOT NULL DEFAULT 'file', config TEXT NOT NULL DEFAULT '{}');
 CREATE TABLE IF NOT EXISTS users(
   id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '',
   password_hash TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'local',
@@ -111,7 +112,9 @@ CREATE TABLE IF NOT EXISTS tasks(
 //
 //	1: users, roles and settings in the database, named blob stores,
 //	   secrets sealed with the secret key (secrets.go).
-const schemaVersion = 1
+//	2: blob_stores.type and config (S3 stores): an older build would open an
+//	   S3 store's path as a directory and find nothing in it.
+const schemaVersion = 2
 
 // Open opens the metadata database and creates or upgrades its tables:
 // PostgreSQL when target is a postgres:// or postgresql:// URL (see
@@ -251,6 +254,8 @@ func migrate(ctx context.Context, db querier) error {
 		{"assets", "downloads", "downloads INTEGER NOT NULL DEFAULT 0"},
 		{"assets", "last_downloaded", "last_downloaded INTEGER NOT NULL DEFAULT 0"},
 		{"tasks", "notify_email", "notify_email TEXT NOT NULL DEFAULT '[]'"},
+		{"blob_stores", "type", "type TEXT NOT NULL DEFAULT 'file'"},
+		{"blob_stores", "config", "config TEXT NOT NULL DEFAULT '{}'"},
 	} {
 		has, err := hasColumn(ctx, db, c.table, c.col)
 		if err != nil {

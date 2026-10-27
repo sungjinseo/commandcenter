@@ -493,6 +493,40 @@ func TestOCIIndex(t *testing.T) {
 	e.check(resp, b, 201, "")
 }
 
+// A chart pushed with `helm push chart.tgz oci://host/dh` is an OCI manifest
+// whose config is application/vnd.cncf.helm.config.v1+json and whose one
+// layer is the chart tarball, tagged with the chart version: a docker
+// repository takes it as any image (the helm format serves index.yaml
+// repositories; OCI charts need no helm repository).
+func TestOCIHelmChart(t *testing.T) {
+	e := newEnv(t)
+	ci := bearer(e.token("ci", "repository:dh/charts/demo:pull,push"))
+	cfg := []byte(`{"name":"demo","version":"1.0.0","description":"a chart","apiVersion":"v2"}`)
+	chart := []byte("\x1f\x8b\x08\x00not really a tarball")
+	m := []byte(`{"schemaVersion":2,"mediaType":"` + mtOCIManifest + `",` +
+		`"config":{"mediaType":"application/vnd.cncf.helm.config.v1+json","digest":"` + e.pushBlob("dh/charts/demo", cfg, ci) + `","size":` + fmt.Sprint(len(cfg)) + `},` +
+		`"layers":[{"mediaType":"application/vnd.cncf.helm.chart.content.v1.tar+gzip","digest":"` + e.pushBlob("dh/charts/demo", chart, ci) + `","size":` + fmt.Sprint(len(chart)) + `}],` +
+		`"annotations":{"org.opencontainers.image.title":"demo","org.opencontainers.image.version":"1.0.0"}}`)
+	resp, b := e.do("PUT", "/v2/dh/charts/demo/manifests/1.0.0", m, ci, hdr("Content-Type", mtOCIManifest))
+	e.check(resp, b, 201, "")
+	// helm pull: the manifest by tag, then the chart layer by digest
+	resp, b = e.do("GET", "/v2/dh/charts/demo/manifests/1.0.0", nil, hdr("Accept", mtOCIManifest))
+	e.check(resp, b, 200, "")
+	if !bytes.Equal(b, m) || resp.Header.Get("Content-Type") != mtOCIManifest {
+		t.Fatalf("manifest: %v %s", resp.Header, b)
+	}
+	resp, b = e.do("GET", "/v2/dh/charts/demo/blobs/"+digestOf(chart), nil)
+	e.check(resp, b, 200, "")
+	if !bytes.Equal(b, chart) {
+		t.Fatalf("chart layer: %q", b)
+	}
+	resp, b = e.do("GET", "/v2/dh/charts/demo/tags/list", nil)
+	e.check(resp, b, 200, "")
+	if !strings.Contains(string(b), `"tags":["1.0.0"]`) {
+		t.Fatalf("tags: %s", b)
+	}
+}
+
 func TestManifestRejections(t *testing.T) {
 	e := newEnv(t)
 	ci := bearer(e.token("ci", "repository:dh/app:pull,push"))

@@ -359,6 +359,9 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 		{"cargo", []string{
 			"crates/a/1.0.0.crate", "crates/a/1.1.0.crate", "crates/ab/0.1.0.crate",
 		}, map[int]string{1: "a@1.0.0", 2: "a@1.0.0,a@1.1.0", 3: "a@1.0.0,a@1.1.0,ab@0.1.0"}},
+		{"helm", []string{ // index.yaml is not a component
+			"a-1.0.0.tgz", "a-1.1.0.tgz", "ab-0.1.0.tgz", "index.yaml",
+		}, map[int]string{1: "a@1.0.0", 2: "a@1.0.0,a@1.1.0", 3: "a@1.0.0,a@1.1.0,ab@0.1.0", 4: "a@1.0.0,a@1.1.0,ab@0.1.0"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {
