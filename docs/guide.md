@@ -210,7 +210,7 @@ helm test commandcenter -n commandcenter
 
 ### Kubernetes에서 백업
 
-`meta.db`와 blob은 같은 시점의 것이어야 하므로("백업과 복원" 참고) Pod를 멈추고 받습니다. 클러스터가 CSI 볼륨 스냅샷을 지원하면(`kubectl get volumesnapshotclass`) 스냅샷이 가장 빠르며, 서비스는 스냅샷이 준비될 때까지 멈춥니다.
+`meta.db`와 blob은 같은 시점의 것이어야 하므로("백업과 복원" 참고) 볼륨을 통째로 받을 때는 Pod를 멈춥니다. Pod를 멈추지 않으려면 아래 "온라인 백업"을 쓰세요. 클러스터가 CSI 볼륨 스냅샷을 지원하면(`kubectl get volumesnapshotclass`) 스냅샷이 가장 빠르며, 서비스는 스냅샷이 준비될 때까지 멈춥니다.
 
 ```bash
 NS=commandcenter SNAP=commandcenter-$(date +%Y%m%d-%H%M)
@@ -266,6 +266,20 @@ kubectl -n $NS scale statefulset commandcenter --replicas=1
 kubectl -n $NS exec commandcenter-maint -- tar czf - -C / data > data.tgz                                            # 백업
 kubectl -n $NS exec -i commandcenter-maint -- sh -c 'find /data -mindepth 1 -delete && tar xzf - -C /' < data.tgz   # 복원
 ```
+
+**온라인 백업**: Pod를 멈추지 않는 온라인 백업("백업과 복원"의 "온라인 백업")도 됩니다. 차트는 루트 파일시스템을 읽기 전용으로 두므로 **`backupDir`(기본 `/backup`)은 쓸 수 있는 볼륨이어야 합니다.** 볼륨이 없으면 백업이 쓰기 오류로 실패합니다. `extraVolumes`와 `extraVolumeMounts`로 PVC를 `/backup`에 마운트하세요. 데이터 볼륨과 다른 디스크에 두어야 디스크 고장에도 남습니다.
+
+```yaml
+extraVolumes:
+  - name: backup
+    persistentVolumeClaim:
+      claimName: commandcenter-backup   # 미리 만들어 둔 PVC
+extraVolumeMounts:
+  - name: backup
+    mountPath: /backup
+```
+
+복원은 Pod를 멈추고(`--replicas=0`) 데이터 PVC와 백업 PVC를 함께 마운트한 일회용 Pod에서 서버 이미지로 `restore --from /backup/<이름> --data /data --force`를 실행한 뒤 다시 `--replicas=1`로 올립니다. 일회용 Pod는 "서버를 멈춰야 하는 작업"의 것과 같되, `image`를 서버 이미지로, `command`를 `["/usr/local/bin/commandcenter", "restore", "--from", "/backup/<이름>", "--data", "/data", "--force"]`로 바꾸고 백업 PVC를 `/backup`에 마운트합니다. 끝나면 `kubectl logs`로 결과를 보고 Pod를 지웁니다.
 
 ### 서버를 멈춰야 하는 작업
 
@@ -622,6 +636,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 | `listen` | 문자열 | `":8081"` | 수신 주소. 컨테이너 안에서는 8081을 유지하세요(헬스체크가 127.0.0.1:8081을 확인). |
 | `baseURL` | URL | `"http://localhost:8081"` | (가져온 뒤 UI의 일반 설정에서 관리) 클라이언트가 접속하는 주소. npm·Cargo 응답의 다운로드 URL이 이 값으로 만들어집니다(PyPI 파일 링크는 호스트 없는 경로이며 이 값의 경로 부분만 앞에 붙습니다). 끝의 `/`는 무시되고, 사용자 정보(`user:pass@`), 쿼리(`?…`), 프래그먼트(`#…`)가 없는 `http(s)` URL이어야 합니다. 이 값은 클라이언트에게 주는 URL의 앞부분이 되므로 사용자 정보가 있으면 그 자격 증명이 모든 클라이언트에게 넘어가고, `?`나 `#`가 있으면 URL이 깨집니다. |
 | `dataDir` | 경로 | `"/data"` | blob과 `meta.db`(SQLite)를 저장하는 디렉터리. compose에서는 named volume입니다. |
+| `backupDir` | 경로 | `"/backup"` | 온라인 백업을 쓰는 디렉터리("백업과 복원" 참고). `dataDir`과 같을 수 없습니다. 시작할 때마다 읽습니다. |
 | `memoryLimitMiB` | 정수 | `80` | Go 메모리 한도(MiB). 환경변수 `GOMEMLIMIT`가 있으면 무시됩니다(compose 기본값은 `GOMEMLIMIT: 80MiB`). |
 | `maxUploadMiB` | 정수 | `1024` | (가져온 뒤 UI에서 관리, 바로 적용) GET/HEAD가 아닌 요청 본문의 최대 크기(MiB). 허용 범위 1..1048576, 0이면 기본값. 초과하면 모든 포맷에서 413. 포맷별로 더 작은 제한이 있으면 그것이 먼저 적용됩니다. |
 | `anonymousRead` | 불리언 | `false` | (가져온 뒤 UI에서 관리) 인증 없는 다운로드 허용 여부. 저장소별로 덮어쓸 수 있습니다. |
@@ -1138,7 +1153,7 @@ crate 이름은 올린 표기(대소문자 포함) 그대로 인덱스, 웹 UI(�
 |---|---|
 | 로그 | `docker compose logs -f` |
 | 메모리 확인 | `docker stats commandcenter` |
-| 사용하지 않는 blob 정리 | `docker compose exec commandcenter commandcenter gc` |
+| 사용하지 않는 blob 정리 | 예약 작업 `compact-blobstore`의 "지금 실행" 또는 `POST /-/api/gc` (서버가 꺼져 있을 때만 `commandcenter gc`) |
 | API 토큰 발급 | `docker compose exec commandcenter commandcenter token create -user ci` |
 | 비밀번호 해시(첫 가져오기용) | `docker run --rm -i ghcr.io/sungjinseo/commandcenter:1.2.3 hash-password` |
 | 관리자 비상 복구 | `docker compose exec -T commandcenter commandcenter user reset-password -user admin -admin`(서버가 멈춰 있으면 `docker compose run --rm -T commandcenter user reset-password -user admin -admin`) |
@@ -1245,6 +1260,8 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 
 쓰기 도중 프로세스가 강제 종료되면(SIGKILL, OOM, 중지 대기 시간 초과) store의 `tmp/`에 미완성 임시 파일(`up-*`)이 남습니다. 1시간 넘게 수정되지 않은 임시 파일은 GC 때와 서버 시작 때 지웁니다. `gc`, `token create` 같은 CLI 명령도 시작할 때 같은 정리를 합니다. 진행 중인 쓰기는 늦어도 몇 분마다 파일을 갱신하므로, 서버가 돌고 있을 때 CLI를 실행해도 쓰는 중인 파일은 지워지지 않습니다. 지운 임시 파일 수는 위 결과에 들어가지 않습니다. compact 작업이 지운 경우에는 서버 로그에 `removed stale temp files`로 남습니다.
 
+서버가 실행 중이면 CLI 대신 예약 작업 `compact-blobstore`(또는 `POST /-/api/gc`)를 쓰세요. 서버의 compact와 백업은 데이터 디렉터리의 잠금 파일 `<dataDir>/.gc.lock`을 잡고, `commandcenter gc`도 같은 잠금을 잡습니다. 서버가 잠금을 쥐고 있으면 CLI는 `-wait`(기본 30s)만큼 기다린 뒤 "a server is running; use the task 'compact-blobstore' or POST /-/api/gc"로 실패합니다. 이렇게 해서 백업이 복사 중인 blob을 다른 프로세스가 지우지 못합니다.
+
 ### 백업과 복원
 
 Kubernetes의 명령은 "Kubernetes에서 백업"에 있습니다. 원칙은 이 절과 같습니다.
@@ -1252,18 +1269,63 @@ Kubernetes의 명령은 "Kubernetes에서 백업"에 있습니다. 원칙은 이
 데이터는 named volume에 있습니다. 볼륨 이름은 기본 `commandcenter-data`이며 `COMMANDCENTER_VOLUME`으로 바꿀 수 있습니다. 이전 repolite 설치의 데이터를 쓰려면 `COMMANDCENTER_VOLUME=repolite_repolite-data`(또는 `docker volume ls`에 보이는 이름)를 지정하세요.
 
 - **백업 대상**: `meta.db`(저장소 정의, 사용자, 역할, 토큰 해시, 설정, 파일 목록)와 모든 blob store입니다. default store는 같은 볼륨의 `blobs/`에, 경로를 비워 만든 이름 붙은 store는 같은 볼륨의 `blobstores/<이름>`에 있습니다. 절대 경로로 만든 store는 그 경로에 있으니 따로 챙기세요. `meta.db`와 blob은 같은 시점의 것이어야 합니다. `config.yaml`도 함께 보관하세요.
-- **백업 파일 보호**: `meta.db`에는 proxy 원격 인증, LDAP bind, SMTP 비밀번호가 들어 있고, 비밀값 키를 정하지 않았다면 평문입니다("저장된 비밀값 암호화" 참고). 백업 파일도 서버와 같은 수준으로 접근을 제한하세요. 키를 정했다면 키도 백업하되 `meta.db` 백업과 다른 곳에 두세요. 키가 없으면 복원한 서버가 시작하지 않습니다.
+- **백업 파일 보호**: `meta.db`에는 proxy 원격 인증, LDAP bind, SMTP 비밀번호가 들어 있고, 비밀값 키를 정하지 않았다면 평문입니다("저장된 비밀값 암호화" 참고). 온라인 백업의 `meta.db` 스냅샷도 같습니다. 백업 파일도 서버와 같은 수준으로 접근을 제한하세요. 키를 정했다면 키도 백업하되 `meta.db` 백업과 다른 곳에 두세요. 키는 어느 백업에도 들어 있지 않으며, 키가 없으면 복원한 서버가 시작하지 않습니다.
 - **실행 중인 볼륨을 그대로 복사하면 백업이 되지 않습니다.** `cp`나 `tar`가 `meta.db`를 읽는 동안 내용이 바뀌거나, `meta.db`가 아직 복사되지 않은 blob을 가리켜서 복원한 뒤 그 파일들이 404가 됩니다(`allow_once` 저장소에는 같은 파일을 다시 올릴 수도 없습니다).
 
 일관된 백업 방법은 두 가지입니다.
 
-1. **멈추고 복사(가장 단순)**: 아래 명령처럼 서버를 멈추고 볼륨을 통째로 복사한 뒤 다시 시작합니다. 중지와 기동은 보통 1초 안쪽이지만 복사하는 동안은 서비스가 멈춥니다.
-2. **무중단**: 먼저 `meta.db`를 SQLite의 online backup API나 `VACUUM INTO`로 스냅샷하고, **그다음에** blob 디렉터리를 복사합니다. blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로 스냅샷 뒤에 생긴 blob이 섞여도 무해합니다(다음 compact 작업이 정리합니다). 순서를 바꾸면 안 됩니다.
-   - 서버 이미지에는 셸과 `sqlite3`가 없습니다. 같은 볼륨을 마운트한 다른 컨테이너에서 **서버와 같은 UID 65532로** 실행하세요(다른 사용자로 실행하면 그 사용자 소유의 파일이 볼륨에 남아 서버가 열지 못할 수 있습니다). 예: `sqlite3 /data/meta.db "VACUUM INTO '/data/meta-snapshot.db'"`. 그다음 `blobs/`(와 이름 붙은 store)를 스냅샷 파일과 함께 복사하고, 볼륨 안의 스냅샷은 지웁니다(`VACUUM INTO`는 이미 있는 파일에 쓰지 않습니다).
-   - 백업하는 동안에는 compact 작업(`commandcenter gc` 포함)이 돌지 않게 하세요. 스냅샷 뒤에 지워진 파일의 blob을 compact가 회수하면 백업에서 빠집니다. 기본 compact 작업은 매일 03:00(서버 시간대)에 돕니다.
-   - 복원할 때는 스냅샷을 `meta.db`라는 이름으로 두고, `meta.db-wal`·`meta.db-shm` 없이 시작합니다.
+1. **온라인 백업**: 서버를 멈추지 않고 `meta.db`의 스냅샷과 그것이 참조하는 blob을 `backupDir`로 복사합니다. 복원은 서버를 멈추고 `commandcenter restore`로 합니다. 아래 "온라인 백업"과 "복원"을 보세요.
+2. **멈추고 복사**: 서버를 멈추고 볼륨을 통째로 복사한 뒤 다시 시작합니다. 중지와 기동은 보통 1초 안쪽이지만 복사하는 동안은 서비스가 멈춥니다. 아래 "볼륨 통째로 복사"를 보세요.
 
-아래는 1번(멈추고 복사) 방법의 명령입니다.
+#### 온라인 백업
+
+서버가 실행 중이어도 업로드를 막지 않고 일관된 사본을 만듭니다. `meta.db`의 스냅샷과 그것이 참조하는 blob만 `backupDir`로 복사합니다.
+
+- **어디에 쓰나**: `config.yaml`의 `backupDir`(기본 `/backup`)입니다. `docker-compose.yml`이 호스트의 `./backup`을 `/backup`에 마운트합니다. `backupDir`은 `dataDir`과 같을 수 없습니다. **리눅스에서 `./backup`처럼 호스트 디렉터리를 마운트하면 컨테이너 사용자(uid 65532)가 거기에 쓸 수 있어야 합니다**: `mkdir -p backup && sudo chown 65532:65532 backup`. named volume은 이미지가 `/backup`의 소유자를 맞춰 두므로 따로 할 일이 없습니다. Kubernetes에서는 `backupDir`에 쓸 수 있는 볼륨을 따로 마운트해야 합니다("Kubernetes에서 백업" 참고).
+- **실행 방법**: 웹 UI의 SYSTEM → Backup의 "Back up now", 예약 작업(작업 유형 `backup`), API, CLI 중 아무거나 됩니다.
+
+  ```bash
+  # API (202 {"id": ...}); 진행은 GET /-/api/backup/runs/<id>로 확인
+  curl -u admin:... -X POST http://localhost:8081/-/api/backup
+  curl -u admin:... http://localhost:8081/-/api/backups            # 목록
+
+  # CLI: 끝날 때까지 기다리고, 실패하면 0이 아닌 코드로 끝납니다
+  export COMMANDCENTER_TOKEN=cc_...      # UI의 Tokens에서 만든 관리자 토큰
+  docker compose exec -e COMMANDCENTER_TOKEN commandcenter commandcenter backup --url http://localhost:8081 --wait
+  ```
+
+  토큰은 `COMMANDCENTER_TOKEN` 환경 변수로 주세요. `--token` 인자는 같은 호스트의 프로세스 목록(`ps`)에 보입니다. 토큰으로도 백업을 **시작**할 수 있어(cron 용도) 관리자 토큰은 그만큼 강력합니다. 토큰으로 시작한 백업은 파괴적일 수 없습니다. 본문의 `keep`과 `deep`은 무시하고, 기본값 또는 대화형 관리자가 마지막으로 정해 둔 값(`api-backup` 작업 행에 저장됨)을 씁니다. 보관 개수를 바꾸려면 UI에서 "지금 백업"을 쓰거나 예약 작업의 `keep`을 고치세요. 검증과 삭제는 대화형 관리자(UI 또는 비밀번호 로그인 세션)만 할 수 있습니다.
+- **옵션**(요청 본문, 작업 파라미터, CLI 플래그): `subdir`(이름, 기본은 `YYYYMMDD-HHMMSS`), `keep`(남길 백업 수, 1 이상 100 이하, 기본 7), `verify`(끝난 뒤 표준 검증), `deep`(깊은 검증, `verify`를 함께 켬). 성공하면 `keep`을 넘는 오래된 백업이 지워지고 어떤 백업도 참조하지 않는 blob도 정리됩니다. 실패한 실행(누락된 blob, 검증 실패)은 보관 정책을 돌리지 않습니다.
+- **구조**: `<backupDir>/<이름>/`에 `meta.db` 스냅샷, `refs`(참조 목록), `manifest.json`이 있고, blob은 백업끼리 공유하는 `<backupDir>/blobs/<store>/sha256/...`에 한 번만 저장됩니다. 그래서 백업을 늘려도 변하지 않은 blob이 다시 복사되지 않습니다. `manifest.json`이 없으면 불완전한 백업입니다. 불완전한 디렉터리(`meta.db`만 있는 것)도 백업 화면 목록에 "미완료"로 나오며 삭제할 수 있습니다. 풀 정리는 이런 디렉터리의 blob도 지키므로, 필요 없으면 직접 삭제하세요.
+- **검증**: 표준 검증은 참조된 blob이 모두 있고 크기가 맞는지 봅니다(바로 끝남). 깊은 검증은 모든 blob의 해시를 다시 계산하고 스냅샷에 `PRAGMA quick_check`를 돌리며 **비동기 작업**입니다(UI는 진행을 보여 주고, API는 202와 id를 돌려주니 `GET /-/api/backup/runs/<id>`로 확인). 손상된 풀 blob은 지워서 다음 백업이 다시 복사하게 합니다.
+- **다른 작업과의 관계**: 백업이 도는 동안 blob 정리(compact)는 데이터 디렉터리의 `.gc.lock` 때문에 기다리고(예약된 compact는 다음 주기에 돕니다), 다른 작업이 돌고 있으면 백업 요청은 409입니다. 백업 중에도 업로드와 다운로드는 계속되며, 백업 도중에 올라온 파일은 그 백업에 들어 있지 않을 수 있습니다. 다른 곳(예약 작업, API, 다른 브라우저 탭)에서 시작한 백업이 돌고 있으면 백업 화면이 그 실행을 끝까지 따라갑니다.
+- 백업은 같은 호스트의 다른 디스크나 마운트(NFS 등)에 두거나 `backupDir`을 주기적으로 밖으로 복사하세요. 같은 디스크의 백업은 디스크 고장을 막아 주지 못합니다.
+
+#### 복원
+
+복원은 **오프라인**입니다. 서버를 멈춘 뒤 같은 이미지로 `restore`를 실행합니다.
+
+```bash
+docker compose stop
+# 새(빈) 볼륨에 복원할 때
+docker compose run --rm commandcenter restore --from /backup/<이름> --data /data
+# 이미 데이터가 있는 볼륨에 복원할 때(웹 UI의 명령도 이 형태입니다)
+docker compose run --rm commandcenter restore --from /backup/<이름> --data /data --force
+docker compose up -d
+```
+
+- 서버를 멈추면 `<dataDir>/.server.lock`이 풀립니다(서버는 떠 있는 동안 이 잠금과 compact·백업 중 `.gc.lock`을 잡고, `restore`는 둘 다 잡습니다). **이전 버전 바이너리의 서버는 `.server.lock`을 잡지 않으므로** 그 서버가 떠 있지 않은지 직접 확인하세요.
+- **빈 `/data`에만 복원합니다.** 데이터가 이미 있으면 `--force`를 붙이세요. 기존 내용은 `<data>/.before-restore-<UTC 시각>/`으로 옮겨지며(같은 파일시스템이라 이름만 바꿉니다), 복원이 잘 됐는지 확인한 뒤 직접 지우세요. 용량이 클 수 있습니다.
+- **먼저 임시 위치에 복원해 모든 검사를 마친 뒤에만** `/data`로 옮기므로, 검사에 실패하면 `/data`는 그대로입니다. 사전 검사는 매니페스트, `meta.db`와 참조 목록의 체크섬, 참조된 blob이 백업 풀에 **있는지**(존재만 보고 크기는 보지 않습니다)입니다. blob의 내용은 임시 위치로 복사하는 동안 sha256으로 확인합니다. 참조 목록의 체크섬이 없는 백업은 경고만 내고 복원됩니다. 그런 백업은 풀 정리가 처음 돌 때 참조 목록(`refs`) 파일이 백업 디렉터리에 만들어집니다.
+- `--allow-missing`은 누락된 blob이 있는 불완전한 백업도 복원합니다(그 파일은 404가 됩니다).
+- `--allow-absolute-stores`: Blob Store에 절대 경로가 있으면 기본적으로 복원을 거부합니다(이 컴퓨터의 다른 곳을 덮어쓸 수 있으므로). 그 경로를 컨테이너에 마운트했다면 이 플래그로 허용하세요. 절대 경로의 blob은 같은 절대 경로로 복원되며 `--force`로도 옮겨지지 않습니다.
+- 비밀값 키를 정해 두었다면 복원한 서버도 백업을 만든 서버와 같은 키로 시작해야 합니다. 백업을 만든 버전보다 오래된 버전으로는 복원한 데이터로 시작하지 않습니다("업그레이드" 참고).
+- 컨테이너 사용자(uid 65532)가 `/backup`을 읽고 `/data`에 쓸 수 있어야 합니다.
+- `docker run`으로 직접 할 때(볼륨 이름은 `docker volume ls`로 확인): `docker run --rm -v <백업 볼륨 또는 경로>:/backup:ro -v commandcenter-data:/data ghcr.io/sungjinseo/commandcenter:1.2.3 restore --from /backup/<이름> --data /data` (빈 볼륨이 아니면 `--force`를 덧붙이세요)
+
+#### 볼륨 통째로 복사
+
+일관된 사본을 위해 서버를 멈춘 상태에서 하세요. 복사하는 동안 서비스가 멈춥니다.
 
 **백업 (PowerShell)**
 
@@ -1283,7 +1345,7 @@ docker compose start
 
 Linux/macOS는 `-v "$PWD":/backup`을 쓰면 됩니다.
 
-**복원** — 오래된 `meta.db-wal`/`-shm` 파일이 섞이지 않도록 반드시 빈 볼륨에서 시작합니다. `docker compose down -v`는 데이터 볼륨을 삭제하므로 백업 파일을 먼저 확인하세요.
+**수동 복사본 복원** — 오래된 `meta.db-wal`/`-shm` 파일이 섞이지 않도록 반드시 빈 볼륨에서 시작합니다. `docker compose down -v`는 데이터 볼륨을 삭제하므로 백업 파일을 먼저 확인하세요.
 
 ```powershell
 docker compose down -v

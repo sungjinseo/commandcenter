@@ -24,6 +24,7 @@ const ADMIN_SCREENS = {
   "admin/support/status": true,
   "admin/support/systeminformation": false,
   "admin/system/tasks": true,
+  "admin/system/backup": false,
   "admin/repository/cleanuppolicies": true,
   "admin/repository/blobstores": true,
   "admin/system/general": false,
@@ -117,7 +118,8 @@ export function parse(hash) {
   }
   if (Object.prototype.hasOwnProperty.call(ADMIN_SCREENS, head)) {
     // "repositories:create[:<recipe>]" is the create flow (recipe picker, form).
-    const max = head === "admin/repository/repositories" && params[0] === "create" ? 2 : (ADMIN_SCREENS[head] ? 1 : 0);
+    // "tasks:create[:<type>]" preselects the task type (the backup page links it).
+    const max = (head === "admin/repository/repositories" || head === "admin/system/tasks") && params[0] === "create" ? 2 : (ADMIN_SCREENS[head] ? 1 : 0);
     if (params.length > max) return { notFound: true };
     return { key: head, params };
   }
@@ -153,7 +155,7 @@ async function show(view, r) {
   if (r.key.startsWith("browse/search/")) return viewSearch(view, r.key.slice("browse/search/".length), r.criteria);
   if (!state.me.admin) {
     const titles = { "admin/repository/repositories": t("nav.repositories"), "admin/security/users": t("nav.users"), "admin/security/roles": t("nav.roles"), "admin/security/realms": t("nav.realms"), "admin/security/usertoken": t("nav.tokens"),
-      "admin/support/status": t("nav.status"), "admin/support/systeminformation": t("nav.sysinfo"), "admin/system/tasks": t("nav.tasks"),
+      "admin/support/status": t("nav.status"), "admin/support/systeminformation": t("nav.sysinfo"), "admin/system/tasks": t("nav.tasks"), "admin/system/backup": t("nav.backup"),
       "admin/repository/cleanuppolicies": t("nav.cleanup"), "admin/repository/blobstores": t("nav.blobstores"), "admin/system/general": t("nav.general") };
     return needAdmin(view, titles[r.key] || t("need.admin"));
   }

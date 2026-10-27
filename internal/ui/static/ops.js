@@ -390,13 +390,15 @@ const cargoNote = () => h("div", { class: "notice" }, icon("info", "hint-ico"), 
 
 const taskLink = (id) => "#admin/system/tasks" + (id ? ":" + enc(id) : "");
 const CLEANUP = "repository.cleanup", REBUILD = "repository.rebuild-metadata", COMPACT = "blobstore.compact";
+const BACKUP = "backup", BACKUP_VERIFY = "backup.verify";
 const TASK_STATUS = { Running: ["task.running", "blue"], Waiting: ["task.waiting"], Disabled: ["task.disabled"] };
 const taskStatus = (x) => (TASK_STATUS[x.status] ? badge(t(TASK_STATUS[x.status][0]), TASK_STATUS[x.status][1]) : badge(x.status));
 const RESULTS = { OK: ["task.ok", "green"], Failed: ["task.failed", "red"], Stopped: ["task.stopped", "amber"] };
 const resultText = (x) => (RESULTS[x.lastResult] ? t(RESULTS[x.lastResult][0]) : x.lastResult || dash);
 const resultBadge = (x) => (x.lastResult ? badge(resultText(x), (RESULTS[x.lastResult] || [])[1]) : badge(t("task.never")));
 const taskEyebrow = () => ({ eyebrow: t("task.eyebrow") });
-const typeLabel = (type, fallback) => ({ [COMPACT]: t("task.tCompact"), [CLEANUP]: t("task.tCleanup"), [REBUILD]: t("task.tRebuild") }[type] || fallback || type);
+const typeLabel = (type, fallback) => ({ [COMPACT]: t("task.tCompact"), [CLEANUP]: t("task.tCleanup"), [REBUILD]: t("task.tRebuild"),
+  [BACKUP]: t("task.tBackup"), [BACKUP_VERIFY]: t("task.tBackupVerify") }[type] || fallback || type);
 
 // Schedules (plan 11 Decision 7), in server time.
 const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -470,8 +472,8 @@ function scheduleEditor(sch) {
   return { el, value };
 }
 
-export async function viewTasks(view, id) {
-  if (id !== undefined) return taskForm(view, id === "create" ? null : id);
+export async function viewTasks(view, id, preType) {
+  if (id !== undefined) return taskForm(view, id === "create" ? null : id, preType);
   const isLive = alive();
   const tasks = (await api("tasks")).tasks || [];
   if (!isLive()) return;
@@ -491,7 +493,7 @@ export async function viewTasks(view, id) {
 }
 
 // paramsEditor gives the type's parameter controls and how to read them.
-function paramsEditor(type, params, repos, policyOf) {
+function paramsEditor(type, params, repos, policyOf, backups) {
   params = params || {};
   if (type === CLEANUP) {
     const list = repos.filter(cleanable);
@@ -511,6 +513,28 @@ function paramsEditor(type, params, repos, policyOf) {
     const one = sel([["", t("task.pickRepo")]].concat(list), cur);
     return { el: field(t("col.repo"), one, t("task.rebuildHelp"), { req: true, full: true }), get: () => ({ repo: one.value }) };
   }
+  if (type === BACKUP) {
+    const subdir = textIn(params.subdir || "", { maxlength: 100, placeholder: "YYYYMMDD-HHMMSS", class: "mono" });
+    const keep = numIn(params.keep || 7, 1, 100);
+    const verify = h("input", { type: "checkbox", checked: !!params.verify || !!params.deep });
+    const deep = h("input", { type: "checkbox", checked: !!params.deep });
+    deep.addEventListener("change", () => { if (deep.checked) verify.checked = true; });
+    verify.addEventListener("change", () => { if (!verify.checked) deep.checked = false; });
+    return {
+      el: [fields(field(t("task.bkSubdir"), subdir, t("task.bkSubdirHelp")), field(t("task.bkKeep"), keep, t("task.bkKeepHelp"))),
+        h("div", { class: "field" }, h("label", { class: "check" }, verify, t("task.bkVerify")),
+          h("label", { class: "check" }, deep, t("task.bkDeep")), h("small", null, t("task.bkVerifyHelp")))],
+      get: () => Object.assign(subdir.value.trim() ? { subdir: subdir.value.trim() } : {},
+        { keep: intOf(keep), verify: verify.checked || deep.checked, deep: deep.checked }),
+    };
+  }
+  if (type === BACKUP_VERIFY) {
+    const names = (backups || []).map((b) => [b.name, b.name]);
+    const cur = params.name || "";
+    if (cur && !names.some(([n]) => n === cur)) names.unshift([cur, cur]);
+    const one = sel([["", t("task.bkNewest")]].concat(names), cur);
+    return { el: field(t("task.bkName"), one, t("task.bkNameHelp"), { full: true }), get: () => (one.value ? { name: one.value } : {}) };
+  }
   return { el: h("div", { class: "notice" }, type === COMPACT ? t("task.compactAbout") : t("task.noParams")), get: () => ({}) };
 }
 
@@ -524,15 +548,16 @@ function logLines(text) {
   }));
 }
 
-async function taskForm(view, id) {
+async function taskForm(view, id, preType) {
   const isLive = alive();
   const creating = id === null;
   const none = () => null;
-  const [list, got, repos, pols] = await Promise.all([
+  const [list, got, repos, pols, bks] = await Promise.all([
     api("tasks"),
     creating ? null : api("tasks/" + encSeg(id)).catch((e) => { if (e.status === 404) return none(); throw e; }),
     loadRepos(true),
     api("cleanup/policies").catch(none),
+    api("backups").catch(none), // the backup.verify target list; none when backup is unavailable
   ]);
   if (!isLive()) return;
   const back = h("a", { class: "btn", href: taskLink() }, t("task.back"));
@@ -546,14 +571,14 @@ async function taskForm(view, id) {
   const types = (list.types || []).map((x) => [x.type, typeLabel(x.type, x.name)]);
 
   const nameIn = textIn(task ? task.name : "", { required: true, maxlength: 100 });
-  const typeSel = creating ? sel(types, CLEANUP) : textIn(typeLabel(task.type, task.typeName), { readonly: true });
+  const typeSel = creating ? sel(types, types.some(([v]) => v === preType) ? preType : CLEANUP) : textIn(typeLabel(task.type, task.typeName), { readonly: true });
   const sched = scheduleEditor(task ? task.schedule : "daily:02:00");
   const enabled = h("input", { type: "checkbox", checked: task ? !!task.enabled : true });
   const notify = h("textarea", { rows: 3, spellcheck: "false", autocomplete: "off", placeholder: "ops@example.com", maxlength: 2000 }, task && task.notifyEmail ? task.notifyEmail.join("\n") : "");
   const paramsBox = h("div", null);
   let params = null;
   const setParams = () => {
-    params = paramsEditor(creating ? typeSel.value : task.type, task ? task.params : null, repos, policyOf);
+    params = paramsEditor(creating ? typeSel.value : task.type, task ? task.params : null, repos, policyOf, bks && bks.backups);
     put(paramsBox, params.el);
   };
   setParams();
@@ -578,6 +603,7 @@ async function taskForm(view, id) {
     const errs = [];
     if (!b.name) errs.push(t("task.e.name"));
     if ((creating ? b.type : task.type) === REBUILD && !b.params.repo) errs.push(t("task.e.repo"));
+    if ((creating ? b.type : task.type) === BACKUP && !(b.params.keep >= 1 && b.params.keep <= 100)) errs.push(t("task.e.keep"));
     if (/^once:$/.test(b.schedule)) errs.push(t("task.e.when"));
     if (errs.length) { fs.show(errs); return; }
     save.disabled = true;

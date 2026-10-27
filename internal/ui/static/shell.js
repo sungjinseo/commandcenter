@@ -343,6 +343,7 @@ function pageTitle(key) {
     case "browse/upload": return t("nav.upload");
     case "admin/repository/repositories": return t("nav.repositories");
     case "admin/system/tasks": return t("nav.tasks");
+    case "admin/system/backup": return t("nav.backup");
     case "admin/repository/cleanuppolicies": return t("nav.cleanup");
     case "admin/repository/blobstores": return t("nav.blobstores");
     case "admin/system/general": return t("nav.general");
@@ -475,6 +476,7 @@ function navSections() {
   if (me.admin) {
     out.push([t("nav.sec.system"), [
       ["#admin/system/general", t("nav.general"), "settings", is("admin/system/general")],
+      ["#admin/system/backup", t("nav.backup"), "archive", is("admin/system/backup")],
       ["#admin/support/status", t("nav.status"), "health", is("admin/support/status")],
       ["#admin/support/systeminformation", t("nav.sysinfo"), "info", is("admin/support/systeminformation")],
     ]]);

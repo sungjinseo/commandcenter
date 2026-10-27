@@ -494,6 +494,7 @@ ul.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
 .tree-label { overflow: hidden; text-overflow: ellipsis; }
 .tree-more .tree-row { color: var(--muted); font-style: italic; }
 .confirm-text { overflow-wrap: anywhere; font-size: 12px; }
+.steps { margin: 0 0 12px; padding-left: 18px; font-size: 11px; line-height: 1.8; }
 .crit-more { margin-top: 10px; }
 .componenthero { display: flex; align-items: center; gap: 13px; padding: 18px; border-bottom: 1px solid var(--line); }
 .componenthero .format { width: 42px; height: 42px; font-size: 16px; }

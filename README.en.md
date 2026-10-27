@@ -72,6 +72,7 @@ All of this comes with the Human Edition. There is no extra checkout step.
 - **Multiple blob stores**: pick a storage location per repository, see disk usage, and run blob cleanup (GC) per store.
 - **Operations**: cleanup policies, scheduled tasks, activity log, request trends, download counts, and failure notification e-mail (SMTP).
 - **Repository online/offline switch**: take a single repository down for maintenance.
+- **Online backup and restore**: take a consistent backup without stopping the server (UI, scheduled task or CLI), and restore into a stopped server after integrity checks. ([operations guide](docs/guide.md#백업과-복원), Korean)
 - **Break-glass recovery**: forgot the admin password? `commandcenter user reset-password` gets you back in. No need to call customer support. There is no customer support.
 
 ## Quick start
@@ -164,6 +165,7 @@ The Human Edition was made by humans. So it has bugs. You will not see an "all p
 - Known limitations and what is not supported yet are in the [limitations section of the operations guide](docs/guide.md#제한-사항) (Korean); what each release fixed and changed is in the [CHANGELOG](CHANGELOG.md).
 - The server is built to run as a single instance. High availability and running several instances are not supported.
 - Report bugs as issues, and security problems privately as the [security policy](SECURITY.md) describes.
+- Restore is offline only: stop the server first (there is no online restore). A backup on the same disk does not protect you from a disk failure, so copy it elsewhere too.
 
 ## FAQ
 

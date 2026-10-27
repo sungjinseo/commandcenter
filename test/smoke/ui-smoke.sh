@@ -394,6 +394,33 @@ nid="$(echo "$ncreated" | sed -nE 's/^\{"id":"([^"]+)".*/\1/p')"
 curl -s -b "$jar" "$base/-/api/tasks/$nid" | grep -q '"notifyEmail":\["ops@example.com","dev@example.com"\]' || fail "notifyEmail did not round-trip"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$base/-/api/tasks/$nid")" "notify task delete"
 
+echo "== online backup through the API, list and standard verify"
+expect 401 "$(status -X POST "$base/-/api/backup")" "backup as anonymous"
+expect 403 "$(status -b "$ojar" "${ui[@]}" -X POST "$base/-/api/backup")" "backup as a non-admin"
+expect 401 "$(status -b "$jar" -X POST "$base/-/api/backup")" "backup with cookie only"
+bk="$(curl -s -b "$jar" "${ui[@]}" -X POST "$base/-/api/backup")"
+bkid="$(echo "$bk" | sed -nE 's/.*"id":"([^"]+)".*/\1/p')"
+[ -n "$bkid" ] || fail "backup start: $bk"
+bkrun=""
+for i in $(seq 1 120); do
+  bkrun="$(curl -s -b "$jar" "$base/-/api/backup/runs/$bkid")"
+  echo "$bkrun" | grep -q '"status":"Running"' || break
+  sleep 0.5
+done
+echo "$bkrun" | grep -q '"status":"OK"' || fail "backup run: $bkrun"
+bklist="$(curl -s -b "$jar" "$base/-/api/backups")"
+bkname="$(echo "$bklist" | sed -nE 's/.*"name":"([0-9]{8}-[0-9]{6}[^"]*)".*/\1/p')"
+[ -n "$bkname" ] || fail "backup list: $bklist"
+expect 401 "$(status -b "$jar" -X POST "$base/-/api/backups/$bkname/verify")" "verify with cookie only"
+bkv="$(curl -s -b "$jar" "${ui[@]}" -X POST "$base/-/api/backups/$bkname/verify")"
+echo "$bkv" | grep -q '"ok":true' || fail "backup verify: $bkv"
+expect 404 "$(status -b "$jar" "${ui[@]}" -X POST "$base/-/api/backups/no-such-backup/verify")" "verify of a missing backup"
+expect 401 "$(status -b "$jar" -X DELETE "$base/-/api/backups/$bkname")" "backup delete with cookie only"
+expect 200 "$(status -b "$jar" "${ui[@]}" -X DELETE "$base/-/api/backups/$bkname")" "backup delete"
+# The deleted backup is gone from a fresh listing and a second delete is 404.
+if curl -s -b "$jar" "$base/-/api/backups" | grep -q "\"name\":\"$bkname\""; then fail "backup $bkname is still listed after its delete"; fi
+expect 404 "$(status -b "$jar" "${ui[@]}" -X DELETE "$base/-/api/backups/$bkname")" "second backup delete"
+
 echo "== logout"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X POST "$base/-/api/logout")" "logout"
 

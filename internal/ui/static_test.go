@@ -17,7 +17,7 @@ import (
 
 // staticNames are the files the shell cannot work without; every other
 // embedded file is checked by walking the directory.
-var staticNames = []string{"index.html", "app.css", "app.js", "browse.js", "dash.js", "search.js", "shell.js", "admin.js", "ops.js", "access.js", "settings.js", "repoform.js", "upload.js", "util.js", "i18n.js"}
+var staticNames = []string{"index.html", "app.css", "app.js", "browse.js", "dash.js", "search.js", "shell.js", "admin.js", "ops.js", "access.js", "settings.js", "repoform.js", "upload.js", "util.js", "i18n.js", "backup.js"}
 
 func readStatic(t *testing.T, name string) string {
 	t.Helper()
@@ -671,5 +671,24 @@ func TestStaticJSBalanced(t *testing.T) {
 	}
 	if err := jsBalance("const a = \"}\"; const b = /[}]/; const c = `x${ {a:1}.a }}`; // {\n"); err != nil {
 		t.Errorf("brackets in strings, regexes, templates and comments must be ignored: %v", err)
+	}
+}
+
+// TestBackupWired: SYSTEM → Backup is reachable and uses the backup API.
+func TestBackupWired(t *testing.T) {
+	for file, wants := range map[string][]string{
+		"shell.js":  {`"#admin/system/backup"`, `t("nav.backup")`},
+		"app.js":    {`"admin/system/backup": false`},
+		"admin.js":  {`case "admin/system/backup": return viewBackups(view);`},
+		"backup.js": {`api("backups")`, `"backup/runs/" + encSeg(id)`, `"/verify?deep=true"`, `kind === "task"`, `d.runningKind`, `b.incomplete`, `confirmTyped({`, `res.sweepSkipped`, `"#admin/system/tasks:create:backup"`, `markBusy(`, `if (d.unsupported)`, `t("bk.postgres")`},
+		"ops.js":    {`[BACKUP]: t("task.tBackup")`, `[BACKUP_VERIFY]: t("task.tBackupVerify")`},
+		"i18n.js":   {`--allow-absolute-stores`},
+	} {
+		js := readStatic(t, file)
+		for _, want := range wants {
+			if !strings.Contains(js, want) {
+				t.Errorf("%s does not contain %s", file, want)
+			}
+		}
 	}
 }

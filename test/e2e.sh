@@ -3,7 +3,7 @@
 # the memory load test. Prints a summary and fails if any check failed.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-checks=(maven-smoke npm-smoke pypi-smoke go-smoke cargo-smoke ui-smoke ldap-smoke mail-smoke load)
+checks=(maven-smoke npm-smoke pypi-smoke go-smoke cargo-smoke ui-smoke ldap-smoke mail-smoke backup-smoke load)
 declare -A result duration memory
 failed=0
 for c in "${checks[@]}"; do
