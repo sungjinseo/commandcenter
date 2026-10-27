@@ -152,10 +152,10 @@ func TestTasks(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
 	var once sync.Once
-	e.ui.Tasks.GC = func(ctx context.Context, _ string) (int, error) {
+	e.ui.Tasks.GC = func(ctx context.Context, _ string) (int, int64, error) {
 		once.Do(func() { close(started) })
 		<-release
-		return 3, nil
+		return 3, 0, nil
 	}
 	wantStatus(t, e.get(t, "/-/api/tasks", ""), http.StatusUnauthorized)
 	wantStatus(t, e.get(t, "/-/api/tasks", "ci"), http.StatusForbidden)
@@ -192,14 +192,14 @@ func TestTasks(t *testing.T) {
 	}
 
 	// failures are recorded
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 0, errors.New("boom") }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 0, 0, errors.New("boom") }
 	wantStatus(t, e.req(t, "POST", run, "", "admin", nil, true), http.StatusAccepted)
 	e.ui.Tasks.Wait()
 	if task = firstTask(t, e); task["lastResult"] != "Failed" {
 		t.Fatalf("failed run: %v", task)
 	}
 	// the legacy alias records state too
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 1, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 1, 0, nil }
 	wantStatus(t, e.req(t, "POST", "/-/api/gc", "", "admin", nil, true), http.StatusOK)
 	if task = firstTask(t, e); task["lastResult"] != "OK" || task["lastRemoved"] != float64(1) {
 		t.Fatalf("alias run: %v", task)
@@ -240,7 +240,7 @@ func TestRepositoryDetailPolicyFields(t *testing.T) {
 
 func TestTaskRunRequiresInteractive(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 0, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 0, 0, nil }
 	_, tok := e.newToken(t, "admin", "")
 	for _, path := range []string{"/-/api/tasks/compact-blobstore/run", "/-/api/gc"} {
 		r, _ := http.NewRequest("POST", e.ts.URL+path, nil)
@@ -268,7 +268,7 @@ func TestTaskRunRequiresInteractive(t *testing.T) {
 // never see a 409 while listTasks hammers the endpoint.
 func TestListTasksDoesNotCauseConflict(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 0, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 0, 0, nil }
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {
@@ -302,7 +302,7 @@ func TestTaskPanicRecordsFailed(t *testing.T) {
 	sink := &repotest.Sink{}
 	e.ui.Events = sink
 	e.ui.Tasks.Events = sink
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { panic("boom") }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { panic("boom") }
 	r, _ := http.NewRequest("POST", e.ts.URL+"/-/api/tasks/compact-blobstore/run", nil)
 	r.SetBasicAuth("admin", "pw")
 	r.Header.Set(auth.UIHeader, "1")
@@ -317,7 +317,7 @@ func TestTaskPanicRecordsFailed(t *testing.T) {
 	if got := sink.Events(); len(got) != 1 || got[0].Kind != "task.run" || got[0].Detail != "Failed: panic: boom" || got[0].Actor != "admin" {
 		t.Fatalf("events after panic: %v", got)
 	}
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 0, nil } // lock was released
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 0, 0, nil } // lock was released
 	wantStatus(t, e.req(t, "POST", "/-/api/gc", "", "admin", nil, true), http.StatusOK)
 }
 

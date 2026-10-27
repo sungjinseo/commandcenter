@@ -118,37 +118,49 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
-	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+	if err := upgrade(path, db); err != nil {
 		db.Close()
 		return nil, err
-	}
-	if version > schemaVersion {
-		db.Close()
-		return nil, fmt.Errorf("%s was written by a newer version of Command Center (database schema %d; this version supports up to %d) "+
-			"and this version would misread it: run the newer version again, or restore the backup taken before the upgrade "+
-			"together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", path, version, schemaVersion)
-	}
-	if _, err := db.Exec(schema); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if err := migrate(context.Background(), db); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if version < schemaVersion { // PRAGMA takes no bind parameters
-		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
-			db.Close()
-			return nil, err
-		}
 	}
 	return &DB{sql: db}, nil
 }
 
+// upgrade creates the tables, adds the columns older databases lack and
+// stamps schemaVersion in one transaction, so a crash leaves the database
+// either as it was or migrated and stamped. A database a newer build wrote
+// is refused before anything is written.
+func upgrade(path string, db *sql.DB) error {
+	tx, err := db.Begin() // BEGIN IMMEDIATE (the DSN's _txlock)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version > schemaVersion {
+		return fmt.Errorf("%s was written by a newer version of Command Center (database schema %d; this version supports up to %d) "+
+			"and this version would misread it: run the newer version again, or restore the backup taken before the upgrade "+
+			"together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", path, version, schemaVersion)
+	}
+	if _, err := tx.Exec(schema); err != nil {
+		return err
+	}
+	if err := migrate(context.Background(), tx); err != nil {
+		return err
+	}
+	if version < schemaVersion { // PRAGMA takes no bind parameters
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // migrate adds columns that older databases lack. Each step checks
 // PRAGMA table_info first, so it is safe on every start.
-func migrate(ctx context.Context, db *sql.DB) error {
+func migrate(ctx context.Context, db querier) error {
 	for _, c := range []struct{ table, col, ddl string }{
 		{"assets", "downloads", "downloads INTEGER NOT NULL DEFAULT 0"},
 		{"assets", "last_downloaded", "last_downloaded INTEGER NOT NULL DEFAULT 0"},
@@ -168,7 +180,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-func hasColumn(ctx context.Context, db *sql.DB, table, col string) (bool, error) {
+func hasColumn(ctx context.Context, db querier, table, col string) (bool, error) {
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
 	if err != nil {
 		return false, err

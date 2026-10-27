@@ -174,7 +174,11 @@ func TestCleanupStopsWhenPolicyEdited(t *testing.T) {
 func TestStopRun(t *testing.T) {
 	h := newHarness(t)
 	entered := make(chan struct{})
-	h.s.GC = func(ctx context.Context, _ string) (int, error) { close(entered); <-ctx.Done(); return 2, ctx.Err() }
+	h.s.GC = func(ctx context.Context, _ string) (int, int64, error) {
+		close(entered)
+		<-ctx.Done()
+		return 2, 0, ctx.Err()
+	}
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "manual"})
 	if h.s.StopRun(tk.ID) {
 		t.Fatal("stopped a task that is not running")

@@ -67,7 +67,7 @@ func TestGCKeepsBlobOfRepoWithMissingStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	ageBlob(t, a.Config.DataDir, sums.SHA256)
-	n, err := a.GCStore(ctx, "default", time.Hour)
+	n, _, err := a.GCStore(ctx, "default", time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestGroupMergedBlobSurvivesDefaultGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	ageBlob(t, a.Config.DataDir, asset.BlobSHA256)
-	if n, err := a.GCStore(ctx, "default", time.Hour); err != nil || n != 0 {
+	if n, _, err := a.GCStore(ctx, "default", time.Hour); err != nil || n != 0 {
 		t.Fatalf("GC removed %d (err %v); the group's merged blob is referenced", n, err)
 	}
 	if !present(t, a.Store.StoreByName("default"), asset.BlobSHA256) {
@@ -178,7 +178,7 @@ func TestGCContinuesAfterStoreError(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(rootB, "blobs")); err != nil { // store b's walk now fails
 		t.Fatal(err)
 	}
-	n, err := a.GC(ctx, time.Hour)
+	n, _, err := a.GC(ctx, time.Hour)
 	if err == nil {
 		t.Fatal("GC hid store b's error")
 	}

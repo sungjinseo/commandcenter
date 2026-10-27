@@ -78,13 +78,13 @@ func (e *BusyError) Error() string {
 type Service struct {
 	DB       *meta.DB
 	Repos    *repo.Registry
-	GC       func(ctx context.Context, store string) (int, error) // blobstore.compact; store "" means all
-	Deleters *cleanup.Registry                                    // repository.cleanup
-	Maven    *maven.Handler                                       // repository.rebuild-metadata
-	Events   repo.EventSink                                       // task.run and cleanup events; nil records none
-	Mail     Mailer                                               // failure e-mails (SendAsync never blocks); nil: none
-	Metrics  Flusher                                              // pending download counts, flushed before cleanup evaluates; nil: none
-	Log      *slog.Logger                                         // run logs go here too (and so to the log ring)
+	GC       func(ctx context.Context, store string) (int, int64, error) // blobstore.compact: blobs and bytes removed; store "" means all
+	Deleters *cleanup.Registry                                           // repository.cleanup
+	Maven    *maven.Handler                                              // repository.rebuild-metadata
+	Events   repo.EventSink                                              // task.run and cleanup events; nil records none
+	Mail     Mailer                                                      // failure e-mails (SendAsync never blocks); nil: none
+	Metrics  Flusher                                                     // pending download counts, flushed before cleanup evaluates; nil: none
+	Log      *slog.Logger                                                // run logs go here too (and so to the log ring)
 
 	// Test hooks and limits; zero values mean the defaults.
 	Now           func() time.Time

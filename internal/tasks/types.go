@@ -69,13 +69,13 @@ func runCompact(ctx context.Context, s *Service, t meta.Task, _ string, log *Run
 	} else {
 		log.Infof("compacting every blob store: removing blobs no asset references")
 	}
-	n, err := s.GC(ctx, p.BlobStore)
-	sum := summary{msg: fmt.Sprintf("removed %d blobs", n), removed: int64(n)}
+	n, freed, err := s.GC(ctx, p.BlobStore)
+	sum := summary{msg: fmt.Sprintf("removed %d blobs (%d bytes)", n, freed), removed: int64(n), bytes: freed}
 	if err != nil {
-		log.Errorf("compact failed after removing %d blobs: %v", n, err)
+		log.Errorf("compact failed after removing %d blobs (%d bytes): %v", n, freed, err)
 		return sum, err
 	}
-	log.Infof("removed %d blobs", n)
+	log.Infof("%s", sum.msg)
 	return sum, nil
 }
 

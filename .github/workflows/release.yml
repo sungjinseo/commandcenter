@@ -17,6 +17,7 @@ jobs:
     permissions:
       contents: write # the GitHub Release
       packages: write # the image on ghcr.io
+      id-token: write # the OIDC token cosign signs the image with
     env:
       VERSION: ${{ github.ref_name }}
     steps:
@@ -38,6 +39,10 @@ jobs:
             echo "major=$(highest "$major.")"
             echo "minor=$(highest "$major.$minor.")"
           } >>"$GITHUB_OUTPUT"
+      # No v4 major tag exists (v3 stopped at v3.9.1), so the release is pinned;
+      # Dependabot moves it. Installed before the push: a failed install stops
+      # the release before anything is published.
+      - uses: sigstore/cosign-installer@v4.1.2
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -57,7 +62,8 @@ jobs:
             type=semver,pattern={{major}},enable=${{ steps.floating.outputs.major == 'true' && !startsWith(github.ref, 'refs/tags/v0.') }}
           # GitHub detects only the Apache license file.
           labels: org.opencontainers.image.licenses=MIT OR Apache-2.0
-      - uses: docker/build-push-action@v7
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -67,6 +73,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           sbom: true
           provenance: mode=max
+      - name: Sign the image
+        # Keyless: Sigstore's certificate names this workflow at the release tag,
+        # and the signature goes to its public transparency log. The digest is
+        # the multi-platform index, which every tag of this release points to.
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/commandcenter@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
       - name: Package the binaries
         # The same build again, served from the builder's cache and exported as
         # files: the binaries are the image's, with the license texts the BSD and

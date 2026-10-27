@@ -81,7 +81,7 @@ func TestTaskCRUD(t *testing.T) {
 
 func TestTaskAPIAuth(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { t.Error("gc ran"); return 0, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { t.Error("gc ran"); return 0, 0, nil }
 	body := `{"name":"x","type":"blobstore.compact","schedule":"manual"}`
 	id := tasks.SeedID
 	for _, c := range []struct{ method, path, body string }{
@@ -110,12 +110,13 @@ func TestTasksUnavailable(t *testing.T) {
 // A run's details are kept: the run log and message are served by GET.
 func TestTaskRunLogServed(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 2, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 2, 20, nil }
 	r := e.admin(t, "POST", "/-/api/tasks/"+tasks.SeedID+"/run", "")
 	wantStatus(t, r, http.StatusAccepted)
 	e.ui.Tasks.Wait()
 	m := e.get(t, "/-/api/tasks/"+tasks.SeedID, "admin").json(t)
-	if !strings.Contains(m["lastLog"].(string), "removed 2 blobs") || m["lastMessage"] != "removed 2 blobs" || m["lastRemoved"] != float64(2) {
+	if !strings.Contains(m["lastLog"].(string), "removed 2 blobs (20 bytes)") || m["lastMessage"] != "removed 2 blobs (20 bytes)" ||
+		m["lastRemoved"] != float64(2) || m["lastBytes"] != float64(20) {
 		t.Fatalf("task: %v", m)
 	}
 }
@@ -125,7 +126,11 @@ func TestTaskRunLogServed(t *testing.T) {
 func TestTaskStopAndConflict(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	entered := make(chan struct{})
-	e.ui.Tasks.GC = func(ctx context.Context, _ string) (int, error) { close(entered); <-ctx.Done(); return 0, ctx.Err() }
+	e.ui.Tasks.GC = func(ctx context.Context, _ string) (int, int64, error) {
+		close(entered)
+		<-ctx.Done()
+		return 0, 0, ctx.Err()
+	}
 	stop := "/-/api/tasks/" + tasks.SeedID + "/stop"
 	wantStatus(t, e.admin(t, "POST", stop, ""), http.StatusConflict)
 	wantStatus(t, e.admin(t, "POST", "/-/api/tasks/nope/stop", ""), http.StatusNotFound)
@@ -162,7 +167,7 @@ func TestGCWhileTaskRunsIsConflict(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	e.ui.Tasks.GC = func(ctx context.Context, _ string) (int, error) { close(entered); <-release; return 0, nil }
+	e.ui.Tasks.GC = func(ctx context.Context, _ string) (int, int64, error) { close(entered); <-release; return 0, 0, nil }
 	defer func() { close(release); e.ui.Tasks.Wait() }()
 	wantStatus(t, e.admin(t, "POST", "/-/api/tasks/"+tasks.SeedID+"/run", ""), http.StatusAccepted)
 	<-entered

@@ -342,7 +342,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, log: log}
 	taskSvc.Repos, taskSvc.Events = registry, evts
-	taskSvc.GC = func(ctx context.Context, store string) (int, error) {
+	taskSvc.GC = func(ctx context.Context, store string) (int, int64, error) {
 		if store == "" {
 			return a.GC(ctx, time.Hour)
 		}
@@ -638,23 +638,23 @@ func (a *App) reloadAccess(ctx context.Context) {
 }
 
 // GC runs garbage collection over every blob store and returns the total
-// number of blobs removed. A store whose collection fails does not stop the
-// others; the errors are joined, each naming its store.
-func (a *App) GC(ctx context.Context, minAge time.Duration) (int, error) {
-	total := 0
+// number of blobs removed and the bytes they held. A store whose collection
+// fails does not stop the others; the errors are joined, each naming its store.
+func (a *App) GC(ctx context.Context, minAge time.Duration) (int, int64, error) {
+	total, freed := 0, int64(0)
 	var errs []error
 	for _, name := range a.Store.StoreNames() {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
 			break
 		}
-		n, err := a.GCStore(ctx, name, minAge)
-		total += n
+		n, b, err := a.GCStore(ctx, name, minAge)
+		total, freed = total+n, freed+b
 		if err != nil {
 			errs = append(errs, fmt.Errorf("blob store %q: %w", name, err))
 		}
 	}
-	return total, errors.Join(errs...)
+	return total, freed, errors.Join(errs...)
 }
 
 // gcScope returns the repositories whose assets keep blobs of a named store
@@ -668,7 +668,8 @@ func (a *App) gcScope(storeName string) []string {
 
 // GCStore removes blobs that no asset in the store's own repositories
 // references and that are older than minAge, deleting only from that store's
-// *blob.Store. "In use" is scoped to the store's repositories (gcScope) so that a blob
+// *blob.Store, and returns how many it removed and the bytes they held.
+// "In use" is scoped to the store's repositories (gcScope) so that a blob
 // shared by name across stores (dedup is per store) is never wrongly removed.
 // The default store keeps every blob any asset references: a build without
 // named stores (an unsupported downgrade) writes all repositories' blobs
@@ -676,13 +677,13 @@ func (a *App) gcScope(storeName string) []string {
 // The age guard protects uploads written but not yet recorded; the ModTime and
 // in-use re-check immediately before removal protects uploads that raced the
 // walk.
-func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duration) (int, error) {
+func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duration) (int, int64, error) {
 	if storeName == "" {
 		storeName = repo.DefaultStore
 	}
 	bs := a.Store.StoreByName(storeName)
 	if bs == nil {
-		return 0, fmt.Errorf("unknown blob store %q", storeName)
+		return 0, 0, fmt.Errorf("unknown blob store %q", storeName)
 	}
 	// The walk below sees only blobs; temp files a killed process left are swept here.
 	if n, err := bs.SweepTmp(); err != nil {
@@ -696,7 +697,7 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		inUse = func(sha string) (bool, error) { return a.DB.BlobInUseInRepos(ctx, sha, repos) }
 	}
 	cutoff := time.Now().Add(-minAge)
-	removed := 0
+	removed, freed := 0, int64(0)
 	err := bs.Walk(func(sha string, mod time.Time) error {
 		if mod.After(cutoff) {
 			return nil
@@ -707,14 +708,14 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		}
 		// Re-check right before removal: a concurrent upload may have refreshed
 		// the blob or recorded an asset since the walk saw it.
-		mod, err = bs.ModTime(sha)
+		info, err := bs.Stat(sha)
 		if errors.Is(err, blob.ErrNotFound) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if mod.After(cutoff) {
+		if info.ModTime().After(cutoff) {
 			return nil
 		}
 		used, err = inUse(sha)
@@ -724,10 +725,10 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		if err := bs.Remove(sha); err != nil {
 			return err
 		}
-		removed++
+		removed, freed = removed+1, freed+info.Size()
 		return nil
 	})
-	return removed, err
+	return removed, freed, err
 }
 
 // Close stops the event writer (it drains its queue first) and closes the database.

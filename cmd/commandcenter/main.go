@@ -178,7 +178,7 @@ func gc(args []string, stdout io.Writer) error {
 		return err
 	}
 	defer a.Close()
-	n, err := a.GC(context.Background(), time.Hour)
+	n, _, err := a.GC(context.Background(), time.Hour)
 	if err != nil {
 		return err
 	}
