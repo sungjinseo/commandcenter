@@ -88,7 +88,7 @@ func TestNoDBWriteUntilFlushAndAggregation(t *testing.T) {
 	r.Now = func() time.Time { return t0 }
 	for i := 0; i < 1000; i++ {
 		r.Download("r", "a.jar")
-		r.Request("r", 10)
+		r.Request("r", 200, 0, 10, 0)
 	}
 	r.Download("r", "b.jar")
 	if db.dlCalls != 0 || db.rqCalls != 0 {
@@ -126,10 +126,10 @@ func TestRequestBucketsPerHour(t *testing.T) {
 	r := New(db)
 	t0 := time.Unix(1_700_000_000, 0)
 	r.Now = func() time.Time { return t0 }
-	r.Request("r", 1)
+	r.Request("r", 200, 0, 1, 0)
 	r.Now = func() time.Time { return t0.Add(time.Hour) }
-	r.Request("r", 2)
-	r.Request("r", 3)
+	r.Request("r", 200, 0, 2, 0)
+	r.Request("r", 200, 0, 3, 0)
 	r.Flush(context.Background())
 	if len(db.rq) != 2 {
 		t.Fatalf("buckets %+v", db.rq)
@@ -274,7 +274,7 @@ func TestKickOnlyWhenCrossingThreshold(t *testing.T) {
 	<-r.kick
 	r.Download("r", "c")
 	r.Download("r", "a")
-	r.Request("r", 1)
+	r.Request("r", 200, 0, 1, 0)
 	if len(r.kick) != 0 {
 		t.Fatal("kicked again above the threshold")
 	}
@@ -287,11 +287,11 @@ func TestMaxPendingDropsNewKeysAndCounts(t *testing.T) {
 	r.Download("r", "b")
 	r.Download("r", "c") // dropped
 	r.Download("r", "a") // existing key still counts
-	r.Request("r", 1)
+	r.Request("r", 200, 0, 1, 0)
 	r.Now = func() time.Time { return time.Unix(1_700_000_000+7200, 0) }
-	r.Request("r", 1)
+	r.Request("r", 200, 0, 1, 0)
 	r.Now = func() time.Time { return time.Unix(1_700_000_000+14400, 0) }
-	r.Request("r", 1) // dropped
+	r.Request("r", 200, 0, 1, 0) // dropped
 	if r.Dropped() != 2 {
 		t.Fatalf("dropped %d, want 2", r.Dropped())
 	}
@@ -309,7 +309,7 @@ func TestRestoreAfterFailedFlushMergesAndBounds(t *testing.T) {
 	hour := r.Now().Unix() / 3600 * 3600
 	r.Download("r", "a")
 	r.Download("r", "b")
-	r.Request("r", 5)
+	r.Request("r", 200, 0, 5, 0)
 	// While the flush is failing, new traffic arrives: an existing key and
 	// fresh keys that fill the map, so part of the restore must be dropped.
 	db.dlHook = func() {
@@ -318,10 +318,10 @@ func TestRestoreAfterFailedFlushMergesAndBounds(t *testing.T) {
 		r.Download("r", "y")
 	}
 	db.rqHook = func() {
-		r.Request("r", 7) // same hour: merged with the restored counts
+		r.Request("r", 200, 0, 7, 0) // same hour: merged with the restored counts
 		r.Now = func() time.Time { return time.Unix(hour+3600, 0) }
-		r.Request("q", 1)
-		r.Request("q2", 1)
+		r.Request("q", 200, 0, 1, 0)
+		r.Request("q2", 200, 0, 1, 0)
 		r.Now = func() time.Time { return time.Unix(hour+7200, 0) }
 	}
 	if err := r.Flush(context.Background()); err == nil {
@@ -366,8 +366,8 @@ func TestRestoreRequestsDropsWhenFull(t *testing.T) {
 	db := &fakeDB{failRq: true}
 	r := New(db)
 	r.MaxPending = 2
-	r.Request("r", 5)
-	db.rqHook = func() { r.Request("q", 1); r.Request("q2", 1) }
+	r.Request("r", 200, 0, 5, 0)
+	db.rqHook = func() { r.Request("q", 200, 0, 1, 0); r.Request("q2", 200, 0, 1, 0) }
 	if err := r.Flush(context.Background()); err == nil {
 		t.Fatal("want error")
 	}
@@ -376,5 +376,26 @@ func TestRestoreRequestsDropsWhenFull(t *testing.T) {
 	r.mu.Unlock()
 	if n != 2 || r.Dropped() != 1 {
 		t.Fatalf("pending %d dropped %d, want 2 and 1", n, r.Dropped())
+	}
+}
+
+func TestRequestErrorsUpstreamAndCacheCounters(t *testing.T) {
+	db := &fakeDB{}
+	r := New(db)
+	r.Request("r", 200, 10, 100, 20*time.Millisecond)
+	r.Request("r", 503, 0, 1, 5*time.Millisecond)
+	r.Request("r", 429, 0, 1, 50*time.Millisecond)
+	r.Upstream("r", true, 300*time.Millisecond)
+	r.Upstream("r", false, 2*time.Second)
+	r.Cache("r", true)
+	r.Cache("r", false)
+	if err := r.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	hour := r.Now().Unix() / 3600 * 3600
+	want := meta.RequestDelta{Hour: hour, Repo: "r", Requests: 3, Bytes: 102, Errors: 2, BytesIn: 10, Ms: 75, MaxMs: 50,
+		Upstream: 2, UpstreamFailures: 1, UpstreamMs: 2300, UpstreamMaxMs: 2000, CacheHits: 1, CacheMisses: 1}
+	if len(db.rq) != 1 || db.rq[0] != want {
+		t.Fatalf("got %+v\nwant %+v", db.rq, want)
 	}
 }

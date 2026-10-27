@@ -66,16 +66,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `COMMANDCENTER_VERSION=1.2.3` (no `v`). To keep running your own build, build it with
   `docker build` and set `COMMANDCENTER_IMAGE` and `COMMANDCENTER_VERSION` to it ("빠른 시작" in the
   operations guide).
+- The database schema is now version 2 (`blob_stores.type`, `blob_stores.config`). Builds before
+  this one refuse nothing but would open an S3 store's path as an empty directory, so do not
+  downgrade once an S3 store exists; the backup from before the upgrade is the way back.
 
 ### Added
-- The `docker` format: hosted Docker/OCI registries served at `/v2/<repository>/<image>` on the
+-- Per-repository traffic on the admin dashboard: `GET /-/api/stats/repositories?range=1h|24h|7d`
+  reports, for every repository, requests, errors (5xx and 429) and the error rate, bytes in and
+  out, average and longest response time, and for proxies the remote fetches, their failures,
+  average and longest remote time, and cache hits and misses. The hourly `request_stats` rows gain
+  these counters (new columns, zero for hours before the upgrade); the request-count chart is
+  unchanged.
+ The `docker` format: hosted Docker/OCI registries served at `/v2/<repository>/<image>` on the
   same host and port (`docker push host/<repo>/<image>:<tag>`), with the Distribution token flow
   (`/v2/token`; Basic is accepted too), schema2 and OCI manifests and indexes stored verbatim,
   chunked, monolithic and cross-repository-mount blob uploads that survive a restart, tag and
   catalog listing, delete by digest, and `writePolicy` as for Maven. `GET /v2/` challenges
   requests without credentials so clients find the token endpoint; anonymous pull then uses an
-  anonymous token. Role privileges may target `format:docker`. Docker proxy and group
-  repositories and cleanup policies for docker repositories are not supported yet.
+  anonymous token. Role privileges may target `format:docker`. Cleanup policies for docker
+  repositories are not supported yet.
 - PostgreSQL as the metadata database: `database.url` / `COMMANDCENTER_DATABASE_URL` and
   `database.maxConns`; SQLite stays the default. Every command that opens the database honours
   it, the schema version guard exists on both, and `COMMANDCENTER_TEST_POSTGRES_URL` runs the
@@ -179,6 +188,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its content type, and leaves the blobs to `blobstore.compact`. The run log names the first 20
   removed paths. The web UI's task editor lists Maven proxies next to hosted repositories, with
   each repository's type.
+- The `raw` format, like Nexus's raw: a hosted repository stores any file at any path
+  (`PUT /repository/<repo>/<path>` with the add privilege; `writePolicy` as for Maven, overwriting an
+  existing file under `allow` needs edit; the same path rules as Maven), serves it with the
+  `Content-Type` the upload sent or one from the extension, and deletes it with the delete
+  privilege. A path ending in `/` (or the repository root) on a hosted repository lists its children
+  as an HTML index, or as JSON with `Accept: application/json`. A proxy fetches and caches any path
+  of its remote, web pages included, honouring `contentMaxAge` and `negativeCacheTTL`; a group
+  answers from the first member that has the path and writes to its `writeMember`. The web UI
+  browses raw repositories by path; components are the files themselves (name = path, no version),
+  which the component search, the UI/API component delete and cleanup policies
+  (`componentAgeDays`, `lastDownloadedDays`, policy format `all` or `raw`) handle per file. Role
+  privileges may target `format:raw`.
+- The `helm` format: Helm chart repositories served at `/repository/<repo>/` with a server-owned
+  `index.yaml`. Hosted repositories take `PUT /repository/<repo>/<chart>-<version>.tgz` (curl
+  `--upload-file`) and helm cm-push's `POST api/charts` (multipart `chart` field, answered with
+  `201 {"saved":true}`), read `Chart.yaml` out of the tarball and rebuild `index.yaml` in the same
+  transaction as every upload or delete (digest, created, urls relative to the repository);
+  `writePolicy` applies as for Maven (overwriting under `allow` needs edit). Proxies cache the
+  upstream `index.yaml` for `metadataMaxAge` with its urls rewritten to the proxy and fetch charts
+  from the upstream URLs verified against the index digest; groups serve a merged `index.yaml`
+  where the first member that has a chart name owns it, for downloads too. Cleanup policies,
+  the web UI's component delete and metadata, and `format:helm` role privileges cover helm
+  repositories. Charts pushed with `helm push oci://` go to a docker repository, which already
+  accepts them.
+- Docker proxy and group repositories: a proxy caches pulls from an upstream registry (`remote`
+  without `/v2`, Docker Hub's `library/` prefix added for unqualified names), speaking the upstream
+  Distribution token flow with `remoteAuth` or anonymously; tags and tag lists are revalidated after
+  `metadataMaxAge`, manifests and layers fetched by digest are verified and cached for good. A
+  group answers from its members in order, a hosted member that has the image owning it, and lists
+  the union of their images. Both refuse pushes with 405.
+- PyPI JSON API: `GET /repository/<repo>/pypi/<project>/json` and `/pypi/<project>/<version>/json`
+  answer in pypi.org's shape (`info` from the stored wheel `METADATA` / sdist `PKG-INFO`,
+  `releases`, `urls` with `digests`, `size`, `upload_time`, `packagetype`). Hosted repositories
+  build it from stored rows, proxies cache the upstream document as metadata and rewrite file URLs,
+  groups answer from the first member that has the project.
+- PEP 658 core metadata: every distribution file has a `<file>.metadata` sidecar, advertised in the
+  simple index (HTML `data-core-metadata` / `data-dist-info-metadata`, JSON `core-metadata` /
+  `dist-info-metadata`) with its sha256, so pip resolves dependencies without downloading wheels.
+  Uploads store it with the file (a `METADATA`/`PKG-INFO` over 16 MiB is refused); files stored by
+  older builds get it extracted on first request. Proxies serve the cached sidecar, extract it from
+  a cached file, or fetch the upstream's advertised `.metadata` (hash-verified). The sidecar is
+  deleted with its version by component delete and cleanup.
+- S3-compatible blob stores. `POST /-/api/blobstores` takes `type: "s3"` with `s3.bucket`,
+  `s3.prefix`, `s3.region`, `s3.endpoint`, `s3.pathStyle`, `s3.accessKeyId`/`s3.secretAccessKey`
+  (or the `AWS_*` environment) and `s3.sse`; blobs are stored as `<prefix>/<sha256>`, uploads over
+  64 MiB go as multipart uploads, downloads use Range GETs, and `blobstore.compact` lists the prefix
+  to collect unreferenced objects. The bucket is checked when the store is created; the secret
+  access key is sealed with the secret key like other stored secrets and never returned.
+  `GET /-/api/blobstores` now reports `type` (`file` or `s3`) and, for S3 stores, `s3` with
+  `secretSet: true/false` in place of the secret; `fsTotal`/`fsFree` are null for them.
+- `commandcenter migrate-db -config PATH -to TARGET` copies an existing SQLite `meta.db` into an
+  empty PostgreSQL database (or a PostgreSQL database into a new SQLite file). It runs offline with
+  the server stopped, copies every table in one transaction on the target, keeps ids, timestamps,
+  JSON and sealed secrets byte for byte (start the server with the same secret key), refuses a
+  non-empty target or a schema-version mismatch, verifies the row count of every table before
+  committing, prints per-table counts, and never prints the URL. Blobs stay where they are.
 
 ### Changed
 

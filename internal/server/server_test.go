@@ -357,9 +357,9 @@ func TestRequestStatsHook(t *testing.T) {
 	var got []rec
 	ts, _ := newServerWith(t, func(s *Server) {
 		s.Handlers = map[string]repo.Handler{"maven": bodyHandler{}}
-		s.Requests = func(repo string, bytes int64) {
+		s.Requests = func(repo string, status int, bytesIn, bytesOut int64, d time.Duration) {
 			mu.Lock()
-			got = append(got, rec{repo, bytes})
+			got = append(got, rec{repo, bytesOut})
 			mu.Unlock()
 		}
 	})

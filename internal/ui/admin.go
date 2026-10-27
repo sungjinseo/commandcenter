@@ -22,6 +22,7 @@ func (u *UI) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /-/api/tokens/{id}", u.deleteToken)
 	mux.HandleFunc("GET /-/api/status", u.status)
 	mux.HandleFunc("GET /-/api/stats/requests", u.requestStats)
+	mux.HandleFunc("GET /-/api/stats/repositories", u.repositoryStats)
 }
 
 // requireUser answers 401 to anonymous callers.

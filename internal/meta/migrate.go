@@ -20,7 +20,7 @@ var copyTables = []struct{ name, cols string }{
 	{"dist_tags", "repo, name, tag, version"},
 	{"negative_cache", "repo, path, expires_at"},
 	{"tokens", `id, "user", hash, created_at, last_used_at`},
-	{"request_stats", "hour, repo, requests, bytes"},
+	{"request_stats", "hour, repo, " + requestStatCols},
 	{"events", "id, at, kind, actor, repo, subject, detail"},
 	{"cleanup_policies", "name, format, config, created_at, updated_at"},
 	{"tasks", "id, name, type, schedule, params, enabled, created_at, updated_at, last_run, last_result, " +

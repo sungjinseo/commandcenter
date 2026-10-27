@@ -298,7 +298,7 @@ kubectl -n commandcenter delete pod commandcenter-maint
 kubectl -n commandcenter scale statefulset commandcenter --replicas=1
 ```
 
-서버의 명령(`secret-key rotate` 등)은 busybox 대신 지금 버전의 서버 이미지로 돌립니다. `command` 대신 `args`에 명령을 주고, 설정 Secret `commandcenter-config`를 `/etc/commandcenter`에 마운트하며, 지금 키를 `COMMANDCENTER_SECRET_KEY`(Secret 참조)로 줍니다. 명령이 끝나면 Pod가 멈추므로 출력은 `kubectl -n commandcenter logs commandcenter-maint`로 봅니다.
+서버의 명령(`secret-key rotate` 등)은 busybox 대신 지금 버전의 서버 이미지로 돌립니다. `command` 대신 `args`에 명령을 주고, 설정 Secret `commandcenter-config`를 `/etc/commandcenter`에 마운트하며, 지금 키를 `COMMANDCENTER_SECRET_KEY`(Secret 참조)로 줍니다. 명령이 끝나면 Pod가 멈추므로 출력은 `kubectl -n commandcenter logs commandcenter-maint`로 봅니다. `migrate-db -to <URL>`도 같은 방식으로 돌립니다(출력은 Pod 로그).
 
 ### 삭제(helm uninstall)
 
@@ -626,7 +626,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 | `maxUploadMiB` | 정수 | `1024` | (가져온 뒤 UI에서 관리, 바로 적용) GET/HEAD가 아닌 요청 본문의 최대 크기(MiB). 허용 범위 1..1048576, 0이면 기본값. 초과하면 모든 포맷에서 413. 포맷별로 더 작은 제한이 있으면 그것이 먼저 적용됩니다. |
 | `anonymousRead` | 불리언 | `false` | (가져온 뒤 UI에서 관리) 인증 없는 다운로드 허용 여부. 저장소별로 덮어쓸 수 있습니다. |
 | `metricsFlushSeconds` | 정수 | `30` | (숨은 설정) 다운로드 수와 요청 통계를 DB에 반영하는 주기(초). 허용 범위 1..3600. "다운로드 수·요청 추이" 참고. |
-| `secretKeyFile` | 경로 | 없음 | 저장된 비밀값(SMTP 비밀번호, LDAP bind 비밀번호, proxy `remoteAuth`)을 암호화하는 키가 든 파일. 환경변수 `COMMANDCENTER_SECRET_KEY`로 줄 수도 있으며, 둘 다 주면 시작하지 않습니다. 없으면 비밀값을 평문으로 저장합니다. "저장된 비밀값 암호화" 참고. |
+| `secretKeyFile` | 경로 | 없음 | 저장된 비밀값(SMTP 비밀번호, LDAP bind 비밀번호, proxy `remoteAuth`, S3 blob store의 `secretAccessKey`)을 암호화하는 키가 든 파일. 환경변수 `COMMANDCENTER_SECRET_KEY`로 줄 수도 있으며, 둘 다 주면 시작하지 않습니다. 없으면 비밀값을 평문으로 저장합니다. "저장된 비밀값 암호화" 참고. |
 | `users` | 목록 | 없음 | (첫 시작 가져오기 전용) 사용자: `name`, `passwordHash`(bcrypt), `roles`. 가져온 사용자는 로컬 사용자가 됩니다. bcrypt 해시가 아닌 값(예: `config.example.yaml`의 `<commandcenter hash-password 출력값>`)은 비밀번호가 없는 것으로 봅니다. 그 사용자는 비밀번호로 로그인할 수 없고, 사용자 API의 `hasPassword`는 `false`이며, 서버가 시작할 때마다 그런 활성 사용자마다 WARN 로그(`local user cannot sign in with a password`)가 남습니다. 웹 UI나 `user reset-password`로 비밀번호를 정하세요. |
 | `roles` | 맵 | 없음 | (첫 시작 가져오기 전용) 역할 이름 → `write: [저장소 이름…]`. `"*"`는 모든 저장소. 가져올 때 항목마다 `repo:<이름>`(또는 `*`) 대상에 browse·read·add·edit·delete 전부를 주는 권한이 됩니다(예전의 쓰기는 삭제를 포함했습니다). |
 | `repositories` | 목록 | 없음 | 저장소 정의(아래 표). **첫 시작 때만** 읽어 DB로 가져옵니다. 이후에는 무시되므로 UI에서 관리합니다("저장소 관리" 참고). |
@@ -640,11 +640,11 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 | 키 | 대상 | 기본값 | 설명 |
 |---|---|---|---|
 | `name` | 모두 | 필수 | 저장소 이름. URL의 `/repository/<name>/`. `/`, 공백, `\` 불가, 중복 불가. UI/API로 만들 때는 영문자·숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만, 최대 64자, `create`는 예약어. |
-| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo` 중 하나. |
+| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm` 중 하나. |
 | `type` | 모두 | 필수 | `hosted`, `proxy`, `group` 중 하나. |
 | `remote` | proxy | 필수 | 원격 저장소의 `http(s)` URL. Cargo는 `sparse+` 없는 sparse index URL. 원격 인증 정보는 URL에 넣지 말고 `remoteAuth`에 넣으세요(URL은 암호화하지 않습니다. "저장된 비밀값 암호화" 참고). |
 | `remoteAuth` | proxy | 없음 | 원격 인증: `username`/`password` 또는 `bearerToken`(둘 다 있으면 토큰 우선). 설정한 `remote`와 스킴·호스트·포트가 같은 곳에만 보내며, 리다이렉트를 따라갈 때도 같습니다. 예외는 같은 호스트의 `http`(80)에서 `https`(443)로 옮기는 리다이렉트로, 첫 요청이 이미 그 호스트에 보냈으므로 자격 증명을 유지합니다. 그 밖에 포트나 스킴이 다른 곳(`https`에서 `http`로 내려가는 경우 포함)과 하위 도메인으로 가는 리다이렉트는 자격 증명 없이 따라갑니다. |
-| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스)를 다시 확인하기까지의 시간. |
+| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`)를 다시 확인하기까지의 시간. |
 | `contentMaxAge` | proxy | `"-1"` | 아티팩트 본문(jar, tgz, 휠, zip, crate)의 재확인 주기. 기본은 영구 캐시. |
 | `negativeCacheTTL` | proxy | `"10m"` | 원격이 404/410을 준 경로, 그리고 체크섬이 맞지 않은 다운로드를 다시 묻지 않는 시간. 만료된 기록은 서버가 시작할 때와 그 뒤 하루에 한 번 DB에서 지웁니다. |
 | `members` | group | 필수 | 멤버 저장소 이름 목록. 순서대로 조회하며 같은 포맷이어야 하고 순환할 수 없습니다. |
@@ -671,7 +671,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - 거절되면 클라이언트는 502(만료된 캐시가 있으면 그 캐시)를 받습니다. 로그의 `remote fetch failed` 줄에는 `address refused by the remote egress policy`가 남습니다.
 - `HTTPS_PROXY`/`HTTP_PROXY`의 사내 프록시를 거치는 요청은 프록시가 대신 접속하므로 IP 주소로 적힌 목적지만 검사합니다(위의 다른 IPv4 표기와 ASCII가 아닌 호스트의 거절 포함). 호스트 이름으로 적힌 목적지는 내부 주소로 해석되더라도 프록시가 그대로 접속하므로, 프록시에서 내부 대역으로 가는 요청을 막거나 사내 도메인과 대역을 `NO_PROXY`에 넣으세요. 프록시 자체의 주소는 막지 않습니다. `NO_PROXY`에 넣은 호스트에는 직접 접속하므로 위 검사를 모두 받습니다.
 
-**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
+**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm과 Docker도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
 
 ## 인증과 권한
 
@@ -759,10 +759,14 @@ database:
 - 환경 변수 `COMMANDCENTER_DATABASE_URL`로도 지정할 수 있습니다(Kubernetes에서는 Secret으로 넣는 것을 권장. Helm 차트의 `database.existingSecret`). 둘 다 지정하면 시작을 거부합니다.
 - `postgres://`와 `postgresql://`만 허용합니다. URL과 비밀번호는 로그나 오류 메시지에 남지 않습니다. 사용자 이름과 비밀번호의 특수문자는 퍼센트 인코딩하십시오.
 - PostgreSQL 13 이상. 데이터베이스는 미리 만들어 두어야 하며(`CREATE DATABASE commandcenter`), 테이블은 첫 시작 때 만들어집니다. 스키마 버전은 `schema_version` 테이블에 기록되고, 더 새 버전이 쓴 데이터베이스는 SQLite와 같이 시작을 거부합니다.
-- 모든 CLI 명령(`token create`, `user reset-password`, `gc`, `secret-key rotate`)이 같은 설정을 읽습니다.
+- 모든 CLI 명령(`token create`, `user reset-password`, `gc`, `secret-key rotate`, `migrate-db`)이 같은 설정을 읽습니다.
 - 백업은 `pg_dump`로 합니다. 시스템 정보 화면의 메타데이터 DB 크기는 PostgreSQL에서는 `pg_database_size` 값입니다.
 - 쓰기는 한 번에 하나씩 처리합니다(SQLite와 같은 규칙). 인스턴스는 여전히 하나만 띄웁니다.
-- 기존 `meta.db`를 PostgreSQL로 옮기는 도구는 아직 없습니다. 새 데이터베이스는 첫 시작 때 `config.yaml`의 저장소·사용자를 가져와 시작합니다.
+- **SQLite에서 PostgreSQL로 옮기기**: `commandcenter migrate-db -config <설정 파일> -to <postgres URL>`이 설정이 가리키는 `meta.db`의 모든 테이블을 비어 있는 PostgreSQL 데이터베이스로 복사합니다. 대상 데이터베이스는 미리 만들어 두고(`CREATE DATABASE commandcenter`), 테이블은 명령이 만듭니다. 서버를 먼저 멈추고 백업을 받은 뒤 실행하세요. 대상 데이터베이스에 행이 하나라도 있거나 스키마 버전이 다르면 아무것도 쓰지 않고 거부합니다. 복사는 대상의 한 트랜잭션으로 하고 테이블마다 행 수를 확인한 뒤에만 커밋하므로 중간에 실패해도 대상은 비어 있는 그대로입니다. ID, 시각, JSON 문서, 암호화된 비밀값(`enc:v1:…`)은 바이트 그대로 복사되므로 **같은 비밀값 키**로 서버를 시작해야 합니다. blob은 옮기지 않으며 `dataDir`의 blob 저장소를 그대로 씁니다. 끝나면 테이블별 행 수를 출력합니다. URL과 비밀번호는 출력이나 오류 메시지에 남지 않습니다. 그 뒤 `database.url`(또는 `COMMANDCENTER_DATABASE_URL`)을 대상으로 바꾸고 서버를 시작합니다. 반대 방향(PostgreSQL → SQLite)은 `-to`에 새 SQLite 파일 경로를 주면 됩니다(설정은 PostgreSQL을 가리킨 채로). 예:
+  ```sh
+  docker compose stop commandcenter
+  docker compose run --rm commandcenter migrate-db -to 'postgres://cc:비밀번호@db.example:5432/commandcenter?sslmode=require'
+  ```
 - NUL이나 잘못된 UTF-8이 든 이름(옛 빌드가 저장한 Maven 경로)은 PostgreSQL에 저장할 수 없으므로 400으로 거부합니다.
 
 ### 저장된 비밀값 암호화
@@ -889,6 +893,7 @@ blob(파일 내용)은 **blob store** 디렉터리에 sha256 이름으로 저장
 - **사용량**: Blob Store 화면과 `GET /-/api/blobstores`가 store별 blob 수·용량(그 store의 저장소가 참조하는 것), 저장소 수, 파일시스템 전체/남은 용량(리눅스)을 보여 줍니다.
 - **삭제**: 저장소가 쓰고 있는 store는 409입니다. 삭제해도 **디렉터리와 파일은 디스크에 남습니다**(관리자가 직접 정리하세요).
 - **compact 작업**(`blobstore.compact`)은 선택 파라미터 `blobStore`로 한 store만 정리하고, 생략하면 모든 store를 정리합니다("예약 작업" 참고).
+- **S3 store**: Blob Store 화면(`POST /-/api/blobstores`)에서 `type: "s3"`로 만들면 blob이 디렉터리 대신 S3 호환 버킷(AWS S3, MinIO, Ceph RGW)에 `<prefix>/<sha256>` 키로 저장됩니다. 필드는 `s3.bucket`(필수), `s3.prefix`(선택, 앞뒤 `/` 없이), `s3.region`(기본 `us-east-1`), `s3.endpoint`(비우면 `https://s3.<region>.amazonaws.com`, MinIO/Ceph는 그 주소), `s3.pathStyle`(`<endpoint>/<bucket>/<key>` 방식, MinIO는 보통 켬), `s3.accessKeyId`/`s3.secretAccessKey`(둘 다 비우면 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` 환경 변수), `s3.sse`(`AES256` 또는 `aws:kms`, 업로드마다 `x-amz-server-side-encryption` 헤더). 만들 때 버킷을 목록 조회해 자격 증명과 버킷을 확인하며(실패하면 400), 같은 endpoint·버킷·prefix를 쓰는 다른 S3 store가 있으면 거부합니다. `secretAccessKey`는 다른 비밀값처럼 비밀값 키로 암호화해 저장하고(`secretKeyFile`), 응답과 화면에는 보이지 않습니다(`GET /-/api/blobstores`는 값 대신 `secretSet: true/false`만 돌려줍니다). 64 MiB를 넘는 파일은 멀티파트 업로드로 올리고, 다운로드는 Range 요청을 그대로 버킷의 Range GET으로 넘깁니다. `path`(비우면 `<dataDir>/blobstores/<이름>`)는 업로드 중인 임시 파일과 Docker 업로드 세션만 두는 로컬 디렉터리이므로 작지만 영구 볼륨에 두세요. compact 작업(GC)은 prefix 아래를 나열해 참조되지 않는 객체를 지웁니다. 삭제해도 버킷의 객체는 남습니다. S3 store를 모르는 이전 버전(구조 버전 1)은 이 store의 경로를 빈 디렉터리로 열어 파일을 찾지 못하므로 내리지 마세요("업그레이드" 참고).
 
 ## 일반 설정
 
@@ -1042,6 +1047,10 @@ twine이 보내는 `sha256_digest`, `md5_digest`, `blake2_256_digest` 중 받은
 
 twine에는 삭제 명령이 없으므로 잘못 올린 버전은 웹 UI나 API로 지웁니다("컴포넌트 삭제" 참고). 그 버전의 파일(wheel, sdist)이 모두 지워지고, 프로젝트 페이지와 group에서 바로 사라집니다.
 
+**JSON API와 PEP 658 메타데이터.** pypi.org의 JSON API와 같은 모양의 문서를 `GET /repository/<저장소>/pypi/<프로젝트>/json`(프로젝트: `info`는 최신 정식 릴리스, `releases`에 모든 릴리스의 파일, `urls`에 최신 릴리스의 파일)과 `/pypi/<프로젝트>/<버전>/json`(그 릴리스만, `releases` 없음)으로 답합니다. 파일 항목에는 `filename`, `url`(`baseURL`로 만든 절대 URL), `digests`(`sha256`, `md5`, `blake2b_256`), `size`, `upload_time`, `packagetype`, `python_version`, `requires_python`, `yanked`가 들어갑니다. hosted는 업로드 때 읽어 둔 wheel의 `METADATA`·sdist의 `PKG-INFO`(`Summary`, `Requires-Dist`, `Classifier`, `Project-URL`, 본문 설명 등)로 `info`를 만들고, proxy는 원격의 `/pypi/<프로젝트>/json`을 메타데이터(`metadataMaxAge`)로 캐시해 파일 URL만 이 서버의 것으로 바꿔 답합니다. group은 그 프로젝트를 처음 가진 멤버의 문서입니다(simple 인덱스와 같은 규칙). 없는 프로젝트·버전은 404입니다.
+
+각 파일 옆에 PEP 658 메타데이터 `…/packages/<프로젝트>/<파일>.metadata`(wheel의 `METADATA` 또는 sdist의 `PKG-INFO` 원문)를 제공하고, simple 인덱스(HTML `data-core-metadata`·`data-dist-info-metadata`, JSON `core-metadata`·`dist-info-metadata`)에 그 sha256과 함께 알리므로 pip가 wheel을 내려받지 않고 의존성을 풀 수 있습니다. hosted는 업로드 때 메타데이터를 파일과 함께 저장합니다(16 MiB 초과면 400). 이전 버전이 저장한 파일은 처음 요청될 때 파일에서 꺼내 저장하며, 그때까지 인덱스에는 해시 없이 `true`로 알립니다. proxy는 캐시된 메타데이터, 캐시된 파일에서 꺼낸 메타데이터, 원격 인덱스가 알린 `<파일 URL>.metadata`(알린 sha256과 대조) 순으로 답하고, 원격이 알리지 않은 파일은 인덱스에도 알리지 않습니다. 메타데이터 파일은 Browse에서 그 버전의 파일로 보이며 컴포넌트 삭제·Cleanup 때 파일과 함께 지워집니다.
+
 ### Go 모듈 설정
 
 `GOPROXY`를 그룹 저장소로 지정합니다.
@@ -1094,7 +1103,8 @@ docker push <host>/docker-hosted/team/app:1.0
 docker pull <host>/docker-hosted/team/app:1.0
 ```
 
-- 지금은 hosted만 지원합니다(proxy·group은 추후). 인증은 Distribution 토큰 방식(`/v2/token`, 5분 유효)이며 Basic 인증도 바로 받습니다. `GET /v2/`는 자격 증명 없는 요청에 익명 읽기가 켜져 있어도 401과 토큰 안내를 돌려줍니다. docker, crane, skopeo가 토큰 주소를 그 응답에서 찾기 때문이며, 익명 읽기가 켜진 저장소는 그 뒤 익명 토큰으로 로그인 없이 pull 됩니다. push에는 add, 매니페스트 삭제(`DELETE /v2/<이름>/manifests/<digest>`)에는 delete 권한이 필요합니다.
+- hosted, proxy, group을 모두 지원합니다. proxy의 `remote`는 레지스트리 주소(`/v2/` 없이. Docker Hub는 `https://registry-1.docker.io`)이며, Docker Hub에서는 경로 없는 이미지 이름(`nginx`)을 `library/nginx`로 바꿔 요청합니다. 원격이 401과 Bearer 안내(`WWW-Authenticate`)를 돌려주면 그 realm에서 토큰을 받아(`remoteAuth`가 있으면 그 자격 증명으로, 없으면 익명으로) 다시 요청하고, 토큰은 realm·service·scope별로 만료까지 재사용합니다. 태그로 받은 매니페스트와 태그 목록은 `metadataMaxAge`마다 다시 확인하고, digest로 받은 매니페스트와 레이어는 digest로 검증해 영구 캐시합니다(`contentMaxAge`). 멀티 아키텍처 이미지는 인덱스(manifest list)째로 받습니다. group은 멤버 순서대로 답하되 그 이미지를 가진 hosted 멤버가 있으면 그 멤버의 답(없으면 404)으로 끝나고, Offline 멤버는 건너뛰며, "없음"이 아닌 오류를 낸 멤버가 있으면 5xx입니다. catalog는 멤버의 합집합입니다. proxy와 group에 push하면 405입니다.
+- 인증은 Distribution 토큰 방식(`/v2/token`, 5분 유효)이며 Basic 인증도 바로 받습니다. `GET /v2/`는 자격 증명 없는 요청에 익명 읽기가 켜져 있어도 401과 토큰 안내를 돌려줍니다. docker, crane, skopeo가 토큰 주소를 그 응답에서 찾기 때문이며, 익명 읽기가 켜진 저장소는 그 뒤 익명 토큰으로 로그인 없이 pull 됩니다. push에는 add, 매니페스트 삭제(`DELETE /v2/<이름>/manifests/<digest>`)에는 delete 권한이 필요합니다.
 - `writePolicy`: `allow`는 태그 덮어쓰기 허용, `allow_once`는 이미 있는 태그를 다른 이미지로 바꾸지 못합니다(409). `deny`는 읽기 전용입니다.
 - 매니페스트는 받은 바이트 그대로 저장되며(최대 4 MiB. schema2, manifest list, OCI manifest, OCI index를 받고 schema1은 거부), 참조하는 blob이 모두 있어야 저장됩니다. 레이어는 내용 주소 저장소에서 중복 제거되고, 업로드 하나는 `maxUploadMiB`를 넘을 수 없습니다. 중단된 업로드 세션은 24시간 뒤 정리됩니다.
 - 매니페스트를 digest로 삭제하면 태그와 더 이상 참조되지 않는 레이어 행이 함께 지워지고, blob은 compact 작업이 회수합니다. 태그로는 삭제할 수 없습니다(400). Cleanup 정책은 docker 저장소에 적용되지 않습니다.
@@ -1132,6 +1142,48 @@ crate 이름은 올린 표기(대소문자 포함) 그대로 인덱스, 웹 UI(�
 - 설정 파일의 `baseURL`은 `index = "sparse+http://…"`에 쓰는 주소와 같아야 합니다. config.json의 `dl`·`api`가 이 값으로 만들어집니다.
 - proxy 저장소의 `remote`는 `sparse+` 접두사를 뗀 sparse index URL입니다. 예: `https://index.crates.io/`
 
+### Raw(일반 파일) 설정
+
+`raw` 포맷은 Nexus의 raw처럼 어떤 파일이든 경로 그대로 저장하고 내려주는 저장소입니다. 설치 파일, 문서, 스크립트, 정적 사이트처럼 패키지 형식이 없는 파일에 씁니다. 클라이언트 설정은 없고 HTTP만 쓰면 됩니다.
+
+```bash
+# 업로드(add 권한): 경로는 자유. Content-Type 헤더를 보내면 그대로 저장되고, 없으면 확장자로 정합니다.
+curl -u ci:PASSWORD -T installer.sh -H 'Content-Type: text/x-shellscript' http://localhost:8081/repository/raw-hosted/tools/installer.sh
+# 다운로드(read 권한): 저장된 Content-Type으로 응답합니다. HEAD, Range, If-None-Match(ETag)도 됩니다.
+curl -O http://localhost:8081/repository/raw-hosted/tools/installer.sh
+# 삭제(delete 권한)
+curl -u ci:PASSWORD -X DELETE http://localhost:8081/repository/raw-hosted/tools/installer.sh
+```
+
+- hosted: `writePolicy`를 Maven처럼 따릅니다. `allow_once`(기본)는 같은 경로 재업로드를 400으로 거부하고, `allow`는 덮어쓰기를 허용하되 이미 있는 파일을 덮어쓰려면 edit 권한이 필요하며(없으면 403), `deny`는 업로드·삭제를 400으로 막습니다. 경로는 Maven과 같은 규칙으로 검사합니다: `..`나 `.` 세그먼트, `//`, 역슬래시, 제어 문자, `?`·`#`·`;`, UTF-8이 아닌 바이트는 400입니다. 공백과 유니코드는 됩니다(URL 인코딩해서 보내세요).
+- 디렉터리 목록: hosted 저장소에서 `/`로 끝나는 경로(저장소 루트 `/repository/raw-hosted/` 포함)를 GET하면 웹 서버처럼 하위 항목을 HTML 목록으로 보여 줍니다. `Accept: application/json`이면 `{"path":"docs/","entries":[{"name":"a.txt","dir":false,"size":5,"lastModified":"…"},{"name":"sub","dir":true}],"truncated":false}` 형태의 JSON입니다. 한 번에 최대 1000개를 보여 주고 더 있으면 `truncated`가 true입니다. 파일이 하나도 없는 디렉터리는 404입니다(루트는 항상 200). proxy와 group은 디렉터리 목록을 제공하지 않습니다(404).
+- proxy: `remote` 아래의 어떤 경로든 원격에서 받아 캐시합니다. 원격이 보낸 Content-Type을 저장하고, 없으면 확장자로 정합니다. 다른 포맷과 달리 `text/html` 응답도 그대로 파일로 캐시합니다(raw 원격은 웹 사이트이기 때문). `contentMaxAge`(기본 영구)마다 다시 확인하고, 원격이 404/410을 준 경로는 `negativeCacheTTL` 동안 다시 묻지 않습니다. `/`로 끝나는 경로는 원격에 묻지 않습니다(원격의 목록 페이지를 파일로 캐시하지 않기 위해).
+- group: 멤버 순서대로 처음 그 경로를 가진 멤버가 답합니다(hosted를 proxy보다 앞에 두세요). `writeMember`가 있으면 PUT·DELETE는 그 hosted 멤버로 갑니다.
+- 웹 UI: Browse는 Maven처럼 경로 트리입니다. 컴포넌트는 파일 하나하나이며 이름이 경로이고 버전은 없습니다(검색의 version 조건은 raw에 맞지 않습니다). 컴포넌트 삭제(API `DELETE /-/api/repositories/<저장소>/components?name=<경로>`)는 version 없이 호출합니다. 메타데이터 탭은 raw에 없습니다.
+- Cleanup 정책: hosted와 proxy 모두 `componentAgeDays`·`lastDownloadedDays`로 파일 단위로 정리합니다(정책 포맷 `all` 또는 `raw`). `releaseType`은 raw에서 모든 파일을 release로 봅니다. `namePattern`은 경로 전체와 맞춰야 합니다(예: `tools/.*\.sh`).
+- 권한: 역할의 `format:raw` 대상도 쓸 수 있습니다. 활동 이벤트는 `upload`/`delete`에 경로가 기록됩니다.
+
+### Helm 설정
+
+Helm 차트 저장소(Nexus의 helm 포맷)입니다. `index.yaml`과 `<이름>-<버전>.tgz`를 `/repository/<저장소>/` 아래에서 제공하며, 서버가 `index.yaml`을 직접 만들어 유지합니다(차트를 올리거나 지울 때마다 같은 트랜잭션에서 다시 생성. `digest`, `created`, 저장소 기준 상대 `urls` 포함).
+
+```bash
+helm repo add cc http://localhost:8081/repository/helm-all
+helm repo update
+helm install app cc/demo --version 1.0.0
+
+# 올리기: 파일 PUT(curl)이나 helm cm-push(POST api/charts). add 권한이 필요합니다.
+curl -u ci:<비밀번호> --upload-file demo-1.0.0.tgz http://localhost:8081/repository/helm-hosted/
+helm cm-push demo-1.0.0.tgz cc-hosted      # helm-push 플러그인. 응답 201 {"saved":true}
+```
+
+- hosted는 올린 tgz에서 `<디렉터리>/Chart.yaml`(1 MiB 이하)을 읽어 `name`, `version`(SemVer 2), `description`, `appVersion`, `dependencies` 등 모든 필드를 인덱스 항목으로 저장합니다. 파일 이름은 `<name>-<version>.tgz`여야 하며(버전의 `+`는 helm package처럼 `_`로 써도 됨) 다르면 400입니다. gzip tar가 아니거나 Chart.yaml이 없으면 400입니다. 업로드 본문은 `maxUploadMiB`를 따릅니다.
+- `writePolicy`: `allow_once`(기본)는 같은 버전 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다. cm-push의 `--force`는 무시하고 저장소 정책을 따릅니다.
+- proxy의 `remote`는 `index.yaml`이 있는 차트 저장소 URL입니다(예: `https://charts.bitnami.com/bitnami/`). 원격 `index.yaml`은 `metadataMaxAge`마다 다시 확인하고, 항목의 `urls`를 proxy 경로로 바꿔 제공합니다. 차트는 처음 받을 때 원격 인덱스의 URL에서 가져와 `digest`로 검증한 뒤 영구 캐시합니다(`contentMaxAge`). 원격이 응답하지 않으면 만료된 인덱스를 `Warning: 110`과 함께 제공합니다. 큰 인덱스(bitnami 약 30 MB)는 내용이 바뀔 때 한 번만 해석합니다.
+- group의 `index.yaml`은 멤버 순서상 그 차트 이름을 처음 가진 멤버의 버전만 냅니다(hosted를 proxy보다 앞에 두세요). 다운로드도 같은 규칙이라 소유 멤버에 없는 버전은 뒤 멤버에 있어도 404입니다. 멤버가 "없음"이 아닌 오류를 내면 5xx로 답합니다. `writeMember`가 있으면 group에 올린 차트는 그 hosted로 갑니다.
+- 삭제는 웹 UI·API의 컴포넌트 삭제("컴포넌트 삭제" 참고)와 Cleanup 정책(helm hosted·proxy 모두 가능)으로 하며, 지우면 `index.yaml`이 바로 갱신됩니다. 역할 권한 대상으로 `format:helm`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 description·home·dependencies를 보여 줍니다.
+- `helm push chart.tgz oci://<host>/<docker 저장소>/<차트>`는 OCI 매니페스트 push이므로 docker 저장소를 쓰세요("Docker 설정" 참고). helm 저장소의 `index.yaml`에는 OCI 차트가 나오지 않습니다.
+
 ## 운영
 
 | 작업 | 명령 |
@@ -1164,7 +1216,7 @@ curl -u admin http://localhost:8081/-/metrics
 
 ### Cleanup 정책
 
-오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷(`all` 또는 다섯 포맷 중 하나)과 아래 기준으로 이루어지며, 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
+오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
 
 | 기준 | 의미 |
 |---|---|
@@ -1238,6 +1290,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 - 에셋 본문을 GET으로 성공적으로 받을 때마다(HEAD는 제외) 그 에셋의 다운로드가 1 늘고 마지막 다운로드 시각이 갱신됩니다. proxy가 캐시를 채우는 요청도 셉니다. 컴포넌트 상세의 기본 정보와 Assets 탭, Browse 파일 목록에 표시되며 Cleanup의 `lastDownloadedDays`가 이 값을 씁니다.
 - 요청마다 DB에 쓰지 않습니다. 카운터는 메모리에 모았다가 **30초마다**(또는 항목이 10 000개에 닿으면, 종료할 때) 한 트랜잭션으로 반영합니다. 그래서 화면의 값은 최대 30초 늦습니다. 주기는 숨은 설정 `metricsFlushSeconds`(1..3600, 기본 30)로 바꿉니다.
 - 요청 추이는 `/repository/<이름>/…` 요청 수와 응답 바이트를 시간 단위(UTC)로 집계해 대시보드의 7일 차트와 시스템 상태의 24시간 차트에 그립니다(`GET /-/api/stats/requests?range=24h|7d|30d&repo=`). 24h는 시간별, 7d·30d는 일별이며 **90일**이 지난 집계는 하루 한 번 지웁니다.
+- 저장소별 상태(`GET /-/api/stats/repositories?range=1h|24h|7d`, admin)는 같은 시간 단위 집계에서 저장소마다 요청 수, 오류 수(5xx·429)와 오류율, 수신·송신 바이트, 응답 시간의 평균·최대를, proxy는 원격 요청 수·실패 수·원격 응답 시간의 평균·최대와 캐시 적중·미스도 냅니다. 대시보드의 "저장소별 상태" 표가 이것이며, 숫자를 누르면 그 저장소로 거른 로그 화면으로 갑니다. `1h`는 현재 시간대와 직전 시간대이고(응답의 `since`), 분위수(p95)는 시간 단위 집계에서 낼 수 없어 제공하지 않습니다.
 
 ### blob 정리 (`commandcenter gc`)
 

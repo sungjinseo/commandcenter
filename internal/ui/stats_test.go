@@ -138,3 +138,56 @@ func TestBrowseAndComponentsCarryDownloads(t *testing.T) {
 		}
 	}
 }
+
+func TestRepositoryStatsAPI(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	now := time.Date(2026, 10, 27, 15, 30, 0, 0, time.UTC)
+	e.ui.now = func() time.Time { return now }
+	h := now.Truncate(time.Hour).Unix()
+	err := e.db.FlushRequests(context.Background(), []meta.RequestDelta{
+		{Hour: h, Repo: "maven-proxy", Requests: 10, Bytes: 1000, Errors: 1, BytesIn: 5, Ms: 500, MaxMs: 200,
+			Upstream: 4, UpstreamFailures: 1, UpstreamMs: 800, UpstreamMaxMs: 700, CacheHits: 6, CacheMisses: 4},
+		{Hour: h - 3600, Repo: "maven-proxy", Requests: 10, Bytes: 0, Ms: 100, MaxMs: 50, Upstream: 1, UpstreamMs: 100, UpstreamMaxMs: 100},
+		{Hour: h - 2*3600, Repo: "maven-releases", Requests: 3, Bytes: 30, MaxMs: 9}, // outside 1h, inside 24h
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := e.get(t, "/-/api/stats/repositories", "reader"); r.status != http.StatusForbidden {
+		t.Fatalf("reader: %d", r.status)
+	}
+	if r := e.get(t, "/-/api/stats/repositories?range=30d", "admin"); r.status != http.StatusBadRequest {
+		t.Fatalf("bad range: %d", r.status)
+	}
+	r := e.get(t, "/-/api/stats/repositories?range=1h", "admin")
+	wantStatus(t, r, http.StatusOK)
+	m := r.json(t)
+	if m["since"] != "2026-10-27T14:00:00Z" || m["collectedAt"] != "2026-10-27T15:30:00Z" || m["range"] != "1h" {
+		t.Fatalf("header: %v", m)
+	}
+	rows := map[string]map[string]any{}
+	for _, x := range m["repositories"].([]any) {
+		row := x.(map[string]any)
+		rows[row["name"].(string)] = row
+	}
+	p := rows["maven-proxy"]
+	if p["type"] != "proxy" || p["requests"] != float64(20) || p["errors"] != float64(1) || p["errorRate"] != 0.05 ||
+		p["bytesOut"] != float64(1000) || p["bytesIn"] != float64(5) || p["latencyAvgMs"] != float64(30) || p["latencyMaxMs"] != float64(200) ||
+		p["upstreamRequests"] != float64(5) || p["upstreamFailures"] != float64(1) || p["upstreamLatencyAvgMs"] != float64(180) ||
+		p["upstreamLatencyMaxMs"] != float64(700) || p["cacheHits"] != float64(6) || p["cacheMisses"] != float64(4) {
+		t.Fatalf("proxy row: %v", p)
+	}
+	hosted := rows["maven-releases"]
+	if hosted["requests"] != float64(0) || hosted["errorRate"] != float64(0) {
+		t.Fatalf("hosted row outside the range: %v", hosted)
+	}
+	if _, has := hosted["cacheHits"]; has {
+		t.Fatalf("hosted row has proxy fields: %v", hosted)
+	}
+	m = e.get(t, "/-/api/stats/repositories", "admin").json(t)
+	for _, x := range m["repositories"].([]any) {
+		if row := x.(map[string]any); row["name"] == "maven-releases" && (row["requests"] != float64(3) || row["latencyMaxMs"] != float64(9)) {
+			t.Fatalf("24h hosted row: %v", row)
+		}
+	}
+}

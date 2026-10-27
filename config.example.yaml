@@ -3,7 +3,9 @@ listen: ":8081"
 baseURL: "http://localhost:8081"   # 클라이언트가 접속하는 주소
 dataDir: "/data"
 memoryLimitMiB: 80
-# secretKeyFile: /run/secrets/commandcenter-secret-key  # 저장된 비밀값(SMTP·LDAP·remoteAuth)을 암호화하는 키 파일. 만들기: head -c 32 /dev/urandom | base64
+# secretKeyFile: /run/secrets/commandcenter-secret-key  # 저장된 비밀값(SMTP·LDAP·remoteAuth, S3 store의 secretAccessKey)을 암호화하는 키 파일. 만들기: head -c 32 /dev/urandom | base64
+# Blob store는 Blob Store 화면(POST /-/api/blobstores)에서 만듭니다. S3 store의 accessKeyId/secretAccessKey를 비우면
+# 프로세스 환경의 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY(, AWS_SESSION_TOKEN)를 씁니다.
 # maxUploadMiB: 1024               # 업로드 본문 최대 크기(MiB). 기본 1024, 1..1048576. 초과하면 413
 anonymousRead: true                # 익명 다운로드 허용 (저장소별 anonymousRead로 덮어쓰기 가능)
 
@@ -16,7 +18,7 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted"] }
 
 repositories:
   - name: maven-central
@@ -103,3 +105,37 @@ repositories:
     format: docker
     type: group
     members: [docker-hosted, docker-proxy]
+  - name: raw-hosted                  # curl -u ci:PW -T file.bin http://<host>/repository/raw-hosted/any/path/file.bin
+    format: raw
+    type: hosted
+    writePolicy: allow_once           # allow: 덮어쓰기 허용(edit 권한 필요). 디렉터리 목록: GET …/raw-hosted/any/path/
+  - name: raw-proxy                   # 원격 웹 사이트의 파일을 경로 그대로 캐시 (HTML도 파일로 캐시)
+    format: raw
+    type: proxy
+    remote: "https://downloads.example.com/"
+    contentMaxAge: "-1"               # 영구 캐시. 원격 404는 negativeCacheTTL 동안 기억
+  - name: raw-all                     # hosted 먼저, 없으면 proxy; 업로드는 raw-hosted로
+    format: raw
+    type: group
+    members: [raw-hosted, raw-proxy]
+    writeMember: raw-hosted
+  - name: helm-hosted                 # curl -u ci:pw --upload-file demo-1.0.0.tgz <host>/repository/helm-hosted/  또는 helm cm-push
+    format: helm
+    type: hosted
+    writePolicy: allow_once           # allow: 같은 버전 덮어쓰기 허용(edit 권한)
+  - name: helm-proxy                  # helm repo add bitnami <host>/repository/helm-proxy
+    format: helm
+    type: proxy
+    remote: "https://charts.bitnami.com/bitnami/"   # index.yaml이 있는 차트 저장소 URL
+    metadataMaxAge: "1h"              # index.yaml 재확인 주기. 차트 파일은 digest로 검증 후 영구 캐시
+  - name: helm-all                    # helm repo add cc <host>/repository/helm-all — hosted가 가진 차트 이름은 hosted 버전만
+    format: helm
+    type: group
+    members: [helm-hosted, helm-proxy]
+    writeMember: helm-hosted
+
+# database:
+#   url: postgres://cc:password@db.example:5432/commandcenter?sslmode=require
+#   # To move an existing SQLite meta.db here, stop the server and run
+#   #   commandcenter migrate-db -config /etc/commandcenter/config.yaml -to 'postgres://...'
+#   # with the config still naming the SQLite database, then set url and start with the same secret key.

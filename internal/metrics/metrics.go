@@ -45,7 +45,27 @@ type rqKey struct {
 	hour int64
 	repo string
 }
-type rqVal struct{ requests, bytes int64 }
+type rqVal struct {
+	requests, bytes, errors, bytesIn, ms, maxMs           int64
+	upstream, upstreamFailures, upstreamMs, upstreamMaxMs int64
+	cacheHits, cacheMisses                                int64
+}
+
+// add folds o into v; the maxima take the larger value.
+func (v *rqVal) add(o rqVal) {
+	v.requests += o.requests
+	v.bytes += o.bytes
+	v.errors += o.errors
+	v.bytesIn += o.bytesIn
+	v.ms += o.ms
+	v.maxMs = max(v.maxMs, o.maxMs)
+	v.upstream += o.upstream
+	v.upstreamFailures += o.upstreamFailures
+	v.upstreamMs += o.upstreamMs
+	v.upstreamMaxMs = max(v.upstreamMaxMs, o.upstreamMaxMs)
+	v.cacheHits += o.cacheHits
+	v.cacheMisses += o.cacheMisses
+}
 
 // Recorder accumulates counters; see Flush and Run.
 type Recorder struct {
@@ -117,9 +137,38 @@ func (r *Recorder) Download(repo, path string) {
 	}
 }
 
-// Request counts one finished request to repo with its response bytes. Callers
-// pass only names the registry knows, so the key space stays small.
-func (r *Recorder) Request(repo string, bytes int64) {
+// Request counts one finished request to repo: its status (5xx and 429 count
+// as errors), request and response bytes and how long it took. Callers pass
+// only names the registry knows, so the key space stays small.
+func (r *Recorder) Request(repo string, status int, bytesIn, bytesOut int64, d time.Duration) {
+	ms := d.Milliseconds()
+	v := rqVal{requests: 1, bytes: bytesOut, bytesIn: bytesIn, ms: ms, maxMs: ms}
+	if status >= 500 || status == 429 {
+		v.errors = 1
+	}
+	r.addRequest(repo, v)
+}
+
+// Upstream counts one fetch from a proxy repository's remote (proxy.Fetcher).
+func (r *Recorder) Upstream(repo string, ok bool, d time.Duration) {
+	ms := d.Milliseconds()
+	v := rqVal{upstream: 1, upstreamMs: ms, upstreamMaxMs: ms}
+	if !ok {
+		v.upstreamFailures = 1
+	}
+	r.addRequest(repo, v)
+}
+
+// Cache counts one lookup in a proxy repository's cache.
+func (r *Recorder) Cache(repo string, hit bool) {
+	if hit {
+		r.addRequest(repo, rqVal{cacheHits: 1})
+	} else {
+		r.addRequest(repo, rqVal{cacheMisses: 1})
+	}
+}
+
+func (r *Recorder) addRequest(repo string, add rqVal) {
 	hour := r.Now().Unix() / 3600 * 3600
 	r.mu.Lock()
 	k := rqKey{hour, repo}
@@ -129,8 +178,7 @@ func (r *Recorder) Request(repo string, bytes int64) {
 		r.drop(1)
 		return
 	}
-	v.requests++
-	v.bytes += bytes
+	v.add(add)
 	r.rq[k] = v
 	crossed := !ok && len(r.dl)+len(r.rq) == r.MaxKeys
 	r.mu.Unlock()
@@ -177,7 +225,10 @@ func (r *Recorder) Flush(ctx context.Context) error {
 	if len(rq) > 0 {
 		batch := make([]meta.RequestDelta, 0, len(rq))
 		for k, v := range rq {
-			batch = append(batch, meta.RequestDelta{Hour: k.hour, Repo: k.repo, Requests: v.requests, Bytes: v.bytes})
+			batch = append(batch, meta.RequestDelta{Hour: k.hour, Repo: k.repo, Requests: v.requests, Bytes: v.bytes,
+				Errors: v.errors, BytesIn: v.bytesIn, Ms: v.ms, MaxMs: v.maxMs,
+				Upstream: v.upstream, UpstreamFailures: v.upstreamFailures, UpstreamMs: v.upstreamMs, UpstreamMaxMs: v.upstreamMaxMs,
+				CacheHits: v.cacheHits, CacheMisses: v.cacheMisses})
 		}
 		if err := r.db.FlushRequests(ctx, batch); err != nil {
 			if firstErr == nil {
@@ -226,8 +277,7 @@ func (r *Recorder) restoreRequests(rq map[rqKey]rqVal) {
 			dropped++
 			continue
 		}
-		cur.requests += v.requests
-		cur.bytes += v.bytes
+		cur.add(v)
 		r.rq[k] = cur
 	}
 	r.mu.Unlock()

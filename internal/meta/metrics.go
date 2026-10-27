@@ -12,11 +12,28 @@ type DownloadDelta struct {
 	Last       time.Time
 }
 
-// RequestDelta is the traffic of one repository in one UTC hour (Hour is unix seconds).
+// RequestDelta is the traffic of one repository in one UTC hour (Hour is unix
+// seconds): requests with their response bytes and 5xx/429 errors, request
+// body bytes, total and longest response times, the proxy's remote fetches
+// (count, failures, total and longest time) and its cache hits and misses.
 type RequestDelta struct {
-	Hour            int64
-	Repo            string
-	Requests, Bytes int64
+	Hour                                                  int64
+	Repo                                                  string
+	Requests, Bytes, Errors, BytesIn, Ms, MaxMs           int64
+	Upstream, UpstreamFailures, UpstreamMs, UpstreamMaxMs int64
+	CacheHits, CacheMisses                                int64
+}
+
+// requestStatCols are the counters of request_stats, in RequestDelta order.
+const requestStatCols = `requests, bytes, errors, bytes_in, ms, max_ms,
+  upstream, upstream_failures, upstream_ms, upstream_max_ms, cache_hits, cache_misses`
+
+// RepoTraffic is the traffic of one repository over a period (RequestDelta summed).
+type RepoTraffic struct {
+	Repo                                                  string
+	Requests, Bytes, Errors, BytesIn, Ms, MaxMs           int64
+	Upstream, UpstreamFailures, UpstreamMs, UpstreamMaxMs int64
+	CacheHits, CacheMisses                                int64
 }
 
 // RequestBucket is the traffic in [T, T+step), T in unix seconds.
@@ -50,9 +67,17 @@ func (d *DB) FlushRequests(ctx context.Context, batch []RequestDelta) error {
 	}
 	return d.Tx(ctx, func(tx *Tx) error {
 		for _, b := range batch {
-			if _, err := tx.q.ExecContext(ctx, `INSERT INTO request_stats(hour, repo, requests, bytes) VALUES(?,?,?,?)
-ON CONFLICT(hour, repo) DO UPDATE SET requests = request_stats.requests + excluded.requests, bytes = request_stats.bytes + excluded.bytes`,
-				b.Hour, b.Repo, b.Requests, b.Bytes); err != nil {
+			const add = `requests = request_stats.requests + excluded.requests, bytes = request_stats.bytes + excluded.bytes,
+errors = request_stats.errors + excluded.errors, bytes_in = request_stats.bytes_in + excluded.bytes_in,
+ms = request_stats.ms + excluded.ms, upstream = request_stats.upstream + excluded.upstream,
+upstream_failures = request_stats.upstream_failures + excluded.upstream_failures, upstream_ms = request_stats.upstream_ms + excluded.upstream_ms,
+cache_hits = request_stats.cache_hits + excluded.cache_hits, cache_misses = request_stats.cache_misses + excluded.cache_misses, `
+			if _, err := tx.q.ExecContext(ctx, `INSERT INTO request_stats(hour, repo, `+requestStatCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(hour, repo) DO UPDATE SET `+add+pg(tx.q,
+				`max_ms = max(request_stats.max_ms, excluded.max_ms), upstream_max_ms = max(request_stats.upstream_max_ms, excluded.upstream_max_ms)`,
+				`max_ms = GREATEST(request_stats.max_ms, excluded.max_ms), upstream_max_ms = GREATEST(request_stats.upstream_max_ms, excluded.upstream_max_ms)`),
+				b.Hour, b.Repo, b.Requests, b.Bytes, b.Errors, b.BytesIn, b.Ms, b.MaxMs,
+				b.Upstream, b.UpstreamFailures, b.UpstreamMs, b.UpstreamMaxMs, b.CacheHits, b.CacheMisses); err != nil {
 				return err
 			}
 		}
@@ -82,6 +107,28 @@ func (d *DB) RequestStats(ctx context.Context, from, to, step int64, repo string
 			return nil, err
 		}
 		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// RepoTrafficStats sums the statistics with from <= hour < to per repository, by
+// name. Repositories without traffic are not returned.
+func (d *DB) RepoTrafficStats(ctx context.Context, from, to int64) ([]RepoTraffic, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT repo, SUM(requests), SUM(bytes), SUM(errors), SUM(bytes_in), SUM(ms), MAX(max_ms),
+SUM(upstream), SUM(upstream_failures), SUM(upstream_ms), MAX(upstream_max_ms), SUM(cache_hits), SUM(cache_misses)
+FROM request_stats WHERE hour >= ? AND hour < ? GROUP BY repo ORDER BY repo`, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RepoTraffic
+	for rows.Next() {
+		var s RepoTraffic
+		if err := rows.Scan(&s.Repo, &s.Requests, &s.Bytes, &s.Errors, &s.BytesIn, &s.Ms, &s.MaxMs,
+			&s.Upstream, &s.UpstreamFailures, &s.UpstreamMs, &s.UpstreamMaxMs, &s.CacheHits, &s.CacheMisses); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }

@@ -40,6 +40,13 @@ var ErrRemote error = &repo.Error{Status: http.StatusBadGateway, Msg: "remote re
 // client sees the remote's limit, not a generic 502.
 var ErrRateLimited error = &repo.Error{Status: http.StatusTooManyRequests, Msg: "remote repository rate limit exceeded"}
 
+// Stats, when set on a Fetcher, is told about each cache lookup and each
+// fetch from the remote (metrics.Recorder).
+type Stats interface {
+	Cache(repo string, hit bool)
+	Upstream(repo string, ok bool, d time.Duration)
+}
+
 // Result is a cached asset; Stale is set when the remote could not be reached
 // and an expired copy is returned instead.
 type Result struct {
@@ -72,6 +79,7 @@ type Fetcher struct {
 	Store  *repo.Store
 	Client *http.Client
 	Now    func() time.Time
+	Stats  Stats // optional counters
 	sf     singleflight.Group
 	sem    chan struct{}
 }
@@ -103,6 +111,7 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 		return Result{}, err
 	}
 	if cached && fresh(rp, kind, a, now) {
+		f.count(rp.Name, true)
 		return Result{Asset: a}, nil
 	}
 	if !cached {
@@ -111,9 +120,11 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 			return Result{}, err
 		}
 		if hit {
+			f.count(rp.Name, true)
 			return Result{}, repo.ErrNotFound
 		}
 	}
+	f.count(rp.Name, false)
 	// The flight is detached from the caller so one cancelled client does not abort
 	// a download that other waiters share. This caller may still stop waiting early.
 	ch := f.sf.DoChan(fmt.Sprintf("%s\x00%d\x00%s", rp.Name, rp.Gen, t.Key), func() (any, error) {
@@ -127,6 +138,12 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 		return r.Val.(Result), nil
 	case <-ctx.Done():
 		return Result{}, ctx.Err()
+	}
+}
+
+func (f *Fetcher) count(repo string, hit bool) {
+	if f.Stats != nil {
+		f.Stats.Cache(repo, hit)
 	}
 }
 
@@ -201,7 +218,11 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		}
 	}
 
+	t0 := time.Now()
 	resp, err := f.Client.Do(req)
+	if f.Stats != nil {
+		f.Stats.Upstream(rp.Name, err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests, time.Since(t0))
+	}
 	if err != nil {
 		return f.stale(rp, t.Key, a, cached, err)
 	}

@@ -165,3 +165,28 @@ func TestFlushRollsBackWholeBatchOnError(t *testing.T) {
 		t.Fatalf("first row of the failed batch was applied: %+v", b)
 	}
 }
+
+func TestRepoStatsSumsCountersAndKeepsMaxima(t *testing.T) {
+	db := openTest(t)
+	base := int64(1_700_000_000) / 3600 * 3600
+	for _, d := range []RequestDelta{
+		{Hour: base, Repo: "p", Requests: 2, Bytes: 10, Errors: 1, BytesIn: 3, Ms: 40, MaxMs: 30, Upstream: 1, UpstreamFailures: 1, UpstreamMs: 500, UpstreamMaxMs: 500, CacheHits: 1},
+		{Hour: base, Repo: "p", Requests: 1, Ms: 5, MaxMs: 5, Upstream: 1, UpstreamMs: 100, UpstreamMaxMs: 100, CacheMisses: 1}, // same hour: added, maxima kept
+		{Hour: base + 3600, Repo: "p", Requests: 1, MaxMs: 90},
+		{Hour: base - 3600, Repo: "p", Requests: 100}, // outside
+		{Hour: base, Repo: "h", Requests: 1},
+	} {
+		if err := db.FlushRequests(ctx, []RequestDelta{d}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.RepoTrafficStats(ctx, base, base+7200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []RepoTraffic{{Repo: "h", Requests: 1}, {Repo: "p", Requests: 4, Bytes: 10, Errors: 1, BytesIn: 3, Ms: 45, MaxMs: 90,
+		Upstream: 2, UpstreamFailures: 1, UpstreamMs: 600, UpstreamMaxMs: 500, CacheHits: 1, CacheMisses: 1}}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}

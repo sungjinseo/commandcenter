@@ -291,6 +291,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	recorder := metrics.New(db)
 	store.Downloads = recorder.Download
 	fetcher := proxy.New(store, proxy.NewClient(), maxConcurrentFetches)
+	fetcher.Stats = recorder
 	resolver := &resolve.Resolver{Store: store, Fetcher: fetcher}
 
 	authn, err := loadAccess(cfg, log, db)

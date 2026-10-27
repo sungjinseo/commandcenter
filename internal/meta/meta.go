@@ -256,6 +256,16 @@ func migrate(ctx context.Context, db querier) error {
 		{"tasks", "notify_email", "notify_email TEXT NOT NULL DEFAULT '[]'"},
 		{"blob_stores", "type", "type TEXT NOT NULL DEFAULT 'file'"},
 		{"blob_stores", "config", "config TEXT NOT NULL DEFAULT '{}'"},
+		{"request_stats", "errors", "errors INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "bytes_in", "bytes_in INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "ms", "ms INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "max_ms", "max_ms INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "upstream", "upstream INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "upstream_failures", "upstream_failures INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "upstream_ms", "upstream_ms INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "upstream_max_ms", "upstream_max_ms INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "cache_hits", "cache_hits INTEGER NOT NULL DEFAULT 0"},
+		{"request_stats", "cache_misses", "cache_misses INTEGER NOT NULL DEFAULT 0"},
 	} {
 		has, err := hasColumn(ctx, db, c.table, c.col)
 		if err != nil {

@@ -35,8 +35,9 @@ type Server struct {
 	UploadIdle time.Duration
 
 	// Requests, if set, is told about each finished request to a known
-	// repository (any status) with its response bytes (metrics.Recorder.Request).
-	Requests func(repo string, bytes int64)
+	// repository: its status, request and response bytes and duration
+	// (metrics.Recorder.Request).
+	Requests func(repo string, status int, bytesIn, bytesOut int64, d time.Duration)
 
 	// UI registers the web UI routes; nil serves no UI.
 	UI interface{ Routes(*http.ServeMux) }
@@ -215,7 +216,8 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 				if ok {
 					name, _, _ = strings.Cut(name, "/")
 					if s.Registry.Get(name) != nil {
-						s.Requests(name, rec.bytes)
+						// ponytail: Content-Length only; a chunked upload counts 0 bytes in.
+						s.Requests(name, status, max(r.ContentLength, 0), rec.bytes, time.Since(start))
 					}
 				}
 			}
