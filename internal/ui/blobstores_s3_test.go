@@ -42,10 +42,10 @@ func TestBlobStoreS3(t *testing.T) {
 	m := r.json(t)
 	s3, _ := m["s3"].(map[string]any)
 	if m["type"] != "s3" || m["path"] != filepath.Join(dataDir, "blobstores", "cloud") || m["fsTotal"] != nil || m["warning"] != nil ||
-		s3 == nil || s3["bucket"] != srv.Bucket || s3["prefix"] != "cc" || s3["sse"] != "AES256" || s3["accessKey"] != srv.AccessKey {
+		s3 == nil || s3["bucket"] != srv.Bucket || s3["prefix"] != "cc" || s3["sse"] != "AES256" || s3["accessKeyId"] != srv.AccessKey || s3["secretSet"] != true {
 		t.Fatalf("create: %s", r.body)
 	}
-	if strings.Contains(r.body, srv.SecretKey) || strings.Contains(r.body, "secretKey") {
+	if strings.Contains(r.body, srv.SecretKey) || strings.Contains(r.body, "secretAccessKey\":\"") {
 		t.Fatalf("the secret key is shown: %s", r.body)
 	}
 	for _, path := range []string{"/-/api/blobstores", "/-/api/blobstores/cloud"} {

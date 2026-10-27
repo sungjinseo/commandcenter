@@ -524,6 +524,9 @@ type versionJSON struct {
 	MediaType string   `json:"mediaType,omitempty"`
 	Size      int64    `json:"size,omitempty"`
 	Platforms []string `json:"platforms,omitempty"`
+	// helm only: from the chart's Chart.yaml.
+	Description string `json:"description,omitempty"`
+	AppVersion  string `json:"appVersion,omitempty"`
 }
 
 // packageVersions lists a package's versions, newest first, at most
@@ -560,8 +563,11 @@ func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 	for _, v := range list {
 		versions = append(versions, versionJSON{Version: v.Version, Created: rfc3339(v.Created), Yanked: v.Yanked})
 	}
-	if rp.Format == "docker" {
+	switch rp.Format {
+	case "docker":
 		u.dockerVersionDetails(r.Context(), rp.Name, name, versions)
+	case "helm":
+		u.helmVersionDetails(r.Context(), rp.Name, name, versions)
 	}
 	tags := map[string]string{}
 	if rp.Format == "npm" || rp.Format == "docker" {
@@ -654,6 +660,28 @@ func (u *UI) dockerVersionDetails(ctx context.Context, repoName, image string, v
 		}
 		if json.Unmarshal([]byte(byDigest[versions[i].Version]), &a) == nil {
 			versions[i].MediaType, versions[i].Size, versions[i].Platforms = a.MediaType, a.LayerBytes, a.Platforms
+		}
+	}
+}
+
+// helmVersionDetails fills a chart version's description and appVersion
+// from its stored index entry (Chart.yaml). Failures leave them empty.
+func (u *UI) helmVersionDetails(ctx context.Context, repoName, chart string, versions []versionJSON) {
+	pkgs, err := u.DB.ListPackages(ctx, repoName, chart)
+	if err != nil {
+		return
+	}
+	attrs := make(map[string]string, len(pkgs))
+	for _, p := range pkgs {
+		attrs[p.Version] = p.Attrs
+	}
+	for i := range versions {
+		var e struct {
+			Description string `json:"description"`
+			AppVersion  string `json:"appVersion"`
+		}
+		if json.Unmarshal([]byte(attrs[versions[i].Version]), &e) == nil {
+			versions[i].Description, versions[i].AppVersion = e.Description, e.AppVersion
 		}
 	}
 }

@@ -73,7 +73,8 @@ type s3JSON struct {
 	Region    string `json:"region"`
 	Endpoint  string `json:"endpoint"`
 	PathStyle bool   `json:"pathStyle"`
-	AccessKey string `json:"accessKey"`
+	AccessKey string `json:"accessKeyId"`
+	SecretSet bool   `json:"secretSet"` // the secret itself is never shown
 	SSE       string `json:"sse"`
 }
 
@@ -97,7 +98,7 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 	if bs.Type == meta.BlobStoreS3 && bs.S3 != nil {
 		c := bs.S3
 		out.S3 = &s3JSON{Bucket: c.Bucket, Prefix: c.Prefix, Region: c.Region, Endpoint: c.Endpoint,
-			PathStyle: c.PathStyle, AccessKey: c.AccessKey, SSE: c.SSE}
+			PathStyle: c.PathStyle, AccessKey: c.AccessKey, SecretSet: c.SecretKey != "", SSE: c.SSE}
 		return out, nil
 	}
 	if total, free, ok := sysinfo.DiskUsage(filepath.Join(root, "blobs")); ok {

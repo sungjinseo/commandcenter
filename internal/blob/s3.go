@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -26,13 +27,16 @@ import (
 // stored secrets.
 type S3Config struct {
 	Bucket    string `json:"bucket"`
-	Prefix    string `json:"prefix,omitempty"`    // key prefix, no leading or trailing slash; empty: bucket root
-	Region    string `json:"region,omitempty"`    // SigV4 region; "us-east-1" when empty
-	Endpoint  string `json:"endpoint,omitempty"`  // https://s3.<region>.amazonaws.com when empty; MinIO/Ceph: their URL
-	PathStyle bool   `json:"pathStyle,omitempty"` // <endpoint>/<bucket>/<key> instead of <bucket>.<endpoint host>/<key> (MinIO)
-	AccessKey string `json:"accessKey,omitempty"` // with SecretKey; both empty: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN
-	SecretKey string `json:"secretKey,omitempty"`
-	SSE       string `json:"sse,omitempty"` // x-amz-server-side-encryption on every upload: "AES256" or "aws:kms"; empty: none
+	Prefix    string `json:"prefix,omitempty"`      // key prefix, no leading or trailing slash; empty: bucket root
+	Region    string `json:"region,omitempty"`      // SigV4 region; "us-east-1" when empty
+	Endpoint  string `json:"endpoint,omitempty"`    // https://s3.<region>.amazonaws.com when empty; MinIO/Ceph: their URL
+	PathStyle bool   `json:"pathStyle,omitempty"`   // <endpoint>/<bucket>/<key> instead of <bucket>.<endpoint host>/<key> (MinIO)
+	AccessKey string `json:"accessKeyId,omitempty"` // with SecretKey; both empty: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN
+	SecretKey string `json:"secretAccessKey,omitempty"`
+	// The names an earlier build wrote; UnmarshalJSON folds them in.
+	LegacyAccessKey string `json:"accessKey,omitempty"`
+	LegacySecretKey string `json:"secretKey,omitempty"`
+	SSE             string `json:"sse,omitempty"` // x-amz-server-side-encryption on every upload: "AES256" or "aws:kms"; empty: none
 }
 
 var (
@@ -576,4 +580,23 @@ func uriEncode(s string, keepSlash bool) string {
 		}
 	}
 	return b.String()
+}
+
+// UnmarshalJSON accepts the key names of the first build (accessKey,
+// secretKey) beside the current ones (accessKeyId, secretAccessKey).
+func (c *S3Config) UnmarshalJSON(b []byte) error {
+	type plain S3Config
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	if p.AccessKey == "" {
+		p.AccessKey = p.LegacyAccessKey
+	}
+	if p.SecretKey == "" {
+		p.SecretKey = p.LegacySecretKey
+	}
+	p.LegacyAccessKey, p.LegacySecretKey = "", ""
+	*c = S3Config(p)
+	return nil
 }
