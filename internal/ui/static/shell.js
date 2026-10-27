@@ -344,6 +344,7 @@ function pageTitle(key) {
     case "admin/repository/repositories": return t("nav.repositories");
     case "admin/system/tasks": return t("nav.tasks");
     case "admin/system/backup": return t("nav.backup");
+    case "admin/system/nexusimport": return t("nav.importNexus");
     case "admin/repository/cleanuppolicies": return t("nav.cleanup");
     case "admin/repository/blobstores": return t("nav.blobstores");
     case "admin/system/general": return t("nav.general");
@@ -477,6 +478,7 @@ function navSections() {
     out.push([t("nav.sec.system"), [
       ["#admin/system/general", t("nav.general"), "settings", is("admin/system/general")],
       ["#admin/system/backup", t("nav.backup"), "archive", is("admin/system/backup")],
+      ["#admin/system/nexusimport", t("nav.importNexus"), "inbox", is("admin/system/nexusimport")],
       ["#admin/support/status", t("nav.status"), "health", is("admin/support/status")],
       ["#admin/support/systeminformation", t("nav.sysinfo"), "info", is("admin/support/systeminformation")],
     ]]);

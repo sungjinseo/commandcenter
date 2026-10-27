@@ -57,6 +57,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.realmRoutes(mux)
 	u.taskRoutes(mux)
 	u.backupRoutes(mux)
+	u.importRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }

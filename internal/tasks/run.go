@@ -203,16 +203,23 @@ func (s *Service) StartAdHoc(typ string, params json.RawMessage, actor string) (
 // row's stored values, set by an interactive run, or the defaults apply) and
 // the row is not rewritten with its params.
 func (s *Service) StartAdHocAs(typ string, params json.RawMessage, actor string, interactive bool) (string, error) {
+	id, _, err := s.startAdHoc(typ, params, actor, interactive, "")
+	return id, err
+}
+
+// startAdHoc validates params and starts the run; it returns the run id and
+// the canonical params. secret is handed to the run in memory (takeSecret).
+func (s *Service) startAdHoc(typ string, params json.RawMessage, actor string, interactive bool, secret string) (string, string, error) {
 	def, ok := types[typ]
 	if !ok {
-		return "", &repo.ValidationError{Errors: []string{fmt.Sprintf("unknown type %q", typ)}}
+		return "", "", &repo.ValidationError{Errors: []string{fmt.Sprintf("unknown type %q", typ)}}
 	}
 	canonical, errs := def.params(s, params, true)
 	if len(errs) > 0 {
-		return "", &repo.ValidationError{Errors: errs}
+		return "", "", &repo.ValidationError{Errors: errs}
 	}
 	if !s.runMu.TryLock() {
-		return "", &BusyError{Running: s.Running()}
+		return "", "", &BusyError{Running: s.Running()}
 	}
 	var b [6]byte
 	rand.Read(b[:])
@@ -234,6 +241,7 @@ func (s *Service) StartAdHocAs(typ string, params json.RawMessage, actor string,
 	s.adhoc[runID] = Outcome{TaskID: t.ID} // Result "": running
 	s.adhocOrder = append(s.adhocOrder, runID)
 	s.runningRun = runID
+	s.secret = secret
 	for len(s.adhocOrder) > maxAdHoc {
 		delete(s.adhoc, s.adhocOrder[0])
 		s.adhocOrder = s.adhocOrder[1:]
@@ -248,9 +256,10 @@ func (s *Service) StartAdHocAs(typ string, params json.RawMessage, actor string,
 			s.adhoc[runID] = out
 		}
 		s.runningRun = ""
+		s.secret = ""
 		s.mu.Unlock()
 	}()
-	return runID, nil
+	return runID, canonical, nil
 }
 
 // AdHocTaskID is the id of the task row that records the ad-hoc (API/CLI)
@@ -381,6 +390,7 @@ func (s *Service) end(done chan struct{}) {
 	s.mu.Lock()
 	stop := s.runStop
 	s.running, s.runDone, s.runCtx, s.runStop = "", nil, nil, nil
+	s.secret = "" // an import password never outlives its run
 	s.mu.Unlock()
 	if stop != nil {
 		stop(nil)

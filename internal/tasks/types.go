@@ -27,6 +27,9 @@ type typeDef struct {
 	run    func(ctx context.Context, s *Service, t meta.Task, actor string, log *RunLog) (summary, error)
 	// dataLock: the run holds the cross-process data directory lock (Service.DataLock).
 	dataLock bool
+	// adhocOnly: the type is started through its own API (StartImport), never
+	// created as a task; its runs are recorded on the ad-hoc row.
+	adhocOnly bool
 }
 
 var types = map[string]typeDef{
@@ -35,6 +38,7 @@ var types = map[string]typeDef{
 	TypeRebuild:      {name: "Rebuild Maven metadata", params: rebuildParamsOf, run: runRebuild},
 	TypeBackup:       {name: "Back up", params: backupParams, run: runBackup, dataLock: true},
 	TypeBackupVerify: {name: "Verify backup (deep)", params: backupVerifyParams, run: runBackupVerify},
+	TypeImportNexus:  {name: "Import from Nexus Repository", params: importParams, run: runImport, adhocOnly: true},
 }
 
 // backupDisabled refuses the backup task types when the backup service is

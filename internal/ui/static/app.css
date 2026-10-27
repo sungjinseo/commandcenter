@@ -527,6 +527,16 @@ ul.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
 .step.active { color: var(--link); }
 .step.active i { background: #285e92; color: #fff; }
 .step-line { height: 1px; background: var(--line); flex: 1; margin: 0 18px; }
+/* SYSTEM → Import from Nexus Repository (plan 15): report header, lists and per-repository details. */
+.im-repohead { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.im-repohead .btn { margin-left: auto; }
+.im-list { margin-top: 16px; font-size: 11px; }
+.im-list h3 { font-size: 11px; color: var(--ink-2); margin-bottom: 6px; }
+.im-list ul, .im-details ul { margin: 0; padding-left: 18px; line-height: 1.7; overflow-wrap: anywhere; }
+.im-details { margin-top: 4px; font-size: 10px; color: var(--muted); }
+.im-details summary { cursor: pointer; }
+.im-err { color: var(--red); }
+.im-pickbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 16px 0 10px; font-size: 10px; color: var(--muted); }
 .dropzone { border: 1px dashed #b8cae4; border-radius: 9px; background: var(--hover); padding: 30px; text-align: center; color: var(--muted); }
 .dropzone strong { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 .rf input:disabled, .rf select:disabled, .field input:disabled { background: var(--th); color: var(--muted); }

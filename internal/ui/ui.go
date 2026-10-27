@@ -21,6 +21,7 @@ import (
 	"commandcenter/internal/backup"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/config"
+	"commandcenter/internal/importer"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
@@ -44,10 +45,11 @@ type UI struct {
 	Started time.Time
 	Tasks   *tasks.Service // scheduled tasks and runs; nil serves 501
 	Log     *slog.Logger
-	Events  repo.EventSink  // activity events; nil records none
-	Logs    *logring.Ring   // recent log records for the log viewer; nil serves none
-	Mail    Mailer          // synchronous sender for the SMTP test; nil serves 501
-	Backups *backup.Service // online backups; nil serves 501
+	Events  repo.EventSink   // activity events; nil records none
+	Logs    *logring.Ring    // recent log records for the log viewer; nil serves none
+	Mail    Mailer           // synchronous sender for the SMTP test; nil serves 501
+	Backups *backup.Service  // online backups; nil serves 501
+	Import  *importer.Engine // import from Nexus Repository; nil serves 501
 
 	Config     *config.Config          // read-only; never serialised wholesale
 	DataDir    string                  // blob root, for the health and filestore checks

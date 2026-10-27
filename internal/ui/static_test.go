@@ -17,7 +17,7 @@ import (
 
 // staticNames are the files the shell cannot work without; every other
 // embedded file is checked by walking the directory.
-var staticNames = []string{"index.html", "app.css", "app.js", "browse.js", "dash.js", "search.js", "shell.js", "admin.js", "ops.js", "access.js", "settings.js", "repoform.js", "upload.js", "util.js", "i18n.js", "backup.js"}
+var staticNames = []string{"index.html", "app.css", "app.js", "browse.js", "dash.js", "search.js", "shell.js", "admin.js", "ops.js", "access.js", "settings.js", "repoform.js", "upload.js", "util.js", "i18n.js", "backup.js", "importer.js"}
 
 func readStatic(t *testing.T, name string) string {
 	t.Helper()
@@ -690,5 +690,32 @@ func TestBackupWired(t *testing.T) {
 				t.Errorf("%s does not contain %s", file, want)
 			}
 		}
+	}
+}
+
+// TestImportWired: plan 15 Decision 7. SYSTEM → Import from Nexus is
+// reachable, uses the import API, polls the job by its run, and the source
+// password lives only in its field (read and cleared per request).
+func TestImportWired(t *testing.T) {
+	for file, wants := range map[string][]string{
+		"shell.js": {`"#admin/system/nexusimport"`, `t("nav.importNexus")`},
+		"app.js":   {`"admin/system/nexusimport": false`},
+		"admin.js": {`case "admin/system/nexusimport": return viewImport(view);`},
+		"importer.js": {`api("import/nexus/test", { method: "POST", body })`, `api("import/nexus", { method: "POST", body })`, `api("import/jobs")`,
+			`"?run=" + encodeURIComponent(run)`, `"/stop", { method: "POST" }`, `"?download=1"`, `const takePassword = () => { const p = pwIn.value; pwIn.value = ""; return p; };`,
+			`body.password = "";`, `markBusy("import-run")`, `markBusy("import-form")`, `const isLive = alive();`, `state.leaving.push(() => clearTimeout(timer));`,
+			`class: "stepper"`, `t("im.insecureWarn")`},
+	} {
+		js := readStatic(t, file)
+		for _, want := range wants {
+			if !strings.Contains(js, want) {
+				t.Errorf("%s does not contain %s", file, want)
+			}
+		}
+	}
+	// The password is never kept in a variable of the module or the view.
+	js := readStatic(t, "importer.js")
+	if n := strings.Count(js, "pwIn.value"); n != 3 {
+		t.Errorf("pwIn.value appears %d times, want 3 (read and clear in takePassword, the emptiness check)", n)
 	}
 }

@@ -29,6 +29,7 @@ import (
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
+	"commandcenter/internal/importer"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/mail"
@@ -410,9 +411,14 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	if db.Driver() == "postgresql" {
 		taskSvc.Backup.Disabled = backup.ErrPostgres // the online backup copies the SQLite file meta.db
 	}
+	// Imports run as the import.nexus task, holding the run slot.
+	taskSvc.Import = &importer.Engine{DB: db, Repos: registry, Maven: mavenH, Npm: npmH, Pypi: pypiH, Cargo: cargoH,
+		Events: evts, HasStore: store.HasStore, Log: log,
+		MaxUpload: func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }}
 	a.Tasks = taskSvc
 	webUI := &ui.UI{
 		Backups: taskSvc.Backup,
+		Import:  taskSvc.Import,
 		Repos:   registry,
 		Auth:    authn,
 		DB:      db,

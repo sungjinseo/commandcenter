@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS tasks(
   last_duration_ms INTEGER NOT NULL DEFAULT 0, last_message TEXT NOT NULL DEFAULT '',
   last_log TEXT NOT NULL DEFAULT '', next_run INTEGER NOT NULL DEFAULT 0,
   last_removed INTEGER NOT NULL DEFAULT 0, last_bytes INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS import_jobs(
+  job TEXT PRIMARY KEY, source TEXT NOT NULL DEFAULT '', params TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT '', actor TEXT NOT NULL DEFAULT '',
+  started INTEGER NOT NULL DEFAULT 0, finished INTEGER NOT NULL DEFAULT 0, report TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS import_state(
+  job TEXT NOT NULL, repo TEXT NOT NULL, path TEXT NOT NULL, sha1 TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK(status IN ('done', 'skipped', 'failed')), error TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(job, repo, path)) WITHOUT ROWID;
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in

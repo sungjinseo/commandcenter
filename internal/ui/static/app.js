@@ -25,6 +25,7 @@ const ADMIN_SCREENS = {
   "admin/support/systeminformation": false,
   "admin/system/tasks": true,
   "admin/system/backup": false,
+  "admin/system/nexusimport": false,
   "admin/repository/cleanuppolicies": true,
   "admin/repository/blobstores": true,
   "admin/system/general": false,
@@ -155,7 +156,7 @@ async function show(view, r) {
   if (r.key.startsWith("browse/search/")) return viewSearch(view, r.key.slice("browse/search/".length), r.criteria);
   if (!state.me.admin) {
     const titles = { "admin/repository/repositories": t("nav.repositories"), "admin/security/users": t("nav.users"), "admin/security/roles": t("nav.roles"), "admin/security/realms": t("nav.realms"), "admin/security/usertoken": t("nav.tokens"),
-      "admin/support/status": t("nav.status"), "admin/support/systeminformation": t("nav.sysinfo"), "admin/system/tasks": t("nav.tasks"), "admin/system/backup": t("nav.backup"),
+      "admin/support/status": t("nav.status"), "admin/support/systeminformation": t("nav.sysinfo"), "admin/system/tasks": t("nav.tasks"), "admin/system/backup": t("nav.backup"), "admin/system/nexusimport": t("nav.importNexus"),
       "admin/repository/cleanuppolicies": t("nav.cleanup"), "admin/repository/blobstores": t("nav.blobstores"), "admin/system/general": t("nav.general") };
     return needAdmin(view, titles[r.key] || t("need.admin"));
   }

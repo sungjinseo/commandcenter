@@ -26,6 +26,7 @@ import (
 	"commandcenter/internal/backup"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/format/maven"
+	"commandcenter/internal/importer"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -38,6 +39,7 @@ const (
 	TypeRebuild      = "repository.rebuild-metadata"
 	TypeBackup       = "backup"
 	TypeBackupVerify = "backup.verify"
+	TypeImportNexus  = "import.nexus" // plan 15: started through the import API only
 )
 
 // Seed task (Decision 7): created on the first start after plan 11 unless
@@ -85,6 +87,7 @@ type Service struct {
 	Deleters *cleanup.Registry                                           // repository.cleanup
 	Maven    *maven.Handler                                              // repository.rebuild-metadata
 	Backup   *backup.Service                                             // backup; runs under the run lock, so compaction waits
+	Import   *importer.Engine                                            // import.nexus; nil: not available
 	// DataLock takes the cross-process data directory lock (datalock) and
 	// returns its release; compaction and backup runs hold it, so an offline
 	// `commandcenter gc` cannot delete blobs meanwhile. Nil: no lock.
@@ -129,6 +132,9 @@ type Service struct {
 	adhocOrder []string
 	// runningRun is the id of the ad-hoc run in progress, "" if none.
 	runningRun string
+	// secret is the source password of the import run being started
+	// (StartImport); the run takes it (takeSecret) and it is never stored.
+	secret string
 }
 
 // Mailer queues an e-mail without blocking (mail.Sender).
@@ -184,10 +190,13 @@ func TypeName(typ string) string {
 	return typ
 }
 
-// Types lists the task types, sorted.
+// Types lists the task types that can be created, sorted.
 func Types() []string {
 	out := make([]string, 0, len(types))
-	for t := range types {
+	for t, d := range types {
+		if d.adhocOnly {
+			continue
+		}
 		out = append(out, t)
 	}
 	sort.Strings(out)
@@ -369,9 +378,14 @@ func (s *Service) apply(t *meta.Task, d Def, prev *meta.Task) error {
 	}
 
 	def, ok := types[t.Type]
-	if !ok {
+	switch {
+	case !ok:
 		errs = append(errs, fmt.Sprintf("unknown type %q: use %s", t.Type, strings.Join(Types(), ", ")))
-	} else {
+	case def.adhocOnly && prev == nil:
+		errs = append(errs, fmt.Sprintf("tasks of type %s cannot be created: start them through their own API", t.Type))
+	case def.adhocOnly && t.Schedule != Manual:
+		errs = append(errs, fmt.Sprintf("tasks of type %s run only when started through their own API: the schedule must be manual", t.Type))
+	default:
 		params, perrs := def.params(s, d.Params, false)
 		if len(perrs) > 0 || prev == nil || params != prev.Params {
 			params, perrs = def.params(s, d.Params, true)
