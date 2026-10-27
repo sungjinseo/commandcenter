@@ -80,6 +80,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.goMetadata(r.Context(), rp, name, version, &m)
 	case "helm":
 		found, err = u.helmMetadata(r.Context(), rp, name, version, &m)
+	case "yum":
+		found, err = u.yumMetadata(r.Context(), rp, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -298,6 +300,52 @@ func (u *UI) helmMetadata(ctx context.Context, rp *repo.Repository, name, versio
 	m.Description, m.Homepage = optStr(e.Description), optStr(e.Home)
 	for _, d := range e.Dependencies {
 		m.Dependencies = append(m.Dependencies, dependencyJS{Scope: "chart", Group: d.Repository, Name: d.Name, Requirement: d.Version, Optional: d.Condition != ""})
+	}
+	return true, nil
+}
+
+// yumMetadata reads the parsed RPM header a yum hosted row holds: summary
+// and description, license, url, and the requires and provides as
+// dependencies (scopes "requires" and "provides").
+func (u *UI) yumMetadata(ctx context.Context, rp *repo.Repository, name, version string, m *componentMetadata) (bool, error) {
+	p, ok, err := u.storedPackage(ctx, rp, name, version)
+	if err != nil || !ok {
+		return ok, err
+	}
+	var e struct {
+		Summary, Description, License, URL string
+		Requires, Provides                 []struct {
+			Name, Flags, Epoch, Ver, Rel string
+			Pre                          bool
+		}
+	}
+	if err := json.Unmarshal([]byte(p.Attrs), &e); err != nil {
+		return true, nil
+	}
+	m.Collected = true
+	desc := e.Summary
+	if e.Description != "" && e.Description != e.Summary {
+		desc = e.Summary + "\n\n" + e.Description
+	}
+	m.Description, m.License, m.Homepage = optStr(desc), optStr(e.License), optStr(e.URL)
+	for _, scope := range []string{"requires", "provides"} {
+		deps := e.Requires
+		if scope == "provides" {
+			deps = e.Provides
+		}
+		for _, d := range deps {
+			req := ""
+			if d.Flags != "" {
+				req = map[string]string{"EQ": "= ", "LT": "< ", "GT": "> ", "LE": "<= ", "GE": ">= "}[d.Flags] + d.Ver
+				if d.Epoch != "" && d.Epoch != "0" {
+					req = req[:strings.Index(req, " ")+1] + d.Epoch + ":" + d.Ver
+				}
+				if d.Rel != "" {
+					req += "-" + d.Rel
+				}
+			}
+			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: d.Name, Requirement: req, Optional: false})
+		}
 	}
 	return true, nil
 }

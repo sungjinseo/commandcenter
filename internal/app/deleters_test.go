@@ -19,12 +19,14 @@ import (
 	"commandcenter/internal/format/cargo"
 	"commandcenter/internal/format/helm"
 	"commandcenter/internal/format/maven"
+	"commandcenter/internal/format/yum"
 	"commandcenter/internal/meta"
 )
 
 func TestDeletersWired(t *testing.T) {
 	a, err := New(testConfig(t, `  - { name: cargo-hosted, format: cargo, type: hosted }
   - { name: helm-hosted, format: helm, type: hosted }
+  - { name: yum-hosted, format: yum, type: hosted, depth: 1 }
   - { name: npm-proxy, format: npm, type: proxy, remote: "https://registry.example.org" }
 `), quiet())
 	if err != nil {
@@ -63,6 +65,11 @@ func TestDeletersWired(t *testing.T) {
 		t.Fatalf("helm hosted deleter: %T %v", d, err)
 	} else if _, ok := d.(*helm.Handler); !ok {
 		t.Fatalf("helm hosted deleter: %T", d)
+	}
+	if d, err := a.Deleters.For(a.Registry.Get("yum-hosted")); err != nil {
+		t.Fatalf("yum hosted deleter: %T %v", d, err)
+	} else if _, ok := d.(*yum.Handler); !ok {
+		t.Fatalf("yum hosted deleter: %T", d)
 	}
 	if _, err := a.Deleters.For(a.Registry.Get("maven-public")); !errors.Is(err, cleanup.ErrNotSupported) {
 		t.Fatalf("group: %v", err)

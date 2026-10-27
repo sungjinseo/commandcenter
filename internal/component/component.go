@@ -7,6 +7,7 @@ package component
 import (
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -274,8 +275,35 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "helm":
 		name, version, ok = SplitHelm(p)
 		return "", name, version, ok
+	case "yum":
+		name, version, ok = SplitRPM(p)
+		return "", name, version, ok
 	}
 	return "", "", "", false
+}
+
+// SplitRPM splits an RPM path, <dir>/<name>-<version>-<release>.<arch>.rpm,
+// into the component the yum format stores: the name qualified by its
+// directory ("el9/foo", "foo" at the root) and version-release.arch
+// ("1.0-1.el9.x86_64"). Version and release never hold "-", so the name
+// ends at the second-last one. Files under repodata/ are not components.
+func SplitRPM(p string) (name, version string, ok bool) {
+	stem, cut := strings.CutSuffix(p, ".rpm")
+	if !cut || strings.HasPrefix(p, "repodata/") || strings.Contains(p, "/repodata/") {
+		return "", "", false
+	}
+	i := strings.LastIndexByte(stem, '-')
+	if i <= 0 || !strings.Contains(stem[i:], ".") {
+		return "", "", false
+	}
+	j := strings.LastIndexByte(stem[:i], '-')
+	if j <= 0 || j+1 == i || strings.HasSuffix(stem[:j], "/") || stem[j+1:i] == "." {
+		return "", "", false
+	}
+	if base := path.Base(stem[:j]); base == "" || base == "." || base == ".." {
+		return "", "", false
+	}
+	return stem[:j], stem[j+1:], true
 }
 
 // helmNameRE is a chart name as the helm format stores it: it starts a
@@ -319,6 +347,8 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, version, name + "/manifests/" + version
 	case "helm":
 		return "", name, version, name + "-" + version + ".tgz"
+	case "yum": // the name is directory-qualified (SplitRPM)
+		return "", name, version, name + "-" + version + ".rpm"
 	}
 	return "", name, version, ""
 }

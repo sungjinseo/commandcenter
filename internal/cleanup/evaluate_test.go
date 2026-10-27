@@ -362,6 +362,9 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 		{"helm", []string{ // index.yaml is not a component
 			"a-1.0.0.tgz", "a-1.1.0.tgz", "ab-0.1.0.tgz", "index.yaml",
 		}, map[int]string{1: "a@1.0.0", 2: "a@1.0.0,a@1.1.0", 3: "a@1.0.0,a@1.1.0,ab@0.1.0", 4: "a@1.0.0,a@1.1.0,ab@0.1.0"}},
+		{"yum", []string{ // repodata/ is not a component; the directory qualifies the name
+			"a-1.0-1.noarch.rpm", "a-1.0-1.x86_64.rpm", "el9/a-1.0-1.el9.x86_64.rpm", "el9/repodata/repomd.xml",
+		}, map[int]string{1: "a@1.0-1.noarch", 2: "a@1.0-1.noarch,a@1.0-1.x86_64", 3: "a@1.0-1.noarch,a@1.0-1.x86_64,el9/a@1.0-1.el9.x86_64", 4: "a@1.0-1.noarch,a@1.0-1.x86_64,el9/a@1.0-1.el9.x86_64"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {

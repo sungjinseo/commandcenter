@@ -37,6 +37,7 @@ func addPolicy(out *repoJSON, rp *repo.Repository) {
 	case "hosted":
 		out.VersionPolicy = rp.VersionPolicy
 		out.WritePolicy = rp.WritePolicy
+		out.Depth = rp.Depth
 	case "proxy":
 		out.MetadataMaxAge = formatDuration(rp.MetadataMaxAge)
 		out.ContentMaxAge = formatDuration(rp.ContentMaxAge)

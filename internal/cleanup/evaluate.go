@@ -254,7 +254,7 @@ func unitPrefix(format, p string) string {
 		if i := strings.LastIndex(p, "."); i > strings.LastIndex(p, "/") {
 			return p[:i+1]
 		}
-	case "npm", "cargo", "helm":
+	case "npm", "cargo", "helm", "yum":
 		return p
 	}
 	return homePrefix(format, p)

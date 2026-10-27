@@ -50,7 +50,7 @@ const (
 
 var (
 	userIDRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
-	accessFormats = []string{"maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm"}
+	accessFormats = []string{"maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm", "yum"}
 )
 
 // validation collects messages for the 400 answer.

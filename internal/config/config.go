@@ -176,6 +176,10 @@ type Repository struct {
 	// hosted
 	VersionPolicy string `yaml:"versionPolicy" json:"versionPolicy,omitempty"` // maven only: release | snapshot | mixed
 	WritePolicy   string `yaml:"writePolicy" json:"writePolicy,omitempty"`     // allow | allow_once | deny
+	// Depth is where a yum hosted repository keeps its repodata/: 0 at the
+	// root, listing every RPM; 1 in each top-level directory, listing its
+	// RPMs (Nexus "repodata depth").
+	Depth int `yaml:"depth,omitempty" json:"depth,omitempty"` // yum hosted only: 0 | 1
 
 	AnonymousRead *bool `yaml:"anonymousRead" json:"anonymousRead,omitempty"` // overrides Config.AnonymousRead
 
@@ -204,7 +208,7 @@ type Repository struct {
 func (r Repository) IsOnline() bool { return r.Online == nil || *r.Online }
 
 var (
-	knownFormats   = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true}
+	knownFormats   = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true}
 	knownTypes     = map[string]bool{"hosted": true, "proxy": true, "group": true}
 	versionPolicys = map[string]bool{"release": true, "snapshot": true, "mixed": true}
 	writePolicies  = map[string]bool{"allow": true, "allow_once": true, "deny": true}
@@ -564,6 +568,13 @@ func ValidateRepositories(list []Repository) error {
 		}
 		if r.WritePolicy != "" && !writePolicies[r.WritePolicy] {
 			add("repository %q: unknown writePolicy %q", r.Name, r.WritePolicy)
+		}
+		if r.Depth != 0 {
+			if r.Format != "yum" || r.Type != "hosted" {
+				add("repository %q: depth is only valid for yum hosted repositories", r.Name)
+			} else if r.Depth != 1 {
+				add("repository %q: depth must be 0 or 1", r.Name)
+			}
 		}
 		if r.CleanupPolicy != "" {
 			switch {

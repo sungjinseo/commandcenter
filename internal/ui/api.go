@@ -255,6 +255,7 @@ type repoJSON struct {
 	// Policy fields come from the config and are admin-only (Decision 8).
 	VersionPolicy    string `json:"versionPolicy,omitempty"`
 	WritePolicy      string `json:"writePolicy,omitempty"`
+	Depth            int    `json:"depth,omitempty"` // yum hosted
 	MetadataMaxAge   string `json:"metadataMaxAge,omitempty"`
 	ContentMaxAge    string `json:"contentMaxAge,omitempty"`
 	NegativeCacheTTL string `json:"negativeCacheTTL,omitempty"`
@@ -467,7 +468,7 @@ func (u *UI) asset(w http.ResponseWriter, r *http.Request) {
 }
 
 // packageFormats are the formats that record packages in the metadata db.
-var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true, "helm": true}
+var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true, "helm": true, "yum": true}
 
 func (u *UI) packages(w http.ResponseWriter, r *http.Request) {
 	rp, ok := u.lookup(w, r)
@@ -529,7 +530,7 @@ type versionJSON struct {
 	MediaType string   `json:"mediaType,omitempty"`
 	Size      int64    `json:"size,omitempty"`
 	Platforms []string `json:"platforms,omitempty"`
-	// helm only: from the chart's Chart.yaml.
+	// helm: from the chart's Chart.yaml; yum: the RPM's summary.
 	Description string `json:"description,omitempty"`
 	AppVersion  string `json:"appVersion,omitempty"`
 }
@@ -573,6 +574,8 @@ func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 		u.dockerVersionDetails(r.Context(), rp.Name, name, versions)
 	case "helm":
 		u.helmVersionDetails(r.Context(), rp.Name, name, versions)
+	case "yum":
+		u.yumVersionDetails(r.Context(), rp.Name, name, versions)
 	}
 	tags := map[string]string{}
 	if rp.Format == "npm" || rp.Format == "docker" {
@@ -665,6 +668,27 @@ func (u *UI) dockerVersionDetails(ctx context.Context, repoName, image string, v
 		}
 		if json.Unmarshal([]byte(byDigest[versions[i].Version]), &a) == nil {
 			versions[i].MediaType, versions[i].Size, versions[i].Platforms = a.MediaType, a.LayerBytes, a.Platforms
+		}
+	}
+}
+
+// yumVersionDetails fills a package version's description with the RPM's
+// summary, from its stored row. Failures leave it empty.
+func (u *UI) yumVersionDetails(ctx context.Context, repoName, name string, versions []versionJSON) {
+	pkgs, err := u.DB.ListPackages(ctx, repoName, name)
+	if err != nil {
+		return
+	}
+	attrs := make(map[string]string, len(pkgs))
+	for _, p := range pkgs {
+		attrs[p.Version] = p.Attrs
+	}
+	for i := range versions {
+		var e struct {
+			Summary string `json:"summary"`
+		}
+		if json.Unmarshal([]byte(attrs[versions[i].Version]), &e) == nil {
+			versions[i].Description = e.Summary
 		}
 	}
 }

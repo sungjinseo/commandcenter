@@ -84,6 +84,18 @@ blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
   downgrade once an S3 store exists; the backup from before the upgrade is the way back.
 
 ### Added
+- The `yum` format: Yum/DNF (RPM) repositories. A hosted repository takes RPMs with
+  `PUT /repository/<repo>/<dir>/<name>-<version>-<release>.<arch>.rpm` (the file name must be the
+  package's own), parses the RPM header and regenerates `repodata/` (`repomd.xml` and the sha256-named
+  `primary`, `filelists` and `other` files, as createrepo_c writes them) in the same transaction as
+  every upload and component delete. `depth` (0, the default, or 1) says whether one `repodata/` at the
+  root lists every package or each top-level directory has its own, as in Nexus. A proxy caches a
+  mirror's files at their paths (`repodata/` revalidated after `metadataMaxAge`, packages kept); a
+  group answers from the first member that has the path, without merging. `writePolicy`, cleanup
+  policies (`format: yum`), the component delete, `format:yum` privileges and the component metadata
+  tab (summary, license, url, requires and provides) work as for Helm. `repomd.xml` is not signed:
+  use `repo_gpgcheck=0` (`gpgcheck=1` still verifies signed packages) ("Yum 설정" in the
+  operations guide).
 - The `oidc` realm: browser login through an OpenID Connect provider (Gitea, Keycloak, ...)
   with the authorization code flow and PKCE, configured under Realms (`GET/PUT /-/api/realms/oidc`,
   `POST /-/api/realms/oidc/test` reads the provider's discovery document) and offered on the login

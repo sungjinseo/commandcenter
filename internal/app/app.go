@@ -29,6 +29,7 @@ import (
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/format/raw"
+	"commandcenter/internal/format/yum"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/mail"
@@ -307,11 +308,12 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	npmH, pypiH := npm.New(store, resolver, authn, baseURL), pypi.New(store, fetcher, baseURL)
 	cargoH := cargo.New(store, fetcher, authn, baseURL)
 	helmH := helm.New(store, fetcher, authn)
+	yumH := yum.New(store, resolver, authn)
 	dockerKey := make([]byte, 32)
 	rand.Read(dockerKey)
 	dockerH := docker.New(store, docker.NewFetcher(store, maxConcurrentFetches), authn, nil, baseURL, dockerKey) // Repos: the registry, below
 	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
-	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH}
+	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "yum": yumH}
 	// Hosted deletes go through the format handlers, which share their locks
 	// with uploads; proxies of every format use the generic deleter.
 	deleters := cleanup.NewRegistry(store)
@@ -323,6 +325,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("docker", "hosted", dockerH) // the UI's delete only: cleanup skips docker too
 	deleters.Register("raw", "hosted", rawH)
 	deleters.Register("helm", "hosted", helmH)
+	deleters.Register("yum", "hosted", yumH)
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)

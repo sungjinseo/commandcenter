@@ -52,6 +52,7 @@ type repoRequest struct {
 	WriteMember            string   `json:"writeMember"`
 	VersionPolicy          string   `json:"versionPolicy"`
 	WritePolicy            string   `json:"writePolicy"`
+	Depth                  int      `json:"depth"` // yum hosted: 0 | 1
 	AnonymousRead          *bool    `json:"anonymousRead"`
 	// CleanupPolicy: absent (null) keeps the stored policy on update and
 	// means none on create; "" clears it; a name sets it.
@@ -84,6 +85,7 @@ type repoConfigResponse struct {
 	WriteMember          string            `json:"writeMember"`
 	VersionPolicy        string            `json:"versionPolicy"`
 	WritePolicy          string            `json:"writePolicy"`
+	Depth                int               `json:"depth"`
 	AnonymousRead        *bool             `json:"anonymousRead"`
 	CleanupPolicy        string            `json:"cleanupPolicy"`
 	Online               bool              `json:"online"`
@@ -118,6 +120,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		WriteMember:          d.WriteMember,
 		VersionPolicy:        d.VersionPolicy,
 		WritePolicy:          d.WritePolicy,
+		Depth:                d.Depth,
 		CleanupPolicy:        d.CleanupPolicy,
 		Online:               d.IsOnline(),
 		BlobStore:            d.BlobStore,
@@ -137,7 +140,7 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 	d := config.Repository{
 		Name: b.Name, Format: b.Format, Type: b.Type, Remote: b.Remote,
 		Members: b.Members, WriteMember: b.WriteMember,
-		VersionPolicy: b.VersionPolicy, WritePolicy: b.WritePolicy,
+		VersionPolicy: b.VersionPolicy, WritePolicy: b.WritePolicy, Depth: b.Depth,
 		AnonymousRead: b.AnonymousRead, Online: b.Online,
 		BlobStore: b.BlobStore,
 	}

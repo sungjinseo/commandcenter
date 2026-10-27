@@ -21,6 +21,7 @@ func TestComponentMetadata(t *testing.T) {
 		c.Repositories = append(c.Repositories,
 			config.Repository{Name: "cargo-hosted", Format: "cargo", Type: "hosted"},
 			config.Repository{Name: "helm-hosted", Format: "helm", Type: "hosted"},
+			config.Repository{Name: "yum-hosted", Format: "yum", Type: "hosted"},
 			config.Repository{Name: "go-hosted", Format: "go", Type: "hosted"})
 	})
 	ctx := context.Background()
@@ -135,6 +136,16 @@ func TestComponentMetadata(t *testing.T) {
 	}
 	if st, _ := get("admin", "helm-hosted", "name=demo&version=2.0.0"); st != 404 {
 		t.Fatalf("helm missing: %d", st)
+	}
+
+	// yum: the parsed RPM header; requires and provides are the dependencies
+	pkg("yum-hosted", "yum", "el9/demo", "1.0-1.el9.x86_64", `{"name":"demo","epoch":"0","version":"1.0","release":"1.el9","arch":"x86_64","summary":"A demo","description":"Demo does nothing.","license":"MIT","url":"https://example.org/demo","provides":[{"name":"demo","flags":"EQ","epoch":"0","ver":"1.0","rel":"1.el9"}],"requires":[{"name":"/bin/sh","pre":true},{"name":"bar","flags":"GE","epoch":"1","ver":"2.0"},{"name":"baz","flags":"LT","epoch":"0","ver":"3","rel":"1"}]}`)
+	st, m = get("admin", "yum-hosted", "name=el9/demo&version=1.0-1.el9.x86_64")
+	if st != 200 || !m.Collected || *m.Description != "A demo\n\nDemo does nothing." || *m.License != "MIT" || *m.Homepage != "https://example.org/demo" {
+		t.Fatalf("yum: %d %+v", st, m)
+	}
+	if got := deps(m); got != "requires::/bin/sh::req requires::bar:>= 1:2.0:req requires::baz:< 3-1:req provides::demo:= 1.0-1.el9:req" {
+		t.Fatalf("yum deps: %s", got)
 	}
 
 	// pypi: the file's PEP 658 sidecar holds the core metadata; a file without one is "not collected"

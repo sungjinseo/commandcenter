@@ -154,6 +154,16 @@ func TestDeriveAsset(t *testing.T) {
 		{"helm", "index.yaml", "", "", "", false},
 		{"helm", "upstream/index.yaml", "", "", "", false},
 		{"helm", "a/demo-1.0.0.tgz", "", "", "", false},
+		{"yum", "demo-1.0-1.el9.x86_64.rpm", "", "demo", "1.0-1.el9.x86_64", true},
+		{"yum", "el9/Packages/d/demo-lib-1.0-1.el9.aarch64.rpm", "", "el9/Packages/d/demo-lib", "1.0-1.el9.aarch64", true}, // "-" in the name; the directory qualifies it
+		{"yum", "el9/x/beta-1.0-1.el9.noarch.rpm", "", "el9/x/beta", "1.0-1.el9.noarch", true},
+		{"yum", "demo-1.0.rpm", "", "", "", false},        // no release
+		{"yum", "demo-1.0-1.rpm", "", "", "", false},      // no arch
+		{"yum", "-1.0-1.noarch.rpm", "", "", "", false},   // no name
+		{"yum", "d/-1.0-1.noarch.rpm", "", "", "", false}, // no name
+		{"yum", "repodata/repomd.xml", "", "", "", false}, // metadata
+		{"yum", "repodata/a-1.0-1.noarch.rpm", "", "", "", false},
+		{"yum", "el9/repodata/a-1.0-1.noarch.rpm", "", "", "", false},
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"unknown", "a/b", "", "", "", false},

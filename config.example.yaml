@@ -18,7 +18,7 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "yum-hosted"] }
 
 repositories:
   - name: maven-central
@@ -133,6 +133,21 @@ repositories:
     type: group
     members: [helm-hosted, helm-proxy]
     writeMember: helm-hosted
+  - name: yum-hosted                  # curl -u ci:pw --upload-file demo-1.0-1.el9.x86_64.rpm <host>/repository/yum-hosted/el9/
+    format: yum
+    type: hosted
+    writePolicy: allow_once           # allow: 같은 패키지 덮어쓰기 허용(edit 권한)
+    depth: 1                          # repodata/ 위치: 0 = 저장소 루트 하나(기본), 1 = 첫 디렉터리마다(el8/, el9/ ...)
+  - name: yum-proxy                   # baseurl=<host>/repository/yum-proxy/rocky/9/BaseOS/x86_64/os/
+    format: yum
+    type: proxy
+    remote: "https://dl.rockylinux.org/pub/"   # 미러의 루트. 경로를 그대로 캐시
+    metadataMaxAge: "1h"              # repodata/ 재확인 주기. rpm 파일은 영구 캐시
+  - name: yum-all                     # baseurl=<host>/repository/yum-all/… — 경로를 먼저 가진 멤버가 답함(병합 없음)
+    format: yum
+    type: group
+    members: [yum-hosted, yum-proxy]
+    writeMember: yum-hosted
 
 # database:
 #   url: postgres://cc:password@db.example:5432/commandcenter?sslmode=require
