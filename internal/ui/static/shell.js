@@ -1,4 +1,4 @@
-// The Command Center shell (plan 10 Decisions 3, 4, 6 and 7): the navy
+// The Command Center console shell (plan 10 Decisions 3, 4, 6 and 7): the
 // sidebar, the topbar, menus and dialogs, the theme and the language.
 import { state, ANON, h, put, api, icon, loadRepos, hideBanner, showError, canUpload, isBusy } from "./util.js";
 import { t, getLang, setLang, onLangChange, applyServerDefault } from "./i18n.js";
@@ -319,6 +319,7 @@ function pageTitle(key) {
   if (key.startsWith("browse/search/")) return t("nav.search");
   switch (key) {
     case "browse/welcome": return t("nav.dashboard");
+    case "browse/component": return t("comp.component");
     case "browse/browse": return t("nav.browse");
     case "browse/upload": return t("nav.upload");
     case "admin/repository/repositories": return t("nav.repositories");
@@ -378,6 +379,8 @@ function showHealth() {
   if (state.me.admin && health !== null) {
     label += " · " + (health < 0 ? t("instance.unavailable") : health ? t("instance.unhealthy", { n: health }) : t("instance.healthy"));
   }
+  els.instanceState.textContent = !state.me.admin || health === null ? t("instance.unavailable")
+    : health < 0 ? t("instance.unavailable") : health ? t("instance.unhealthy", { n: health }) : t("instance.healthy");
   pill.title = label;
   pill.setAttribute("aria-label", label);
 }
@@ -430,7 +433,7 @@ function navSections() {
   const is = (...keys) => (k) => keys.includes(k);
   const out = [[t("nav.sec.workspace"), [
     ["#browse/welcome", t("nav.dashboard"), "dashboard", is("browse/welcome", "login")],
-    ["#browse/browse", t("nav.browse"), "repos", is("browse/browse")],
+    ["#browse/browse", t("nav.browse"), "repos", is("browse/browse", "browse/component")],
     ["#browse/search/generic", t("nav.search"), "search", (k) => k.startsWith("browse/search/")],
     repos.some(canUpload) ? ["#browse/upload", t("nav.upload"), "upload", is("browse/upload")] : null,
   ]]];
@@ -562,7 +565,9 @@ export function rerender() { hooks.rerender(); }
 export function initShell(rerender) {
   hooks.rerender = rerender;
   els.instanceHost = h("b", null, location.host);
-  els.instance = h("div", { class: "instance" }, h("i", { class: "hdot", "aria-hidden": "true" }), els.instanceHost);
+  els.instanceState = h("span", { class: "instance-state" });
+  els.instance = h("div", { class: "instance" }, h("i", { class: "hdot", "aria-hidden": "true" }),
+    h("span", { class: "instance-copy" }, els.instanceHost, els.instanceState));
   buildTopbar();
   applyTexts();
   state.idle = () => {
