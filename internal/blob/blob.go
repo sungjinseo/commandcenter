@@ -47,6 +47,16 @@ const tmpPrefix = "up-"
 // command started next to a running server never removes a write in progress.
 const tmpMaxAge = time.Hour
 
+// sessionPrefix names resumable upload sessions (Docker chunked uploads)
+// under tmp: the data file and its ".json" sidecar. They outlive the
+// request and a restart, so SweepTmp keeps them for SessionMaxAge after
+// their last write instead of tmpMaxAge.
+const sessionPrefix = "ses-"
+
+// SessionMaxAge is how long an upload session may go without a write before
+// SweepTmp removes it (Distribution expires uploads after 24 h).
+const SessionMaxAge = 24 * time.Hour
+
 // Open prepares the blob directories under root and sweeps stale temp files.
 func Open(root string) (*Store, error) {
 	for _, d := range []string{"blobs/sha256", "tmp"} {
@@ -60,20 +70,28 @@ func Open(root string) (*Store, error) {
 }
 
 // SweepTmp removes Write's temp files that have not been modified for
-// tmpMaxAge and returns how many it removed. Write removes its temp file on
-// every return, so only a killed process (SIGKILL, OOM, a stop timeout)
-// leaves one behind.
+// tmpMaxAge, and upload sessions (SessionPath) not written to for
+// SessionMaxAge, and returns how many it removed. Write removes its temp
+// file on every return, so only a killed process (SIGKILL, OOM, a stop
+// timeout) leaves one behind; a session is left behind by a client that
+// never finished it.
 func (s *Store) SweepTmp() (int, error) {
 	dir := filepath.Join(s.root, "tmp")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0, err
 	}
-	cutoff := time.Now().Add(-tmpMaxAge)
+	now := time.Now()
 	n := 0
 	var errs []error
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), tmpPrefix) {
+		var cutoff time.Time
+		switch {
+		case strings.HasPrefix(e.Name(), tmpPrefix):
+			cutoff = now.Add(-tmpMaxAge)
+		case strings.HasPrefix(e.Name(), sessionPrefix):
+			cutoff = now.Add(-SessionMaxAge)
+		default:
 			continue
 		}
 		info, err := e.Info()
@@ -87,6 +105,13 @@ func (s *Store) SweepTmp() (int, error) {
 		}
 	}
 	return n, errors.Join(errs...)
+}
+
+// SessionPath is the file an upload session id (hex, the caller's to
+// validate) accumulates its bytes in; its sidecar is the same path with
+// ".json". CommitFile moves a finished one into the store.
+func (s *Store) SessionPath(id string) string {
+	return filepath.Join(s.root, "tmp", sessionPrefix+id)
 }
 
 func (s *Store) path(sha string) string {
@@ -109,10 +134,7 @@ func (s *Store) Write(r io.Reader) (Sums, error) {
 		}
 	}()
 
-	h256, h1, h5, h512 := sha256.New(), sha1.New(), md5.New(), sha512.New()
-	buf := bufPool.Get().(*[]byte)
-	defer bufPool.Put(buf)
-	n, err := io.CopyBuffer(io.MultiWriter(f, h256, h1, h5, h512), r, *buf)
+	sums, err := hashTo(f, r)
 	if err != nil {
 		return Sums{}, mapErr(err)
 	}
@@ -122,14 +144,48 @@ func (s *Store) Write(r io.Reader) (Sums, error) {
 	if err := f.Close(); err != nil {
 		return Sums{}, mapErr(err)
 	}
-	sums := Sums{SHA256: sum(h256), SHA1: sum(h1), MD5: sum(h5), SHA512: sum(h512), Size: n}
+	committed = true // commit removes tmp on every return
+	return s.commit(tmp, sums)
+}
 
+// CommitFile hashes the file at path (a SessionPath the caller wrote and
+// synced) and commits it under its SHA-256 like Write, without copying it
+// again; path is gone on return, whatever happens.
+func (s *Store) CommitFile(path string) (Sums, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		os.Remove(path)
+		return Sums{}, mapErr(err)
+	}
+	sums, err := hashTo(io.Discard, f)
+	f.Close()
+	if err != nil {
+		os.Remove(path)
+		return Sums{}, mapErr(err)
+	}
+	return s.commit(path, sums)
+}
+
+// hashTo copies r to w and returns the digests and size of what it copied.
+func hashTo(w io.Writer, r io.Reader) (Sums, error) {
+	h256, h1, h5, h512 := sha256.New(), sha1.New(), md5.New(), sha512.New()
+	buf := bufPool.Get().(*[]byte)
+	defer bufPool.Put(buf)
+	n, err := io.CopyBuffer(io.MultiWriter(w, h256, h1, h5, h512), r, *buf)
+	if err != nil {
+		return Sums{}, err
+	}
+	return Sums{SHA256: sum(h256), SHA1: sum(h1), MD5: sum(h5), SHA512: sum(h512), Size: n}, nil
+}
+
+// commit moves the closed, synced file tmp with digests sums to its blob
+// path; tmp is removed on every return.
+func (s *Store) commit(tmp string, sums Sums) (Sums, error) {
 	dst := s.path(sums.SHA256)
 	// A size mismatch means the stored blob is corrupt (e.g. truncated by a
 	// crash); do not dedup against it, replace it with the fresh copy.
 	if info, err := os.Stat(dst); err == nil && info.Size() == sums.Size {
 		os.Remove(tmp)
-		committed = true
 		// Refresh mtime so GC's age guard protects a re-upload that is not yet
 		// recorded as an asset.
 		now := time.Now()
@@ -139,12 +195,13 @@ func (s *Store) Write(r io.Reader) (Sums, error) {
 		return sums, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		os.Remove(tmp)
 		return Sums{}, mapErr(err)
 	}
 	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
 		return Sums{}, mapErr(err)
 	}
-	committed = true
 	return sums, nil
 }
 

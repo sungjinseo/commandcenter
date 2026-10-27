@@ -16,7 +16,7 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted"] }
 
 repositories:
   - name: maven-central
@@ -90,3 +90,7 @@ repositories:
     type: group
     members: [cargo-hosted, cargo-proxy]
     writeMember: cargo-hosted
+  - name: docker-hosted               # docker push <host>/docker-hosted/<image>:<tag> (API: /v2/docker-hosted/<image>/...)
+    format: docker
+    type: hosted
+    writePolicy: allow                # allow_once: 이미 있는 태그를 다른 이미지로 덮어쓰지 못함

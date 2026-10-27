@@ -462,7 +462,7 @@ func (u *UI) asset(w http.ResponseWriter, r *http.Request) {
 }
 
 // packageFormats are the formats that record packages in the metadata db.
-var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true}
+var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true}
 
 func (u *UI) packages(w http.ResponseWriter, r *http.Request) {
 	rp, ok := u.lookup(w, r)
@@ -556,7 +556,7 @@ func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 		versions = append(versions, versionJSON{Version: v.Version, Created: rfc3339(v.Created), Yanked: v.Yanked})
 	}
 	tags := map[string]string{}
-	if rp.Format == "npm" {
+	if rp.Format == "npm" || rp.Format == "docker" {
 		dt, err := u.DB.ListDistTags(r.Context(), rp.Name, name)
 		if err != nil {
 			u.fail(w, r, err)

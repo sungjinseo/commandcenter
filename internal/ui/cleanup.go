@@ -314,6 +314,9 @@ func (u *UI) previewPolicy(w http.ResponseWriter, r *http.Request) {
 		case rp.Format == "cargo" && rp.Type == "hosted":
 			writeError(w, http.StatusBadRequest, "cleanup is not supported for cargo hosted repositories (yank crates, or delete versions in the web UI)")
 			return
+		case rp.Format == "docker":
+			writeError(w, http.StatusBadRequest, "cleanup is not supported for docker repositories (delete manifests in the web UI or with the registry API)")
+			return
 		case !cleanup.FormatMatches(p.Format, rp.Format):
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("cleanup policy %q is for %s repositories", p.Name, p.Format))
 			return

@@ -282,6 +282,8 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, PyPIDisplayVersion(name, version), "packages/" + name + "/" + version
 	case "cargo":
 		return "", name, version, "crates/" + name + "/" + version + ".crate"
+	case "docker": // an image's manifest row: version is its digest
+		return "", name, version, name + "/manifests/" + version
 	}
 	return "", name, version, ""
 }

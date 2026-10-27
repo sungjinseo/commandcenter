@@ -3,6 +3,7 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"commandcenter/internal/config"
 	"commandcenter/internal/events"
 	"commandcenter/internal/format/cargo"
+	"commandcenter/internal/format/docker"
 	"commandcenter/internal/format/golang"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/format/npm"
@@ -49,8 +51,11 @@ type App struct {
 	Mail     *mail.Sender      // failure and test e-mail; Close drains its queue
 	Events   *events.Recorder  // activity events; written by a goroutine that Close stops
 	Deleters *cleanup.Registry // per-format component deleters used by cleanup
-	Tasks    *tasks.Service    // scheduled tasks; the scheduler runs while Serve does
-	log      *slog.Logger
+	// DockerKey signs the Docker registry's bearer tokens: random per
+	// process (one instance), so a restart only makes clients fetch new ones.
+	DockerKey []byte
+	Tasks     *tasks.Service // scheduled tasks; the scheduler runs while Serve does
+	log       *slog.Logger
 }
 
 // Version is reported by the UI; cmd/commandcenter sets it before New.
@@ -298,7 +303,11 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	goH.Auth, mavenH.Auth = authn, authn // overwrites need Edit
 	npmH, pypiH := npm.New(store, resolver, authn, baseURL), pypi.New(store, fetcher, baseURL)
 	cargoH := cargo.New(store, fetcher, authn, baseURL)
-	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH}
+	dockerKey := make([]byte, 32)
+	rand.Read(dockerKey)
+	dockerH := docker.New(store, authn, nil, baseURL, dockerKey) // Repos: the registry, below
+	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
+	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH}
 	// Hosted deletes go through the format handlers, which share their locks
 	// with uploads; proxies of every format use the generic deleter.
 	deleters := cleanup.NewRegistry(store)
@@ -306,7 +315,8 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("maven", "hosted", mavenH)
 	deleters.Register("npm", "hosted", npmH)
 	deleters.Register("pypi", "hosted", pypiH)
-	deleters.Register("cargo", "hosted", cargoH) // the UI's delete only: cleanup skips Cargo hosted
+	deleters.Register("cargo", "hosted", cargoH)   // the UI's delete only: cleanup skips Cargo hosted
+	deleters.Register("docker", "hosted", dockerH) // the UI's delete only: cleanup skips docker too
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)
@@ -326,6 +336,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 
 	registry := repo.NewRegistry(db, defs)
 	registry.Policies = cleanup.PolicyLookup(db)
+	dockerH.Repos = registry
 	// Route each repository's blob I/O to the store it names; an unknown or
 	// empty name resolves to the default store.
 	store.StoreFor = func(name string) string {
@@ -375,7 +386,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	authn.Log = log // redacted LDAP failures, sign-in throttling
 	authn.Sessions = auth.NewSessions()
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
-	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, log: log}
+	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, log: log}
 	taskSvc.Repos, taskSvc.Events = registry, evts
 	taskSvc.GC = func(ctx context.Context, store string) (int, int64, error) {
 		if store == "" {
@@ -406,7 +417,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
 	srv := &server.Server{Registry: registry, Handlers: handlers, Auth: authn, Log: log,
-		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Requests: recorder.Request}
+		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Requests: recorder.Request, Docker: dockerH}
 	a.Handler = srv.Handler()
 	return a, nil
 }

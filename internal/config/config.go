@@ -204,7 +204,7 @@ type Repository struct {
 func (r Repository) IsOnline() bool { return r.Online == nil || *r.Online }
 
 var (
-	knownFormats   = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true}
+	knownFormats   = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true}
 	knownTypes     = map[string]bool{"hosted": true, "proxy": true, "group": true}
 	versionPolicys = map[string]bool{"release": true, "snapshot": true, "mixed": true}
 	writePolicies  = map[string]bool{"allow": true, "allow_once": true, "deny": true}
@@ -549,6 +549,9 @@ func ValidateRepositories(list []Repository) error {
 		if r.Type == "group" && len(r.Members) == 0 {
 			add("repository %q: group needs members", r.Name)
 		}
+		if r.Format == "docker" && r.Type != "hosted" && knownTypes[r.Type] {
+			add("repository %q: docker %s repositories are not supported yet (hosted only)", r.Name, r.Type)
+		}
 		if r.Type != "group" && (len(r.Members) > 0 || r.WriteMember != "") {
 			add("repository %q: members/writeMember are only valid for groups", r.Name)
 		}
@@ -571,6 +574,8 @@ func ValidateRepositories(list []Repository) error {
 				add("repository %q: cleanupPolicy is only valid for hosted and proxy repositories", r.Name)
 			case r.Format == "cargo" && r.Type == "hosted":
 				add("repository %q: cleanup is not supported for cargo hosted repositories (yank crates, or delete versions in the web UI)", r.Name)
+			case r.Format == "docker":
+				add("repository %q: cleanup is not supported for docker repositories (delete manifests in the web UI or with the registry API)", r.Name)
 			}
 		}
 	}

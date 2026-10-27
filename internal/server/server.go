@@ -40,6 +40,14 @@ type Server struct {
 
 	// UI registers the web UI routes; nil serves no UI.
 	UI interface{ Routes(*http.ServeMux) }
+
+	// Docker serves the Docker/OCI registry API at /v2/ and renders its
+	// errors; nil serves none. It authenticates Bearer tokens there itself
+	// (the tokens its /v2/token issues); Basic credentials are checked here.
+	Docker interface {
+		http.Handler
+		repo.ErrorWriter
+	}
 }
 
 const realm = `Basic realm="commandcenter"`
@@ -67,6 +75,9 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /-/metrics", s.metrics)
 	mux.HandleFunc("/repository/{name}/{path...}", s.repository)
+	if s.Docker != nil {
+		mux.Handle("/v2/", s.Docker)
+	}
 	if s.UI != nil {
 		s.UI.Routes(mux) // still behind wrap: authenticated and logged
 	}
@@ -197,7 +208,11 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 				"bytes", rec.bytes, "ms", time.Since(start).Milliseconds(), "user", p.Owner(), "remote", r.RemoteAddr)
 			if s.Requests != nil {
 				// Only names the registry knows: a scanner cannot add rows.
-				if name, ok := strings.CutPrefix(r.URL.Path, "/repository/"); ok {
+				name, ok := strings.CutPrefix(r.URL.Path, "/repository/")
+				if !ok {
+					name, ok = strings.CutPrefix(r.URL.Path, "/v2/")
+				}
+				if ok {
 					name, _, _ = strings.Cut(name, "/")
 					if s.Registry.Get(name) != nil {
 						s.Requests(name, rec.bytes)
@@ -230,25 +245,35 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 		// A browser replays Basic credentials it cached after our challenge
 		// on a cross-site form post too: refuse such writes, on every route,
 		// before authenticating.
+		writeErr := repo.WriteError
+		if s.Docker != nil && strings.HasPrefix(r.URL.Path, "/v2/") {
+			writeErr = s.Docker.WriteError
+		}
 		if err := crossOrigin.Check(r); err != nil && !s.fromBaseURL(r) {
-			repo.WriteError(rec, r, repo.Errorf(http.StatusForbidden, "%v", err))
+			writeErr(rec, r, repo.Errorf(http.StatusForbidden, "%v", err))
 			return
 		}
-		p, err := s.Auth.Authenticate(r)
+		var err error
+		// A registry token is the registry's to check (it is no API token);
+		// its bearer is not anonymous either, so no anonymous body deadline.
+		bearer := s.Docker != nil && strings.HasPrefix(r.URL.Path, "/v2/") && isBearer(r)
+		if !bearer {
+			p, err = s.Auth.Authenticate(r)
+		}
 		if err != nil && isLogin(r) {
 			// npm sends its stale saved token with the login PUT; the password in
 			// the body is what counts there.
 			p, err = auth.Principal{}, nil
 		}
 		if wait := auth.RetryAfter(rec.Header(), err); wait > 0 {
-			repo.WriteError(rec, r, repo.Errorf(http.StatusTooManyRequests, "too many failed sign-ins; try again in %d seconds", wait))
+			writeErr(rec, r, repo.Errorf(http.StatusTooManyRequests, "too many failed sign-ins; try again in %d seconds", wait))
 		} else if err != nil {
 			if r.Header.Get(auth.UIHeader) != "1" { // the web UI handles 401 itself: no browser dialog
 				rec.Header().Set("WWW-Authenticate", realm)
 			}
-			repo.WriteError(rec, r, repo.Errorf(http.StatusUnauthorized, "invalid credentials"))
+			writeErr(rec, r, repo.Errorf(http.StatusUnauthorized, "invalid credentials"))
 		} else {
-			if p.Anonymous() {
+			if p.Anonymous() && !bearer {
 				// Read before anyone is signed in: a byte per idle period
 				// must not hold the connection for weeks (QA N-5).
 				r.Body = repo.WithDeadline(r.Body, time.Now().Add(min(idle, anonymousBodyTimeout)))
@@ -256,6 +281,12 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			next.ServeHTTP(rec, r.WithContext(auth.WithPrincipal(r.Context(), p)))
 		}
 	})
+}
+
+// isBearer reports whether r carries a Bearer token.
+func isBearer(r *http.Request) bool {
+	scheme, _, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+	return strings.EqualFold(scheme, "Bearer")
 }
 
 // isLogin reports whether r is npm's legacy login request.

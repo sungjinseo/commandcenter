@@ -111,6 +111,8 @@ func cleanupParamsOf(s *Service, raw json.RawMessage, check bool) (string, []str
 			errs = append(errs, fmt.Sprintf("repository %q is a group: clean its members", name))
 		case rp.Type == "hosted" && rp.Format == "cargo":
 			errs = append(errs, fmt.Sprintf("repository %q is Cargo hosted: yank crates, or delete versions in the web UI", name))
+		case rp.Format == "docker":
+			errs = append(errs, fmt.Sprintf("repository %q is a docker repository: delete manifests in the web UI or with the registry API", name))
 		}
 		repos = append(repos, name)
 	}

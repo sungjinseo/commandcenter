@@ -94,6 +94,8 @@ func (e *Evaluator) EvaluateFrom(ctx context.Context, rp *repo.Repository, p Pol
 		return Evaluation{}, fmt.Errorf("%s repository %q: %w", rp.Type, rp.Name, ErrNotSupported)
 	case rp.Format == "cargo" && rp.Type == "hosted":
 		return Evaluation{}, fmt.Errorf("cargo hosted repository %q (yank crates, or delete versions in the web UI): %w", rp.Name, ErrNotSupported)
+	case rp.Format == "docker":
+		return Evaluation{}, fmt.Errorf("docker repository %q (delete manifests in the web UI or with the registry API): %w", rp.Name, ErrNotSupported)
 	case !FormatMatches(p.Format, rp.Format):
 		return Evaluation{}, fmt.Errorf("cleanup policy %q is for %s repositories, not %s repository %q", p.Name, p.Format, rp.Format, rp.Name)
 	}
