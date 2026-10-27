@@ -93,6 +93,19 @@ helm test commandcenter -n commandcenter
 
 Ingress/HTTPRoute, TLS, PostgreSQL, 비밀값 키, 백업과 업그레이드는 운영 가이드의 [Kubernetes](docs/guide.md#kubernetes)에 있습니다.
 
+### Kubernetes (Helm 없이, YAML 하나)
+
+Helm을 쓰지 않는 클러스터에는 릴리스마다 붙는 매니페스트 파일(`commandcenter-v0.1.1.yaml`, 이미지가 그 릴리스로 고정됨)을 씁니다. 저장소의 [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml)과 같은 내용입니다.
+
+```bash
+curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.1.1/commandcenter-v0.1.1.yaml
+# 파일 안의 baseURL, passwordHash, storageClassName 세 곳을 채운 뒤
+kubectl create namespace commandcenter
+kubectl apply -n commandcenter -f commandcenter-v0.1.1.yaml
+```
+
+파드 하나짜리 StatefulSet, ConfigMap의 `config.yaml`, PVC, Service가 들어 있습니다. Ingress나 Gateway는 클러스터 방식대로 붙입니다. 차트 파일(`commandcenter-helm-chart-0.1.1.tgz`)도 릴리스에 있어 OCI 레지스트리를 못 쓰는 곳에서는 `helm install commandcenter ./commandcenter-helm-chart-0.1.1.tgz -f my-values.yaml`로 설치합니다.
+
 ### Docker compose
 
 ```bash

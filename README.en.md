@@ -93,6 +93,19 @@ helm test commandcenter -n commandcenter
 
 Ingress/HTTPRoute, TLS, PostgreSQL, the secret key, backups and upgrades are in the guide's [Kubernetes](docs/guide.md#kubernetes) section.
 
+### Kubernetes without Helm (one YAML file)
+
+Clusters that do not use Helm take the manifest attached to every release (`commandcenter-v0.1.1.yaml`, with the image pinned to that release). It is the same file as [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml) in the repository.
+
+```bash
+curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.1.1/commandcenter-v0.1.1.yaml
+# fill in baseURL, passwordHash and storageClassName in the file, then
+kubectl create namespace commandcenter
+kubectl apply -n commandcenter -f commandcenter-v0.1.1.yaml
+```
+
+It holds a one-pod StatefulSet, the `config.yaml` ConfigMap, a PVC and a Service; add an Ingress or Gateway the way your cluster does it. The chart is also attached as a file (`commandcenter-helm-chart-0.1.1.tgz`) for places that cannot pull OCI charts: `helm install commandcenter ./commandcenter-helm-chart-0.1.1.tgz -f my-values.yaml`.
+
 ### Docker compose
 
 ```bash

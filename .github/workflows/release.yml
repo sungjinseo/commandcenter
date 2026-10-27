@@ -119,7 +119,12 @@ jobs:
             cp "out/linux_$arch/usr/local/bin/commandcenter" "out/linux_$arch/usr/share/doc/commandcenter/"* "$name/"
             tar -czf "dist/$name.tar.gz" "$name"
           done
-          cd dist && sha256sum -- *.tar.gz > SHA256SUMS
+          # The Kubernetes reference manifest pinned to this release, and the
+          # chart as a file for clusters that cannot pull OCI charts.
+          sed "s#ghcr.io/sungjinseo/commandcenter:VERSION#ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/commandcenter:${VERSION#v}#" \
+            deploy/kubernetes/commandcenter.yaml > "dist/commandcenter-$VERSION.yaml"
+          cp "$RUNNER_TEMP/commandcenter-${VERSION#v}.tgz" "dist/commandcenter-helm-chart-${VERSION#v}.tgz"
+          cd dist && sha256sum -- *.tar.gz *.tgz *.yaml > SHA256SUMS
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
