@@ -87,7 +87,7 @@ jobs:
           cat >"$RUNNER_TEMP/required.yaml" <<'EOF'
           config:
             baseURL: https://repo.example.com
-            adminPasswordHash: $2a$10$ci.test.value.not.a.real.bcrypt.hash
+            adminPasswordHash: '$2a$10$7EqJtq98hPqEX7fNZaFWoO5bSrV1DmUFq3mvUvVeUoNhLKq0L5k1e'   # well-formed bcrypt test value; the schema checks the shape
           EOF
           cat >"$RUNNER_TEMP/full.yaml" <<'EOF'
           imagePullSecrets: [{name: registry-login}]
