@@ -18,7 +18,10 @@ import (
 
 const (
 	metadataType = "text/plain; charset=utf-8" // the PEP 658 sidecar
-	maxJSONDoc   = 64 << 20                    // cap for an upstream /pypi/<project>/json document
+	// maxJSONDoc caps an upstream /pypi/<project>/json document: rewriteJSON
+	// needs ~9x its size in memory (the server's budget is 128 MiB), and
+	// pypi.org's largest documents are single-digit MiB.
+	maxJSONDoc = 8 << 20
 )
 
 // header is a parsed core metadata document: lower-cased field names to
@@ -258,10 +261,13 @@ func (h *Handler) hostedJSON(ctx context.Context, serving, owner *repo.Repositor
 		}
 	}
 	raw, err := h.coreMetadata(ctx, owner, project, chosen.Filename)
-	if err != nil {
+	if err != nil && repo.StatusOf(err) != http.StatusNotFound { // no readable metadata: the files, without info fields
 		return nil, err
 	}
 	inf := info(parseCore(raw))
+	if raw == nil {
+		inf["name"] = project
+	}
 	inf["version"] = version
 	inf["requires_python"] = nullable(chosen.RequiresPython)
 	doc := map[string]any{"info": inf, "urls": releases[version], "vulnerabilities": []any{}, "last_serial": 0}
@@ -494,7 +500,8 @@ func (h *Handler) sidecar(ctx context.Context, rp *repo.Repository, project, fil
 // extract reads the core metadata out of the stored file and stores it as
 // the file's sidecar; a hosted row learns the sidecar's sha256 so the simple
 // index can advertise it. A stored file that is no distribution this server
-// can read (a proxy's cached .egg, say) has no sidecar (404).
+// can read (a proxy's cached .egg, say) has no sidecar (404); a hosted row
+// remembers that (noMetadata) so the index stops advertising one.
 func (h *Handler) extract(ctx context.Context, rp *repo.Repository, project, filename string) (meta.Asset, error) {
 	unlock := h.locks.Lock(rp.Name + "\x00" + project)
 	defer unlock()
@@ -505,9 +512,17 @@ func (h *Handler) extract(ctx context.Context, rp *repo.Repository, project, fil
 	if err != nil {
 		return meta.Asset{}, err
 	}
+	none := func(err error) (meta.Asset, error) {
+		if rp.Type == "hosted" {
+			if err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error { return markMetadata(ctx, tx, rp.Name, project, filename, noMetadata) }); err != nil {
+				return meta.Asset{}, err
+			}
+		}
+		return meta.Asset{}, repo.Errorf(http.StatusNotFound, "no core metadata for %q: %v", filename, err)
+	}
 	version, ok := fileVersion(project, filename)
 	if !ok {
-		return meta.Asset{}, repo.Errorf(http.StatusNotFound, "no core metadata for %q", filename)
+		return none(errors.New("not a release file name"))
 	}
 	f, err := h.Store.Open(dist)
 	if err != nil {
@@ -517,7 +532,7 @@ func (h *Handler) extract(ctx context.Context, rp *repo.Repository, project, fil
 	_, raw, err := readMetadata(f, dist.Size, filename, project, version)
 	if err != nil {
 		if repo.StatusOf(err) == http.StatusBadRequest {
-			return meta.Asset{}, repo.Errorf(http.StatusNotFound, "no core metadata for %q: %v", filename, err)
+			return none(err)
 		}
 		return meta.Asset{}, err
 	}
@@ -533,26 +548,31 @@ func (h *Handler) extract(ctx context.Context, rp *repo.Repository, project, fil
 		if rp.Type != "hosted" {
 			return nil
 		}
-		pkgs, err := tx.ListPackages(ctx, rp.Name, project)
+		return markMetadata(ctx, tx, rp.Name, project, filename, sums.SHA256)
+	})
+	return a, err
+}
+
+// markMetadata records sha as a hosted row's MetadataSHA256.
+func markMetadata(ctx context.Context, tx *meta.Tx, repoName, project, filename, sha string) error {
+	pkgs, err := tx.ListPackages(ctx, repoName, project)
+	if err != nil {
+		return err
+	}
+	for _, p := range pkgs {
+		if p.Version != filename {
+			continue
+		}
+		var attrs fileAttrs
+		if err := json.Unmarshal([]byte(p.Attrs), &attrs); err != nil {
+			return err
+		}
+		attrs.MetadataSHA256 = sha
+		doc, err := json.Marshal(attrs)
 		if err != nil {
 			return err
 		}
-		for _, p := range pkgs {
-			if p.Version != filename {
-				continue
-			}
-			var attrs fileAttrs
-			if err := json.Unmarshal([]byte(p.Attrs), &attrs); err != nil {
-				return err
-			}
-			attrs.MetadataSHA256 = sums.SHA256
-			doc, err := json.Marshal(attrs)
-			if err != nil {
-				return err
-			}
-			return tx.UpdatePackage(ctx, rp.Name, project, filename, string(doc))
-		}
-		return nil
-	})
-	return a, err
+		return tx.UpdatePackage(ctx, repoName, project, filename, string(doc))
+	}
+	return nil
 }

@@ -82,10 +82,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 }
 
 // index serves rp's index.yaml; a hosted repository nothing was published
-// to yet answers an empty one, so `helm repo add` works before the first push.
+// to yet answers an empty one, so `helm repo add` works before the first
+// push. A proxy whose upstream has none answers the upstream's 404 (or 502),
+// so a wrong remote URL shows instead of an empty repository.
 func (h *Handler) index(w http.ResponseWriter, r *http.Request, rp *repo.Repository) error {
 	res, err := h.indexAsset(r.Context(), rp)
-	if errors.Is(err, repo.ErrNotFound) {
+	if errors.Is(err, repo.ErrNotFound) && rp.Type == "hosted" {
 		body, err := newIndex(h.Now()).marshal()
 		if err != nil {
 			return err

@@ -5,8 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
@@ -153,15 +157,13 @@ func TestMetadataBackfill(t *testing.T) {
 	md := "Metadata-Version: 2.1\nName: old-pkg\nVersion: 1.0\nSummary: stored by an older build\n"
 	e.seedHosted(t, "old-pkg", "old_pkg-1.0.tar.gz", string(sdistBytes(t, map[string]string{"old_pkg-1.0/PKG-INFO": md})))
 	e.seedHosted(t, "junk", "junk-1.0.tar.gz", "not an sdist")
-	if page := e.do("GET", "py-hosted", "simple/old-pkg/", "").Body.String(); !strings.Contains(page, `data-core-metadata="true"`) {
-		t.Fatalf("page before: %s", page)
+	// the first listing extracts the sidecar, so the index advertises its hash
+	if page := e.do("GET", "py-hosted", "simple/old-pkg/", "").Body.String(); !strings.Contains(page, `data-core-metadata="sha256=`+sha(md)+`"`) {
+		t.Fatalf("page: %s", page)
 	}
 	w := e.do("GET", "py-hosted", "packages/old-pkg/old_pkg-1.0.tar.gz.metadata", "")
 	if w.Code != 200 || w.Body.String() != md {
 		t.Fatalf("metadata: %d %q", w.Code, w.Body.String())
-	}
-	if page := e.do("GET", "py-hosted", "simple/old-pkg/", "").Body.String(); !strings.Contains(page, `data-core-metadata="sha256=`+sha(md)+`"`) {
-		t.Fatalf("page after: %s", page)
 	}
 	if a, err := e.h.Store.Get(context.Background(), "py-hosted", "packages/old-pkg/old_pkg-1.0.tar.gz.metadata"); err != nil || a.ContentType != metadataType {
 		t.Fatalf("sidecar asset: %+v %v", a, err)
@@ -173,8 +175,106 @@ func TestMetadataBackfill(t *testing.T) {
 	if w := e.do("GET", "py-hosted", "packages/junk/junk-1.0.tar.gz.metadata", ""); w.Code != 404 {
 		t.Fatalf("junk metadata: %d", w.Code)
 	}
-	if w := e.do("GET", "py-hosted", "pypi/junk/json", ""); w.Code != 404 {
-		t.Fatalf("junk json: %d", w.Code)
+	// a file without readable metadata still has a project document: the
+	// files, with only name and version in info
+	w = e.do("GET", "py-hosted", "pypi/junk/json", "")
+	if d := decodeDoc(t, w.Body.Bytes()); w.Code != 200 || d.Info["name"] != "junk" || d.Info["version"] != "1.0" || d.Info["summary"] != nil || len(d.Releases["1.0"]) != 1 {
+		t.Fatalf("junk json: %d %s", w.Code, w.Body)
+	}
+}
+
+// A row the initial release stored without reading the archive (it validated
+// only the file name) whose core metadata cannot be extracted is not
+// advertised in the simple index: pip fetches an advertised PEP 658 sidecar
+// unconditionally and aborts the install on its 404 (review PYPI-1).
+func TestUnreadableMetadataNotAdvertised(t *testing.T) {
+	e := newEnv(t)
+	e.seedHosted(t, "oldpkg", "oldpkg-1.0.tar.gz", string(sdistBytes(t, map[string]string{"src/PKG-INFO": "Metadata-Version: 2.1\nName: oldpkg\nVersion: 1.0\n"})))
+	md := "Metadata-Version: 2.1\nName: good\nVersion: 1.0\n"
+	e.seedHosted(t, "good", "good-1.0.tar.gz", string(sdistBytes(t, map[string]string{"good-1.0/PKG-INFO": md})))
+	for _, accept := range []string{"", jsonType} {
+		page := e.do("GET", "py-hosted", "simple/oldpkg/", accept).Body.String()
+		if strings.Contains(page, "core-metadata") || strings.Contains(page, "dist-info-metadata") {
+			t.Fatalf("advertised although GET .metadata is 404 (%s):\n%s", accept, page)
+		}
+		if w := e.do("GET", "py-hosted", "packages/oldpkg/oldpkg-1.0.tar.gz.metadata", ""); w.Code != 404 {
+			t.Fatalf("sidecar: %d", w.Code)
+		}
+		// the one that can be read is advertised with its hash right away
+		page = e.do("GET", "py-hosted", "simple/good/", accept).Body.String()
+		if !strings.Contains(page, "sha256") || !strings.Contains(page, sha(md)) {
+			t.Fatalf("readable row (%s):\n%s", accept, page)
+		}
+	}
+	if w := e.do("GET", "py-hosted", "pypi/oldpkg/json", ""); w.Code != 200 {
+		t.Fatalf("pypi/oldpkg/json: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("GET", "py-hosted", "packages/oldpkg/oldpkg-1.0.tar.gz", ""); w.Code != 200 {
+		t.Fatalf("the file itself: %d", w.Code)
+	}
+	// the outcome is remembered on the row, not re-read on every listing
+	pkgs, err := e.h.Store.DB.ListPackages(context.Background(), "py-hosted", "oldpkg")
+	if err != nil || len(pkgs) != 1 || !strings.Contains(pkgs[0].Attrs, `"metadata_sha256":"-"`) {
+		t.Fatalf("row: %+v %v", pkgs, err)
+	}
+}
+
+// peakMem runs fn and returns the peak heap+stack in use while it ran, in MiB.
+func peakMem(fn func()) (float64, time.Duration) {
+	var stop atomic.Bool
+	var max uint64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var ms runtime.MemStats
+		for !stop.Load() {
+			runtime.ReadMemStats(&ms)
+			if v := ms.HeapInuse + ms.StackInuse; v > max {
+				max = v
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	start := time.Now()
+	fn()
+	elapsed := time.Since(start)
+	stop.Store(true)
+	<-done
+	return float64(max) / (1 << 20), elapsed
+}
+
+// rewriteJSON of the largest upstream document accepted (maxJSONDoc) fits
+// the server's memory budget (128 MiB; it needs ~9x the document, which is
+// why the cap is what it is). Review PYPI-2.
+func TestProxyJSONMemory(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"info":{"name":"big","version":"1.0"},"releases":{`)
+	n := 0
+	for sb.Len() < maxJSONDoc-4096 {
+		if n > 0 {
+			sb.WriteString(",")
+		}
+		fmt.Fprintf(&sb, `"1.%d.0":[`, n)
+		for f := 0; f < 2; f++ {
+			if f > 0 {
+				sb.WriteString(",")
+			}
+			fmt.Fprintf(&sb, `{"comment_text":"","digests":{"blake2b_256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","md5":"0123456789abcdef0123456789abcdef","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"},"downloads":-1,"filename":"big-1.%d.0-py3-none-any.whl","has_sig":false,"md5_digest":"0123456789abcdef0123456789abcdef","packagetype":"bdist_wheel","python_version":"py3","requires_python":">=3.8","size":123456,"upload_time":"2024-01-02T03:04:05","upload_time_iso_8601":"2024-01-02T03:04:05.000000Z","url":"https://files.pythonhosted.org/packages/ab/cd/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/big-1.%d.0-py3-none-any.whl","yanked":false,"yanked_reason":null}`, n, n)
+		}
+		sb.WriteString("]")
+		n++
+	}
+	sb.WriteString(`},"urls":[]}`)
+	raw := []byte(sb.String())
+	runtime.GC()
+	var err error
+	peak, el := peakMem(func() { _, err = rewriteJSON(raw, func(f string) string { return "http://x/" + f }) })
+	t.Logf("doc %d MiB, %d releases: peak %.0f MiB, %v, err=%v", len(raw)>>20, n, peak, el, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peak > 100 {
+		t.Fatalf("rewriting a %d MiB upstream JSON needed %.0f MiB (container: 128 MiB)", len(raw)>>20, peak)
 	}
 }
 

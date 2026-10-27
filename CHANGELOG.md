@@ -247,6 +247,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- An up-to-date database is opened without any CREATE/ALTER, so on PostgreSQL a role with only
+  SELECT/INSERT/UPDATE/DELETE on the tables (and USAGE on the schema) can run the server and the CLI.
+  Creating or upgrading the schema still needs the owner of the database and its tables, and a
+  refused upgrade now says so (SQLSTATE 42501).
 - **npm and PyPI groups answer from one member and fail closed** (QA N-1, N-11). The first member
   in order that has the package answers alone: npm packuments, version documents, dist-tags and
   tarballs, PyPI project pages and files. Later members' versions, tags and files are not mixed in,
@@ -432,6 +436,54 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Docker proxy: a failure of the upstream token service (realm down, timeout, non-https realm) now
+  answers 502 and is no longer negative-cached as `MANIFEST_UNKNOWN`/`BLOB_UNKNOWN` for
+  `negativeCacheTTL`; a realm that refuses the credentials (401/403) still answers 404 as before.
+- Docker: `GET /v2/<name>/tags/list?n=0` and `GET /v2/_catalog?n=0` return an empty page instead of
+  dropping the connection (handler panic).
+- Docker hosted: deleting a manifest no longer unlinks a layer that was uploaded or checked with
+  `HEAD` within the last 24 hours, so a `docker push` that skipped layers already present cannot fail
+  with `MANIFEST_BLOB_UNKNOWN` because another manifest of the image was deleted meanwhile; such
+  layers are reclaimed by a later manifest delete.
+- Docker groups: the owner rule now holds through nested groups: when a hosted member of a nested
+  group has the image, the outer group answers that member's 404 instead of falling through to a
+  proxy member that has the same name.
+- Docker and Cargo groups: a remote's rate limit (429) reaches the client as 429 (`TOOMANYREQUESTS`)
+  through a group instead of 502.
+- The component metadata API no longer rebuilds the POM property map for every dependency: a POM with
+  1000 properties and 2000 dependencies now costs ~3 MiB and ~10 ms per request instead of ~520 MiB
+  and ~0.5 s. It expands `${project.groupId}`, `${project.artifactId}` and `${project.version}` (and
+  the `${pom.*}` and bare `${version}` forms) in dependency coordinates, falling back to the parent's
+  coordinates, no longer loses what follows an element nested deeper than 1000 levels, and parses
+  PyPI core metadata with the pypi format's own RFC 822 parser, so the long description and folded
+  continuation lines are not read as `Requires-Dist`, `License`, `Summary` or `Home-page`.
+- S3 blob stores no longer follow HTTP redirects: a 301/302 from the endpoint (for example AWS's
+  PermanentRedirect for a bucket in another region) is reported with S3's own message instead of
+  being followed to another host. An object served without `Content-Length` is an error instead of
+  an empty download, and the client no longer offers `Accept-Encoding: gzip`.
+- Creating an S3 blob store on the same bucket and prefix as an existing store is refused however
+  the endpoint is spelled (trailing slash, upper case, default port, or the AWS default left empty),
+  so two stores' GCs cannot delete each other's blobs.
+- Concurrent creates of users, roles or blob stores with the same (or look-alike) id end in a
+  conflict for one of them instead of two rows or a raw constraint error.
+- A Helm proxy of a large upstream (bitnami's `index.yaml` is ~30 MB) was OOM-killed in the default
+  128 MiB container on its first `index.yaml` request and again on every upstream change: the index
+  was decoded whole (~580 MiB). It is now read and rewritten one chart version at a time
+  (~40 MiB for the same index); a single version larger than 2 MiB, or an index not laid out as
+  `helm repo index` writes it and larger than 2 MiB, is a 502.
+- A Helm proxy whose upstream has no `index.yaml` (a wrong `remote`) answered a fabricated empty
+  index with 200, so `helm repo add` succeeded and `helm search repo` found nothing; it now answers
+  the upstream's 404 (502 for a failure), and a group with such a member fails as for any failing
+  member. A hosted repository nothing was published to still answers an empty index.
+- PyPI hosted advertised PEP 658 core metadata (`data-core-metadata`) for every file, including
+  files the initial release stored without reading them, whose `.metadata` then answered 404 and
+  made pip abort the install. The simple index now extracts the metadata of such files when it
+  first lists them and advertises only what it has; a file none can be read from is remembered and
+  not advertised, and `/pypi/<project>/json` still lists its files (`info` with name and version
+  only) instead of 404.
+- A PyPI proxy's `/pypi/<project>/json` of a very large upstream document needed ~9x its size in
+  memory (64 MiB were accepted: ~600 MiB); the cap is now 8 MiB (pypi.org's largest documents are
+  single-digit MiB), 502 above it.
 - npm and PyPI groups served a later member's same-named public package while an earlier hosted
   member was offline (QA N-1), PyPI groups also while it failed.
 - npm groups mixed dist-tags that only a later member had, such as `beta`, into an internal package

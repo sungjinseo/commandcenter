@@ -7,11 +7,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -450,6 +453,165 @@ func TestProxyUpstreamNotYAML(t *testing.T) {
 	e.index.Store(&idx)
 	if w := e.do("GET", "helm-proxy", "index.yaml", nil); w.Code != 502 {
 		t.Fatalf("invalid upstream index: %d %s", w.Code, w.Body)
+	}
+}
+
+// A proxy whose upstream has no index.yaml (a wrong remote URL) answers
+// the upstream's 404, not a fabricated empty index that makes `helm repo
+// add` succeed silently; a group with such a member fails as for any failing
+// member. Review HELM-2.
+func TestProxyUpstreamIndexMissing(t *testing.T) {
+	e := newEnv(t)
+	e.repos["helm-proxy"].RemoteURL.Path = "/nothing/"
+	if w := e.do("GET", "helm-proxy", "index.yaml", nil); w.Code != 404 {
+		t.Fatalf("upstream index.yaml is 404: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("GET", "helm-all", "index.yaml", nil); w.Code != 502 {
+		t.Fatalf("group with the proxy member: %d %s", w.Code, w.Body)
+	}
+	// a hosted repository nothing was published to still answers an empty index
+	if ix := index(t, e.do("GET", "helm-hosted", "index.yaml", nil)); len(ix.Entries) != 0 {
+		t.Fatalf("hosted: %+v", ix)
+	}
+}
+
+// An index.yaml is read a version at a time (forEachEntry) in the layouts
+// generators write: go-yaml's (helm repo index), indented sequences, flow
+// style, comments, CRLF; and what indexWriter writes reads back the same.
+func TestForEachEntryLayouts(t *testing.T) {
+	helm := "apiVersion: v1\nentries:\n  a:\n  - name: a\n    version: 1.0.0\n  - name: a\n    version: 2.0.0\n  b:\n  - name: b\n    version: 1.0.0\ngenerated: 2026-01-02T03:04:05Z\n"
+	docs := map[string]string{
+		"helm":     helm,
+		"crlf":     strings.ReplaceAll(helm, "\n", "\r\n"),
+		"indented": "apiVersion: v1\nentries:\n    a:\n        - name: a\n          version: 1.0.0\n        - name: a\n          version: 2.0.0\n    b:\n        - name: b\n          version: 1.0.0\ngenerated: 2026-01-02T03:04:05Z\n",
+		"flow":     "apiVersion: v1\nentries: {a: [{name: a, version: 1.0.0}, {name: a, version: 2.0.0}], b: [{name: b, version: 1.0.0}]}\ngenerated: 2026-01-02T03:04:05Z\n",
+		"mixed":    "generated: 2026-01-02T03:04:05Z\nentries: # charts\n  a: [{name: a, version: 1.0.0}, {name: a, version: 2.0.0}]\n  # a comment\n\n  b:\n  - name: b\n    version: 1.0.0\n    description: |\n      two\n\n      lines\napiVersion: v1\n",
+	}
+	check := func(name string, ix *indexFile, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if ix.APIVersion != "v1" || !ix.Generated.Equal(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)) || len(ix.Entries) != 2 ||
+			strings.Join(versions(ix, "a"), ",") != "1.0.0,2.0.0" || strings.Join(versions(ix, "b"), ",") != "1.0.0" {
+			t.Fatalf("%s: %+v", name, ix)
+		}
+	}
+	for name, doc := range docs {
+		ix, err := parseIndex(strings.NewReader(doc))
+		check(name, ix, err)
+		if name == "mixed" && ix.Entries["b"][0].str("description") != "two\n\nlines\n" {
+			t.Fatalf("block scalar: %q", ix.Entries["b"][0].str("description"))
+		}
+		var buf bytes.Buffer
+		iw := &indexWriter{w: &buf}
+		if _, err := forEachEntry(strings.NewReader(doc), iw.add); err != nil {
+			t.Fatal(err)
+		}
+		if err := iw.close(ix.Generated); err != nil {
+			t.Fatal(err)
+		}
+		ix, err = parseIndex(&buf)
+		check(name+" rewritten", ix, err)
+	}
+	if ix, err := parseIndex(strings.NewReader("apiVersion: v1\nentries: {}\n")); err != nil || len(ix.Entries) != 0 {
+		t.Fatalf("empty: %+v %v", ix, err)
+	}
+	for _, bad := range []string{"entries:\n- a\n", "entries:\n  a:\n    name: a\n", "entries: [not, a, map\n", "apiVersion: v1\nentries:\n  a:\n  - name: a\n    x: " + strings.Repeat("y", maxIndexChunk) + "\n"} {
+		if _, err := parseIndex(strings.NewReader(bad)); err == nil {
+			t.Fatalf("no error for %.40q", bad)
+		}
+	}
+	var buf bytes.Buffer
+	iw := &indexWriter{w: &buf}
+	iw.add("a", entry{"name": "a"})
+	iw.add("b", entry{"name": "b"})
+	if err := iw.add("a", entry{"name": "a"}); err == nil {
+		t.Fatal("a chart listed twice")
+	}
+}
+
+// peakMem runs fn and returns the peak heap+stack in use while it ran, in MiB.
+func peakMem(fn func()) (float64, time.Duration) {
+	var stop atomic.Bool
+	var max uint64
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var ms runtime.MemStats
+		for !stop.Load() {
+			runtime.ReadMemStats(&ms)
+			if v := ms.HeapInuse + ms.StackInuse; v > max {
+				max = v
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	start := time.Now()
+	fn()
+	elapsed := time.Since(start)
+	stop.Store(true)
+	<-done
+	return float64(max) / (1 << 20), elapsed
+}
+
+// discard is a ResponseWriter that keeps no body (a recorder would hold 30 MiB).
+type discard struct {
+	hdr  http.Header
+	code int
+}
+
+func (d *discard) Header() http.Header         { return d.hdr }
+func (d *discard) WriteHeader(code int)        { d.code = code }
+func (d *discard) Write(b []byte) (int, error) { return len(b), nil }
+
+// The first index.yaml of a proxy of a bitnami-sized upstream (30 MiB,
+// 1107 charts x 50 versions) is derived within the server's memory budget
+// (128 MiB): decoded whole, yaml.v3 needed ~580 MiB. Review HELM-1.
+func TestProxyBigUpstreamIndexMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("30 MiB index")
+	}
+	e := newEnv(t)
+	var sb strings.Builder
+	sb.WriteString("apiVersion: v1\nentries:\n")
+	n := 0
+	for sb.Len() < 30<<20 {
+		name := fmt.Sprintf("chart%d", n)
+		sb.WriteString("  " + name + ":\n")
+		for v := 0; v < 50; v++ {
+			fmt.Fprintf(&sb, "  - apiVersion: v2\n    appVersion: 1.%d.0\n    created: \"2026-01-02T03:04:05.000000006Z\"\n    description: A Helm chart for %s with a description of ordinary length as bitnami writes them\n    digest: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n    home: https://example.com/%s\n    keywords:\n    - kube\n    - %s\n    maintainers:\n    - name: team\n      email: team@example.com\n    name: %s\n    sources:\n    - https://github.com/example/%s\n    urls:\n    - https://charts.example.com/%s-1.%d.0.tgz\n    version: 1.%d.0\n", v, name, name, name, name, name, name, v, v)
+		}
+		n++
+	}
+	sb.WriteString("generated: \"2026-01-02T03:04:05Z\"\n")
+	doc := sb.String()
+	e.index.Store(&doc)
+	r := httptest.NewRequest("GET", "/repository/helm-proxy/index.yaml", nil)
+	r = r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{}))
+	w := &discard{hdr: http.Header{}}
+	runtime.GC()
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(80 << 20)) // as deployed (GOMEMLIMIT=80MiB under a 128 MiB limit)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	peak, el := peakMem(func() { e.h.Serve(w, r, e.repos["helm-proxy"], "index.yaml") })
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	t.Logf("index %d MiB, %d charts: peak %.0f MiB (%.0f MiB before, the test's document), %v; kept %.0f MiB (the upstream table)",
+		len(doc)>>20, n, peak, float64(before.HeapInuse)/(1<<20), el, float64(after.HeapInuse-before.HeapInuse)/(1<<20))
+	if w.code != 200 {
+		t.Fatalf("index.yaml: %d", w.code)
+	}
+	if peak > 100 {
+		t.Fatalf("deriving the index of a %d MiB upstream needed %.0f MiB (container: 128 MiB)", len(doc)>>20, peak)
+	}
+	up, _ := e.h.upstreams.Load("helm-proxy")
+	if c := up.(*upstream).charts; len(c) != n*50 || c["chart5-1.7.0.tgz"].url != "https://charts.example.com/chart5-1.7.0.tgz" {
+		t.Fatalf("upstream table: %d charts, %+v", len(c), c["chart5-1.7.0.tgz"])
+	}
+	a, err := e.h.Store.Get(context.Background(), "helm-proxy", "index.yaml")
+	if err != nil || a.Size < int64(len(doc))/2 {
+		t.Fatalf("derived index: %+v %v", a, err)
 	}
 }
 

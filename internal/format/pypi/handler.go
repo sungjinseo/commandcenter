@@ -33,7 +33,10 @@ func New(store *repo.Store, fetcher *proxy.Fetcher, baseURL func() string) *Hand
 // fileAttrs is the packages.attrs document of a hosted file. Blake2b256 and
 // MetadataSHA256 (the sha256 of the file's core metadata sidecar, see
 // metadataKey) are absent in rows older builds wrote; the sidecar is then
-// extracted on its first request (see extract).
+// extracted when the row is first listed (walk) or requested (see extract).
+// MetadataSHA256 noMetadata marks a file none can be read from, which the
+// index then does not advertise (the initial release stored files without
+// reading them).
 type fileAttrs struct {
 	Filename       string `json:"filename"`
 	Version        string `json:"version"`
@@ -42,6 +45,8 @@ type fileAttrs struct {
 	Blake2b256     string `json:"blake2b_256,omitempty"`
 	MetadataSHA256 string `json:"metadata_sha256,omitempty"`
 }
+
+const noMetadata = "-"
 
 // errStop ends a walk early once the wanted file is found.
 var errStop = errors.New("stop")
@@ -183,9 +188,25 @@ func (h *Handler) walk(ctx context.Context, rp *repo.Repository, project string,
 			if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
 				return err
 			}
-			// Every hosted file has core metadata (extracted on first request
-			// when an older build stored none); its hash is advertised when known.
-			if err := fn(File{Filename: a.Filename, SHA256: a.SHA256, RequiresPython: a.RequiresPython, HasMetadata: true, MetadataSHA256: a.MetadataSHA256}); err != nil {
+			// A row an older build stored without its core metadata learns it
+			// now (extract marks the row either way), so the index advertises
+			// only sidecars that answer: pip aborts on an advertised 404.
+			if a.MetadataSHA256 == "" {
+				sc, err := h.sidecar(ctx, rp, project, a.Filename)
+				switch {
+				case err == nil:
+					a.MetadataSHA256 = sc.BlobSHA256
+				case repo.StatusOf(err) == http.StatusNotFound:
+					a.MetadataSHA256 = noMetadata
+				default:
+					return err
+				}
+			}
+			f := File{Filename: a.Filename, SHA256: a.SHA256, RequiresPython: a.RequiresPython, HasMetadata: a.MetadataSHA256 != noMetadata}
+			if f.HasMetadata {
+				f.MetadataSHA256 = a.MetadataSHA256
+			}
+			if err := fn(f); err != nil {
 				return err
 			}
 		}
