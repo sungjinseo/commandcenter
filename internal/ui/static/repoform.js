@@ -18,7 +18,7 @@ const tk = (base, k) => t(base + "." + k);
 const createLink = (recipe) => adminRepoLink("create") + (recipe ? ":" + encodeURIComponent(recipe) : "");
 
 // Recipe names: "maven2" is our "maven" format.
-const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"]];
+const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"]];
 const TYPES = ["hosted", "proxy", "group"];
 const RECIPES = RECIPE_FORMATS.flatMap(([label, format]) => TYPES.map((type) => ({ id: label + "-" + type, format, type })));
 const recipeOf = (format, type) => RECIPES.find((r) => r.format === format && r.type === type);
@@ -33,6 +33,7 @@ const VERSION = [["release", "Release"], ["snapshot", "Snapshot"], ["mixed", "Mi
 const REMOTE_EXAMPLE = {
   maven: "https://repo1.maven.org/maven2/", npm: "https://registry.npmjs.org/", pypi: "https://pypi.org/",
   go: "https://proxy.golang.org/", cargo: "https://index.crates.io/", docker: "https://registry-1.docker.io", helm: "https://charts.helm.sh/stable/",
+  nuget: "https://api.nuget.org/v3/index.json", apt: "https://deb.debian.org/debian/", yum: "https://dl.rockylinux.org/pub/",
 };
 const ANON = [["", "rf.anonInherit"], ["true", "rf.anonAllow"], ["false", "rf.anonDeny"]];
 
@@ -248,6 +249,7 @@ export async function viewRepoForm(view, o) {
       metadataMaxAge: "24h", contentMaxAge: "-1", negativeCacheTTL: "10m",
       members: [], writeMember: "", versionPolicy: r.format === "maven" && r.type === "hosted" ? "release" : "",
       writePolicy: r.type === "hosted" ? "allow_once" : "", anonymousRead: null,
+      distribution: r.format === "apt" && r.type === "hosted" ? "stable" : "", component: r.format === "apt" && r.type === "hosted" ? "main" : "", depth: 0,
     };
   }
   const all = ((await listP).repositories || []);
@@ -294,6 +296,16 @@ export async function viewRepoForm(view, o) {
   const deploy = isHosted ? select(isDocker
     ? [["allow", t("docker.allowOverwrite")], ["allow_once", t("docker.preventOverwrite")]]
     : DEPLOY.map(([v, k]) => [v, t(k)]), cfg.writePolicy || "allow_once") : null;
+
+  // APT hosted: distribution, component and the (write-only) signing key; Yum hosted: repodata depth
+  const isApt = cfg.format === "apt" && isHosted, isYum = cfg.format === "yum" && isHosted;
+  const distribution = isApt ? textInput(cfg.distribution || "stable", { placeholder: "stable", maxlength: 100 }) : null;
+  const component = isApt ? textInput(cfg.component || "main", { placeholder: "main", maxlength: 100 }) : null;
+  const signingKey = isApt ? h("textarea", { id: uid("sk"), class: "mono", rows: 5, spellcheck: "false", autocomplete: "off",
+    placeholder: cfg.signingKeySet ? t("rf.unchanged") : "-----BEGIN PGP PRIVATE KEY BLOCK-----" }) : null;
+  const clrKey = isApt && cfg.signingKeySet ? checkbox(t("rf.clearSigningKey"), false) : null;
+  if (clrKey) clrKey.box.addEventListener("change", () => { signingKey.disabled = clrKey.box.checked; if (clrKey.box.checked) signingKey.value = ""; });
+  const depth = isYum ? select([["0", t("rf.depth0")], ["1", t("rf.depth1")]], String(cfg.depth || 0)) : null;
 
   // Proxy
   let remote, mdAge, ctAge, negTTL, hidden, user, pass, bearer, clrPass, clrBearer;
@@ -383,7 +395,12 @@ export async function viewRepoForm(view, o) {
           version ? field(t("rf.version"), version, t("rf.versionHelp")) : null,
           field(t("rf.layout"), layout))) : null,
         isHosted ? card(t("rf.hosted"), t("rf.hostedSub"), fields(
-          field(isDocker ? t("docker.writePolicy") : t("rf.deploy"), deploy, isDocker ? t("docker.writePolicyHelp") : t("rf.deployHelp"), { full: true }))) : null,
+          field(isDocker ? t("docker.writePolicy") : t("rf.deploy"), deploy, isDocker ? t("docker.writePolicyHelp") : t("rf.deployHelp"), { full: true }),
+          distribution ? field(t("rf.distribution"), distribution, t("rf.distributionHelp")) : null,
+          component ? field(t("rf.component"), component, t("rf.componentHelp")) : null,
+          signingKey ? field(t("rf.signingKey"), signingKey, cfg.signingKeySet ? [h("span", { class: "rf-set" }, t("rf.signingKeySet")), " — ", t("rf.keepEmpty")] : t("rf.signingKeyHelp"), { full: true }) : null,
+          clrKey ? h("div", { class: "field full" }, clrKey.el) : null,
+          depth ? field(t("rf.depth"), depth, t("rf.depthHelp")) : null)) : null,
         isProxy ? card(t("rf.proxy"), t("rf.proxySub"), fields(
           field(t("rf.remote"), remote, t("rf.remoteHelp"), { req: true, full: true }),
           hidden ? h("div", { class: "field full" }, hidden.el, h("small", null, t("rf.hiddenHelp"))) : null,
@@ -452,6 +469,14 @@ export async function viewRepoForm(view, o) {
       b.members = picker.get();
       b.writeMember = writable.value;
     }
+    if (distribution) {
+      b.distribution = distribution.value.trim();
+      b.component = component.value.trim();
+      b.signingKey = signingKey.value;
+      signingKey.value = ""; // the secret never stays in the page
+      if (clrKey && clrKey.box.checked) b.clearSigningKey = true;
+    }
+    if (depth) b.depth = Number(depth.value);
     return b;
   }
 

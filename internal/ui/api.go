@@ -255,7 +255,10 @@ type repoJSON struct {
 	// Policy fields come from the config and are admin-only (Decision 8).
 	VersionPolicy    string `json:"versionPolicy,omitempty"`
 	WritePolicy      string `json:"writePolicy,omitempty"`
-	Depth            int    `json:"depth,omitempty"` // yum hosted
+	Depth            int    `json:"depth,omitempty"`         // yum hosted
+	Distribution     string `json:"distribution,omitempty"`  // apt hosted
+	Component        string `json:"component,omitempty"`     // apt hosted
+	SigningKeySet    bool   `json:"signingKeySet,omitempty"` // apt hosted: Release.gpg/InRelease are signed
 	MetadataMaxAge   string `json:"metadataMaxAge,omitempty"`
 	ContentMaxAge    string `json:"contentMaxAge,omitempty"`
 	NegativeCacheTTL string `json:"negativeCacheTTL,omitempty"`

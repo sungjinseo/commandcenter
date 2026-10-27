@@ -372,7 +372,9 @@ async function versionList(r, c) {
   };
   switch (r.format) {
     case "docker":
-    case "helm": return pkgVersions(c.name);
+    case "helm":
+    case "nuget":
+    case "yum": return pkgVersions(c.name);
     case "maven": {
       const dir = (c.group ? c.group.split(".").join("/") + "/" : "") + c.name + "/";
       const d = await listDir(dir);
@@ -598,6 +600,28 @@ function setupSnippets(r) {
       return [["GOPROXY", "go env -w GOPROXY=" + url.replace(/\/$/, "") + "\ngo env -w GONOSUMDB=example.com"]];
     case "cargo":
       return [["~/.cargo/config.toml", "[registries.commandcenter]\nindex = \"sparse+" + url + "\"" + (hosted ? "" : "\n\n[source.crates-io]\nreplace-with = \"commandcenter\"")]];
+    case "nuget": {
+      const idx = url + "index.json";
+      const out = [["dotnet nuget add source", "dotnet nuget add source " + idx + " -n commandcenter" + (local ? "" : " -u ci -p <" + t("setup.password") + "> --store-password-in-clear-text")]];
+      if (hosted || r.writeMember) out.push(["dotnet nuget push", "dotnet nuget push <package>.nupkg -s " + idx + " -k <" + t("setup.token") + ">"]);
+      return out;
+    }
+    case "apt": {
+      const base = url.replace(/\/$/, "");
+      const dist = hosted ? r.distribution || "stable" : "<suite>", comp = hosted ? r.component || "main" : "<component>";
+      const out = r.signingKeySet
+        ? [["public.key", "curl -fsSL " + url + "public.key | sudo gpg --dearmor -o /usr/share/keyrings/" + r.name + ".gpg"],
+          ["sources.list", "deb [signed-by=/usr/share/keyrings/" + r.name + ".gpg] " + base + " " + dist + " " + comp]]
+        : [["sources.list", "deb " + (hosted ? "[trusted=yes] " : "") + base + " " + dist + " " + comp]];
+      if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <package>_<version>_<arch>.deb " + url + "pool/<package>.deb"]);
+      return out;
+    }
+    case "yum": {
+      const base = url.replace(/\/$/, "") + (hosted ? (r.depth === 1 ? "/<dir>" : "") : "/<path on the mirror>");
+      const out = [[r.name + ".repo", "[" + r.name + "]\nname=" + r.name + "\nbaseurl=" + base + "/\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=0"]];
+      if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <name>-<version>-<release>.<arch>.rpm " + url + (r.depth === 1 ? "<dir>/" : "")]);
+      return out;
+    }
   }
   return [];
 }

@@ -38,6 +38,7 @@ func addPolicy(out *repoJSON, rp *repo.Repository) {
 		out.VersionPolicy = rp.VersionPolicy
 		out.WritePolicy = rp.WritePolicy
 		out.Depth = rp.Depth
+		out.Distribution, out.Component, out.SigningKeySet = rp.Distribution, rp.Component, rp.SigningKey != ""
 	case "proxy":
 		out.MetadataMaxAge = formatDuration(rp.MetadataMaxAge)
 		out.ContentMaxAge = formatDuration(rp.ContentMaxAge)
