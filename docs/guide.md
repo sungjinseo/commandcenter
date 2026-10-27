@@ -160,7 +160,7 @@ kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
 - **리소스**: 메모리 요청과 한도 128Mi, `GOMEMLIMIT=80MiB`입니다. CPU는 요청(100m)만 두고 한도는 두지 않습니다.
 - **노출**: Service는 평문 HTTP입니다. Ingress나 Gateway에서 TLS를 끝내고, "TLS와 리버스 프록시"의 제한(본문 크기, 타임아웃, 연결 수)을 쓰는 컨트롤러의 설정으로 겁니다.
 - **비상 복구**: `user reset-password`는 실행 중인 Pod에서 돌립니다(`printf '%s\n' "$PW" | kubectl exec -i -n <네임스페이스> commandcenter-0 -- commandcenter user reset-password -user admin -admin`). 서버가 5초 안에 반영합니다("비상 복구" 참고).
-- **서버를 멈춰야 하는 작업**(멈춘 상태의 백업): `kubectl scale statefulset commandcenter --replicas=0`으로 Pod를 내리고, 같은 PVC(`data-commandcenter-0`)와 ConfigMap을 마운트하고 같은 UID 65532로 도는 일회용 Pod에서 실행한 다음 `--replicas=1`로 되돌립니다.
+- **서버를 멈춰야 하는 작업**(멈춘 상태의 백업, 비밀값 키 교체): `kubectl scale statefulset commandcenter --replicas=0`으로 Pod를 내리고, 같은 PVC(`data-commandcenter-0`)와 ConfigMap을 마운트하고 같은 UID 65532로 도는 일회용 Pod에서 실행한 다음 `--replicas=1`로 되돌립니다.
 
 ## repolite에서 이전하기
 
@@ -276,7 +276,7 @@ Command Center는 파일만 저장하므로 컴포넌트는 서버가 요청 시
 - **Go**: `모듈/@v/버전.(zip|mod|info)`.
 - **Go**의 경로는 대소문자 인코딩(`!b` = `B`)을 쓰므로 모듈 이름과 버전은 풀어서 보여 줍니다(`github.com/!burnt!sushi/toml` → `github.com/BurntSushi/toml`).
 - **PyPI, Cargo**: hosted 저장소는 packages 테이블의 이름과 버전. PyPI는 파일 이름에서 표시 버전을 뽑습니다. Cargo는 packages 테이블과 경로에 소문자로 저장한 이름 대신 올린 표기(대소문자 포함)를 보여 줍니다.
-- **프록시 저장소(npm, PyPI, Cargo)**: packages 테이블에 행이 없으므로 캐시된 파일의 경로(assets 테이블)에서 같은 방식으로 파생합니다.
+- **프록시 저장소(npm, PyPI, Cargo)**: packages 테이블에 행이 없으므로 캐시된 파일의 경로(assets 테이블)에서 같은 방식으로 파생합니다. Cargo는 경로에 이름이 소문자로 남으므로, 캐시해 둔 인덱스 파일(`index/<인덱스 경로>`) 첫 줄의 `name`에서 올린 표기를 읽어 보여 줍니다. 보여 주는 컴포넌트마다 그 파일의 앞부분(최대 4 KiB)만 읽고 원격에는 묻지 않습니다. 인덱스 파일이 캐시에 없거나 첫 줄의 첫 키가 `name`이 아니면(crates.io와 cargo는 늘 `name`을 먼저 씁니다) 경로의 소문자 이름을 씁니다.
 - 검색은 메타 DB에서 한도까지만 훑습니다: assets 테이블 질의 한 번마다 최대 2000개 파일, packages 테이블은 이름 2000개와 버전 2000개까지 봅니다(`keyword`만 주면 이름으로 좁힌 검사를 먼저 하고, 한도가 남으면 버전 일치를 찾는 전체 검사를 이어서 합니다). 한도에 걸리거나 10초 안에 끝나지 않으면 그때까지의 결과를 `truncated: true`로 돌려줍니다. 페이지마다 같은 한도 안에서 처음부터 다시 훑고 정렬한 뒤 잘라 내므로, 데이터가 바뀌지 않는 한 페이지가 겹치거나 빠지지 않습니다(10초 제한에 걸린 경우는 예외). 대신 한도 밖의 결과는 페이지를 넘겨도 나오지 않으니 조건을 좁히세요. 검색은 무거운 질의용 세마포어 안에서 실행하므로 메모리 사용이 일정합니다.
 
 ### 컴포넌트 삭제
@@ -333,7 +333,8 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - **삭제**: 저장소 이름을 직접 입력해야 삭제됩니다. 다음 규칙이 있습니다.
   - group의 멤버(또는 writeMember)인 저장소는 409로 거부하며 메시지에 group 이름이 나옵니다. group에서 먼저 빼세요.
   - 삭제하면 그 저장소의 정의와 자산, 패키지, dist-tag, negative cache 행이 한 트랜잭션으로 지워집니다. blob 파일은 다음 GC(Compact blob store)에서 회수됩니다.
-  - 역할이 그 저장소(`repo:<이름>`)에 가진 권한은 지워지지 않고, 삭제할 때와 서버가 시작할 때 경고 로그만 남습니다. 같은 이름으로 저장소를 다시 만들면 그 권한이 새 저장소에 그대로 적용되므로, 필요 없으면 역할에서 빼세요.
+  - 같은 트랜잭션에서 모든 역할의 그 저장소 권한(대상이 정확히 `repo:<이름>`인 것)도 지웁니다. 그래서 같은 이름으로 저장소를 다시 만들어도 이전 권한이 따라오지 않습니다. `*`, `format:<포맷>`, 다른 저장소 대상은 그대로이고, 권한이 모두 빠진 역할도 지우지 않습니다. 웹 UI의 삭제 확인 창에 권한이 빠질 역할이 나옵니다. 권한을 지운 역할이 있으면 저장소 이름과 역할을 적은 WARN 로그(`removed the privileges on a deleted repository from roles`) 한 줄과, 역할마다 활동 기록의 `role.update` 이벤트(`removed repo:<이름>`)가 남습니다. 저장소를 지웠다가 같은 이름으로 다시 만드는 스크립트는 역할에 권한을 다시 넣어야 합니다.
+  - 이전 버전에서 저장소를 지울 때 남은 권한은 그대로 있고, 서버가 시작할 때 역할과 저장소마다 경고 로그(`role grants privileges on a repository that does not exist`)가 남습니다. 같은 이름으로 저장소를 다시 만들면 그 권한이 새 저장소에 적용되므로, 필요 없으면 역할에서 빼세요.
 - **입력 검사**: 저장소를 만들거나 편집할 때(UI·API, 첫 시작의 config 가져오기) group의 멤버가 중복되면 거부하고(`duplicate member`), 시간 값(`metadataMaxAge`, `contentMaxAge`, `negativeCacheTTL`)에 음수(`-5m`)를 쓰면 거부합니다(400). "영원히"는 `-1`로만 씁니다. `remote`와 `remoteAuth`는 proxy에만 쓸 수 있고 `versionPolicy`는 group에 쓸 수 없습니다(400). 웹 UI의 Maven group 폼에는 versionPolicy 칸이 없습니다. 이전 버전이 이미 저장한 정의는 그대로 읽습니다. 음수 시간은 0(캐시하지 않음, 즉시 만료)으로, 중복 멤버는 한 번만 쓰고, hosted·group의 `remote`·`remoteAuth`와 group의 `versionPolicy`는 쓰이지 않던 값이라 버리며, 시작 시 저장소마다 경고를 한 줄 남깁니다. 그런 저장소가 있어도 서버는 시작하고 다른 저장소의 편집도 막지 않으며, 그 저장소를 편집할 때 값을 고치면 됩니다. 저장소를 만들거나 지우면 목록의 개수·크기 통계(약 30초 캐시)도 바로 다시 계산하므로, 같은 이름으로 다시 만든 빈 저장소가 이전 값을 보여 주지 않습니다.
 - **원격 인증 정보**: proxy의 비밀번호와 Bearer 토큰은 DB에 저장되지만(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) **어떤 API와 화면에도 다시 보이지 않습니다**(설정되어 있는지 여부만 표시). 편집 때 비워 두면 기존 값을 유지하고, "clear" 체크로 지웁니다. `remote`의 **호스트가 바뀌면 인증 정보를 다시 입력해야 합니다**(토큰을 새 호스트로 옮길 수 없습니다).
 - **권한**: 만들기, 편집, 삭제는 관리자이면서 비밀번호 또는 세션으로 인증한 경우에만 됩니다(API 토큰으로는 403). 쓰기 요청에는 `X-Command-Center-UI: 1` 헤더가 필요합니다.
@@ -445,7 +446,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - group에 쓰는 요청은 같은 동작을 `writeMember` 저장소에 대해 검사합니다.
 - **내장 `admin` 역할**은 모든 대상에 모든 동작을 가지며 관리 화면과 `/-/metrics`도 쓸 수 있습니다. 수정·삭제할 수 없습니다.
 - 역할을 지우려는데 사용자가 쓰고 있거나 LDAP 설정의 `groupMappings[].roles` 또는 `defaultRoles`에 들어 있으면 409입니다(LDAP 참조는 메시지에 어느 매핑인지 나옵니다).
-- **입력 검사**: `repo:<이름>` 대상은 그 이름의 저장소가 있어야 하며, 없으면 400(`unknown repository "<이름>"`)입니다. 이미 저장된 역할에 있던 대상은 저장소가 지워졌어도 그 역할을 편집할 때 그대로 둘 수 있습니다(새로 넣는 대상만 검사합니다). 한 역할에 같은 대상을 두 번 쓰면 400(`duplicate target`)입니다. 역할 ID도 사용자 ID처럼 이미 있는 ID와 대소문자만 다른 ID는 만들 수 없고(409, `config.yaml` 첫 가져오기에서는 시작 실패), `admin`은 대소문자와 관계없이 예약어입니다. 설명에는 제어 문자를 쓸 수 없습니다. 이전 버전이 저장한 설명은 바꾸지 않는 한 다시 검사하지 않습니다.
+- **입력 검사**: `repo:<이름>` 대상은 그 이름의 저장소가 있어야 하며, 없으면 400(`unknown repository "<이름>"`)입니다. 이미 저장된 역할에 있던 대상은 저장소가 없어도(이전 버전이 저장소를 지울 때 남긴 권한 등) 그 역할을 편집할 때 그대로 둘 수 있습니다(새로 넣는 대상만 검사합니다). 저장소를 지우면 그 대상도 역할에서 지워지므로("저장소 관리"의 삭제 참고), 삭제 전에 열어 둔 역할 편집 화면을 그대로 저장하면 400입니다. 한 역할에 같은 대상을 두 번 쓰면 400(`duplicate target`)입니다. 역할 ID도 사용자 ID처럼 이미 있는 ID와 대소문자만 다른 ID는 만들 수 없고(409, `config.yaml` 첫 가져오기에서는 시작 실패), `admin`은 대소문자와 관계없이 예약어입니다. 설명에는 제어 문자를 쓸 수 없습니다. 이전 버전이 저장한 설명은 바꾸지 않는 한 다시 검사하지 않습니다.
 - 예: `repo:maven-releases`에 `browse`, `read`, `add`만 있는 역할의 사용자가 Maven에 `PUT`하면 201, `DELETE`하면 403입니다.
 
 ### 읽기 권한
@@ -507,7 +508,22 @@ SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비�
   UPDATE repositories SET config = json_remove(config, '$.remoteAuth.password', '$.remoteAuth.bearerToken') WHERE json_extract(config, '$.remoteAuth') IS NOT NULL;
   ```
 
-- **키 교체는 아직 지원하지 않습니다.** 바꿔야 하면 위처럼 값을 지우고 새 키로 시작해 다시 입력하세요.
+- **키 교체**: `secret-key rotate`가 저장된 비밀값을 지금 키에서 새 키로 한 트랜잭션에 다시 암호화합니다. 실행 중인 서버는 시작할 때 읽은 키를 메모리에 계속 들고 있어서, 서버가 도는 동안 바꾸면 바뀐 값을 읽지 못하고 그 뒤 저장하는 값은 이전 키로 암호화해 두 키가 섞입니다. 그래서 **서버를 먼저 멈추고** 실행한 뒤 새 키로 시작합니다. 실행 전에 백업을 받아 두세요("백업과 복원" 참고).
+
+  ```bash
+  docker compose stop
+  head -c 32 /dev/urandom | base64 > new.key   # 새 키. 컨테이너의 UID 65532가 읽을 수 있어야 합니다
+  docker compose run --rm -v "${PWD}/new.key:/run/new.key:ro" commandcenter secret-key rotate -new-key-file /run/new.key
+  # 끝나면 COMMANDCENTER_SECRET_KEY(.env 등)나 secretKeyFile이 가리키는 파일을 new.key의 값으로 바꿉니다
+  docker compose up -d
+  ```
+
+  - 지금 키는 서버와 같이 `COMMANDCENTER_SECRET_KEY`나 `secretKeyFile`에서 읽으므로, 키 설정은 명령이 끝난 **뒤에** 바꿉니다. 아직 키를 정한 적이 없다면 지금 키는 없어도 됩니다. 새 키는 `-new-key-file`이 가리키는 파일에서 같은 형식(32바이트 난수의 base64, 위의 "키 만들기" 참고)으로 읽습니다. `-new-key-file`이 없거나, 그 파일을 읽지 못하거나, 형식이 틀리면 아무것도 바꾸지 않고 오류로 끝납니다.
+  - 지금 키로 암호화된 값은 새 키로 다시 암호화하고, 평문으로 남아 있던 값도 새 키로 암호화합니다. 지금 키로 풀리지 않는 값이 하나라도 있으면(`it was encrypted with another key`, `it is encrypted, and no secret key is set`) 아무것도 바꾸지 않고 `stored secrets (nothing was changed): …` 오류와 0이 아닌 코드로 끝납니다. 교체를 마친 뒤 같은 명령을 다시 실행해도 이렇게 거부됩니다.
+  - 출력은 개수뿐이며 키와 비밀값은 나오지 않습니다(예: `re-encrypted 3 stored secrets with the new key and encrypted 1 that were plain text`). 마지막 줄은 `done; start the server with the new key in COMMANDCENTER_SECRET_KEY or secretKeyFile`입니다.
+  - `.env`의 값을 바꿨다면 `docker compose start`가 아니라 `docker compose up -d`로 시작하세요. `start`는 컨테이너를 만들 때의 환경변수를 그대로 씁니다. Git Bash에서는 "백업과 복원"처럼 `MSYS_NO_PATHCONV=1`을 앞에 붙이고 `"$(pwd -W)/new.key:/run/new.key:ro"`를 씁니다.
+  - 교체 전에 받은 백업은 이전 키로만 풀립니다. 그 백업을 보관하는 동안은 이전 키도 따로 보관하세요. `new.key`는 키를 옮긴 뒤 지웁니다.
+  - Kubernetes에서는 "서버를 멈춰야 하는 작업"처럼 일회용 Pod에서 실행하고(지금 키의 `COMMANDCENTER_SECRET_KEY` Secret 참조와 새 키 파일 마운트를 함께 둡니다), Secret을 새 키로 바꾼 뒤 `--replicas=1`로 되돌립니다.
 - 키를 켠 뒤 이 기능이 없는 이전 버전으로 내리면, 이전 버전은 암호화된 값을 그대로 비밀번호로 보내 원격·SMTP·LDAP 인증이 실패합니다("업그레이드" 참고).
 - 키가 없을 때는 `enc:v1:`로 시작하는 비밀번호를 저장하지 않습니다(암호화된 값과 구별할 수 없기 때문입니다).
 
@@ -531,7 +547,7 @@ SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비�
 |---|---|---|
 | `url` | 없음 | `ldap://호스트[:포트]` 또는 `ldaps://호스트[:포트]` |
 | `startTLS` | `false` | `ldap://`에서 StartTLS로 암호화(`ldaps://`와는 같이 쓸 수 없음) |
-| `insecureSkipVerify` | `false` | 서버 인증서 검증 생략. 시험용으로만 쓰세요. |
+| `insecureSkipVerify` | `false` | 서버 인증서 검증 생략. 시험용으로만 쓰세요. 사내 CA가 발급한 인증서라면 검증을 끄지 말고, 그 CA 인증서(PEM 파일)를 컨테이너의 한 디렉터리에 마운트한 뒤 환경변수 `SSL_CERT_DIR`로 그 디렉터리를 알려 주세요(예: `SSL_CERT_DIR=/etc/ssl/internal-ca`). 이 설정은 SMTP와 proxy의 원격 연결에도 적용되며, 기본 인증서 묶음도 계속 읽으므로 공개 CA를 쓰는 연결에는 영향이 없습니다. |
 | `bindDN`, `bindPassword` | 없음 | 검색에 쓰는 서비스 계정. `bindDN`이 없으면 익명 검색. 비밀번호는 저장만 되고(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) API 응답·로그·이벤트에 나오지 않습니다(`bindPasswordSet`만 표시). 비워서 보내면 기존 값을 유지하고 `clearBindPassword: true`로 지웁니다. 단 **서버의 호스트:포트를 바꾸거나, `ldaps`에서 `ldap`으로 바꾸거나, `startTLS`를 끄거나, `insecureSkipVerify`를 켤 때는 비밀번호를 다시 입력해야 합니다**(400). 저장된 비밀번호가 다른 서버나 더 약한 연결로 새어 나가지 않게 하는 규칙입니다. |
 | `timeoutSeconds` | `5` | 연결·응답 제한(1..60) |
 | `userBaseDN` | 필수 | 사용자를 검색할 기준 DN |
@@ -568,7 +584,7 @@ LDAP 사용자는 DB에 사용자 행이 따로 없고, 로그인하면 메모�
 - LDAP 사용자의 항목은 1분이 지나면 다음 사용 때 서비스 계정으로 다시 검색해 확인합니다(**세션, 토큰, 비밀번호 캐시 모두**). 디렉터리에서 사라졌거나 검색 결과가 모호하면 즉시 거부합니다.
 - 디렉터리에 닿을 수 없으면 **닫힌 채로(fail closed)** 거부합니다. 재확인이 실패하면 그 시도가 끝난 때부터 10초 동안은 다시 시도하지 않고 거부합니다(클라이언트가 먼저 연결을 끊은 경우는 실패로 치지 않습니다). 한 사용자의 재확인은 한 번에 하나만 하고 같은 사용자의 다른 요청은 그 결과를 기다리며, 기다리는 요청은 클라이언트가 끊으면 바로 끝납니다. 재시작 직후에도 LDAP 사용자의 세션과 토큰은 한 번 재확인을 통과해야 합니다. 로컬 관리자는 영향을 받지 않습니다.
 - 재확인은 `userFilter`의 `{user}`가 `userIdAttr`와 같은 값을 가리킨다고 가정합니다(예: `(uid={user})`와 `uid`). 다르면 재확인이 실패해 1분 뒤 세션·토큰이 거부됩니다.
-- 로그인 경로의 **장애 백오프**: 연결·TLS 단계(TCP, TLS/StartTLS, 서비스 바인드의 네트워크 오류)가 연달아 3번 실패하면 15초 동안 로그인에서 `ldap` Realm을 건너뛰어(뒤의 Realm이 판단) 로컬 로그인이 느려지지 않게 합니다. 잘못된 비밀번호, 검색 실패, 너무 큰 응답 같은 요청별 실패는 장애로 세지 않습니다. 디렉터리 응답 메시지는 1 MiB로 제한합니다.
+- 로그인 경로의 **장애 백오프**: 연결·TLS 단계(TCP, TLS/StartTLS, 서비스 바인드의 네트워크 오류)가 연달아 3번 실패하면 15초 동안 로그인에서 `ldap` Realm을 건너뛰어(뒤의 Realm이 판단) 로컬 로그인이 느려지지 않게 합니다. 잘못된 비밀번호, 검색 실패, 너무 큰 응답 같은 요청별 실패는 장애로 세지 않습니다. 디렉터리 응답 메시지는 1 MiB로 제한합니다. 검색 결과 항목 하나에는 속성 64개, 속성 하나에는 값 1024개까지 받으며, 넘는 사용자(예: 직접 속한 그룹이 1024개를 넘는 사용자)는 로그인할 수 없습니다.
 - 디렉터리에서 사용자가 사라져도 토큰과 세션을 지우지는 않고 접근만 거부합니다(기준 DN 오타로 전부 폐기되는 일을 막기 위해서입니다). 같은 ID가 다시 생기면 이전 토큰이 되살아날 수 있으므로 재사용되지 않는 값을 `userIdAttr`로 쓰세요.
 
 ### 연결 테스트
@@ -678,10 +694,11 @@ SMTP 설정(`GET/PUT /-/api/settings/smtp`, 관리자)으로 예약 작업 실�
 Maven 동작 메모:
 
 - SNAPSHOT 버전 디렉터리의 `maven-metadata.xml`은 서버가 만듭니다. 그 디렉터리의 파일을 올리거나 지울 때마다, 그리고 `repository.rebuild-metadata` 작업이 돌 때 가장 높은 timestamp 빌드를 기준으로 다시 만듭니다. 클라이언트(`mvn deploy`)가 올린 같은 문서는 201로 답하되 무시합니다.
-- GA 디렉터리(`groupId/artifactId/`)의 `maven-metadata.xml`도 서버가 저장된 아티팩트로 만듭니다. 버전 목록, `latest`, `release`, `groupId`, `artifactId`는 아티팩트를 올리거나 지울 때마다 다시 계산합니다. 클라이언트(`mvn deploy`)가 올린 문서는 201로 답하되 플러그인 그룹 문서의 `<plugins>`만 저장된 문서에 합치고, 나머지(버전, `<latest>`, `<release>`, 경로와 다른 groupId/artifactId)는 무시합니다. 그래서 배포 권한만으로는 아티팩트가 없는 버전을 끼워 넣어 `[1.0,)` 같은 버전 범위 해석을 바꿀 수 없습니다. 다만 groupId/artifactId가 경로의 GA를 가리키는 문서(`mvn deploy`가 아티팩트를 다 올린 뒤 올리는 문서)를 받으면 그 GA의 문서를 저장된 아티팩트로 다시 만듭니다. 그래서 아티팩트 업로드 뒤의 갱신이 실패했더라도(아티팩트 업로드는 201, 서버 로그에 `maven-metadata.xml rebuild failed`) 배포의 마지막 단계에서 바로잡힙니다. 이때 다시 만들기가 실패하면 그 메타데이터 업로드가 5xx로 실패합니다. 이전 버전에서 클라이언트 문서로 들어간 버전은 그 GA에 아티팩트나 GA 문서를 하나 더 올리거나(다음 `mvn deploy`) `repository.rebuild-metadata` 작업을 돌리면 사라집니다(업그레이드 후 한 번 돌리기를 권장합니다).
+- GA 디렉터리(`groupId/artifactId/`)의 `maven-metadata.xml`도 서버가 저장된 아티팩트로 만듭니다. 버전 목록, `latest`, `release`, `groupId`, `artifactId`는 아티팩트를 올리거나 지울 때마다 다시 계산합니다. 클라이언트(`mvn deploy`)가 올린 문서는 201로 답하되 플러그인 그룹 문서의 `<plugins>`만 저장된 문서에 합치고, 나머지(버전, `<latest>`, `<release>`, 경로와 다른 groupId/artifactId)는 무시합니다. 그래서 배포 권한만으로는 아티팩트가 없는 버전을 끼워 넣어 `[1.0,)` 같은 버전 범위 해석을 바꿀 수 없습니다. 다만 groupId/artifactId가 경로의 GA를 가리키는 문서(`mvn deploy`가 아티팩트를 다 올린 뒤 올리는 문서)를 받으면 그 GA의 문서를 저장된 아티팩트로 다시 만듭니다. 그래서 아티팩트 업로드 뒤의 갱신이 실패했더라도(아티팩트 업로드는 201, 서버 로그에 `maven-metadata.xml rebuild failed`) 배포의 마지막 단계에서 바로잡힙니다. 이때 다시 만들기가 실패하면 그 메타데이터 업로드가 5xx로 실패합니다. GA 디렉터리가 플러그인 그룹의 groupId 디렉터리이기도 하면(groupId `org.example`의 플러그인 목록과 GA `org:example`이 함께 쓰는 `org/example/maven-metadata.xml`) 아티팩트나 컴포넌트를 지울 때(Cleanup 포함)와 `repository.rebuild-metadata` 작업이 문서를 다시 만들 때도 `<plugins>`는 그대로 남고, 그 GA의 마지막 버전을 지우면 `<plugins>`만 남습니다. 이전 버전에서 클라이언트 문서로 들어간 버전은 그 GA에 아티팩트나 GA 문서를 하나 더 올리거나(다음 `mvn deploy`) `repository.rebuild-metadata` 작업을 돌리면 사라집니다(업그레이드 후 한 번 돌리기를 권장합니다). 아티팩트가 하나도 없는 GA의 문서는 이 작업이 버전을 지웁니다(`<plugins>`가 있으면 그것만 남기고, 없으면 문서를 지웁니다). 문서에 적힌 `groupId`/`artifactId`가 없거나 다른 GA를 가리켜도, 문서가 다른 GA의 디렉터리 안(GA `org:example` 아래의 `org/example/app/`)에 있어도 마찬가지입니다.
 - 올리는 `maven-metadata.xml`은 1 MiB까지 받습니다(넘으면 413). 업로드한 메타데이터는 동시에 2개까지만 처리하며, 슬롯이 모두 사용 중이면 30초까지 기다리다가 `503 too many concurrent maven-metadata.xml uploads, retry`로 거절하므로 잠시 후 다시 시도하세요. 슬롯을 잡은 업로드는 본문을 10초 안에 다 보내야 하며(계속 조금씩 보내도 마찬가지입니다), 넘기면 `408 maven-metadata.xml not received within 10s`로 답합니다. 그래서 느린 클라이언트 둘이 슬롯을 모두 잡아도 다른 업로드는 10초 남짓만 기다립니다. 본문은 슬롯을 잡은 뒤에 읽으므로, 슬롯을 기다리는 업로드는 본문을 메모리에 올리지 않습니다.
 - 올리는 `.pom`(classifier가 없는 것)은 저장하기 전에 내용을 검사합니다. 1 MiB까지 받고(넘으면 413), 올바른 XML이면서 루트가 `<project>` 하나여야 하며, `groupId`(없으면 `<parent>`의 값), `artifactId`, `version`(없으면 `<parent>`의 값)이 업로드 경로의 좌표와 같아야 합니다. 그렇지 않으면 400입니다(예: `400 .pom declares "evil:other:9", want "org.example:pv:1.1"`). 거부된 업로드는 아무것도 남기지 않으므로 `allow_once` 저장소에서도 고쳐서 다시 올릴 수 있습니다. SNAPSHOT의 timestamp 파일은 디렉터리의 버전(`1.0-SNAPSHOT`)과 비교합니다. `groupId`와 `artifactId` 안의 `${이름}`은 그 POM의 `<properties>`로 바꾼 뒤 비교합니다. 거기에 없는 속성(부모 POM이 정하는 `${scala.binary.version}` 등)은 `/`와 `:`가 아닌 한 글자 이상과 맞는 것으로 보고, 나머지 부분은 그대로 비교합니다. 그래서 `<artifactId>hudi-spark_${scala.binary.version}</artifactId>`인 POM은 `hudi-spark_2.12` 경로에는 올라가지만 `other_2.12` 경로에는 400입니다. `version`에 `${…}`가 들어 있으면 비교하지 않습니다. 명령줄(`-Drevision=…`)이나 부모 POM이 정하는 CI-friendly 버전(`${revision}`)은 서버가 알 수 없기 때문이며, 그래서 flatten-maven-plugin 없이 `mvn -Drevision=1.2.3 deploy`로 배포해도 받습니다. `encoding="ISO-8859-1"`, `EUC-KR`처럼 다른 인코딩을 선언한 POM도 받습니다. 선언이 없거나 UTF-8로 선언한 POM에 UTF-8이 아닌 바이트가 있으면(예: MS949로 저장한 `<description>`) Maven처럼 그 바이트를 U+FFFD로 바꿔 읽으므로 받으며, 좌표는 그대로 비교합니다. classifier가 붙은 `.pom`과 이미 저장된 POM은 검사하지 않습니다.
-- proxy와 group은 Maven 파일만 조회하고, proxy는 그것만 원격에서 받아 캐시합니다: 아티팩트(서명 `.asc` 포함), `maven-metadata.xml`, `.meta/prefixes.txt`, `archetype-catalog.xml`, sbt 1.9 이전 방식(legacy layout)의 sbt 플러그인 파일과 그 체크섬입니다. sbt 플러그인 파일은 디렉터리 이름에만 `_<Scala 버전>_<sbt 버전>`이 붙고 파일 이름에는 붙지 않습니다(예: `com/eed3si9n/sbt-assembly_2.12_1.0/2.1.1/sbt-assembly-2.1.1.jar`). sbt와 coursier가 이 경로로 요청하므로 proxy와 group에서는 받을 수 있지만, hosted 저장소에는 이 경로로 올릴 수 없습니다(400). 디렉터리(`junit/junit/4.13.2`, `junit/junit/`)처럼 그 밖의 경로는 원격에 묻지 않고 404로 답하므로, proxy 주소를 브라우저로 열어 원격의 디렉터리 목록을 볼 수는 없습니다(캐시된 파일은 웹 UI의 Browse에서 봅니다). IDE가 받는 원격 인덱스(`.index/`)도 받지 않습니다. 이름이 `.html`로 끝나지 않는 파일에 원격이 `text/html`로 답하면(디렉터리 목록이나 오류 페이지) 저장하지 않습니다. 캐시에 없던 파일이면 404로 처리하며 negative cache에 기록합니다. 이때 서버 로그에 `remote answered with a web page, taken as not found`가 남으니, 원격 서버가 아티팩트를 `text/html`로 잘못 내주는지 이 줄로 확인하세요. 이미 캐시된 파일(만료된 `maven-metadata.xml` 등)을 다시 확인할 때 이런 답이 오면 원격 장애(점검 페이지나 로그인 페이지)로 보고, 원격에 접속할 수 없을 때처럼 캐시된 사본을 그대로 줍니다. 이때는 서버 로그에 `remote fetch failed`와 `remote answered with a web page`가 남습니다. 이전 버전이 캐시한 디렉터리 목록은 이제 제공하지 않지만(404) Browse에는 남아 있습니다. 해는 없으며, 지우려면 그 proxy를 group에서 빼고 지운 뒤 같은 설정으로 다시 만들어 group에 다시 넣으세요(캐시는 요청할 때 다시 받습니다).
+- sbt 플러그인은 hosted 저장소에 `sbt publish`로 배포할 수 있습니다. sbt 1.9 이상은 기본 설정(`sbtPluginPublishLegacyMavenStyle := true`)에서 한 버전 디렉터리에 두 방식으로 올립니다. Maven 방식 파일은 이름에 디렉터리와 같은 `_<Scala 버전>_<sbt 버전>`이 붙고(`com/example/sbt-foo_2.12_1.0/1.0.0/sbt-foo_2.12_1.0-1.0.0.jar`), 옛 방식(legacy layout) 파일은 붙지 않습니다(`com/example/sbt-foo_2.12_1.0/1.0.0/sbt-foo-1.0.0.jar`). sbt 1.9 미만은 옛 방식으로만 올립니다. 서버는 두 방식을 모두 저장하고 hosted와 group에서 내줍니다. 옛 방식 파일은 디렉터리 이름이 `_<숫자>_<숫자>`(예: `_2.12_1.0`)로 끝나고 파일 이름이 그 접미사를 뺀 이름, `-`, 버전, classifier(있으면), 확장자로 되어 있을 때만 받고, 그 밖의 이름은 400입니다. 옛 방식 `.pom`은 접미사를 뺀 artifactId(`sbt-foo`)와 비교해 검사합니다(예: `400 .pom declares "com.example:sbt-foo_2.12_1.0:1.0.0", want "com.example:sbt-foo:1.0.0"`). 옛 방식 파일은 GA의 버전으로 치지 않으므로 `maven-metadata.xml`의 버전 목록에는 Maven 방식 파일이 있는 버전만 들어가고, sbt 1.9 미만으로 배포한 버전은 목록에 없습니다(버전을 정확히 적으면 받을 수 있습니다). 컴포넌트 검색, Cleanup, 컴포넌트 삭제 API에서는 두 방식의 파일(proxy에 캐시된 옛 방식 파일 포함)이 한 컴포넌트(`com.example:sbt-foo_2.12_1.0:1.0.0`)이므로 컴포넌트를 지우면 둘 다 지웁니다. Maven 방식 파일만 지우면 sbt가 옛 방식 파일로 그 버전을 계속 받기 때문입니다. 다만 웹 UI의 "Delete component"는 파일을 하나씩 지우면서 Maven 방식 파일만 지우므로, 남은 옛 방식 파일은 파일 화면의 "Delete asset"으로 지우거나 처음부터 API로 지우세요("컴포넌트 삭제" 참고).
+- proxy와 group은 Maven 파일만 조회하고, proxy는 그것만 원격에서 받아 캐시합니다: 아티팩트(서명 `.asc` 포함), `maven-metadata.xml`, `.meta/prefixes.txt`, `archetype-catalog.xml`, sbt의 옛 방식(legacy layout)으로 된 sbt 플러그인 파일과 그 체크섬입니다. 옛 방식 파일은 디렉터리 이름에만 `_<Scala 버전>_<sbt 버전>`이 붙고 파일 이름에는 붙지 않습니다(예: `com/eed3si9n/sbt-assembly_2.12_1.0/2.1.1/sbt-assembly-2.1.1.jar`). sbt와 coursier가 이 경로로 요청하므로 proxy와 group에서 받을 수 있고, hosted 저장소에도 올릴 수 있습니다(위 항목 참고). 디렉터리(`junit/junit/4.13.2`, `junit/junit/`)처럼 그 밖의 경로는 원격에 묻지 않고 404로 답하므로, proxy 주소를 브라우저로 열어 원격의 디렉터리 목록을 볼 수는 없습니다(캐시된 파일은 웹 UI의 Browse에서 봅니다). IDE가 받는 원격 인덱스(`.index/`)도 받지 않습니다. 이름이 `.html`로 끝나지 않는 파일에 원격이 `text/html`로 답하면(디렉터리 목록이나 오류 페이지) 저장하지 않습니다. 캐시에 없던 파일이면 404로 처리하며 negative cache에 기록합니다. 이때 서버 로그에 `remote answered with a web page, taken as not found`가 남으니, 원격 서버가 아티팩트를 `text/html`로 잘못 내주는지 이 줄로 확인하세요. 이미 캐시된 파일(만료된 `maven-metadata.xml` 등)을 다시 확인할 때 이런 답이 오면 원격 장애(점검 페이지나 로그인 페이지)로 보고, 원격에 접속할 수 없을 때처럼 캐시된 사본을 그대로 줍니다. 이때는 서버 로그에 `remote fetch failed`와 `remote answered with a web page`가 남습니다. 이전 버전이 캐시한 디렉터리 목록과 IDE 인덱스(`.index/`)는 이제 제공하지 않지만(404) Browse에는 남아 있습니다. 해는 없으며, 지우려면 그 proxy를 대상으로 `repository.rebuild-metadata` 작업을 한 번 실행하세요(업그레이드 후 proxy마다 한 번 돌리기를 권장합니다. "예약 작업" 참고). 이 작업은 proxy가 더는 받지 않는 경로(Maven 파일이 아닌 경로)의 캐시만 지우고, Maven 파일 경로의 캐시는 `text/html`이어도 남깁니다. 원격이 형식을 잘못 표시한 진짜 아티팩트일 수 있기 때문입니다. 작업 로그에 지운 경로가 처음 20개까지 남고, 지운 캐시의 blob은 다음 `blobstore.compact` 작업이 회수합니다.
 - group은 `.meta/prefixes.txt`에 404로 답합니다(멤버의 접두사 목록을 그대로 내주면 다른 멤버의 아티팩트가 없다고 오해하기 때문입니다). 병합한 메타데이터의 `Last-Modified`는 멤버가 오프라인이 되어 내용이 바뀌어도 뒤로 가지 않고 앞으로만 움직입니다.
 - 업로드 경로의 이름에 `?`, `#`, `;`, 제어 문자(NUL 포함)나 UTF-8이 아닌 바이트(직접 만든 요청의 `%E9` 같은)가 있으면 400으로 거부합니다(조회는 막지 않으므로 이미 있는 파일은 계속 받을 수 있습니다). release 정책 저장소는 timestamp가 붙은 SNAPSHOT 버전(`1.4-20260101.000000-1`)도 400으로 거부합니다.
 
@@ -700,7 +717,7 @@ npm login --registry http://localhost:8081/repository/npm-all/
 ```
 
 `npm publish`는 그룹의 `writeMember`(npm-hosted)에 저장됩니다. 같은 버전을 다시 publish하면 거부됩니다(403).
-`npm install`, `npm dist-tag`, `npm deprecate`, `npm unpublish`, `npm whoami`, `npm logout`(그 토큰을 폐기)을 지원하며, `npm search`와 `npm audit`(501)은 지원하지 않습니다.
+`npm install`, `npm dist-tag`, `npm deprecate`, `npm unpublish`, `npm whoami`, `npm logout`(그 토큰을 폐기)을 지원하며, `npm search`(404)와 `npm audit`(501)은 지원하지 않습니다.
 `npm ping`과 `npm audit`도 저장소 읽기 권한이 필요합니다(익명 읽기가 꺼져 있으면 토큰 필요). `npm login`은 토큰 없이 됩니다. 헬스 체크에는 `npm ping` 대신 인증 없이 200을 주는 `GET /service/rest/v1/status`를 쓰세요.
 새 버전은 SemVer 2.0 형식(`1.2.3`, `1.2.3-beta.1`)이어야 하고 빌드 메타데이터(`3.0.0+a`처럼 `+…`)는 붙일 수 없습니다(400). npm은 `+…`를 무시하므로 `3.0.0`과 같은 버전이 둘이 되어 `npm install X@3.0.0`이 실패하기 때문입니다. dist-tag 이름은 버전이나 범위처럼 보이면(`1.0.0`, `^1`, `1.x`) 거부됩니다.
 publish는 저장한 tarball도 검사합니다. gzip으로 압축한 tar여야 하고, 맨 위 디렉터리 바로 아래에 일반 파일 `package.json`이 하나만 있어야 하며, 그 `name`과 `version`이 publish 문서와 같아야 합니다. npm은 압축을 풀 때 경로의 첫 요소를 떼므로 맨 위 디렉터리 이름은 `npm pack`이 쓰는 `package/`가 아니어도 됩니다. `version`은 npm이 publish할 때처럼 앞의 `v`·`=`와 빌드 메타데이터(`+…`)를 뗀 값으로도 비교하므로, `package.json`에 `1.2.3+ci.5`처럼 적은 패키지도 `npm publish`로 올라갑니다. publish 문서의 새 버전마다 `versions.<버전>.name`도 패키지 이름과 같아야 합니다. 빈 파일, gzip이나 tar가 아닌 파일, `package.json`이 없거나 둘 이상인 tarball, `package.json`이 1 MiB를 넘는 tarball은 400입니다. 압축을 푼 크기는 publish 문서 하나에 든 새 tarball을 모두 합쳐 1 GiB까지만 읽고, 넘으면 400(`more than 1073741824 bytes uncompressed in this publish`)입니다. `npm publish`는 문서 하나에 버전 하나를 보내므로 tarball 하나가 1 GiB까지입니다. 버전 형식, `versions.<버전>.name`, shasum·integrity는 tarball을 읽기 전에 검사합니다. 처음 publish하는 패키지 이름은 npm이 새 패키지에 요구하는 대로 소문자여야 하고 `node_modules`, `favicon.ico`는 쓸 수 없습니다(400). 점(`.`)이나 밑줄(`_`)로 시작하는 이름, 214자를 넘는 이름, URL에 그대로 쓸 수 없는 문자가 든 이름은 이전부터 400입니다. 다만 npm처럼 scope 이름은 scope나 패키지 부분이 밑줄로 시작해도 되므로, `@acme/_internal` 같은 패키지도 publish할 수 있고 proxy와 group으로 받을 수 있습니다. scope나 패키지 부분이 점으로 시작하는 이름(`@acme/.x`)은 계속 400입니다. 이미 저장된 패키지는 대문자 이름이어도(예전 빌드에서 올린 경우) 새 버전을 계속 publish할 수 있고, `JSONStream`처럼 예전 규칙으로 만든 공개 패키지도 proxy와 group으로 그대로 받을 수 있습니다.
@@ -818,7 +835,7 @@ cargo publish --registry commandcenter
 publish는 `.crate`를 검사합니다. gzip으로 압축한 tar여야 하고, 모든 항목이 `<이름>-<버전>/` 아래에 있어야 하며(절대 경로와 `..` 불가), 링크나 sparse 항목은 받지 않습니다. `<이름>-<버전>/Cargo.toml`(1 MiB 이하)이 있어야 하고, 그 `[package]` 표의 `name`과 `version`이 publish 메타데이터와 대소문자까지 같아야 합니다. 두 값은 한 줄 문자열이어야 하므로 `version.workspace = true` 같은 workspace 상속이 남아 있으면 거부합니다(`cargo publish`는 실제 값으로 바꿔 써서 올리므로 해당하지 않습니다). 위반하면 모두 400입니다. 저장된 crate는 `crates/<이름>/<버전>.crate` 경로로도 받을 수 있습니다(UI와 API가 이 주소를 알려 줍니다).
 publish 메타데이터 중 인덱스에 그대로 들어가는 의존성 항목도 검사해, cargo가 읽지 못하는 줄이 인덱스에 남지 않게 합니다. 의존성 이름과 `explicit_name_in_toml`(영문자나 `_`로 시작하고 영문자·숫자·`-`·`_`만, 64자 이하), `version_req`(cargo의 semver 요구 조건: `^1.2`, `~1`, `>=1, <2`, `=1.0.0-rc.1`, `1.*`, `*` 등), `kind`(`normal`, `dev`, `build`), `target`(`cfg(...)` 식이나 `x86_64-unknown-linux-gnu` 같은 타깃 이름), `registry`(절대 URL)가 맞지 않으면 400입니다. crates.io와 달리 `*` 요구 조건과 다른 레지스트리의 의존성은 허용합니다.
 Windows 장치 이름(`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`)과 표준 라이브러리 이름(`std`, `core`, `alloc`, `proc_macro`, `test`)으로는 새 crate를 만들 수 없습니다(400, 대소문자와 `-`/`_`는 구분하지 않음). 이미 그 이름으로 올라가 있는 crate는 crates.io처럼 계속 새 버전을 올릴 수 있습니다.
-crate 이름은 올린 표기(대소문자 포함) 그대로 인덱스, 웹 UI(검색 결과와 컴포넌트·asset 화면의 `cargo add` 예시), 패키지 API(`/-/api/repositories/<저장소>/packages`)와 활동 이벤트에 나옵니다. cargo는 의존성 이름을 대소문자까지 맞춰 찾기 때문입니다. 저장 경로(`crates/<이름>/<버전>.crate`)는 소문자이고, 인덱스·다운로드·yank·패키지 API 조회는 대소문자를 가리지 않습니다. proxy에 캐시된 crate는 캐시 경로의 소문자 이름으로 나옵니다.
+crate 이름은 올린 표기(대소문자 포함) 그대로 인덱스, 웹 UI(검색 결과와 컴포넌트·asset 화면의 `cargo add` 예시), 패키지 API(`/-/api/repositories/<저장소>/packages`)와 활동 이벤트에 나옵니다. cargo는 의존성 이름을 대소문자까지 맞춰 찾기 때문입니다. 저장 경로(`crates/<이름>/<버전>.crate`)는 소문자이고, 인덱스·다운로드·yank·패키지 API 조회는 대소문자를 가리지 않습니다. proxy에 캐시된 crate도 웹 UI에는 캐시해 둔 인덱스 파일에서 읽은 올린 표기로 나오고, 인덱스 파일이 캐시에 없으면 소문자 이름으로 나옵니다("컴포넌트는 파생 값" 참고). 패키지 API는 packages 테이블을 읽으므로 proxy의 crate는 돌려주지 않습니다.
 그룹 인덱스는 멤버 순서상 그 crate를 처음 가진 멤버의 인덱스를 그대로 냅니다(멤버끼리 합치지 않으므로 hosted를 proxy보다 앞에 두세요). 멤버가 "없음"이 아닌 오류를 내면 다음 멤버로 넘어가지 않고 5xx로 답합니다. 건너뛰면 오래된 버전이 조용히 선택될 수 있기 때문입니다.
 인덱스 응답에는 hosted, proxy, group 모두 `ETag`가 붙고, 맞는 `If-None-Match`에는 304로 답합니다. proxy의 ETag는 캐시한 원격 인덱스 파일의 내용을, group의 ETag는 응답한 멤버와 그 멤버의 ETag를 따르므로, 내용이 바뀌거나 다른 멤버가 응답하게 되면 달라집니다. `Last-Modified`는 보내지 않고 `If-Modified-Since`는 무시합니다. yank는 올린 시각을 바꾸지 않고 group은 응답하는 멤버가 바뀔 수 있어, 시각으로 비교하면 바뀐 인덱스에 304가 나갈 수 있기 때문입니다. cargo는 `ETag`가 있으면 그것만 씁니다.
 
@@ -836,6 +853,7 @@ crate 이름은 올린 표기(대소문자 포함) 그대로 인덱스, 웹 UI(�
 | API 토큰 발급 | `docker compose exec commandcenter commandcenter token create -user ci` |
 | 비밀번호 해시(첫 가져오기용) | `docker run --rm -i commandcenter:latest hash-password` |
 | 관리자 비상 복구 | `docker compose exec -T commandcenter commandcenter user reset-password -user admin -admin`(서버가 멈춰 있으면 `docker compose run --rm -T commandcenter user reset-password -user admin -admin`) |
+| 비밀값 키 교체 | 서버를 멈추고 `docker compose run --rm -v "${PWD}/new.key:/run/new.key:ro" commandcenter secret-key rotate -new-key-file /run/new.key`, 그다음 키 설정을 새 키로 바꿔 `docker compose up -d`("저장된 비밀값 암호화"의 키 교체 참고) |
 | 버전 확인 | `docker compose exec commandcenter commandcenter version` (릴리스 이미지·바이너리는 태그 이름(예: `v1.2.3`), 직접 빌드한 이미지는 빌드 때의 `COMMANDCENTER_VERSION`, 지정하지 않았으면 `dev`) |
 
 ### 로그
@@ -884,7 +902,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 |---|---|---|
 | `blobstore.compact` | 쓰이지 않는 blob과 1시간 넘은 임시 파일 정리(`commandcenter gc`와 같음) | `blobStore`(선택, 한 store만. 비우면 모든 store. 없는 이름은 만들 때 400) |
 | `repository.cleanup` | 정책이 연결된 저장소를 정리 | `repos`(비우면 정책이 있는 모든 저장소) |
-| `repository.rebuild-metadata` | 모든 GA의 `maven-metadata.xml`을 에셋에서 다시 만듦 | `repo`(Maven hosted만) |
+| `repository.rebuild-metadata` | hosted: 모든 GA와 SNAPSHOT 버전의 `maven-metadata.xml`을 에셋에서 다시 만들고, 아티팩트가 없는 GA의 문서에서 버전을 지움(`<plugins>`는 남김). proxy: 이전 버전이 캐시한, Maven 파일이 아닌 경로의 캐시(디렉터리 목록, `.index/`)를 지움 | `repo`(Maven hosted 또는 proxy) |
 
 첫 시작 때 작업이 하나도 없으면 `compact-blobstore`(`blobstore.compact`, `daily:03:00`, 사용)를 만듭니다. 이 기본 작업은 지울 수 없습니다(`DELETE`는 409). 지우면 재시작해도 다시 생기지 않아 compaction이 조용히 멈추기 때문이며, 끄고 싶으면 "사용"을 끄세요.
 
@@ -905,7 +923,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 - **중지**: 실행 중인 작업은 상세 화면의 "중지"(또는 `POST /-/api/tasks/{id}/stop`, 관리자)로 멈춥니다. 실행 중이면 202, 아니면 409이며, 작업은 진행 중인 단계(cleanup은 지우던 컴포넌트)를 마치고 멈춰 결과가 **Stopped**로 남습니다.
 - 실행 하나는 최대 6시간이며 넘으면 취소됩니다. 실행 기록을 저장하지 못하면(DB 오류) 다음 예정 시각을 메모리에서 넘겨 틱마다 다시 실행하지 않습니다.
 - 실행 로그는 최대 200줄·64 KiB이고 넘치면 **앞부분과 뒷부분**만 남기고 가운데를 생략했다는 줄을 넣습니다. 그래서 마지막 줄(성공·실패)은 항상 보입니다. 로그는 시스템 로그에도 함께 기록됩니다.
-- 기존 `POST /-/api/gc`는 compact 실행의 별칭으로 남아 있습니다.
+- 기존 `POST /-/api/gc`는 compact 실행의 별칭으로 남아 있습니다. "지금 실행"과 달리 실행이 끝난 뒤 200으로 응답하며(실패하면 500), `removed`와 `bytes`는 지운 blob의 수와 바이트 수입니다(작업의 `lastRemoved`·`lastBytes`와 같음).
 
 ### 로그·활동
 
@@ -918,6 +936,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
   | `upload` | hosted 쓰기 성공(Maven 주 아티팩트, npm publish, PyPI 업로드, Go zip, Cargo publish) |
   | `delete` | 에셋·컴포넌트 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API, Cleanup). npm·PyPI·Go·Cargo는 버전마다 한 건이며 지운 사람과 파일 수(`assets=N`)가 남습니다 |
   | `repo.create` / `repo.update` / `repo.delete` | 저장소 변경 |
+  | `role.create` / `role.update` / `role.delete` | 역할 변경. 저장소를 지워 그 저장소 권한이 빠진 역할도 `role.update`(저장소 이름, `removed repo:<이름>`)로 남습니다 |
   | `token.create` / `token.revoke` | API 토큰 발급·폐기 |
   | `task.run` | 작업 실행(결과와 요약) |
   | `cleanup` | 정리 결과(개수, 용량) |
@@ -990,6 +1009,14 @@ Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이�
 - **운영에서는 `1.2.3`처럼 정확한 버전을 고정하세요.** 새 버전이 DB를 바꾼 뒤에는 이전 버전으로 되돌리기 어려우므로 `latest`나 `1` 같은 움직이는 태그로 의도치 않게 올라가면 안 됩니다.
 - compose로 쓰려면 `docker-compose.yml`에서 `build:` 블록을 지우고 `image: ghcr.io/sungjinseo/commandcenter:1.2.3`으로 바꾼 뒤 `docker compose pull && docker compose up -d`를 실행합니다. 이 가이드의 다른 명령에 나오는 `commandcenter:latest`도 이 이미지 이름으로 바꿔 쓰세요.
 - **SBOM과 provenance**: 이미지에 SPDX SBOM과 빌드 provenance 증명이 함께 올라갑니다. `docker buildx imagetools inspect ghcr.io/sungjinseo/commandcenter:1.2.3 --format '{{ json .SBOM }}'`(provenance는 `.Provenance`)로 확인합니다.
+- **이미지 서명**: 이미지는 cosign으로 키 없이(keyless) 서명합니다. 서명 인증서에는 서명한 워크플로와 태그(`https://github.com/sungjinseo/commandcenter/.github/workflows/release.yml@refs/tags/v1.2.3`)가 적히고, 서명은 Sigstore의 공개 투명성 로그에 남습니다. 서명은 태그가 가리키는 이미지(여러 플랫폼을 묶은 인덱스)의 digest에 붙고, 플랫폼별 이미지의 digest에는 붙지 않습니다. cosign 3 이상으로 다음처럼 확인합니다.
+
+  ```bash
+  cosign verify ghcr.io/sungjinseo/commandcenter:1.2.3 \
+    --certificate-identity https://github.com/sungjinseo/commandcenter/.github/workflows/release.yml@refs/tags/v1.2.3 \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  ```
+
 - **바이너리**: GitHub Release에 `commandcenter-v1.2.3-linux-amd64.tar.gz`, `commandcenter-v1.2.3-linux-arm64.tar.gz`(이미지 안의 바이너리와 같은 파일, 라이선스·고지 파일 포함)와 `SHA256SUMS`가 올라갑니다. 받은 뒤 `sha256sum -c --ignore-missing SHA256SUMS`로 확인하세요.
 
 ### 업그레이드
@@ -1004,7 +1031,7 @@ Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이�
 
    릴리스 이미지를 쓴다면 `docker-compose.yml`의 `image:` 태그를 새 버전으로 바꾸고 `docker compose pull && docker compose up -d`를 실행합니다("릴리스 이미지와 바이너리" 참고). 이전 컨테이너는 진행 중인 요청을 마친 뒤 끝납니다("정상 종료" 참고).
 
-   데이터 볼륨은 그대로 유지되고, 새 버전은 처음 시작할 때 `meta.db`를 필요한 만큼 새 구조로 바꿉니다.
+   데이터 볼륨은 그대로 유지되고, 새 버전은 처음 시작할 때 `meta.db`를 필요한 만큼 새 구조로 바꿉니다. 구조 변경과 DB 구조 버전 기록은 한 트랜잭션으로 하므로, 도중에 중단되어도 `meta.db`는 이전 상태로 남고 다음 시작 때 다시 바꿉니다.
 4. 시작 로그에 ERROR가 없는지 보고, 로그인·다운로드·업로드를 한 번씩 확인합니다. UI 세션은 재시작으로 끊기고 API 토큰은 유지됩니다.
 
 **다운그레이드는 지원하지 않습니다.** 이 버전부터 `meta.db`에 DB 구조 버전(SQLite `PRAGMA user_version`, 지금은 1)을 기록하고, 자기보다 새 버전이 기록한 `meta.db`로는 시작하지 않습니다. 이때 시작 오류는 `/data/meta.db was written by a newer version of Command Center (database schema 2; this version supports up to 1) …`처럼 두 구조 버전을 알려 주며, `meta.db`는 건드리지 않습니다. 되돌려야 하면 업그레이드 전에 받은 백업을 이전 버전의 이미지와 함께 복원하세요("백업과 복원" 참고). 백업 뒤에 올라온 패키지와 바뀐 설정은 사라집니다.
@@ -1074,7 +1101,7 @@ docker compose start
 - **`baseURL` 불일치**: npm/cargo가 "다운로드 실패", 엉뚱한 호스트로 접속, `ECONNREFUSED`를 내면 응답 안의 URL이 클라이언트가 접속하는 주소와 다른 것입니다. `baseURL`을 클라이언트가 쓰는 주소(스킴, 호스트, 포트)와 똑같이 맞추고 `docker compose restart` 하세요. pip는 PyPI 파일 링크가 호스트 없는 경로라서 해당하지 않습니다(`baseURL`의 경로 부분만 맞으면 됩니다).
 - **npm 401**: `~/.npmrc`의 토큰이 서버에 없으면(예: 볼륨을 다시 만든 뒤) `anonymousRead`가 켜져 있어도 모든 요청이 401입니다. `npm login`을 다시 하거나 `_authToken` 줄을 지우세요.
 - **`meta.db was written by a newer version of Command Center`**: 더 새 버전이 쓴 `meta.db`로 이전 버전을 띄웠습니다. 새 버전으로 다시 시작하거나, 업그레이드 전에 받은 백업을 지금 버전과 함께 복원하세요("업그레이드" 참고).
-- **`it is encrypted, and no secret key is set` / `it was encrypted with another key`**: 비밀값 키가 없거나 다릅니다. 암호화할 때 쓴 키를 `COMMANDCENTER_SECRET_KEY`나 `secretKeyFile`로 주세요("저장된 비밀값 암호화" 참고).
+- **`it is encrypted, and no secret key is set` / `it was encrypted with another key`**: 비밀값 키가 없거나 다릅니다. 암호화할 때 쓴 키를 `COMMANDCENTER_SECRET_KEY`나 `secretKeyFile`로 주세요. `secret-key rotate`로 키를 바꿨다면 새 키이고, 교체 전에 받은 백업을 복원했다면 이전 키입니다("저장된 비밀값 암호화" 참고).
 - **`508 proxy loop detected`**: proxy 저장소의 `remote`가 결국 같은 Command Center 인스턴스를 가리키면(예: 자기 자신의 그룹) 요청이 돌고 돌지 않도록 서버가 508로 거절합니다. 요청마다 `X-Command-Center-Hop` 헤더에 인스턴스 ID를 덧붙여 알아내므로, 서로 다른 두 인스턴스가 이어지는 것(A가 B를 proxy)은 막지 않습니다. `remote`를 고치세요.
 - **`431 Request Header Fields Too Large`**: 요청 헤더가 16 KiB를 넘었습니다. 브라우저라면 같은 사이트(상위 도메인 포함)에 쌓인 쿠키가 큰 경우가 많으니 쿠키를 지워 보세요.
 - **웹 UI의 저장·업로드가 403 `cross-origin request detected…`**: 브라우저의 `Origin`이 서버가 받은 `Host`와도, `baseURL`의 출처(스킴, 호스트, 포트)와도 다릅니다. 보통 `Host`를 바꾸는 프록시 뒤에서 평문 HTTP로 접속할 때이니, `baseURL`을 브라우저 주소창의 주소와 똑같이 맞추세요("TLS와 리버스 프록시" 참고). `baseURL`에 기본 포트(`:80`, `:443`)를 적으면 브라우저의 `Origin`과 맞지 않으니 빼세요.
