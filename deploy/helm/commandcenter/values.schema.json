@@ -41,7 +41,8 @@
             "npm",
             "pypi",
             "go",
-            "cargo"
+            "cargo",
+            "docker"
           ]
         },
         "type": {
