@@ -11,11 +11,13 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+
+	"commandcenter/internal/meta/metatest"
 )
 
 func openTest(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,18 +135,33 @@ func TestPruneNegative(t *testing.T) {
 
 func userVersion(t *testing.T, db *DB) int {
 	t.Helper()
-	var v int
-	if err := db.sql.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+	v, err := schemaVersionOf(ctx, db.sql)
+	if err != nil {
 		t.Fatal(err)
 	}
 	return v
+}
+
+// rawOpen opens target with the bare driver, without Open's upgrade.
+func rawOpen(t *testing.T, target string) *pool {
+	t.Helper()
+	driver := "sqlite"
+	if IsPostgresURL(target) {
+		driver = "pgx"
+	}
+	db, err := sql.Open(driver, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return &pool{db: db, pg: driver == "pgx"}
 }
 
 // QA N-30: Open stamps the schema version on new and older (version 0)
 // databases, and refuses one a newer build wrote, naming both versions and
 // the way back, without changing it.
 func TestOpenSchemaVersion(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "meta.db")
+	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
 	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -152,7 +169,7 @@ func TestOpenSchemaVersion(t *testing.T) {
 	if v := userVersion(t, db); v != schemaVersion {
 		t.Fatalf("new database: user_version %d, want %d", v, schemaVersion)
 	}
-	if _, err := db.sql.Exec("PRAGMA user_version = 0"); err != nil { // as builds before the guard left it
+	if err := stampSchemaVersion(ctx, db.sql, 0); err != nil { // as builds before the guard left it
 		t.Fatal(err)
 	}
 	db.Close()
@@ -162,7 +179,7 @@ func TestOpenSchemaVersion(t *testing.T) {
 	if v := userVersion(t, db); v != schemaVersion {
 		t.Fatalf("older database: user_version %d, want %d", v, schemaVersion)
 	}
-	if _, err := db.sql.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion+1)); err != nil {
+	if err := stampSchemaVersion(ctx, db.sql, schemaVersion+1); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -175,13 +192,7 @@ func TestOpenSchemaVersion(t *testing.T) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
 	}
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	var v int
-	if err := raw.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != schemaVersion+1 {
+	if v, err := schemaVersionOf(ctx, rawOpen(t, path)); err != nil || v != schemaVersion+1 {
 		t.Fatalf("refused database: user_version %d (err %v), want it untouched at %d", v, err, schemaVersion+1)
 	}
 }
@@ -193,6 +204,9 @@ func TestOpenSchemaVersion(t *testing.T) {
 // again instead of trusting a half-migrated database. That next start
 // commits once, so the stamp cannot lag the migration.
 func TestOpenMigratesInOneTransaction(t *testing.T) {
+	if metatest.Postgres() {
+		t.Skip("SQLite's migration; TestOpenPostgresInOneTransaction is PostgreSQL's")
+	}
 	path := filepath.Join(t.TempDir(), "meta.db")
 	raw, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -273,7 +287,7 @@ func TestTokenUseIsThrottled(t *testing.T) {
 	db.CreateToken(ctx, "id", "ci", "h", time.Now())
 	lastUsed := func() int64 {
 		var v int64
-		db.sql.QueryRow(`SELECT last_used_at FROM tokens WHERE hash = 'h'`).Scan(&v)
+		db.sql.QueryRowContext(ctx, `SELECT last_used_at FROM tokens WHERE hash = 'h'`).Scan(&v)
 		return v
 	}
 	db.TouchToken(ctx, "h")
@@ -281,13 +295,13 @@ func TestTokenUseIsThrottled(t *testing.T) {
 	if first == 0 {
 		t.Fatal("first use must be recorded")
 	}
-	db.sql.Exec(`UPDATE tokens SET last_used_at = ? WHERE hash = 'h'`, time.Now().Add(-10*time.Second).UnixMilli())
+	db.sql.ExecContext(ctx, `UPDATE tokens SET last_used_at = ? WHERE hash = 'h'`, time.Now().Add(-10*time.Second).UnixMilli())
 	recent := lastUsed()
 	db.TouchToken(ctx, "h")
 	if lastUsed() != recent {
 		t.Fatal("a use within a minute must not write again")
 	}
-	db.sql.Exec(`UPDATE tokens SET last_used_at = ? WHERE hash = 'h'`, time.Now().Add(-2*time.Minute).UnixMilli())
+	db.sql.ExecContext(ctx, `UPDATE tokens SET last_used_at = ? WHERE hash = 'h'`, time.Now().Add(-2*time.Minute).UnixMilli())
 	old := lastUsed()
 	db.TouchToken(ctx, "h")
 	if lastUsed() == old {
@@ -300,7 +314,7 @@ func TestTouchTokenIsConditional(t *testing.T) {
 	db.CreateToken(ctx, "id", "ci", "h", time.Now())
 	lastUsed := func() int64 {
 		var v int64
-		db.sql.QueryRow(`SELECT last_used_at FROM tokens WHERE hash = 'h'`).Scan(&v)
+		db.sql.QueryRowContext(ctx, `SELECT last_used_at FROM tokens WHERE hash = 'h'`).Scan(&v)
 		return v
 	}
 	if _, _, err := db.TokenUser(ctx, "h"); err != nil || lastUsed() != 0 {
@@ -311,13 +325,13 @@ func TestTouchTokenIsConditional(t *testing.T) {
 		t.Fatal("first use must be recorded")
 	}
 	recent := time.Now().Add(-10 * time.Second).UnixMilli()
-	db.sql.Exec(`UPDATE tokens SET last_used_at = ? WHERE hash = 'h'`, recent)
+	db.sql.ExecContext(ctx, `UPDATE tokens SET last_used_at = ? WHERE hash = 'h'`, recent)
 	db.TouchToken(ctx, "h")
 	if lastUsed() != recent {
 		t.Fatal("a use within a minute must not write again")
 	}
 	old := time.Now().Add(-2 * time.Minute).UnixMilli()
-	db.sql.Exec(`UPDATE tokens SET last_used_at = ? WHERE hash = 'h'`, old)
+	db.sql.ExecContext(ctx, `UPDATE tokens SET last_used_at = ? WHERE hash = 'h'`, old)
 	db.TouchToken(ctx, "h")
 	if lastUsed() == old {
 		t.Fatal("a use after a minute must be recorded")

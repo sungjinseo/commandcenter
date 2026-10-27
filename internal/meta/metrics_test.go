@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"commandcenter/internal/meta/metatest"
 )
 
 func TestFlushDownloadsAddsAndTakesMax(t *testing.T) {
@@ -87,6 +89,9 @@ func TestRequestStatsBucketsAndPrune(t *testing.T) {
 }
 
 func TestMigrationIsIdempotentOnOldDB(t *testing.T) {
+	if metatest.Postgres() {
+		t.Skip("SQLite's migration: PostgreSQL support starts at schema 1")
+	}
 	path := filepath.Join(t.TempDir(), "meta.db")
 	old, err := sql.Open("sqlite", "file:"+path)
 	if err != nil {
@@ -123,11 +128,20 @@ func TestFlushRollsBackWholeBatchOnError(t *testing.T) {
 		}
 	}
 	// A trigger forces the second row of each batch to fail.
-	for _, ddl := range []string{
+	ddls := []string{
 		`CREATE TRIGGER fail_dl BEFORE UPDATE ON assets WHEN NEW.path = 'bad' BEGIN SELECT RAISE(ABORT, 'forced'); END`,
 		`CREATE TRIGGER fail_rq BEFORE INSERT ON request_stats WHEN NEW.repo = 'bad' BEGIN SELECT RAISE(ABORT, 'forced'); END`,
-	} {
-		if _, err := db.sql.Exec(ddl); err != nil {
+	}
+	if db.sql.pg {
+		ddls = []string{
+			`CREATE FUNCTION fail_dl() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.path = 'bad' THEN RAISE 'forced'; END IF; RETURN NEW; END $$`,
+			`CREATE TRIGGER fail_dl BEFORE UPDATE ON assets FOR EACH ROW EXECUTE FUNCTION fail_dl()`,
+			`CREATE FUNCTION fail_rq() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.repo = 'bad' THEN RAISE 'forced'; END IF; RETURN NEW; END $$`,
+			`CREATE TRIGGER fail_rq BEFORE INSERT ON request_stats FOR EACH ROW EXECUTE FUNCTION fail_rq()`,
+		}
+	}
+	for _, ddl := range ddls {
+		if _, err := db.sql.ExecContext(ctx, ddl); err != nil {
 			t.Fatal(err)
 		}
 	}

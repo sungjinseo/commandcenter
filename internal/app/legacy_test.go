@@ -15,6 +15,7 @@ import (
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 )
 
@@ -22,7 +23,7 @@ import (
 // (final review C1): it runs between two starts on the same data directory.
 func storeLegacy(t *testing.T, cfg *config.Config, edit func(*config.Repository)) {
 	t.Helper()
-	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(cfg.DataDir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

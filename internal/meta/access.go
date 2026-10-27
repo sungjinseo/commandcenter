@@ -133,7 +133,7 @@ func (d *DB) DeleteUser(ctx context.Context, id string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrNotFound
 		}
-		_, err = tx.q.ExecContext(ctx, `DELETE FROM tokens WHERE user = ?`, id)
+		_, err = tx.q.ExecContext(ctx, `DELETE FROM tokens WHERE "user" = ?`, id)
 		return err
 	})
 }
@@ -174,11 +174,13 @@ func insertUser(ctx context.Context, q querier, u User) error {
 
 // checkFreeID returns ErrExists when table (users or roles) has id, compared
 // case-insensitively: login and role lookups are exact, so "Admin" next to
-// "admin" would be a look-alike. Ids are ASCII, so NOCASE folds them fully.
-// Rows that already differ only in case are left alone.
+// "admin" would be a look-alike. Ids are ASCII, so NOCASE folds them fully
+// (and lower() under the "C" collation on PostgreSQL, which folds ASCII as
+// NOCASE does). Rows that already differ only in case are left alone.
 func checkFreeID(ctx context.Context, q querier, table, id string) error {
 	var got string
-	err := q.QueryRowContext(ctx, `SELECT id FROM `+table+` WHERE id = ? COLLATE NOCASE LIMIT 1`, id).Scan(&got)
+	err := q.QueryRowContext(ctx, pg(q, `SELECT id FROM `+table+` WHERE id = ? COLLATE NOCASE LIMIT 1`,
+		`SELECT id FROM `+table+` WHERE lower(id) = lower(? COLLATE "C") LIMIT 1`), id).Scan(&got)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
@@ -268,7 +270,8 @@ func (d *DB) UpdateRole(ctx context.Context, r Role) error {
 func (d *DB) DeleteRole(ctx context.Context, id string) error {
 	return d.Tx(ctx, func(tx *Tx) error {
 		var one int
-		err := tx.q.QueryRowContext(ctx, `SELECT 1 FROM users, json_each(users.roles) WHERE json_each.value = ? LIMIT 1`, id).Scan(&one)
+		err := tx.q.QueryRowContext(ctx, pg(tx.q, `SELECT 1 FROM users, json_each(users.roles) WHERE json_each.value = ? LIMIT 1`,
+			`SELECT 1 FROM users, json_array_elements_text(users.roles::json) AS r(value) WHERE r.value = ? LIMIT 1`), id).Scan(&one)
 		if err == nil {
 			return ErrInUse
 		}

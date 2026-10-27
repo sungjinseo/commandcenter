@@ -17,6 +17,7 @@ import (
 	"commandcenter/internal/config"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 )
 
 func TestAccessImportedOnceThenConfigIgnored(t *testing.T) {
@@ -35,6 +36,7 @@ func TestAccessImportedOnceThenConfigIgnored(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		cfg.Database.URL = metatest.URL(t, cfg.DataDir)
 		return cfg
 	}
 	start := func(cfg *config.Config) (*App, string) {
@@ -106,6 +108,7 @@ func TestInvalidUsersSectionAfterImport(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load must not fail on the users section: %v", err)
 		}
+		cfg.Database.URL = metatest.URL(t, cfg.DataDir)
 		return cfg
 	}
 	const invalid = "users: [{name: u, passwordHash: x, roles: [nope]}]\n"
@@ -147,6 +150,7 @@ func TestStaleSettingsKeysAfterImport(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load must not fail on import-only settings keys: %v", err)
 		}
+		cfg.Database.URL = metatest.URL(t, cfg.DataDir)
 		return cfg
 	}
 	// Before the import an invalid baseURL or maxUploadMiB still stops startup.
@@ -303,7 +307,7 @@ func TestServeAppliesOutOfProcessAccessChanges(t *testing.T) {
 	}()
 
 	// A second handle on the database stands in for the CLI process.
-	other, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	other, err := meta.Open(metatest.Target(t, filepath.Join(cfg.DataDir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

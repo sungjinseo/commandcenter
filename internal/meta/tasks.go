@@ -133,7 +133,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?)`, t.ID, t.Name, t.Type, t.Schedule, t.Params, boolIn
 func (d *DB) CreateTask(ctx context.Context, t Task) error {
 	return d.Tx(ctx, func(tx *Tx) error {
 		var n, exists int
-		if err := tx.q.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(id = ?), 0) FROM tasks`, t.ID).Scan(&n, &exists); err != nil {
+		if err := tx.q.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE WHEN id = ? THEN 1 ELSE 0 END), 0) FROM tasks`, t.ID).Scan(&n, &exists); err != nil {
 			return err
 		}
 		switch {

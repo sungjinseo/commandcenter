@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/meta/metatest"
 )
 
 func rawRow(t *testing.T, db *DB, query, key string) string {
@@ -72,7 +73,7 @@ func checkSecretsRead(t *testing.T, db *DB) {
 // read; a database without the key, or with another one, cannot read them,
 // and the errors never hold a secret.
 func TestSecretsSealedAtRest(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "meta.db")
+	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
 	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +168,7 @@ func TestSealRefusesSealedLookingPlainText(t *testing.T) {
 // does not open stops it before anything is written, also when it comes
 // after secrets that did open.
 func TestRotateSecretKey(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "meta.db")
+	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
 	open := func(key byte) *DB { // key 0: none
 		t.Helper()
 		db, err := Open(path)

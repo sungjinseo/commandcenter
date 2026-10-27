@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/tasks"
 )
@@ -38,6 +39,7 @@ repositories:
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.Database.URL = metatest.URL(t, cfg.DataDir)
 	return cfg
 }
 
@@ -336,6 +338,7 @@ func TestRepositoriesImportedOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		cfg.Database.URL = metatest.URL(t, cfg.DataDir)
 		return cfg
 	}
 	start := func(cfg *config.Config) (*App, string) {
@@ -394,6 +397,7 @@ func TestInvalidRepositoriesSectionAfterImport(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load must not fail on the repositories section: %v", err)
 		}
+		cfg.Database.URL = metatest.URL(t, cfg.DataDir)
 		return cfg
 	}
 	const invalid = "  - { name: x, format: docker, type: hosted }\n"
@@ -431,6 +435,7 @@ func TestStartupWithStoredRepositoryNamedCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.Database.URL = metatest.URL(t, cfg.DataDir)
 	for i := 0; i < 2; i++ { // the first start imports it, the second loads the stored one
 		a, err := New(cfg, quiet())
 		if err != nil {

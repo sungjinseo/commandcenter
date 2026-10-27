@@ -28,6 +28,7 @@ import (
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/resolve"
@@ -50,7 +51,7 @@ func newMavenServer(t *testing.T) (*httptest.Server, *auth.Sessions) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +181,7 @@ func TestGroupOfOfflineMembersAnswers503(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +247,7 @@ func TestCrossSiteUploadRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

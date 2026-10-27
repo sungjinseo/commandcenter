@@ -12,11 +12,12 @@ import (
 	"unicode/utf8"
 
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 )
 
 func openDB(t *testing.T) *meta.DB {
 	t.Helper()
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

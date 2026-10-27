@@ -33,8 +33,9 @@ func (d *DB) FlushDownloads(ctx context.Context, batch []DownloadDelta) error {
 	}
 	return d.Tx(ctx, func(tx *Tx) error {
 		for _, b := range batch {
-			if _, err := tx.q.ExecContext(ctx, `UPDATE assets SET downloads = downloads + ?, last_downloaded = max(last_downloaded, ?)
-WHERE repo = ? AND path = ?`, b.N, toMs(b.Last), b.Repo, b.Path); err != nil {
+			if _, err := tx.q.ExecContext(ctx, pg(tx.q, `UPDATE assets SET downloads = downloads + ?, last_downloaded = max(last_downloaded, ?)
+WHERE repo = ? AND path = ?`, `UPDATE assets SET downloads = downloads + ?, last_downloaded = GREATEST(last_downloaded, ?)
+WHERE repo = ? AND path = ?`), b.N, toMs(b.Last), b.Repo, b.Path); err != nil {
 				return err
 			}
 		}
@@ -50,7 +51,7 @@ func (d *DB) FlushRequests(ctx context.Context, batch []RequestDelta) error {
 	return d.Tx(ctx, func(tx *Tx) error {
 		for _, b := range batch {
 			if _, err := tx.q.ExecContext(ctx, `INSERT INTO request_stats(hour, repo, requests, bytes) VALUES(?,?,?,?)
-ON CONFLICT(hour, repo) DO UPDATE SET requests = requests + excluded.requests, bytes = bytes + excluded.bytes`,
+ON CONFLICT(hour, repo) DO UPDATE SET requests = request_stats.requests + excluded.requests, bytes = request_stats.bytes + excluded.bytes`,
 				b.Hour, b.Repo, b.Requests, b.Bytes); err != nil {
 				return err
 			}

@@ -13,6 +13,7 @@ import (
 	"commandcenter/internal/blob"
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 )
 
 // orphanApp starts an App whose database already holds a repository "orphan"
@@ -21,7 +22,7 @@ import (
 func orphanApp(t *testing.T) (*App, *bytes.Buffer) {
 	t.Helper()
 	cfg := testConfig(t, "")
-	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(cfg.DataDir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

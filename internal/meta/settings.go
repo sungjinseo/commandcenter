@@ -298,21 +298,21 @@ type AccessData struct {
 // LoadAccess reads users, roles and settings in one read transaction, so a
 // snapshot never mixes states from before and after a concurrent write.
 func (d *DB) LoadAccess(ctx context.Context) (AccessData, error) {
-	// ReadOnly makes the driver issue a plain (deferred) BEGIN instead of the
-	// DSN's BEGIN IMMEDIATE, so a reload does not take the write lock.
-	tx, err := d.sql.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	// A read transaction: one snapshot, and no write lock for a reload.
+	tx, err := d.sql.begin(ctx, false)
 	if err != nil {
 		return AccessData{}, err
 	}
 	defer tx.Rollback()
+	q := txConn{tx: tx, pg: d.sql.pg}
 	var out AccessData
-	if out.Users, err = listUsers(ctx, tx); err != nil {
+	if out.Users, err = listUsers(ctx, q); err != nil {
 		return AccessData{}, fmt.Errorf("load users: %w", err)
 	}
-	if out.Roles, err = listRoles(ctx, tx); err != nil {
+	if out.Roles, err = listRoles(ctx, q); err != nil {
 		return AccessData{}, fmt.Errorf("load roles: %w", err)
 	}
-	if out.Settings, err = loadSettings(ctx, tx); err != nil {
+	if out.Settings, err = loadSettings(ctx, q); err != nil {
 		return AccessData{}, fmt.Errorf("load settings: %w", err)
 	}
 	if err := d.box.openSettings(&out.Settings); err != nil {

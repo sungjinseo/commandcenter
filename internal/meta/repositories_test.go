@@ -9,11 +9,14 @@ import (
 	"time"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/meta/metatest"
 )
 
+// openTestDB opens a new database and returns it with the target that
+// reopens it.
 func openTestDB(t *testing.T) (*DB, string) {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "meta.db")
+	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
 	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)

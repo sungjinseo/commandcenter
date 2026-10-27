@@ -85,9 +85,9 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 	for _, f := range opts {
 		f(&o)
 	}
-	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	db, err := OpenDB(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("open metadata db: %w", err)
+		return nil, err
 	}
 	if err := useSecretKey(cfg, log, db); err != nil {
 		db.Close()
@@ -104,6 +104,41 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// databaseEnv holds the URL of the PostgreSQL metadata database, so that it
+// can come from a Kubernetes Secret; database.url in the config file gives
+// it instead.
+const databaseEnv = "COMMANDCENTER_DATABASE_URL"
+
+// OpenDB opens the metadata database: PostgreSQL at the URL in
+// COMMANDCENTER_DATABASE_URL or database.url, else SQLite at
+// <dataDir>/meta.db. Every command that uses the database opens it here.
+// The URL is never logged or put in an error: it may hold a password.
+func OpenDB(cfg *config.Config) (*meta.DB, error) {
+	url := os.Getenv(databaseEnv)
+	src := databaseEnv
+	switch {
+	case url != "" && cfg.Database.URL != "":
+		return nil, fmt.Errorf("set %s or database.url, not both", databaseEnv)
+	case url == "":
+		url, src = cfg.Database.URL, "database.url"
+	}
+	target := filepath.Join(cfg.DataDir, "meta.db")
+	if url != "" {
+		if !meta.IsPostgresURL(url) {
+			return nil, fmt.Errorf("%s must be a postgres:// or postgresql:// URL", src)
+		}
+		target = url
+	}
+	db, err := meta.Open(target)
+	if err != nil {
+		return nil, fmt.Errorf("open metadata db: %w", err)
+	}
+	if n := cfg.Database.MaxConns; n > 0 {
+		db.SetMaxOpenConns(n)
+	}
+	return db, nil
 }
 
 // secretKeyEnv holds the key that encrypts the stored secrets; secretKeyFile
@@ -190,9 +225,9 @@ func RotateSecretKey(cfg *config.Config, newKeyFile string) (resealed, plain int
 	if err != nil {
 		return 0, 0, err
 	}
-	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	db, err := OpenDB(cfg)
 	if err != nil {
-		return 0, 0, fmt.Errorf("open metadata db: %w", err)
+		return 0, 0, err
 	}
 	defer db.Close()
 	if key != nil {
@@ -578,7 +613,7 @@ func (a *App) Serve(ctx context.Context) error {
 	ln = server.LimitConns(srv, ln, maxConns)
 	errc := make(chan error, 1)
 	go func() {
-		a.log.Info("listening", "addr", a.Config.Listen)
+		a.log.Info("listening", "addr", a.Config.Listen, "database", a.DB.Driver())
 		errc <- srv.Serve(ln)
 	}()
 	select {

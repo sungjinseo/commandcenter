@@ -164,8 +164,8 @@ select[multiple] { height: auto; }
 }
 .brand { padding: 25px 21px 20px; display: flex; gap: 10px; align-items: center; color: inherit; }
 .brand:hover { text-decoration: none; }
-.brandmark { display: grid; place-items: center; width: 34px; height: 37px; color: var(--nav-accent); flex: none; }
-.brandmark svg { width: 33px; height: 36px; }
+.brandmark { display: grid; place-items: center; width: 24px; height: 24px; flex: none; }
+.brandmark img { display: block; width: 100%; height: 100%; }
 .brand strong { display: block; font-size: 13px; line-height: 1.18; letter-spacing: .11em; color: #f0f5fc; font-weight: 650; }
 .brand small { display: block; font-size: 8px; color: #8294af; letter-spacing: .17em; margin-top: 6px; }
 .instance {
@@ -537,7 +537,7 @@ ul.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
 .sysinfo .card-head p { font-family: var(--mono); }
 .sysinfo div.kv > :first-child { font-family: var(--mono); max-width: 50%; overflow-wrap: anywhere; }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
-.login-brand .brandmark { flex: none; }
+.login-brand .brandmark { width: 40px; height: 40px; }
 .login-brand strong { font-size: 12px; letter-spacing: .08em; color: var(--ink-2); }
 .login-brand p { font-size: 10px; margin-top: 3px; }
 .rf-members { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; max-width: 720px; }

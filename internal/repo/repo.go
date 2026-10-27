@@ -161,6 +161,8 @@ func StatusOf(err error) int {
 		return http.StatusBadRequest
 	case errors.Is(err, meta.ErrNotFound), errors.Is(err, blob.ErrNotFound):
 		return http.StatusNotFound
+	case errors.Is(err, meta.ErrInvalidText): // a name PostgreSQL cannot store
+		return http.StatusBadRequest
 	case errors.As(err, &tooBig):
 		return http.StatusRequestEntityTooLarge
 	case errors.Is(err, os.ErrDeadlineExceeded): // the request body stalled (IdleBody)

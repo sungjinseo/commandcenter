@@ -95,6 +95,14 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// Database is the metadata database. Without a URL it is SQLite at
+// <dataDir>/meta.db; COMMANDCENTER_DATABASE_URL may give the URL instead
+// (the app reads it, see app.OpenDB).
+type Database struct {
+	URL      string `yaml:"url"`      // postgres:// or postgresql://; never logged (it may hold a password)
+	MaxConns int    `yaml:"maxConns"` // connection pool size; 0: 4 for SQLite, 10 for PostgreSQL
+}
+
 type Config struct {
 	Listen              string          `yaml:"listen"`
 	BaseURL             string          `yaml:"baseURL"`
@@ -103,6 +111,7 @@ type Config struct {
 	MaxUploadMiB        int             `yaml:"maxUploadMiB"`
 	MetricsFlushSeconds int             `yaml:"metricsFlushSeconds"` // hidden: how often download/request counters are written (default 30)
 	SecretKeyFile       string          `yaml:"secretKeyFile"`       // file holding the key that encrypts stored secrets (or COMMANDCENTER_SECRET_KEY)
+	Database            Database        `yaml:"database"`
 	AnonymousRead       bool            `yaml:"anonymousRead"`
 	Users               []User          `yaml:"users"`
 	Roles               map[string]Role `yaml:"roles"`
@@ -348,6 +357,9 @@ func (c *Config) validate() error {
 	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
 	if c.MetricsFlushSeconds < 1 || c.MetricsFlushSeconds > 3600 {
 		add("metricsFlushSeconds must be between 1 and 3600")
+	}
+	if c.Database.MaxConns < 0 || c.Database.MaxConns > 1000 {
+		add("database.maxConns must be between 1 and 1000 (0: the default)")
 	}
 	// baseURL and maxUploadMiB are import-only (plan 12): a problem is
 	// reported in SettingsErr and only matters before the first import.

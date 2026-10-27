@@ -18,6 +18,7 @@ import (
 	"commandcenter/internal/config"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/repo/repotest"
 )
@@ -53,7 +54,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

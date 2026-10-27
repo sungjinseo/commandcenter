@@ -14,6 +14,7 @@ import (
 	"commandcenter/internal/component"
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/repo/repotest"
 )
@@ -31,7 +32,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

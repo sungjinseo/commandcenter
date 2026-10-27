@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -265,9 +264,9 @@ func resetPassword(ctx context.Context, cfg *config.Config, name, pw string, adm
 	if err != nil {
 		return err
 	}
-	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	db, err := app.OpenDB(cfg)
 	if err != nil {
-		return fmt.Errorf("open metadata db: %w", err)
+		return err
 	}
 	defer db.Close()
 	done, err := db.AccessImported(ctx)

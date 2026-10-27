@@ -23,6 +23,7 @@ import (
 	"commandcenter/internal/config"
 	"commandcenter/internal/format/cargo"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/server"
 	"commandcenter/internal/tasks"
@@ -67,7 +68,7 @@ func newEnvWith(t *testing.T, baseURL string, mutate func(*config.Config)) *env 
 	if mutate != nil {
 		mutate(cfg)
 	}
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

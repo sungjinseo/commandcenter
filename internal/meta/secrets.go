@@ -272,7 +272,8 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 			}
 			n++
 		}
-		rows, err := tx.q.QueryContext(ctx, `SELECT name, config FROM repositories WHERE json_extract(config, '$.remoteAuth') IS NOT NULL`)
+		rows, err := tx.q.QueryContext(ctx, pg(tx.q, `SELECT name, config FROM repositories WHERE json_extract(config, '$.remoteAuth') IS NOT NULL`,
+			`SELECT name, config FROM repositories WHERE config::json ->> 'remoteAuth' IS NOT NULL`))
 		if err != nil {
 			return err
 		}

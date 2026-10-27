@@ -8,13 +8,25 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 )
+
+// configYAML is a config file with dataDir, on the test's database (see
+// metatest).
+func configYAML(t *testing.T, dataDir string) []byte {
+	y := "dataDir: " + filepath.ToSlash(dataDir) + "\n"
+	if u := metatest.URL(t, dataDir); u != "" {
+		y += "database: {url: " + strconv.Quote(u) + "}\n"
+	}
+	return []byte(y)
+}
 
 func TestHashPassword(t *testing.T) {
 	var out bytes.Buffer
@@ -93,7 +105,7 @@ func TestPickConfigPath(t *testing.T) {
 func TestUserResetPassword(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("dataDir: "+filepath.ToSlash(filepath.Join(dir, "data"))+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, configYAML(t, filepath.Join(dir, "data")), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "data"), 0o755); err != nil {
@@ -119,7 +131,7 @@ func TestUserResetPassword(t *testing.T) {
 			t.Fatalf("output %q lacks %q", out.String(), want)
 		}
 	}
-	db, err := meta.Open(filepath.Join(dir, "data", "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "data", "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +154,7 @@ func TestUserResetPassword(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `user "dirk" is an LDAP role-override record; choose another id for a local recovery account`) {
 		t.Fatalf("ldap override id: %v", err)
 	}
-	db, err = meta.Open(filepath.Join(dir, "data", "meta.db"))
+	db, err = meta.Open(metatest.Target(t, filepath.Join(dir, "data", "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,14 +177,14 @@ func TestUserCommandUsage(t *testing.T) {
 func TestSecretKeyRotate(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte("dataDir: "+filepath.ToSlash(dir)+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, configYAML(t, dir), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 	oldKey, newKey := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
 	open := func(key []byte) *meta.DB {
 		t.Helper()
-		db, err := meta.Open(filepath.Join(dir, "meta.db"))
+		db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
 		if err != nil {
 			t.Fatal(err)
 		}

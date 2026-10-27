@@ -17,6 +17,7 @@ import (
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/repo/repotest"
 )
@@ -289,6 +290,9 @@ func TestComponentsPaging(t *testing.T) {
 // in JSON strings the byte became U+FFFD, and the next page skipped "b한",
 // which sorts between the two.
 func TestComponentsPagingInvalidUTF8(t *testing.T) {
+	if metatest.Postgres() {
+		t.Skip("PostgreSQL never held a name that is not UTF-8")
+	}
 	e := newEnv(t, "http://x")
 	type comp struct{ name, ver string }
 	var all []comp

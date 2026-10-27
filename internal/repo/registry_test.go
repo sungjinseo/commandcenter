@@ -15,11 +15,12 @@ import (
 	"commandcenter/internal/auth"
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 )
 
 func newRegistry(t *testing.T, defs ...config.Repository) (*Registry, *meta.DB) {
 	t.Helper()
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,7 +661,7 @@ func TestRegistryCreateNormalizesRemoteAuth(t *testing.T) {
 // M7 (final review): a legacy row stored with an empty blobStore lives in the
 // default store, so an update that says "default" explicitly is no change.
 func TestRegistryBlobStoreLegacyEmptyAcceptsDefault(t *testing.T) {
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

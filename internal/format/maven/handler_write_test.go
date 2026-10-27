@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 )
 
@@ -679,9 +680,17 @@ func TestLegacyOddNamesStillServed(t *testing.T) {
 	e.putAll(t, "releases", "org/example/app/1.0/app-1.0.jar")
 	legacy := []string{
 		"org/example/app/2.0/app-2.0.jar;jsessionid=1",
-		"org/example/app/3.0/app-3.0.jar\x00.pom",
 		"org/example/app/3.0/app-3.0.jar#frag",
+		"org/example/app/3.0/app-3.0.jar\x00.pom",
 		"org/example/app/3.0/app-3.0-caf\xe9.jar",
+	}
+	if metatest.Postgres() { // PostgreSQL never held a NUL or a non-UTF-8 name
+		for _, p := range legacy[2:] {
+			if w := e.doRaw("GET", "releases", p, ""); w.Code != 404 {
+				t.Fatalf("GET %q: %d %q, want 404", p, w.Code, w.Body)
+			}
+		}
+		legacy = legacy[:2]
 	}
 	for _, p := range legacy {
 		e.seed(t, "releases", p, "legacy")

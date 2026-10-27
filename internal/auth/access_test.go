@@ -13,6 +13,7 @@ import (
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 )
 
 // accessFixture is a snapshot with one user per interesting privilege shape.
@@ -328,7 +329,7 @@ func TestRoleChangesApplyLive(t *testing.T) {
 }
 
 func TestReloadFromDatabase(t *testing.T) {
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +376,7 @@ func TestReloadFromDatabase(t *testing.T) {
 // Reload, which ends what the API's OnUserChanged would: the sessions of a
 // user whose password changed or who was disabled or removed.
 func TestReloadEndsSessionsOfChangedUsers(t *testing.T) {
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -420,7 +421,7 @@ func TestReloadEndsSessionsOfChangedUsers(t *testing.T) {
 }
 
 func TestReloadUnderConcurrency(t *testing.T) {
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

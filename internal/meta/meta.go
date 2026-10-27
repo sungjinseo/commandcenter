@@ -1,4 +1,4 @@
-// Package meta stores repository metadata in SQLite.
+// Package meta stores repository metadata in SQLite or PostgreSQL.
 package meta
 
 import (
@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -31,15 +32,17 @@ type Asset struct {
 }
 
 type DB struct {
-	sql *sql.DB
-	box sealer // seals the stored secrets; see SetSecretKey
+	sql  *pool
+	path string // the SQLite file; "" on PostgreSQL
+	box  sealer // seals the stored secrets; see SetSecretKey
 }
 
-// querier is implemented by *sql.DB and *sql.Tx.
+// querier is implemented by *pool and txConn (dialect.go).
 type querier interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	QueryRowContext(ctx context.Context, query string, args ...any) row
+	postgres() bool
 }
 
 const schema = `
@@ -99,7 +102,8 @@ CREATE TABLE IF NOT EXISTS tasks(
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in
-// SQLite's PRAGMA user_version. Open refuses a database with a higher
+// SQLite's PRAGMA user_version and in PostgreSQL's schema_version table
+// (which starts at 1). Open refuses a database with a higher
 // version: an older build must never run on data a newer one wrote (QA
 // N-30). Bump it with every change an older build would mishandle (a table
 // or column it would not maintain, a stored value it would misread). Builds
@@ -109,56 +113,138 @@ CREATE TABLE IF NOT EXISTS tasks(
 //	   secrets sealed with the secret key (secrets.go).
 const schemaVersion = 1
 
-// Open opens (and creates if needed) the database at path.
-func Open(path string) (*DB, error) {
-	dsn := "file:" + path +
-		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-4000)&_txlock=immediate"
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
+// Open opens the metadata database and creates or upgrades its tables:
+// PostgreSQL when target is a postgres:// or postgresql:// URL (see
+// IsPostgresURL), else the SQLite file at target, created if needed. Errors
+// never hold the URL.
+func Open(target string) (*DB, error) {
+	var p *pool
+	var name string
+	if IsPostgresURL(target) {
+		db, n, err := openPostgres(target)
+		if err != nil {
+			return nil, err
+		}
+		p, name = &pool{db: db, pg: true}, n
+	} else {
+		dsn := "file:" + target +
+			"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-4000)&_txlock=immediate"
+		db, err := sql.Open("sqlite", dsn)
+		if err != nil {
+			return nil, err
+		}
+		db.SetMaxOpenConns(4)
+		p, name = &pool{db: db}, target
+	}
+	if err := upgrade(p, name); err != nil {
+		p.db.Close()
 		return nil, err
 	}
-	db.SetMaxOpenConns(4)
-	if err := upgrade(path, db); err != nil {
-		db.Close()
-		return nil, err
+	d := &DB{sql: p}
+	if !p.pg {
+		d.path = target
 	}
-	return &DB{sql: db}, nil
+	return d, nil
+}
+
+// SetMaxOpenConns sets the size of the connection pool (default 4 for
+// SQLite, 10 for PostgreSQL). Call it before d is used.
+func (d *DB) SetMaxOpenConns(n int) {
+	d.sql.db.SetMaxOpenConns(n)
+	if d.sql.pg {
+		d.sql.db.SetMaxIdleConns(n)
+	}
+}
+
+// Driver names the database d runs on: "sqlite" or "postgresql".
+func (d *DB) Driver() string {
+	if d.sql.pg {
+		return "postgresql"
+	}
+	return "sqlite"
+}
+
+// SizeBytes returns the size of the database: of the SQLite file (without
+// its WAL), or pg_database_size on PostgreSQL.
+func (d *DB) SizeBytes(ctx context.Context) (int64, error) {
+	if !d.sql.pg {
+		st, err := os.Stat(d.path)
+		if err != nil {
+			return 0, err
+		}
+		return st.Size(), nil
+	}
+	var n int64
+	err := d.sql.QueryRowContext(ctx, `SELECT pg_database_size(current_database())`).Scan(&n)
+	return n, err
 }
 
 // upgrade creates the tables, adds the columns older databases lack and
 // stamps schemaVersion in one transaction, so a crash leaves the database
 // either as it was or migrated and stamped. A database a newer build wrote
-// is refused before anything is written.
-func upgrade(path string, db *sql.DB) error {
-	tx, err := db.Begin() // BEGIN IMMEDIATE (the DSN's _txlock)
+// is refused before anything is written. On PostgreSQL the transaction holds
+// the write lock, so two processes starting at once upgrade in turn.
+func upgrade(p *pool, name string) error {
+	ctx := context.Background()
+	tx, err := p.begin(ctx, true)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var version int
-	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+	q := txConn{tx: tx, pg: p.pg}
+	version, err := schemaVersionOf(ctx, q)
+	if err != nil {
 		return err
 	}
 	if version > schemaVersion {
 		return fmt.Errorf("%s was written by a newer version of Command Center (database schema %d; this version supports up to %d) "+
 			"and this version would misread it: run the newer version again, or restore the backup taken before the upgrade "+
-			"together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", path, version, schemaVersion)
+			"together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", name, version, schemaVersion)
 	}
-	if _, err := tx.Exec(schema); err != nil {
+	if _, err := q.ExecContext(ctx, pg(q, schema, pgSchema)); err != nil {
 		return err
 	}
-	if err := migrate(context.Background(), tx); err != nil {
-		return err
+	if !p.pg { // pgSchema has every column
+		if err := migrate(ctx, q); err != nil {
+			return err
+		}
 	}
-	if version < schemaVersion { // PRAGMA takes no bind parameters
-		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+	if version < schemaVersion {
+		if err := stampSchemaVersion(ctx, q, schemaVersion); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-// migrate adds columns that older databases lack. Each step checks
+// schemaVersionOf reads the stamped schema version: 0 for a new database or
+// one from before the stamp.
+func schemaVersionOf(ctx context.Context, q querier) (int, error) {
+	var v int
+	if !q.postgres() {
+		err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v)
+		return v, err
+	}
+	if _, err := q.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version(version BIGINT NOT NULL)`); err != nil {
+		return 0, err
+	}
+	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v)
+	return v, err
+}
+
+func stampSchemaVersion(ctx context.Context, q querier, v int) error {
+	if !q.postgres() { // PRAGMA takes no bind parameters
+		_, err := q.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v))
+		return err
+	}
+	if _, err := q.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
+		return err
+	}
+	_, err := q.ExecContext(ctx, `INSERT INTO schema_version(version) VALUES(?)`, v)
+	return err
+}
+
+// migrate adds columns that older SQLite databases lack. Each step checks
 // PRAGMA table_info first, so it is safe on every start.
 func migrate(ctx context.Context, db querier) error {
 	for _, c := range []struct{ table, col, ddl string }{
@@ -200,7 +286,7 @@ func hasColumn(ctx context.Context, db querier, table, col string) (bool, error)
 	return false, rows.Err()
 }
 
-func (d *DB) Close() error { return d.sql.Close() }
+func (d *DB) Close() error { return d.sql.db.Close() }
 
 const assetCols = `repo, path, blob_sha256, size, content_type, sha1, md5, sha512,
   created_at, last_modified, remote_etag, remote_last_modified, checked_at`
@@ -345,7 +431,7 @@ func (d *DB) BlobInUse(ctx context.Context, sha string) (bool, error) {
 }
 
 func (d *DB) CreateToken(ctx context.Context, id, user, hash string, created time.Time) error {
-	_, err := d.sql.ExecContext(ctx, `INSERT INTO tokens(id, user, hash, created_at) VALUES(?,?,?,?)`, id, user, hash, toMs(created))
+	_, err := d.sql.ExecContext(ctx, `INSERT INTO tokens(id, "user", hash, created_at) VALUES(?,?,?,?)`, id, user, hash, toMs(created))
 	return err
 }
 
@@ -358,7 +444,7 @@ var TokenTouchInterval = time.Minute
 func (d *DB) TokenUser(ctx context.Context, hash string) (string, time.Time, error) {
 	var user string
 	var last int64
-	err := d.sql.QueryRowContext(ctx, `SELECT user, last_used_at FROM tokens WHERE hash = ?`, hash).Scan(&user, &last)
+	err := d.sql.QueryRowContext(ctx, `SELECT "user", last_used_at FROM tokens WHERE hash = ?`, hash).Scan(&user, &last)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", time.Time{}, ErrNotFound
 	}

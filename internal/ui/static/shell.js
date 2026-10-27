@@ -1,6 +1,6 @@
 // The Command Center shell (plan 10 Decisions 3, 4, 6 and 7): the navy
 // sidebar, the topbar, menus and dialogs, the theme and the language.
-import { state, ANON, h, put, s, api, icon, loadRepos, hideBanner, showError, canUpload, isBusy } from "./util.js";
+import { state, ANON, h, put, api, icon, loadRepos, hideBanner, showError, canUpload, isBusy } from "./util.js";
 import { t, getLang, setLang, onLangChange, applyServerDefault } from "./i18n.js";
 
 const hooks = { rerender: () => {} };
@@ -416,13 +416,9 @@ function instanceHost() {
 
 // ---- sidebar (Decision 6: real features only) ---------------------------------
 
-// brandMark is the concept's hexagon mark, drawn from static path data.
+// Share the favicon's package-and-hub mark across both brand areas.
 function brandMark() {
-  const svg = s("svg", { viewBox: "0 0 36 40", fill: "none", "aria-hidden": "true", focusable: "false" });
-  svg.appendChild(s("path", { d: "M18 2 32 10v17L18 36 4 27V10L18 2Z", stroke: "currentColor", "stroke-width": "1.5" }));
-  svg.appendChild(s("path", { d: "M18 9 25 13v10l-7 4-7-4V13l7-4Z", stroke: "currentColor" }));
-  svg.appendChild(s("path", { d: "M18 2v7M4 10l7 3m14 0 7-3M18 27v9M4 27l7-4m14 0 7 4", stroke: "currentColor" }));
-  return svg;
+  return h("img", { src: "/ui/icon.svg", alt: "", "aria-hidden": "true", width: 24, height: 24 });
 }
 
 const SEARCH_SUB = [["cargo", "cargo"], ["go", "golang"], ["maven", "maven"], ["npm", "npm"], ["pypi", "pypi"]];

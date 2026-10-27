@@ -388,6 +388,21 @@ func TestSecretKeyFile(t *testing.T) {
 	}
 }
 
+func TestDatabase(t *testing.T) {
+	c, err := Parse([]byte("database:\n  url: postgres://cc@db:5432/cc\n  maxConns: 20\n"))
+	if err != nil || c.Database.URL != "postgres://cc@db:5432/cc" || c.Database.MaxConns != 20 {
+		t.Fatalf("database = %+v, %v", c.Database, err)
+	}
+	if c, err := Parse([]byte("{}")); err != nil || c.Database != (Database{}) {
+		t.Fatalf("default database = %+v, %v; want SQLite (no URL)", c.Database, err)
+	}
+	for _, bad := range []string{"-1", "1001"} {
+		if _, err := Parse([]byte("database: {maxConns: " + bad + "}\n")); err == nil || !strings.Contains(err.Error(), "database.maxConns") {
+			t.Fatalf("maxOpenConns %s: %v", bad, err)
+		}
+	}
+}
+
 func TestMetricsFlushSeconds(t *testing.T) {
 	c, err := Parse([]byte("{}"))
 	if err != nil || c.MetricsFlushSeconds != 30 {

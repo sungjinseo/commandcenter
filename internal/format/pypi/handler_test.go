@@ -17,6 +17,7 @@ import (
 	"commandcenter/internal/blob"
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
 )
@@ -71,7 +72,7 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(ts.Close)
 	dir := t.TempDir()
 	b, _ := blob.Open(dir)
-	db, err := meta.Open(filepath.Join(dir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

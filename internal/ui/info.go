@@ -301,6 +301,7 @@ func (u *UI) systemInformation(w http.ResponseWriter, r *http.Request) {
 	cfg := map[string]any{}
 	if c := u.Config; c != nil {
 		cfg["dataDir"] = c.DataDir
+		cfg["database"] = u.DB.Driver() // never the URL: it may hold a password
 		cfg["listen"] = c.Listen
 		cfg["memoryLimitMiB"] = c.MemoryLimitMiB
 	}
@@ -355,10 +356,8 @@ func (u *UI) systemInformation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stores := map[string]any{"blobCount": blobs, "blobBytes": blobBytes}
-	if u.DataDir != "" {
-		if st, err := os.Stat(filepath.Join(u.DataDir, "meta.db")); err == nil {
-			stores["metaDbBytes"] = st.Size()
-		}
+	if n, err := u.DB.SizeBytes(r.Context()); err == nil { // the meta.db file, or the PostgreSQL database
+		stores["metaDbBytes"] = n
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{

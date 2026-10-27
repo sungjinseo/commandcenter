@@ -11,6 +11,7 @@ import (
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 )
 
@@ -25,7 +26,7 @@ type evalEnv struct {
 
 func newEvalEnv(t *testing.T) *evalEnv {
 	t.Helper()
-	db, err := meta.Open(filepath.Join(t.TempDir(), "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}

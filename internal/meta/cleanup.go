@@ -77,7 +77,7 @@ func scanPolicy(row scanner) (CleanupPolicy, error) {
 func (d *DB) CreateCleanupPolicy(ctx context.Context, p CleanupPolicy) error {
 	return d.Tx(ctx, func(tx *Tx) error {
 		var exists, n int
-		if err := tx.q.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(name = ?), 0) FROM cleanup_policies`, p.Name).
+		if err := tx.q.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(CASE WHEN name = ? THEN 1 ELSE 0 END), 0) FROM cleanup_policies`, p.Name).
 			Scan(&n, &exists); err != nil {
 			return err
 		}
@@ -138,7 +138,8 @@ func (d *DB) RepositoriesUsingPolicy(ctx context.Context, name string) ([]string
 }
 
 func reposUsingPolicy(ctx context.Context, q querier, name string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `SELECT name FROM repositories WHERE json_extract(config, '$.cleanupPolicy') = ? ORDER BY name`, name)
+	rows, err := q.QueryContext(ctx, pg(q, `SELECT name FROM repositories WHERE json_extract(config, '$.cleanupPolicy') = ? ORDER BY name`,
+		`SELECT name FROM repositories WHERE config::json ->> 'cleanupPolicy' = ? ORDER BY name`), name)
 	if err != nil {
 		return nil, err
 	}

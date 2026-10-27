@@ -67,6 +67,13 @@ func (d *DB) ListDir(ctx context.Context, repo, prefix string, limit int) (entri
 	return entries, truncated, nil
 }
 
+// contains is the condition that expr, a lower-cased column, contains the
+// lower-cased ? parameter: ASCII case folding, as SQLite's lower(), and no
+// wildcard characters.
+func contains(q querier, expr string) string {
+	return pg(q, `instr(`+expr+`, lower(?)) > 0`, `strpos(`+expr+`, lower(? COLLATE "C")) > 0`)
+}
+
 // AssetHit is one search result.
 type AssetHit struct{ Repo, Path string }
 
@@ -83,7 +90,7 @@ func (d *DB) SearchAssets(ctx context.Context, repos []string, q string, limit i
 	}
 	args = append(args, q, limit+1)
 	rows, err := d.sql.QueryContext(ctx, `SELECT repo, path FROM assets WHERE repo IN (`+marks+`)
-AND instr(lower(path), lower(?)) > 0 ORDER BY repo, path LIMIT ?`, args...)
+AND `+contains(d.sql, "lower(path)")+` ORDER BY repo, path LIMIT ?`, args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -108,7 +115,7 @@ AND instr(lower(path), lower(?)) > 0 ORDER BY repo, path LIMIT ?`, args...)
 // (case-insensitive; "" matches all), at most limit.
 func (d *DB) SearchPackageNames(ctx context.Context, repo, q string, limit int) ([]string, bool, error) {
 	rows, err := d.sql.QueryContext(ctx, `SELECT DISTINCT name FROM packages WHERE repo = ?
-AND instr(lower(name), lower(?)) > 0 ORDER BY name LIMIT ?`, repo, q, limit+1)
+AND `+contains(d.sql, "lower(name)")+` ORDER BY name LIMIT ?`, repo, q, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -156,7 +163,7 @@ func (d *DB) RepoStats(ctx context.Context) (map[string]RepoStat, error) {
 // BlobStats returns the number of distinct blobs referenced by assets and their total size.
 func (d *DB) BlobStats(ctx context.Context) (blobs, bytes int64, err error) {
 	err = d.sql.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size),0) FROM
-(SELECT blob_sha256, MAX(size) AS size FROM assets GROUP BY blob_sha256)`).Scan(&blobs, &bytes)
+(SELECT blob_sha256, MAX(size) AS size FROM assets GROUP BY blob_sha256) AS b`).Scan(&blobs, &bytes)
 	return blobs, bytes, err
 }
 
@@ -173,7 +180,7 @@ func (d *DB) BlobStatsInRepos(ctx context.Context, repos []string) (blobs, bytes
 		args = append(args, r)
 	}
 	err = d.sql.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(size),0) FROM
-(SELECT blob_sha256, MAX(size) AS size FROM assets WHERE repo IN (`+marks+`) GROUP BY blob_sha256)`, args...).
+(SELECT blob_sha256, MAX(size) AS size FROM assets WHERE repo IN (`+marks+`) GROUP BY blob_sha256) AS b`, args...).
 		Scan(&blobs, &bytes)
 	return blobs, bytes, err
 }
@@ -208,10 +215,10 @@ type Token struct {
 
 // ListTokens returns tokens (all users when user == ""), newest first, at most limit.
 func (d *DB) ListTokens(ctx context.Context, user string, limit int) ([]Token, bool, error) {
-	q := `SELECT id, user, created_at, last_used_at FROM tokens`
+	q := `SELECT id, "user", created_at, last_used_at FROM tokens`
 	var args []any
 	if user != "" {
-		q += ` WHERE user = ?`
+		q += ` WHERE "user" = ?`
 		args = append(args, user)
 	}
 	q += ` ORDER BY created_at DESC, id LIMIT ?`
@@ -245,7 +252,7 @@ func (d *DB) ListTokens(ctx context.Context, user string, limit int) ([]Token, b
 func (d *DB) GetToken(ctx context.Context, id string) (Token, error) {
 	var t Token
 	var created, last int64
-	err := d.sql.QueryRowContext(ctx, `SELECT id, user, created_at, last_used_at FROM tokens WHERE id = ?`, id).
+	err := d.sql.QueryRowContext(ctx, `SELECT id, "user", created_at, last_used_at FROM tokens WHERE id = ?`, id).
 		Scan(&t.ID, &t.User, &created, &last)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Token{}, ErrNotFound
@@ -292,7 +299,7 @@ func (d *DB) DeleteUserTokens(ctx context.Context, owners ...string) (int64, err
 	for i, o := range owners {
 		args[i] = o
 	}
-	res, err := d.sql.ExecContext(ctx, `DELETE FROM tokens WHERE user IN (?`+strings.Repeat(",?", len(owners)-1)+`)`, args...)
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM tokens WHERE "user" IN (?`+strings.Repeat(",?", len(owners)-1)+`)`, args...)
 	if err != nil {
 		return 0, err
 	}
@@ -370,7 +377,7 @@ func (d *DB) searchAssetInfos(ctx context.Context, repos []string, q string, lim
 	}
 	args = append(args, q, limit+1)
 	rows, err := d.sql.QueryContext(ctx, `SELECT repo, path, size, last_modified, downloads, last_downloaded FROM assets WHERE repo IN (`+marks+`)
-AND instr(`+pathExpr+`, lower(?)) > 0 ORDER BY repo, path LIMIT ?`, args...)
+AND `+contains(d.sql, pathExpr)+` ORDER BY repo, path LIMIT ?`, args...)
 	if err != nil {
 		return nil, false, err
 	}
