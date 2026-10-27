@@ -4,6 +4,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 checks=(maven-smoke npm-smoke pypi-smoke go-smoke cargo-smoke ui-smoke ldap-smoke mail-smoke backup-smoke load)
+# The real-Nexus import needs 2-3 GB of RAM and several minutes: opt in with E2E_IMPORT=1.
+[ "${E2E_IMPORT:-}" = 1 ] && checks+=(import-smoke)
 declare -A result duration memory
 failed=0
 for c in "${checks[@]}"; do

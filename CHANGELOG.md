@@ -66,6 +66,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `COMMANDCENTER_VERSION=1.2.3` (no `v`). To keep running your own build, build it with
   `docker build` and set `COMMANDCENTER_IMAGE` and `COMMANDCENTER_VERSION` to it ("빠른 시작" in the
   operations guide).
+- Online backups (see Added) write to the new process setting `backupDir`, default `/backup`.
+  `docker-compose.yml` now mounts `./backup` there. On Linux, Docker creates a missing `./backup`
+  owned by root, which the server (uid 65532) cannot write: create it first with
+  `mkdir -p backup && sudo chown 65532:65532 backup`. With the Helm chart the root filesystem is
+  read-only, so online backups need a writable volume at `backupDir` (`extraVolumes` and
+  `extraVolumeMounts`, "Kubernetes에서 백업" in the operations guide). Nothing changes for backups
+  taken with the server stopped.
+- `commandcenter gc` now takes the data directory lock (`<dataDir>/.gc.lock`) that a running server
+  holds while it compacts a blob store or takes a backup. While the server holds it, `gc` waits
+  `-wait` (default 30s) and then fails with `a server is running; use the task 'compact-blobstore'
+  or POST /-/api/gc`. Scripts that run `gc` next to a running server should use the task or the
+  API instead.
+- `commandcenter serve` now holds `<dataDir>/.server.lock` while it runs, and a second server on the
+  same data directory does not start. On Linux the lock is released when the process ends, also
+  after a crash.
 
 ### Added
 - The `docker` format: hosted Docker/OCI registries served at `/v2/<repository>/<image>` on the
@@ -86,6 +101,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   links and declared dependencies, read from the stored POM, npm manifest, Cargo index line or
   go.mod; the web UI shows them in a metadata tab on the component view.
 
+- **Online backups and an offline restore.** The `backup` task (scheduled, or "Back up now" on the
+  new SYSTEM → Backup page, `POST /-/api/backup`, or `commandcenter backup --url … --wait`)
+  snapshots `meta.db` and copies the blobs it references into `<backupDir>/<name>/` while the
+  server keeps serving uploads and downloads. Backups share one blob pool, so each backup copies
+  only new blobs; each blob's sha256 is checked while it is copied. `keep` (1 to 100, default 7)
+  prunes old backups and the pool blobs no backup references. A standard verify checks that every
+  referenced blob is there with its size; a deep verify (the `backup.verify` task) re-hashes the
+  pool, runs `PRAGMA quick_check` on the snapshot and removes corrupt pool blobs so the next
+  backup copies them again. Compaction waits while a backup runs. A backup started with an API
+  token uses the stored `keep` and never deep-verifies, and only interactive admins can verify or
+  delete backups. `commandcenter restore --from /backup/<name> --data /data` restores into a
+  stopped server: it stages everything and checks the manifest, the checksums of `meta.db` and of
+  the reference list, and each blob's sha256 before it moves the data in; `--force` moves the
+  existing data aside to `<data>/.before-restore-<time>/` first. "백업과 복원" in the operations
+  guide describes both, next to the stop-and-copy method. Both need the SQLite metadata database:
+  with PostgreSQL (`database.url`) the backup task, the backup API, `commandcenter backup` and
+  `commandcenter restore` refuse and point to `pg_dump` plus a copy of the blob stores, and the
+  backup page shows that instead of its actions.
+- **Import from Nexus Repository 3.** SYSTEM → Import from Nexus in the web UI,
+  `POST /-/api/import/nexus` and `commandcenter import nexus` copy repository definitions (hosted,
+  proxy and group) and the files of Maven, npm, PyPI and Cargo hosted repositories from a running
+  Nexus Repository 3, which is only read. Every file is verified against the source's checksum and
+  goes through the same checks as an upload; a file that differs from what the target already has
+  is reported as a conflict and never overwritten, and dist-tags and deprecations already in the
+  target are kept. Runs have a job name: a re-run skips finished files and resumes after a stop or
+  a crash, `retryFailed` retries failures, and a dry run writes nothing. The source password stays
+  in memory for the run only. Users, roles, privileges and proxy credentials are not imported, nor
+  are docker repositories (the report says so; copy images with docker pull, tag and push). The
+  import keeps its records in the metadata database, SQLite or PostgreSQL;
+  "Nexus Repository에서 이관" in the operations guide has the checklist.
 - A production deployment section in the operations guide (`docs/guide.md`): TLS through a reverse
   proxy, storage for `meta.db` (local or block storage, never NFS or SMB), a single instance,
   resource sizing, graceful shutdown, consistent and online backups, and why downgrades are unsafe.

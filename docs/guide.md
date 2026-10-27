@@ -267,7 +267,7 @@ kubectl -n $NS exec commandcenter-maint -- tar czf - -C / data > data.tgz       
 kubectl -n $NS exec -i commandcenter-maint -- sh -c 'find /data -mindepth 1 -delete && tar xzf - -C /' < data.tgz   # 복원
 ```
 
-**온라인 백업**: Pod를 멈추지 않는 온라인 백업("백업과 복원"의 "온라인 백업")도 됩니다. 차트는 루트 파일시스템을 읽기 전용으로 두므로 **`backupDir`(기본 `/backup`)은 쓸 수 있는 볼륨이어야 합니다.** 볼륨이 없으면 백업이 쓰기 오류로 실패합니다. `extraVolumes`와 `extraVolumeMounts`로 PVC를 `/backup`에 마운트하세요. 데이터 볼륨과 다른 디스크에 두어야 디스크 고장에도 남습니다.
+**온라인 백업**: 메타데이터가 SQLite(`/data/meta.db`)이면 Pod를 멈추지 않는 온라인 백업("백업과 복원"의 "온라인 백업")도 됩니다. PostgreSQL을 쓰면 온라인 백업과 복원은 쓸 수 없으니 `pg_dump`와 blob 복사로 백업합니다("메타데이터 데이터베이스" 참고). 차트는 루트 파일시스템을 읽기 전용으로 두므로 **`backupDir`(기본 `/backup`)은 쓸 수 있는 볼륨이어야 합니다.** 볼륨이 없으면 백업이 쓰기 오류로 실패합니다. `extraVolumes`와 `extraVolumeMounts`로 PVC를 `/backup`에 마운트하세요. 데이터 볼륨과 다른 디스크에 두어야 디스크 고장에도 남습니다.
 
 ```yaml
 extraVolumes:
@@ -622,6 +622,84 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 
 **업로드가 401로 실패할 때**: 브라우저가 `/repository` 경로에 대해 Basic 인증 정보를 캐시해 두었다면(예: 그 주소를 직접 열어 로그인한 경우) 그 값이 UI 세션보다 우선하므로 업로드가 401로 실패할 수 있습니다. 브라우저에 저장된 해당 사이트의 인증 정보를 지우고 다시 시도하세요.
 
+## Nexus Repository에서 이관
+
+운영 중인 Nexus Repository 3에서 저장소 정의와 hosted 저장소의 파일을 Command Center로 옮깁니다. 원본 서버는 읽기(GET)만 하므로 이관 중에도 그대로 쓸 수 있고, 아무것도 바뀌지 않습니다.
+
+### 준비
+
+- **원본 계정**: 저장소와 자산을 읽을 수 있는 관리자 계정(`nx-admin`) 또는 사용자 토큰(토큰의 이름 코드와 패스 코드 쌍)이 필요합니다. 비밀번호는 실행하는 동안 서버 메모리에만 있습니다. DB, 로그, 이벤트, 작업 파라미터, 보고서 어디에도 저장하지 않으므로 이어서 실행(resume)할 때는 다시 입력해야 합니다.
+- **네트워크**: Command Center 서버(컨테이너)에서 원본 URL에 닿아야 합니다. 브라우저가 아니라 **서버가** 원본에 접속합니다. 원본 URL은 http 또는 https여야 하고, 같은 호스트로의 리다이렉트만 따라갑니다. 자체 서명 인증서면 `insecureSkipVerify`(CLI는 `--insecure-skip-verify`)로 TLS 검증을 끌 수 있지만 경고가 나옵니다. 가능하면 CA를 신뢰시키세요.
+- **Command Center 쪽**: 관리자 권한이 필요합니다. 이관은 예약 작업과 같은 슬롯 하나를 쓰므로 도는 동안 compact, 백업, cleanup은 기다립니다. 데이터 디렉터리에 원본 hosted 저장소 크기만큼의 여유 디스크가 있어야 합니다.
+
+### UI로 이관
+
+1. SYSTEM → "Nexus 이관 / Import from Nexus"를 엽니다. 관리자로 로그인한 웹 세션만 시작할 수 있습니다.
+2. 원본 URL과 계정을 넣고 "연결 테스트"를 누르면 원본 저장소 목록이 나옵니다. 각 줄에 "정의+파일", "정의만", "미지원" 중 하나가 표시됩니다. 옮길 저장소를 고르세요.
+3. 옵션을 정합니다: 정의 가져오기, 파일 가져오기, 대상 blob store(기본 `default`), 이름 접두어, 작업 이름, 동시 다운로드 수(1~16, 기본 4), 실패 재시도.
+4. 먼저 **드라이 런**을 돌립니다. 무엇을 만들고 몇 개, 몇 바이트를 가져올지, 충돌은 무엇인지만 보여 주고 아무것도 쓰지 않습니다.
+5. 시작하면 진행률(저장소, 파일, 바이트, 현재 저장소)이 실시간으로 나오고, 끝나면 보고서가 작업 이력에 남습니다. JSON으로 내려받을 수 있습니다. 중단 버튼으로 멈출 수 있고, 멈춘 작업은 이어서 실행할 수 있습니다.
+
+### CLI로 이관
+
+```bash
+export COMMANDCENTER_TOKEN=cc_...      # UI의 Tokens에서 만든 관리자 토큰
+export NEXUS_PASSWORD='...'            # 원본 비밀번호(없으면 터미널에서 입력 프롬프트, 에코 없음)
+docker compose exec -e COMMANDCENTER_TOKEN -e NEXUS_PASSWORD commandcenter \
+  commandcenter import nexus --server http://localhost:8081 --from https://nexus.example.com --user nx-admin --wait
+```
+
+- 원본 비밀번호는 환경 변수 `NEXUS_PASSWORD`나 프롬프트로만 받고, 인자로는 받지 않습니다(`ps`에 보이기 때문입니다). 익명으로 읽을 수 있는 원본이면 `--user`를 생략합니다.
+- 주요 플래그: `--repos a,b`(비우면 전부), `--dry-run`, `--definitions=false`, `--content=false`, `--blob-store`, `--rename-prefix`, `--job`, `--concurrency`, `--retry-failed`, `--insecure-skip-verify`, `--wait`.
+- `--wait`는 2초마다 진행 줄을 찍고 끝나면 저장소별 표와 오류, 알림을 출력합니다. 실패한 파일이 있거나 멈췄으면 0이 아닌 코드로 끝납니다. 기다리는 중에 Ctrl-C를 누르면 서버의 작업도 멈출지 묻습니다. 한 번 더 누르면 기다림만 그만두고 작업은 서버에서 계속 돕니다.
+
+### 무엇이 옮겨지나
+
+| 대상 | 내용 |
+|---|---|
+| 저장소 정의 | 같은 이름으로 만듭니다. hosted는 쓰기 정책과 Maven 버전 정책을 유지합니다. proxy는 원격 URL과 캐시 유효 시간(max age, negative cache)을 유지합니다. group은 멤버 순서를 유지하고, 지원하지 않는 포맷의 멤버는 경고와 함께 뺍니다. |
+| hosted 파일 | Maven(`maven2`), npm, PyPI, Cargo. 파일마다 원본이 알려 주는 sha256(없으면 sha1)을 받으며 검증합니다. 다르면 그 파일만 실패하고 저장하지 않습니다. 파일은 업로드할 때와 같은 검사(npm tarball의 `package.json`, PyPI 파일 안의 메타데이터, Cargo 크레이트의 `Cargo.toml`)를 거치며, 통과하지 못한 파일은 실패로 기록합니다. |
+| npm | 모든 버전의 tarball과 dist-tag, deprecated 표시. 원본이 알려 주는 이름과 버전(npm 속성, 없으면 경로 `<이름>/-/<이름>-<버전>.tgz`)이 tarball의 `package.json`과 같아야 하며, 빌드 메타데이터(`+…`)가 붙은 버전은 `npm publish`처럼 받지 않습니다. |
+| Cargo | 크레이트와 인덱스 줄, yank 상태. 인덱스의 `cksum`이 크레이트의 sha256과 같아야 합니다. |
+| Maven | 같은 경로로 저장하고 GA 메타데이터를 다시 만듭니다. 체크섬 파일과 `maven-metadata.xml`은 Command Center가 만들기 때문에 복사하지 않습니다. |
+
+### 옮겨지지 않는 것
+
+- **사용자, 역할, 권한(privilege)**: 원본 API가 비밀번호 해시를 주지 않고 권한 모델도 다릅니다. 아래 점검표대로 다시 만드세요.
+- **proxy의 원격 인증 정보**: 원본 API가 내주지 않습니다. 보고서의 "proxies needing credentials" 목록에 있는 proxy는 UI의 저장소 편집에서 인증 정보를 다시 넣어야 합니다.
+- **proxy 캐시**: 복사하지 않습니다. 처음 요청할 때 다시 채워집니다.
+- **go 저장소의 파일**과 hosted가 아닌 저장소의 파일(정의는 만듭니다).
+- **docker 저장소**: Command Center에도 docker 형식이 있지만 이관은 docker 저장소의 정의도 이미지도 가져오지 않습니다. 보고서에 "not imported"로 저장소 이름과 함께 나옵니다. Command Center에 docker 저장소를 만들고 이미지를 `docker pull`, `docker tag`, `docker push`로 옮기세요.
+- **아직 지원하지 않는 포맷**(raw, helm, nuget, apt 등): 보고서에 "unsupported in this version"으로 저장소 수와 이름만 나옵니다.
+- PyPI의 yank 표시는 가져오지 않습니다.
+
+### 중단, 이어서 실행, 다시 실행
+
+- 작업은 이름(`--job`, 기본은 `<원본 호스트>-<날짜>`)으로 구분하고, 파일별 결과를 DB에 기록합니다. **같은 이름으로 다시 실행하면** 끝난 파일은 건너뜁니다(보고서의 `alreadyDone`). 중단되거나 서버가 죽은 뒤에도 같은 이름과 비밀번호로 다시 실행하면 이어서 갑니다.
+- 다른 이름으로 다시 실행해도 안전합니다. 대상에 내용이 같은 파일이 이미 있으면 다시 쓰지 않고 `skipped`로 셉니다.
+- 이관은 대상에 이미 있는 npm dist-tag와 deprecated 표시를 옮기거나 바꾸지 않습니다. dist-tag는 대상에 그 태그가 없을 때만 설정하고(이미 같은 버전을 가리키면 그대로 둡니다), deprecated 표시는 대상 버전에 없을 때만 설정합니다. 원본과 값이 달라 대상 값을 그대로 둔 항목은 보고서의 알림(notes)에 `kept target value`로 남습니다.
+- 실패한 파일은 다음 실행에서 다시 시도하지 않습니다. 원인을 고친 뒤 `--retry-failed`(UI는 "실패 재시도")로 다시 시도하세요.
+- 파일 하나는 업로드처럼 `maxUploadMiB`(일반 설정)를 넘을 수 없습니다. 넘는 파일은 `larger than maxUploadMiB`로 실패하므로, 값을 올린 뒤 `--retry-failed`로 다시 실행하세요.
+- 이관은 한 번에 하나만 돕니다. 처리량은 동시 다운로드 수(기본 4)와 원본 속도에 달렸고, 파일 하나의 제한 시간은 30분입니다. 파일은 스트리밍으로 저장하므로 메모리는 파일 크기에 비례하지 않습니다.
+- 파일 하나를 처리하다 예상하지 못한 오류가 나도 그 파일만 실패하고 이관은 계속됩니다.
+
+### 드라이 런과 충돌
+
+- 드라이 런(`--dry-run`)은 대상에 아무것도 쓰지 않습니다(저장소, 작업 이력, blob 모두). 만들 저장소, 가져올 파일 수와 크기, 건너뛸 파일, 충돌을 보여 줍니다. 본 실행 전에 한 번 돌리세요.
+- **이름 충돌**: 같은 이름의 저장소가 이미 있고 포맷과 유형이 같으면 그 저장소를 그대로 씁니다. 포맷이나 유형이 다르면 충돌로 보고하고 그 저장소는 건너뜁니다. `--rename-prefix`(예: `nx-`)를 주면 새 이름으로 만들어 충돌을 피합니다.
+- **버전 충돌**: 대상에 같은 경로나 같은 버전이 이미 있는데 내용이 다르면 그 파일은 실패로 기록하고 **덮어쓰지 않습니다**.
+
+### 이관 후 점검표
+
+1. 보고서에서 실패(failed)와 충돌, 경고가 0인지 확인합니다. 실패가 있으면 원인을 고치고 `--retry-failed`로 다시 실행하세요.
+2. 사용자, 역할, 권한을 다시 만듭니다(LDAP를 쓰면 Realm과 그룹 매핑을 설정). 필요한 곳에는 API 토큰을 발급합니다.
+3. "proxies needing credentials"에 나온 proxy의 인증 정보를 다시 입력합니다.
+4. 클라이언트 설정(Maven `settings.xml`, `.npmrc`, `pip.conf`, Cargo `config.toml`, `GOPROXY`)의 URL을 새 서버로 바꿉니다. 경로 규칙(`/repository/<이름>/...`)이 같으므로 보통 호스트만 바꾸면 됩니다.
+5. 대표 프로젝트를 새 서버에서 빌드해 봅니다(`mvn dependency:get`, `npm install`, `pip download`, `cargo fetch`).
+6. 이관 중에 원본에 새로 올라온 파일이 있으면 같은 작업 이름으로 한 번 더 실행해 가져옵니다. 전환 직전에 원본을 읽기 전용으로 두는 것이 가장 안전합니다.
+7. Cleanup 정책, 예약 작업(compact, 백업), blob store 용량, 알림 메일 설정은 이관되지 않으니 새로 설정합니다.
+8. 새 서버에서 백업을 한 번 만들고 나서 원본 서버를 내립니다.
+
 ## 설정 레퍼런스
 
 설정 파일은 YAML이며 알 수 없는 키가 있으면 시작이 실패합니다. 설정을 바꾼 뒤에는 `docker compose restart`로 반영하세요.
@@ -775,7 +853,7 @@ database:
 - `postgres://`와 `postgresql://`만 허용합니다. URL과 비밀번호는 로그나 오류 메시지에 남지 않습니다. 사용자 이름과 비밀번호의 특수문자는 퍼센트 인코딩하십시오.
 - PostgreSQL 13 이상. 데이터베이스는 미리 만들어 두어야 하며(`CREATE DATABASE commandcenter`), 테이블은 첫 시작 때 만들어집니다. 스키마 버전은 `schema_version` 테이블에 기록되고, 더 새 버전이 쓴 데이터베이스는 SQLite와 같이 시작을 거부합니다.
 - 모든 CLI 명령(`token create`, `user reset-password`, `gc`, `secret-key rotate`)이 같은 설정을 읽습니다.
-- 백업은 `pg_dump`로 합니다. 시스템 정보 화면의 메타데이터 DB 크기는 PostgreSQL에서는 `pg_database_size` 값입니다.
+- 메타데이터는 `pg_dump`로 백업하고 blob store는 따로 복사합니다. 온라인 백업과 `commandcenter restore`("백업과 복원")는 SQLite 전용이어서, PostgreSQL에서는 백업 작업, 백업 API, `commandcenter backup`, `commandcenter restore`가 이유를 알리며 거부하고 웹 UI의 백업 화면에는 이 안내만 나옵니다. 시스템 정보 화면의 메타데이터 DB 크기는 PostgreSQL에서는 `pg_database_size` 값입니다.
 - 쓰기는 한 번에 하나씩 처리합니다(SQLite와 같은 규칙). 인스턴스는 여전히 하나만 띄웁니다.
 - 기존 `meta.db`를 PostgreSQL로 옮기는 도구는 아직 없습니다. 새 데이터베이스는 첫 시작 때 `config.yaml`의 저장소·사용자를 가져와 시작합니다.
 - NUL이나 잘못된 UTF-8이 든 이름(옛 빌드가 저장한 Maven 경로)은 PostgreSQL에 저장할 수 없으므로 400으로 거부합니다.
@@ -1265,6 +1343,8 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 ### 백업과 복원
 
 Kubernetes의 명령은 "Kubernetes에서 백업"에 있습니다. 원칙은 이 절과 같습니다.
+
+메타데이터 데이터베이스가 PostgreSQL이면 이 절의 온라인 백업과 복원은 쓸 수 없습니다("메타데이터 데이터베이스" 참고). 먼저 `pg_dump`로 데이터베이스를 받고 **그다음에** blob store를 복사하세요. blob은 내용 주소 방식이라 덤프 뒤에 생긴 blob이 섞여도 무해합니다. 복사하는 동안에는 compact 작업이 돌지 않게 하세요.
 
 데이터는 named volume에 있습니다. 볼륨 이름은 기본 `commandcenter-data`이며 `COMMANDCENTER_VOLUME`으로 바꿀 수 있습니다. 이전 repolite 설치의 데이터를 쓰려면 `COMMANDCENTER_VOLUME=repolite_repolite-data`(또는 `docker volume ls`에 보이는 이름)를 지정하세요.
 

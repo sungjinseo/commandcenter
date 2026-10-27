@@ -73,6 +73,7 @@ All of this comes with the Human Edition. There is no extra checkout step.
 - **Operations**: cleanup policies, scheduled tasks, activity log, request trends, download counts, and failure notification e-mail (SMTP).
 - **Repository online/offline switch**: take a single repository down for maintenance.
 - **Online backup and restore**: take a consistent backup without stopping the server (UI, scheduled task or CLI), and restore into a stopped server after integrity checks. ([operations guide](docs/guide.md#백업과-복원), Korean)
+- **Migration from another repository server**: import repository definitions and hosted files (Maven, npm, PyPI, Cargo) from your existing server with the UI or the CLI. Supports a dry run and resuming. (See the [operations guide](docs/guide.md), Korean.)
 - **Break-glass recovery**: forgot the admin password? `commandcenter user reset-password` gets you back in. No need to call customer support. There is no customer support.
 
 ## Quick start
