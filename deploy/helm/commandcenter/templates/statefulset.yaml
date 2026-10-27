@@ -80,6 +80,13 @@ spec:
                   name: {{ .Values.secretKey.existingSecret }}
                   key: {{ .Values.secretKey.key }}
             {{- end }}
+            {{- if .Values.database.existingSecret }}
+            - name: COMMANDCENTER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.key }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -68,6 +68,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   operations guide).
 
 ### Added
+- PostgreSQL as the metadata database: `database.url` / `COMMANDCENTER_DATABASE_URL` and
+  `database.maxConns`; SQLite stays the default. Every command that opens the database honours
+  it, the schema version guard exists on both, and `COMMANDCENTER_TEST_POSTGRES_URL` runs the
+  whole test suite on PostgreSQL. The Helm chart takes the URL from a Secret
+  (`database.existingSecret`). Names PostgreSQL cannot store (NUL, invalid UTF-8) are refused
+  with 400 there, and system information reports the driver and database size.
+- `GET /-/api/repositories/{name}/components/metadata`: a component's description, license,
+  links and declared dependencies, read from the stored POM, npm manifest, Cargo index line or
+  go.mod; the web UI shows them in a metadata tab on the component view.
 
 - A production deployment section in the operations guide (`docs/guide.md`): TLS through a reverse
   proxy, storage for `meta.db` (local or block storage, never NFS or SMB), a single instance,

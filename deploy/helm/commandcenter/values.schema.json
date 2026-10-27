@@ -528,6 +528,24 @@
           }
         }
       }
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "maxConns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        }
+      }
     }
   }
 }

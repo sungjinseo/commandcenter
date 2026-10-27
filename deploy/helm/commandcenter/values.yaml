@@ -46,6 +46,19 @@ secretKey:
   existingSecret: ""
   key: key
 
+# Metadata database. Empty uses SQLite in /data/meta.db, which needs block storage. On NFS
+# (or for more than a small team) point it at PostgreSQL: the volume then holds only blobs,
+# which may be on NFS. The URL goes in a Secret (it carries the password):
+#   kubectl create secret generic commandcenter-database \
+#     --from-literal=url='postgres://cc:PASSWORD@db:5432/commandcenter?sslmode=require'
+# The database must exist; tables are created on the first start. There is no tool that moves
+# an existing meta.db into PostgreSQL.
+database:
+  existingSecret: ""
+  key: url
+  # Pool size; 0 leaves the server's default (10 on PostgreSQL).
+  maxConns: 0
+
 # Go's soft memory limit (GOMEMLIMIT). Keep it about 60-65 % of resources.limits.memory, and raise
 # both together. "" leaves it to memoryLimitMiB in an existingSecret's config.yaml.
 goMemLimit: 80MiB

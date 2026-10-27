@@ -746,6 +746,25 @@ printf '%s\n' "$PW" | docker compose run --rm -T commandcenter user reset-passwo
   - 거절은 저절로 풀리고, 관리자가 그 사용자의 비밀번호를 재설정하거나 `user reset-password`를 실행해도 풀립니다. 기록은 메모리에만 있어(이름과 주소를 합쳐 최대 10000개) 재시작하면 지워집니다. 이름이나 주소가 한도에 닿으면 WARN 로그(`sign-in throttled`)가 한 번 남습니다. 한도는 고정값이며 설정으로 바꿀 수 없습니다.
   - API 토큰과 이미 로그인한 세션은 영향을 받지 않습니다. 누군가 일부러 계속 틀리면 그 이름의 비밀번호 로그인은 계속 거절되므로, 빌드와 CI는 비밀번호 대신 API 토큰을 쓰세요. 토큰 형식의 값(`cc_`나 `rl_` 뒤에 16진수 64자리)을 Basic 비밀번호로 보냈다가 토큰 확인에 실패한 요청(폐기했거나 잘못된 토큰)은 실패로 세지 않습니다.
 
+### 메타데이터 데이터베이스
+
+기본값은 `<dataDir>/meta.db`의 SQLite입니다(docker-compose, 소규모 설치). NFS처럼 파일 잠금이 느린 스토리지(Kubernetes의 NAS 볼륨 등)에서는 쓰기마다 몇 초씩 기다리게 되므로 PostgreSQL을 쓰십시오. 그러면 볼륨에는 blob만 남고, blob은 NFS에 두어도 됩니다.
+
+```yaml
+database:
+  url: postgres://cc:비밀번호@db.example:5432/commandcenter?sslmode=require
+  maxConns: 10        # 생략 시 SQLite 4, PostgreSQL 10
+```
+
+- 환경 변수 `COMMANDCENTER_DATABASE_URL`로도 지정할 수 있습니다(Kubernetes에서는 Secret으로 넣는 것을 권장. Helm 차트의 `database.existingSecret`). 둘 다 지정하면 시작을 거부합니다.
+- `postgres://`와 `postgresql://`만 허용합니다. URL과 비밀번호는 로그나 오류 메시지에 남지 않습니다. 사용자 이름과 비밀번호의 특수문자는 퍼센트 인코딩하십시오.
+- PostgreSQL 13 이상. 데이터베이스는 미리 만들어 두어야 하며(`CREATE DATABASE commandcenter`), 테이블은 첫 시작 때 만들어집니다. 스키마 버전은 `schema_version` 테이블에 기록되고, 더 새 버전이 쓴 데이터베이스는 SQLite와 같이 시작을 거부합니다.
+- 모든 CLI 명령(`token create`, `user reset-password`, `gc`, `secret-key rotate`)이 같은 설정을 읽습니다.
+- 백업은 `pg_dump`로 합니다. 시스템 정보 화면의 메타데이터 DB 크기는 PostgreSQL에서는 `pg_database_size` 값입니다.
+- 쓰기는 한 번에 하나씩 처리합니다(SQLite와 같은 규칙). 인스턴스는 여전히 하나만 띄웁니다.
+- 기존 `meta.db`를 PostgreSQL로 옮기는 도구는 아직 없습니다. 새 데이터베이스는 첫 시작 때 `config.yaml`의 저장소·사용자를 가져와 시작합니다.
+- NUL이나 잘못된 UTF-8이 든 이름(옛 빌드가 저장한 Maven 경로)은 PostgreSQL에 저장할 수 없으므로 400으로 거부합니다.
+
 ### 저장된 비밀값 암호화
 
 SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비밀번호와 Bearer 토큰은 원격 서버에 그대로 보내야 하므로 사용자 비밀번호나 토큰처럼 해시로 저장할 수 없습니다. **비밀값 키를 정하면** 이 값들을 AES-256-GCM으로 암호화해 `meta.db`에 저장하고(`enc:v1:`로 시작하는 값) 쓸 때 풉니다. 그러면 `meta.db`, 볼륨 복사본, 백업 파일이 새어도 키 없이는 비밀값을 알 수 없습니다. 키가 없으면 평문으로 저장하고, 시작할 때마다 WARN 로그(`no secret key is configured`)가 한 줄 남습니다.
