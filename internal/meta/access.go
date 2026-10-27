@@ -19,6 +19,7 @@ import (
 const (
 	SourceLocal = "local"
 	SourceLDAP  = "ldap"
+	SourceOIDC  = "oidc"
 
 	StatusActive   = "active"
 	StatusDisabled = "disabled"
@@ -49,7 +50,7 @@ type User struct {
 	Name         string
 	Email        string
 	PasswordHash string `json:"-"` // never serialised
-	Source       string // SourceLocal or SourceLDAP
+	Source       string // SourceLocal, SourceLDAP or SourceOIDC
 	Status       string // StatusActive or StatusDisabled
 	Roles        []string
 	CreatedAt    time.Time

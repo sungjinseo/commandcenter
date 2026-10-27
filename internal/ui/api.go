@@ -35,6 +35,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/me", u.me)
 	mux.HandleFunc("POST /-/api/login", u.login)
 	mux.HandleFunc("POST /-/api/logout", u.logout)
+	mux.HandleFunc("GET /-/api/auth/sso", u.ssoProviders)
 	mux.HandleFunc("GET /-/api/repositories", u.repositories)
 	mux.HandleFunc("GET /-/api/repositories/{name}", u.repository)
 	mux.HandleFunc("GET /-/api/repositories/{name}/browse", u.browse)
@@ -55,6 +56,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.settingsRoutes(mux)
 	u.smtpRoutes(mux)
 	u.realmRoutes(mux)
+	u.oidcRealmRoutes(mux)
 	u.taskRoutes(mux)
 }
 
@@ -74,8 +76,11 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 		// user), which the token page matches token owners against.
 		out["owner"] = p.Owner()
 		out["realm"] = "Local"
-		if p.IsLDAP() {
+		switch {
+		case p.IsLDAP():
 			out["realm"] = "LDAP"
+		case p.IsOIDC():
+			out["realm"] = "OIDC"
 		}
 		// Signed-in users see the version in the sidebar footer (plan 10);
 		// anonymous callers do not learn it.

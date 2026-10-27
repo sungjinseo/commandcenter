@@ -71,7 +71,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   downgrade once an S3 store exists; the backup from before the upgrade is the way back.
 
 ### Added
--- Per-repository traffic on the admin dashboard: `GET /-/api/stats/repositories?range=1h|24h|7d`
+- The `oidc` realm: browser login through an OpenID Connect provider (Gitea, Keycloak, ...)
+  with the authorization code flow and PKCE, configured under Realms (`GET/PUT /-/api/realms/oidc`,
+  `POST /-/api/realms/oidc/test` reads the provider's discovery document) and offered on the login
+  page as an SSO button (`GET /-/api/auth/sso`). Groups from the ID token (or userinfo) map to roles
+  like LDAP groups, a `source: oidc` user row overrides or blocks a provider user, and the client
+  secret is stored encrypted with the secret key. OIDC users get API tokens owned by `oidc:<id>`
+  for CLI clients; their sessions and tokens need a fresh browser login after a restart. The login
+  state lives in memory, so the realm needs a single replica ("OIDC 설정" in the operations guide).
+- Per-repository traffic on the admin dashboard: `GET /-/api/stats/repositories?range=1h|24h|7d`
   reports, for every repository, requests, errors (5xx and 429) and the error rate, bytes in and
   out, average and longest response time, and for proxies the remote fetches, their failures,
   average and longest remote time, and cache hits and misses. The hourly `request_stats` rows gain

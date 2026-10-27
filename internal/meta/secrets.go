@@ -15,8 +15,8 @@ import (
 	"commandcenter/internal/config"
 )
 
-// The stored secrets are the SMTP password, the LDAP bind password, a
-// proxy's remoteAuth password and bearer token and an S3 blob store's
+// The stored secrets are the SMTP password, the LDAP bind password, the
+// OIDC client secret, a proxy's remoteAuth password and bearer token and an S3 blob store's
 // secret key. They must be sent as they
 // are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
 // with AES-256-GCM on write and opened on read, so a copy of meta.db or of a
@@ -112,11 +112,18 @@ func (s sealer) sealValue(v any) (any, error) {
 		if c != nil {
 			return s.sealValue(*c)
 		}
+	case *OIDC:
+		if c != nil {
+			return s.sealValue(*c)
+		}
 	case SMTP:
 		c.Password, err = s.seal(c.Password)
 		return c, err
 	case LDAP:
 		c.BindPassword, err = s.seal(c.BindPassword)
+		return c, err
+	case OIDC:
+		c.ClientSecret, err = s.seal(c.ClientSecret)
 		return c, err
 	}
 	return v, nil
@@ -129,6 +136,8 @@ func (s sealer) openValue(key string, v any) (err error) {
 		c.Password, err = s.open(c.Password)
 	case *LDAP:
 		c.BindPassword, err = s.open(c.BindPassword)
+	case *OIDC:
+		c.ClientSecret, err = s.open(c.ClientSecret)
 	}
 	if err != nil {
 		return fmt.Errorf("setting %q: %w", key, err)
@@ -140,7 +149,10 @@ func (s sealer) openSettings(set *Settings) error {
 	if err := s.openValue(SettingSMTP, &set.SMTP); err != nil {
 		return err
 	}
-	return s.openValue(SettingLDAP, &set.LDAP)
+	if err := s.openValue(SettingLDAP, &set.LDAP); err != nil {
+		return err
+	}
+	return s.openValue(SettingOIDC, &set.OIDC)
 }
 
 // sealRepo returns def with its remoteAuth secrets sealed. def's own
@@ -246,11 +258,12 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 		// Rewritten as stored, without today's validation: only the secret changes.
 		var smtp SMTP
 		ldap := DefaultLDAP()
+		oidc := DefaultOIDC()
 		for _, st := range []struct {
 			key    string
 			v      any
 			secret *string
-		}{{SettingSMTP, &smtp, &smtp.Password}, {SettingLDAP, &ldap, &ldap.BindPassword}} {
+		}{{SettingSMTP, &smtp, &smtp.Password}, {SettingLDAP, &ldap, &ldap.BindPassword}, {SettingOIDC, &oidc, &oidc.ClientSecret}} {
 			found, err := getSettingJSON(ctx, tx.q, st.key, st.v)
 			if err != nil {
 				return err

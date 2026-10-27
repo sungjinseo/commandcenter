@@ -143,7 +143,7 @@ func (u *UI) createToken(w http.ResponseWriter, r *http.Request) {
 		id, tok, err = u.Auth.CreateToken(r.Context(), user)
 	}
 	if errors.Is(err, auth.ErrLDAPUser) {
-		writeError(w, http.StatusBadRequest, "an LDAP user creates their own tokens")
+		writeError(w, http.StatusBadRequest, "an LDAP or OIDC user creates their own tokens")
 		return
 	}
 	if errors.Is(err, auth.ErrUserDisabled) {

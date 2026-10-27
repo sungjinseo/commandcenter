@@ -552,7 +552,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 ### 관리자 화면
 
 - **Repositories**: 목록, 상세, 만들기·편집·삭제(아래 "저장소 관리"). Name, Format, Type, URL, Online(Online/Offline 전환), Blob Store, Remote, Members, 저장소 크기, 그리고 versionPolicy, writePolicy, metadataMaxAge, contentMaxAge, negativeCacheTTL(설정값).
-- **Users**: 사용자 목록·만들기·편집·삭제·비밀번호 재설정·API 토큰 모두 폐기(User ID, Source, Roles, Status). LDAP 로그인 사용자는 최근에 로그인한 사용자만 `directory` 행으로 보입니다("인증과 권한", "Realm과 LDAP" 참고). 비밀번호 해시는 절대 내보내지 않습니다.
+- **Users**: 사용자 목록·만들기·편집·삭제·비밀번호 재설정·API 토큰 모두 폐기(User ID, Source, Roles, Status). LDAP 로그인 사용자는 최근에 로그인한 사용자만 `directory` 행으로 보입니다("인증과 권한", "Realm, LDAP, OIDC" 참고). 비밀번호 해시는 절대 내보내지 않습니다.
 - **Roles**: 역할과 권한(대상 × 동작) 편집. 내장 `admin` 역할은 수정·삭제할 수 없습니다.
 - **Realms**: Realm 순서와 켜기/끄기, LDAP 설정과 연결 테스트.
 - **Account**: 로그인한 사용자 본인의 비밀번호 변경(로컬 사용자만).
@@ -682,7 +682,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - **Basic 인증**: 사용자 이름과 비밀번호. UI에서 사용자를 만들 때 비밀번호(8자 이상, 72바이트 이하, 공백만으로는 안 됨)를 입력합니다. `commandcenter hash-password`는 첫 시작 때 `config.yaml`에서 가져올 해시를 만들며 같은 비밀번호 규칙을 적용합니다(가져온 뒤에는 `config.yaml`의 사용자를 고쳐도 반영되지 않습니다). 관리자가 모두 잠겼을 때는 "비상 복구"의 `user reset-password`를 쓰세요. 사용자 ID는 영문자·숫자로 시작하고 영문자, 숫자, `.`, `_`, `@`, `-`만, 최대 64자이며 `create`는 예약어입니다. 이미 있는 ID와 대소문자만 다른 ID(예: `admin`이 있을 때 `Admin`)는 만들 수 없고, 409 응답에 기존 ID가 나옵니다(`already exists as "admin"`). 로그인은 대소문자를 구분하므로 비슷해 보이는 다른 계정이 생기지 않게 하기 위해서이며, 이전 버전이 이미 만든 그런 ID는 그대로 둡니다. 첫 가져오기에서도 같은 규칙을 적용하므로 규칙에 맞지 않는 ID(예: `:`이 들어간 ID)나 대소문자만 다른 ID 두 개가 `config.yaml`에 있으면 가져오기가 실패하고 서버가 시작되지 않습니다. 이름과 이메일에는 줄바꿈 같은 제어 문자를 쓸 수 없고, 이메일은 비워 두거나 `user@example.com` 형식의 주소 하나(표시 이름이나 여러 주소 없이)여야 합니다(400). 이전 버전이 저장한 값은 바꾸지 않는 한 다시 검사하지 않으므로 그런 사용자도 편집하거나 비활성화할 수 있습니다.
 - **상태**: `active` 또는 `disabled`. 비활성화하거나 삭제한 사용자는 Basic 인증, 세션, 토큰 모두 곧바로 거부됩니다. 사용자를 삭제하면 그 사용자의 API 토큰도 함께 지워집니다.
 - **본인 비밀번호 변경**: 로그인한 로컬 사용자는 계정 화면(`PUT /-/api/account/password`)에서 현재 비밀번호를 확인한 뒤 바꿉니다. 비밀번호나 세션으로 인증해야 하고 토큰으로는 안 됩니다. 새 비밀번호가 현재 비밀번호와 같으면 400입니다. 바꾸면 그 사용자의 세션이 모두 끊기고 현재 브라우저만 새 세션을 받습니다. LDAP 사용자는 비밀번호를 디렉터리에서 관리하므로 400입니다. 현재 비밀번호는 로컬 Realm으로만 확인하므로 같은 이름의 LDAP 사용자의 비밀번호로는 바꿀 수 없습니다. 관리자는 다른 로컬 사용자의 비밀번호를 재설정할 수 있고, 그러면 그 사용자의 세션이 모두 끊깁니다. 재설정은 새 비밀번호가 현재 비밀번호와 같은지 보지 않습니다(관리자가 사용자의 현재 비밀번호를 맞혀 볼 수 없게 하기 위해서입니다). 어느 쪽이든 API 토큰은 그대로 유효하므로, 비밀번호가 새어 나갔다고 의심되면 사용자 화면의 **토큰 모두 폐기**도 누르세요(아래 "API 토큰").
-- **API 토큰**: UI의 API 토큰 화면 또는 `docker compose exec commandcenter commandcenter token create -user ci`가 `cc_…` 토큰을 만듭니다. `Authorization: Bearer <토큰>`, 토큰 값만 보내는 형태(Cargo), 또는 **Basic 인증의 비밀번호 자리**(사용자 이름은 토큰 소유자와 같아야 하며 다르면 401)로 쓸 수 있어 Maven·pip·Go CI에서 비밀번호 대신 넣을 수 있습니다. 토큰으로는 새 토큰을 발급·폐기하거나 웹 UI에 로그인할 수 없습니다(실제 비밀번호나 로그인 세션만 가능). 토큰은 만료되지 않지만 사용자를 비활성화·삭제하거나 `token` Realm을 끄면 무효가 됩니다. 비밀번호를 바꾸거나 재설정해도 토큰은 남습니다. 관리자는 사용자 화면의 **토큰 모두 폐기**(`DELETE /-/api/users/<id>/tokens`, 관리자이며 비밀번호 또는 세션으로 인증하고 `X-Command-Center-UI: 1` 헤더 필요)로 그 사용자의 토큰을 한 번에 폐기합니다. 같은 ID의 LDAP 사용자 토큰(`ldap:<id>`)도 함께 폐기하고, 응답 `{"revoked": <개수>}`와 활동 기록의 `token.revoke` 이벤트(`all <개수>`)에 폐기한 개수가 나옵니다. 폐기된 토큰을 쓰던 빌드와 CI는 401을 받으므로 새 토큰을 넣으세요. 토큰은 해시만 저장되므로 분실하면 다시 발급하세요. LDAP 사용자의 토큰은 소유자가 `ldap:<id>`입니다("Realm과 LDAP" 참고).
+- **API 토큰**: UI의 API 토큰 화면 또는 `docker compose exec commandcenter commandcenter token create -user ci`가 `cc_…` 토큰을 만듭니다. `Authorization: Bearer <토큰>`, 토큰 값만 보내는 형태(Cargo), 또는 **Basic 인증의 비밀번호 자리**(사용자 이름은 토큰 소유자와 같아야 하며 다르면 401)로 쓸 수 있어 Maven·pip·Go CI에서 비밀번호 대신 넣을 수 있습니다. 토큰으로는 새 토큰을 발급·폐기하거나 웹 UI에 로그인할 수 없습니다(실제 비밀번호나 로그인 세션만 가능). 토큰은 만료되지 않지만 사용자를 비활성화·삭제하거나 `token` Realm을 끄면 무효가 됩니다. 비밀번호를 바꾸거나 재설정해도 토큰은 남습니다. 관리자는 사용자 화면의 **토큰 모두 폐기**(`DELETE /-/api/users/<id>/tokens`, 관리자이며 비밀번호 또는 세션으로 인증하고 `X-Command-Center-UI: 1` 헤더 필요)로 그 사용자의 토큰을 한 번에 폐기합니다. 같은 ID의 LDAP 사용자 토큰(`ldap:<id>`)도 함께 폐기하고, 응답 `{"revoked": <개수>}`와 활동 기록의 `token.revoke` 이벤트(`all <개수>`)에 폐기한 개수가 나옵니다. 폐기된 토큰을 쓰던 빌드와 CI는 401을 받으므로 새 토큰을 넣으세요. 토큰은 해시만 저장되므로 분실하면 다시 발급하세요. LDAP 사용자의 토큰은 소유자가 `ldap:<id>`입니다("Realm, LDAP, OIDC" 참고).
 - **`npm login`**: 사용자 이름과 비밀번호로 로그인하면 서버가 토큰을 발급해 `~/.npmrc`에 저장합니다.
 - **세션**: 웹 UI 로그인 세션은 메모리에만 있고 모두 1000개, 사용자당 20개까지입니다. 넘으면 그 사용자의 세션 가운데 가장 오래 쓰지 않은 것이 끊깁니다("웹 UI"의 "주의할 점" 참고).
 
@@ -804,7 +804,7 @@ SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비�
 - 키를 켠 뒤 이 기능이 없는 이전 버전으로 내리면, 이전 버전은 암호화된 값을 그대로 비밀번호로 보내 원격·SMTP·LDAP 인증이 실패합니다("업그레이드" 참고).
 - 키가 없을 때는 `enc:v1:`로 시작하는 비밀번호를 저장하지 않습니다(암호화된 값과 구별할 수 없기 때문입니다).
 
-## Realm과 LDAP
+## Realm, LDAP, OIDC
 
 **Realm**은 인증 방식입니다. Realm 화면에서 순서와 켜기/끄기를 정합니다(`GET/PUT /-/api/realms`).
 
@@ -813,6 +813,7 @@ SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비�
 | `local` | DB에 저장된 로컬 사용자의 비밀번호 로그인(UI와 Basic 인증) |
 | `token` | API 토큰 |
 | `ldap` | LDAP 디렉터리의 사용자·비밀번호 로그인 |
+| `oidc` | OpenID Connect 제공자(Gitea, Keycloak 등)를 통한 브라우저 SSO 로그인("OIDC 설정" 참고) |
 
 비밀번호 로그인은 켜진 Realm을 **목록 순서대로** 시도합니다(기본은 `local`, `token`이며 `ldap`은 설정을 마친 뒤 켭니다). 앞 Realm에서 실패하면 다음으로 넘어가므로 같은 이름이 로컬과 LDAP에 모두 있으면 순서가 우선순위입니다. `token` Realm을 끄면 모든 토큰이 거부됩니다. `ldap`은 URL, 사용자 기준 DN, 필터를 채우기 전에는 켤 수 없고, `local`이나 `ldap`을 끄는 변경에는 위의 잠금 방지가 적용됩니다.
 
@@ -881,6 +882,48 @@ groupMappings: [{ "group": "cc-admins", "roles": ["admin"] }]
 ```
 
 `test/smoke/ldap-smoke.sh`가 이 구성을 컨테이너로 띄워 로그인, 토큰, 잠금 방지를 확인합니다.
+
+### OIDC 설정
+
+`oidc` Realm은 OpenID Connect 제공자(IdP)로 **브라우저에서** 로그인합니다(authorization code + PKCE). 로그인 화면의 SSO 버튼(`GET /-/api/auth/sso`가 알려 주는 `{"providers":[{"id":"oidc","name":"<displayName>","url":"/-/sso/oidc/start"}]}`, Realm이 꺼져 있거나 `issuer`가 비어 있으면 빈 목록)을 누르면 제공자로 갔다가 `<baseURL>/-/sso/oidc/callback`으로 돌아와 웹 세션이 생깁니다. 비밀번호가 오가지 않으므로 Basic 인증이나 `npm login` 같은 **CLI 클라이언트는 OIDC로 로그인할 수 없고, 웹 UI에서 발급한 API 토큰을 씁니다**(토큰 소유자는 `oidc:<id>`, Basic 인증의 사용자 이름은 `oidc:`를 뺀 ID). 설정은 Realm 화면(`GET/PUT /-/api/realms/oidc`, 관리자)에서 하고, `issuer`와 `clientId`를 채우기 전에는 Realm을 켤 수 없습니다.
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `issuer` | 없음 | 제공자의 issuer URL. `https://`여야 하고(`http://`는 `localhost`/`127.0.0.1`만 허용) 사용자 정보·쿼리·프래그먼트가 없어야 합니다. `<issuer>/.well-known/openid-configuration`을 읽어 각 엔드포인트를 알아내며, 문서의 `issuer`가 설정과 다르면 거부합니다(1시간 캐시). |
+| `clientId`, `clientSecret` | 없음 | 제공자에 등록한 OAuth2 애플리케이션. 비밀값은 저장만 되고(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) 응답·로그·이벤트에 나오지 않습니다(`clientSecretSet`만 표시). 비워서 보내면 기존 값을 유지하고 `clearClientSecret: true`로 지웁니다. **`issuer`를 바꾸거나 `insecureSkipVerify`를 켤 때는 비밀값을 다시 입력해야 합니다**(400). 토큰 교환은 `client_secret_basic`이고, 제공자가 `token_endpoint_auth_methods_supported`에서 basic을 빼면 `client_secret_post`로 보냅니다. 비밀값이 비어 있으면 공개 클라이언트로(PKCE만) 교환합니다. |
+| `displayName` | `SSO` | 로그인 화면의 버튼 이름 |
+| `scopes` | `openid profile email groups` | 요청할 scope. `openid`는 필수입니다. |
+| `usernameClaim` | `preferred_username` | 사용자 ID로 쓸 claim. 값은 소문자로 바꾼 뒤 사용자 ID 규칙(영문·숫자·`.`·`_`·`@`·`-`, 64자 이하)에 맞아야 하며 아니면 400입니다. |
+| `groupsClaim` | `groups` | 그룹 목록(문자열 배열) claim. ID 토큰에 없으면 `userinfo` 엔드포인트에서 가져오고, 거기에도 없으면 그룹 없음으로 봅니다. |
+| `groupMappings`, `defaultRoles` | 없음 | LDAP와 같은 그룹 → 역할 매핑(그룹 이름은 대소문자 구분 없이 비교) |
+| `caCert` | 없음 | 시스템 인증서 묶음에 **더해** 신뢰할 CA 인증서(PEM, 여러 장 가능). Kubernetes 안의 자체 서명 IdP에 쓰세요. |
+| `insecureSkipVerify` | `false` | 인증서 검증 생략. 시험용으로만 쓰세요. |
+| `timeoutSeconds` | `10` | 제공자 호출(discovery, JWKS, 토큰, userinfo)의 제한(1..60) |
+
+로그인 흐름과 검증은 다음과 같습니다.
+
+1. `GET /-/sso/oidc/start?next=<#해시>`가 state·nonce·PKCE verifier를 만들어 메모리에 10분간 보관하고(state 쿠키 `cc_oidc_state`, `https` baseURL에서는 `__Host-cc_oidc_state`) 제공자의 authorization 엔드포인트로 302합니다. `next`는 `#`으로 시작하는 512자 이하의 해시여야 하며 아니면 무시합니다. `baseURL`이 비어 있으면 503입니다.
+2. 제공자가 `/-/sso/oidc/callback?code&state`로 돌려보내면 쿠키의 state와 비교하고 보관한 항목을 **한 번만** 씁니다(재사용·만료는 400). 토큰 엔드포인트에서 code를 교환하고 ID 토큰을 검증합니다: 서명(RS256·ES256, JWKS는 캐시하고 모르는 `kid`가 오면 1분에 한 번만 다시 받음), `iss`, `aud`(여럿이면 `azp`), `exp`(60초 허용), `iat`, `nonce`. 제공자가 `error`로 돌려보내면 로그인 실패 페이지(400)입니다. 응답 본문은 모두 1 MiB로 제한하고, 제공자 호출은 proxy와 같은 송신 정책(사설·루프백 주소 차단, `caCert`와 `insecureSkipVerify` 적용)을 따릅니다.
+3. 사용자 ID와 그룹을 메모리에 기록하고 소유자 `oidc:<id>`의 세션을 만든 뒤 `/` + `next`로 302합니다. 역할은 요청마다 최신 매핑과 `source`가 `oidc`인 **역할 덮어쓰기 행**(LDAP와 같은 규칙: 역할을 더하고, `disabled`면 로그인 거부 403)으로 계산합니다. 사용자 화면에는 로그인한 OIDC 사용자가 `source: oidc`, `realm: OIDC` 행으로 보이고 `/-/api/me`의 `realm`은 `OIDC`입니다.
+
+OIDC 사용자의 항목은 **메모리에만** 있고 제공자에 다시 묻지 않습니다. 서버를 재시작하거나 OIDC 설정을 바꾸면 항목이 사라져 그 사용자의 세션과 API 토큰은 다시 로그인할 때까지 거부됩니다(브라우저는 SSO 버튼을 다시 누르면 되고, 토큰은 그 뒤 다시 동작합니다). 보관 중인 로그인 state도 메모리에 있으므로 **인스턴스는 하나여야 합니다**(복제본이 여럿이면 start와 callback이 다른 인스턴스로 가서 실패합니다. "저장 공간과 인스턴스" 참고). 제공자에서 사용자를 지워도 Command Center가 바로 알지는 못하므로 즉시 막으려면 `source: oidc` 덮어쓰기 행을 `disabled`로 두거나 토큰을 폐기하세요.
+
+`POST /-/api/realms/oidc/test`(PUT과 같은 본문, 저장하지 않음)는 보낸 설정으로 discovery 문서를 읽어 `{issuer, authorizationEndpoint, tokenEndpoint, jwksUri, scopesSupported, algs}`를 돌려주고, 실패하면 400과 이유입니다(`caCert`가 맞는지 확인할 때 쓰세요). 설정 변경은 활동 기록에 `realms.oidc.update`로 바뀐 키 이름만 남습니다.
+
+예: Gitea 1.26을 제공자로 쓰는 경우입니다. Gitea의 **설정 → 애플리케이션**에서 OAuth2 애플리케이션을 만들고 리디렉션 URI에 `<baseURL>/-/sso/oidc/callback`(예: `https://repo.example.com/-/sso/oidc/callback`)을 넣은 뒤 클라이언트 ID와 비밀값을 가져옵니다. Gitea의 `groups` claim은 사용자가 속한 조직과 팀을 `조직:팀` 꼴(예: `platform:owners`)로 주므로 그 이름을 매핑에 적습니다.
+
+```
+issuer:         https://gitea.example
+clientId:       (Gitea가 준 Client ID)
+clientSecret:   (Gitea가 준 Client Secret)
+scopes:         openid profile email groups
+usernameClaim:  preferred_username    groupsClaim: groups
+groupMappings:  [{ "group": "platform:owners", "roles": ["admin"] },
+                 { "group": "platform:developers", "roles": ["deployer"] }]
+caCert:         (Gitea가 사내 CA 인증서를 쓰면 그 PEM)
+```
+
+저장한 뒤 테스트 버튼으로 discovery를 확인하고 Realm 화면에서 `oidc`를 켜면 로그인 화면에 SSO 버튼이 나타납니다. CI와 빌드 도구는 OIDC로 로그인한 사용자가 API 토큰 화면에서 만든 토큰을 씁니다.
 
 ## Blob Store
 

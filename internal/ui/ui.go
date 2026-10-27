@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/oidc"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/tasks"
 )
@@ -60,6 +62,13 @@ type UI struct {
 	blobChecker    func() (bool, string)      // test hook; nil runs checkBlobStore
 	blobBusy       atomic.Bool                // a blob check goroutine is still running
 
+	// OIDC login (sso.go): the pending logins, and the provider client of
+	// the configuration it was built from.
+	sso      ssoStates
+	oidcMu   sync.Mutex
+	oidcCfg  meta.OIDC
+	oidcProv *oidc.Provider
+
 	// Heavy queries (search, stats) share heavySlots slots and the stats are
 	// cached; the function fields and now are test hooks.
 	slotsOnce      sync.Once
@@ -71,11 +80,13 @@ type UI struct {
 	now            func() time.Time
 }
 
-// Routes registers "/", "GET /ui/" and "/-/api/" handlers on mux.
+// Routes registers "/", "GET /ui/", "/-/api/" and the "/-/sso/" login
+// handlers on mux.
 func (u *UI) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/{$}", u.root)
 	mux.Handle("GET /ui/", u.static())
 	mux.Handle("/-/api/", u.apiHandler())
+	u.ssoRoutes(mux)
 }
 
 // root redirects to the UI. Only GET and HEAD are redirected; other methods
@@ -96,6 +107,9 @@ func securityHeaders(h http.Header) {
 // static serves the embedded files. Unknown paths serve index.html: routing
 // is hash-based, so this only matters for typos.
 func (u *UI) static() http.Handler {
+	// Go's built-in table has no entry for web fonts; nosniff would then
+	// make browsers refuse an octet-stream font.
+	_ = mime.AddExtensionType(".woff2", "font/woff2")
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		panic(err) // the embed directive guarantees the directory

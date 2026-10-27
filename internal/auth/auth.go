@@ -108,7 +108,7 @@ type Principal struct {
 	Admin  bool
 	Via    Via
 	roles  []string // role ids; shared with an immutable snapshot, never modified
-	source string   // "" for a stored user, sourceLDAP for a directory user
+	source string   // "" for a stored user, sourceLDAP for a directory user, sourceOIDC for a provider's
 }
 
 func (p Principal) Anonymous() bool { return p.User == "" }
@@ -166,6 +166,9 @@ type Authenticator struct {
 	ldapDown       time.Time              // the login path skips the ldap realm until then (outage back-off)
 	ldapFails      int                    // consecutive dial-phase login failures
 	ldapFailsSince time.Time              // when the first of them happened
+
+	oidcMu    sync.Mutex
+	oidcUsers map[string]oidcEntry // OIDC id -> identity (oidc.go)
 }
 
 const (
@@ -237,8 +240,12 @@ func (a *Authenticator) Reload(ctx context.Context) error {
 // setSnapshot publishes s. A changed LDAP configuration drops the cached
 // LDAP users and password successes, so they are looked up again under it.
 func (a *Authenticator) setSnapshot(s *Snapshot) {
-	if old := a.snap.Swap(s); old != nil && ldapChanged(old, s) {
+	old := a.snap.Swap(s)
+	if old != nil && ldapChanged(old, s) {
 		a.clearLDAP()
+	}
+	if old != nil && oidcChanged(old, s) {
+		a.clearOIDC()
 	}
 }
 
@@ -256,8 +263,10 @@ func (a *Authenticator) OnUserChanged(id string) {
 	if a.Sessions != nil {
 		a.Sessions.DeleteUser(id)
 		a.Sessions.DeleteUser(ldapOwnerPrefix + id)
+		a.Sessions.DeleteUser(oidcOwnerPrefix + id)
 	}
 	a.dropLDAP(id)
+	a.dropOIDC(id)
 	prefix := id + "\x00"
 	a.mu.Lock()
 	for k := range a.cache {
@@ -377,9 +386,12 @@ func (a *Authenticator) lookup(ctx context.Context, name string) (Principal, boo
 	if id, ok := splitOwner(name); ok {
 		return a.ldapLookup(ctx, id)
 	}
+	if id, ok := splitOIDCOwner(name); ok {
+		return a.oidcLookup(ctx, id)
+	}
 	u, ok := a.snap.Load().users[name]
-	if !ok || u.Status != meta.StatusActive || u.Source == meta.SourceLDAP {
-		return Principal{}, false // an ldap-source row is an override, not a principal
+	if !ok || u.Status != meta.StatusActive || u.Source != meta.SourceLocal {
+		return Principal{}, false // an ldap- or oidc-source row is an override, not a principal
 	}
 	return principal(u), true
 }
@@ -511,9 +523,20 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 			return Principal{}, ErrBadCredentials
 		}
 		p = lp
+	} else if id, isOIDC := splitOIDCOwner(user); isOIDC {
+		// An OIDC user's token: the oidc realm must be on and the user in
+		// the cache (signed in since the last restart).
+		if owner != "" && id != owner {
+			return Principal{}, ErrBadCredentials
+		}
+		op, ok := a.oidcLookup(ctx, id)
+		if !ok {
+			return Principal{}, ErrBadCredentials
+		}
+		p = op
 	} else {
 		u, ok := s.users[user]
-		if !ok || u.Status != meta.StatusActive || u.Source == meta.SourceLDAP {
+		if !ok || u.Status != meta.StatusActive || u.Source != meta.SourceLocal {
 			return Principal{}, ErrBadCredentials
 		}
 		if owner != "" && u.ID != owner {
@@ -591,10 +614,11 @@ func (a *Authenticator) CreateToken(ctx context.Context, user string) (id, token
 	if u.Status != meta.StatusActive {
 		return "", "", fmt.Errorf("%w: %q", ErrUserDisabled, user)
 	}
-	if u.Source == meta.SourceLDAP {
-		// An override row is not a principal: an LDAP user's own tokens
-		// come from CreateTokenFor and are owned by "ldap:<id>".
-		return "", "", fmt.Errorf("%w: %q is an LDAP user", ErrLDAPUser, user)
+	if u.Source != meta.SourceLocal {
+		// An override row is not a principal: an LDAP or OIDC user's own
+		// tokens come from CreateTokenFor and are owned by "ldap:<id>" or
+		// "oidc:<id>".
+		return "", "", fmt.Errorf("%w: %q is an %s user", ErrLDAPUser, user, strings.ToUpper(u.Source))
 	}
 	return a.storeToken(ctx, user)
 }
@@ -608,14 +632,14 @@ type TokenRevoker interface {
 }
 
 // RevokeUserTokens deletes every API token of user id: the stored user's and
-// those of the LDAP user with that id ("ldap:<id>"), as OnUserChanged ends
+// those of the LDAP and OIDC users with that id ("ldap:<id>", "oidc:<id>"), as OnUserChanged ends
 // both users' sessions. It returns how many it deleted (QA N-16).
 func (a *Authenticator) RevokeUserTokens(ctx context.Context, id string) (int64, error) {
 	rv, ok := a.tokens.(TokenRevoker)
 	if !ok {
 		return 0, errors.New("auth: the token store cannot revoke tokens")
 	}
-	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id)
+	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id)
 }
 
 // RevokeToken deletes token when p owns it (npm logout). A token that does not
@@ -637,8 +661,8 @@ func (a *Authenticator) RevokeToken(ctx context.Context, token string, p Princip
 	return rv.DeleteTokenByHash(ctx, hash)
 }
 
-// ErrLDAPUser reports a token requested for an LDAP override row.
-var ErrLDAPUser = errors.New("tokens of LDAP users are created by the user")
+// ErrLDAPUser reports a token requested for an LDAP or OIDC override row.
+var ErrLDAPUser = errors.New("tokens of LDAP and OIDC users are created by the user")
 
 func (a *Authenticator) storeToken(ctx context.Context, owner string) (id, token string, err error) {
 	id, token = randomHex(8), tokenPrefix+randomHex(32)

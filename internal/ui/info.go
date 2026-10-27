@@ -99,8 +99,11 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 	for _, su := range s.Users() {
 		isAdmin, wl, privs := summarize(su.Roles)
 		realm := "Local"
-		if su.Source == meta.SourceLDAP {
+		switch su.Source {
+		case meta.SourceLDAP:
 			realm = "LDAP"
+		case meta.SourceOIDC:
+			realm = "OIDC"
 		}
 		st := stored[su.ID]
 		users = append(users, map[string]any{
@@ -118,6 +121,17 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 			"userId": lu.ID, "realm": "LDAP", "roles": lu.Roles,
 			"admin": isAdmin, "status": meta.StatusActive, "writeRepositories": wl, "privileges": privs,
 			"id": lu.ID, "name": lu.Name, "email": lu.Email, "source": meta.SourceLDAP, "hasPassword": false,
+			"createdAt": "", "updatedAt": "", "directory": true,
+		})
+	}
+	// Signed-in OIDC users likewise; "directory" marks a row without a
+	// stored record of its own.
+	for _, ou := range u.Auth.OIDCUsers() {
+		isAdmin, wl, privs := summarize(ou.Roles)
+		users = append(users, map[string]any{
+			"userId": ou.ID, "realm": "OIDC", "roles": ou.Roles,
+			"admin": isAdmin, "status": meta.StatusActive, "writeRepositories": wl, "privileges": privs,
+			"id": ou.ID, "name": ou.Name, "email": ou.Email, "source": meta.SourceOIDC, "hasPassword": false,
 			"createdAt": "", "updatedAt": "", "directory": true,
 		})
 	}

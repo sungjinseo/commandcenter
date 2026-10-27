@@ -353,8 +353,8 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	if body.Status == "" {
 		body.Status = meta.StatusActive
 	}
-	if body.Source != meta.SourceLocal && body.Source != meta.SourceLDAP {
-		v.add("source must be %q or %q", meta.SourceLocal, meta.SourceLDAP)
+	if body.Source != meta.SourceLocal && body.Source != meta.SourceLDAP && body.Source != meta.SourceOIDC {
+		v.add("source must be %q, %q or %q", meta.SourceLocal, meta.SourceLDAP, meta.SourceOIDC)
 	}
 	if body.Status != meta.StatusActive && body.Status != meta.StatusDisabled {
 		v.add("status must be %q or %q", meta.StatusActive, meta.StatusDisabled)
@@ -364,8 +364,8 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	checkEmail(&v, body.Email)
 	hash := ""
 	switch {
-	case body.Source == meta.SourceLDAP && body.Password != "":
-		v.add("an LDAP user has no local password")
+	case body.Source != meta.SourceLocal && body.Password != "":
+		v.add("an LDAP or OIDC user has no local password")
 	case body.Source == meta.SourceLocal:
 		if err := checkPassword(body.Password); err != nil {
 			v = append(v, err.(*repo.ValidationError).Errors...)
@@ -496,10 +496,10 @@ func (u *UI) deleteUser(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	if cur.Source == meta.SourceLDAP && cur.Status == meta.StatusDisabled {
-		// The disabled override row is what keeps the directory user out
-		// (QA N-20): deleting it would let them sign in again unannounced.
-		writeError(w, http.StatusConflict, "this disabled record blocks LDAP user "+cur.ID+"; deleting it lets them sign in again (set it active first)")
+	if cur.Source != meta.SourceLocal && cur.Status == meta.StatusDisabled {
+		// The disabled override row is what keeps the directory or provider
+		// user out (QA N-20): deleting it would let them sign in again unannounced.
+		writeError(w, http.StatusConflict, "this disabled record blocks "+strings.ToUpper(cur.Source)+" user "+cur.ID+"; deleting it lets them sign in again (set it active first)")
 		return
 	}
 	err = u.checkLockout(r.Context(), func(users []meta.User) []meta.User {
@@ -803,6 +803,10 @@ func (u *UI) deleteRole(w http.ResponseWriter, r *http.Request) {
 	}
 	if ref := ldapRoleRef(set.LDAP, id); ref != "" {
 		writeError(w, http.StatusConflict, roleInUseMessage+" by the "+ref)
+		return
+	}
+	if ref := ldapRoleRef(set.OIDC.Mapping(), id); ref != "" {
+		writeError(w, http.StatusConflict, roleInUseMessage+" by the "+strings.Replace(ref, "LDAP", "OIDC", 1))
 		return
 	}
 	// A role held by a user is refused by the store (ErrInUse), so deleting

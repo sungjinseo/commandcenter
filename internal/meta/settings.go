@@ -31,9 +31,10 @@ const (
 	RealmLocal = "local" // password login, UI and Basic auth
 	RealmToken = "token" // API tokens
 	RealmLDAP  = "ldap"  // password login against LDAP (plan 12 Task 6)
+	RealmOIDC  = "oidc"  // browser login through an OpenID Connect provider
 )
 
-var knownRealms = map[string]bool{RealmLocal: true, RealmToken: true, RealmLDAP: true}
+var knownRealms = map[string]bool{RealmLocal: true, RealmToken: true, RealmLDAP: true, RealmOIDC: true}
 
 // Realm is one entry of the ordered realm list.
 type Realm struct {
@@ -113,6 +114,7 @@ type Settings struct {
 	Realms             []Realm
 	SMTP               SMTP
 	LDAP               LDAP
+	OIDC               OIDC
 }
 
 // DefaultSettings returns the values used for missing keys: today's behaviour.
@@ -125,6 +127,7 @@ func DefaultSettings() Settings {
 		DefaultLanguage:    "ko",
 		Realms:             []Realm{{ID: RealmLocal, Enabled: true}, {ID: RealmToken, Enabled: true}},
 		LDAP:               DefaultLDAP(),
+		OIDC:               DefaultOIDC(),
 	}
 }
 
@@ -167,7 +170,7 @@ func getSettingJSON(ctx context.Context, q querier, key string, v any) (bool, er
 }
 
 // SetSettingJSON stores v as the JSON value of key. The realms key is
-// validated (ValidateRealms). A secret in v (SMTP, LDAP) is sealed.
+// validated (ValidateRealms). A secret in v (SMTP, LDAP, OIDC) is sealed.
 func (d *DB) SetSettingJSON(ctx context.Context, key string, v any) error {
 	v, err := d.box.sealValue(v)
 	if err != nil {
@@ -235,6 +238,7 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 		{SettingRealms, &s.Realms},
 		{SettingSMTP, &s.SMTP},
 		{SettingLDAP, &s.LDAP},
+		{SettingOIDC, &s.OIDC},
 	} {
 		if _, err := getSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return Settings{}, err
@@ -256,6 +260,9 @@ func (d *DB) SaveSettings(ctx context.Context, s Settings) error {
 		return err
 	}
 	if s.LDAP.BindPassword, err = d.box.seal(s.LDAP.BindPassword); err != nil {
+		return err
+	}
+	if s.OIDC.ClientSecret, err = d.box.seal(s.OIDC.ClientSecret); err != nil {
 		return err
 	}
 	return d.Tx(ctx, func(tx *Tx) error { return saveSettings(ctx, tx.q, s) })
@@ -280,6 +287,7 @@ func saveSettings(ctx context.Context, q querier, s Settings) error {
 		{SettingDefaultLanguage, s.DefaultLanguage},
 		{SettingSMTP, s.SMTP},
 		{SettingLDAP, s.LDAP},
+		{SettingOIDC, s.OIDC},
 	} {
 		if err := setSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return err
@@ -395,6 +403,12 @@ func validateSettingValue(key string, b []byte) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		return ValidateLDAP(v)
+	case SettingOIDC:
+		v := DefaultOIDC()
+		if err := json.Unmarshal(b, &v); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		return ValidateOIDC(v)
 	}
 	return nil
 }

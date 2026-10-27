@@ -76,11 +76,14 @@ type ldapPassHit struct {
 func (p Principal) IsLDAP() bool { return p.source == sourceLDAP }
 
 // Owner is the key of p's sessions and tokens: the user id, or "ldap:<id>"
-// for an LDAP principal, so a local and an LDAP user with the same id
-// never share them.
+// for an LDAP principal and "oidc:<id>" for an OIDC one, so a local and a
+// directory or provider user with the same id never share them.
 func (p Principal) Owner() string {
-	if p.IsLDAP() {
+	switch {
+	case p.IsLDAP():
 		return ldapOwnerPrefix + p.User
+	case p.IsOIDC():
+		return oidcOwnerPrefix + p.User
 	}
 	return p.User
 }
@@ -356,6 +359,12 @@ func sortLDAPUsers(us []LDAPUser) {
 func (a *Authenticator) CreateTokenFor(ctx context.Context, p Principal) (id, token string, err error) {
 	if p.Anonymous() {
 		return "", "", errors.New("anonymous caller")
+	}
+	if p.IsOIDC() {
+		if _, ok := a.oidcLookup(ctx, p.User); !ok {
+			return "", "", fmt.Errorf("%w: %q", ErrUserDisabled, p.User)
+		}
+		return a.storeToken(ctx, p.Owner())
 	}
 	if !p.IsLDAP() {
 		return a.CreateToken(ctx, p.User)
