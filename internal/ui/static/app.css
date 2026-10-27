@@ -577,6 +577,9 @@ ul.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
 .up-st { min-width: 80px; color: var(--muted); }
 
 /* ---- operations: request chart, logs, cleanup, tasks (plan 11) ---- */
+.metric-link { white-space: nowrap; text-decoration: underline; text-underline-offset: 3px; }
+#repository-logs { scroll-margin-top: calc(var(--hdr-h) + 12px); }
+.btn[aria-disabled="true"] { opacity: .5; cursor: default; }
 .chart-key { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--muted); margin-bottom: 8px; }
 .chart-key i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--blue); margin-right: 6px; }
 .chart-key .end { margin-left: auto; color: var(--link); text-align: right; }

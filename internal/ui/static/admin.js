@@ -213,7 +213,7 @@ function healthBox(c) {
     h("p", { class: "tiny muted" }, t("st.checked", { time: fmtDate(c.lastChecked), ms: fmtNum(c.durationMs) })));
 }
 
-async function viewStatus(view, name) {
+async function viewStatus(view, name, criteria) {
   const isLive = alive();
   let checks = null;
   // Download needs both the metrics and the health checks, so it waits for the first poll.
@@ -265,8 +265,9 @@ async function viewStatus(view, name) {
     h("h2", { class: "section-title" }, t("st.checks")), box,
     ops ? [h("h2", { class: "section-title" }, t("st.activity")),
       h("div", { class: "two" }, trendCard(isLive, "24h", t("st.trend"), t("st.trendSub")), m.card),
-      logsCard(isLive)] : null,
+      logsCard(isLive, criteria)] : null,
     h("h2", { class: "section-title" }, t("st.metrics")), m.stats, ops ? null : m.card);
+  if (criteria && criteria.has("repo")) view.querySelector("#repository-logs").scrollIntoView({ block: "start" });
   await load();
 }
 
@@ -301,7 +302,7 @@ async function viewSysInfo(view) {
 // ---- settings router ------------------------------------------------------------------
 
 // showSettings renders an admin screen; the caller has checked admin.
-export function showSettings(view, key, p0, p1) {
+export function showSettings(view, key, p0, p1, criteria) {
   switch (key) {
     case "admin/repository/repositories":
       if (p0 === undefined) return viewRepos(view, true);
@@ -311,7 +312,7 @@ export function showSettings(view, key, p0, p1) {
     case "admin/security/roles": return viewRoles(view, p0);
     case "admin/security/realms": return viewRealms(view);
     case "admin/security/usertoken": return viewTokens(view, true);
-    case "admin/support/status": return viewStatus(view, p0);
+    case "admin/support/status": return viewStatus(view, p0, criteria);
     case "admin/support/systeminformation": return viewSysInfo(view);
     case "admin/system/tasks": return viewTasks(view, p0);
     case "admin/repository/cleanuppolicies": return viewPolicies(view, p0);

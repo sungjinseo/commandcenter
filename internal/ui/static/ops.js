@@ -6,7 +6,7 @@
 //   #admin/system/tasks[:create|:<id>]
 import {
   state, h, put, api, enc, encSeg, alive, adminRepoLink, safeURL, fmtBytes, fmtNum, fmtDate, FORMATS, FORMAT_NAMES,
-  fmtBadge, pageHead, loading, card, kv, tbl, handleError, showError, icon, s, markBusy, taskName, loadRepos, debounce,
+  fmtBadge, nameCell, pageHead, loading, card, kv, tbl, handleError, showError, icon, s, markBusy, taskName, loadRepos, debounce,
 } from "./util.js";
 import { t, locale } from "./i18n.js";
 import { confirmDelete } from "./browse.js";
@@ -154,35 +154,135 @@ export function trendCard(isLive, range, title, subText) {
   return card(title, subText, body, badge(label));
 }
 
+// ---- repository operations ----------------------------------------------------------
+
+const RANGE_MS = { "1h": 3600000, "24h": 86400000, "7d": 604800000 };
+const rangeOptions = () => [["1h", t("repoOps.1h")], ["24h", t("repoOps.24h")], ["7d", t("repoOps.7d")]];
+const metric = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const percent = (v) => (v * 100).toLocaleString(locale(), { maximumFractionDigits: 2 }) + "%";
+
+export function repositoryStatsCard(isLive) {
+  const range = sel(rangeOptions(), "24h", { "aria-label": t("repoOps.range") });
+  const refresh = button([icon("refresh"), t("logs.refresh")], "small");
+  const body = h("div");
+  const collected = h("div", { class: "tiny muted", role: "status" });
+  const panel = card(t("repoOps.title"), t("repoOps.sub"), [collected, body], acts(range, refresh));
+  panel.hidden = true; // An unimplemented endpoint must leave no panel behind.
+  let seq = 0;
+  const load = async () => {
+    const n = ++seq, selected = range.value;
+    refresh.disabled = true;
+    put(body, loading());
+    put(collected);
+    try {
+      const d = await api("stats/repositories?range=" + selected);
+      if (!isLive() || n !== seq) return;
+      if (!d || !Array.isArray(d.repositories)) throw new Error("Invalid repository statistics");
+      panel.hidden = false;
+      put(collected, t("repoOps.collected", {
+        since: d.since ? fmtDate(d.since) : dash,
+        at: d.collectedAt ? fmtDate(d.collectedAt) : dash,
+      }));
+      put(body, tbl([
+        t("col.repo"), t("col.status"), ...[
+          t("repoOps.requests"), t("repoOps.errorRate"), t("repoOps.upstreamFailures"), t("repoOps.upstreamLatency"),
+          t("repoOps.cache"), t("repoOps.bytesIn"), t("repoOps.bytesOut"), t("repoOps.latency"),
+        ].map((label) => ({ t: label, cls: "num" })),
+      ], d.repositories.map((r) => {
+        const href = "#admin/support/status?" + new URLSearchParams({ repo: r.name, range: selected });
+        const cell = (v, format = fmtNum) => h("td", { class: "num" }, metric(v)
+          ? h("a", { class: "metric-link", href, title: t("repoOps.openLogs", { repo: r.name }) }, format(v)) : dash);
+        const latencyCell = (avg, max) => cell(avg, (v) => fmtNum(v) + " / " + (metric(max) ? fmtNum(max) : dash) + " ms");
+        const proxy = r.type === "proxy";
+        const cacheTotal = metric(r.cacheHits) && metric(r.cacheMisses) ? r.cacheHits + r.cacheMisses : 0;
+        const bad = r.errorRate >= 0.01 || (proxy && r.upstreamFailures > 0);
+        const status = r.requests > 0 || bad ? (bad ? t("repoOps.bad") : t("repoOps.ok")) : t("repoOps.noTraffic");
+        return h("tr", null,
+          h("td", null, nameCell(r.format, h("a", { href }, h("strong", null, r.name)), r.format + " · " + r.type)),
+          h("td", null, badge([h("i", { class: "dot", "aria-hidden": "true" }), status], bad ? "red" : r.requests > 0 ? "green" : null)),
+          cell(r.requests), cell(r.errorRate, percent), cell(proxy ? r.upstreamFailures : null),
+          latencyCell(proxy ? r.upstreamLatencyAvgMs : null, r.upstreamLatencyMaxMs),
+          cell(proxy && cacheTotal > 0 ? r.cacheHits / cacheTotal : null, percent),
+          cell(r.bytesIn, fmtBytes), cell(r.bytesOut, fmtBytes), latencyCell(r.latencyAvgMs, r.latencyMaxMs));
+      }), t("repoOps.none")));
+    } catch (e) {
+      if (!isLive() || n !== seq) return;
+      panel.hidden = e.status === 404;
+      if (!panel.hidden) put(body, h("div", { class: "empty", role: "alert" }, t("repoOps.failed")));
+    } finally {
+      if (n === seq) refresh.disabled = false;
+    }
+  };
+  range.addEventListener("change", load);
+  refresh.addEventListener("click", load);
+  load();
+  return panel;
+}
+
 // ---- log viewer -------------------------------------------------------------------
 
 // logClass colours a WARN line amber and an ERROR line red.
 const logClass = (level) => (level === "ERROR" ? "err" : level === "WARN" ? "warn" : null);
 
-export function logsCard(isLive) {
+// The API only filters level/text. Apply repo/time locally to all retained
+// records (2,000 maximum), and generate filtered downloads from the same rows.
+function matchesLogRepo(attrs, repo) {
+  const pairs = String(attrs || "").matchAll(/(?:^|\s)(?:[\w-]+\.)*(?:repo|repository)=("(?:\\.|[^"\\])*"|[^\s]+)/g);
+  for (const [, raw] of pairs) {
+    let value = raw;
+    if (raw.startsWith('"')) { try { value = JSON.parse(raw); } catch (e) { continue; } }
+    if (value === repo) return true;
+  }
+  return false;
+}
+
+export function logsCard(isLive, criteria = new URLSearchParams()) {
   const level = sel([["", t("logs.all")], ["INFO", "INFO+"], ["WARN", "WARN+"], ["ERROR", "ERROR"]], "", { "aria-label": t("logs.level") });
+  const repo = textIn(criteria.get("repo"), { type: "search", placeholder: t("logs.repo"), "aria-label": t("logs.repo"), maxlength: 64 });
+  const range = sel([["", t("logs.allTime")], ...rangeOptions()], RANGE_MS[criteria.get("range")] ? criteria.get("range") : "", { "aria-label": t("repoOps.range") });
   const q = h("input", { type: "search", placeholder: t("logs.filter"), "aria-label": t("logs.filter"), autocomplete: "off", maxlength: 200 });
   const refresh = button([icon("refresh"), t("logs.refresh")], "small");
   const dl = h("a", { class: "btn small", href: "/-/api/logs/download", download: "commandcenter.log" }, t("logs.download"));
   const box = h("div", { class: "log tall", role: "log", tabindex: "0", "aria-label": t("logs.title") }, loading());
   const count = h("span", { class: "end", role: "status" });
   let seq = 0;
+  let downloadURL = null;
+  const clearDownload = () => {
+    if (downloadURL) URL.revokeObjectURL(downloadURL);
+    downloadURL = null;
+    dl.removeAttribute("href");
+    dl.setAttribute("aria-disabled", "true");
+  };
+  state.leaving.push(clearDownload);
   const load = async () => {
+    later.cancel();
+    clearDownload();
+    count.textContent = "";
+    put(box, loading());
+    const repository = repo.value.trim();
+    const filtered = !!(repository || range.value);
+    const until = Date.now(), since = range.value ? until - RANGE_MS[range.value] : -Infinity;
     const p = new URLSearchParams();
     if (level.value) p.set("level", level.value);
     if (q.value.trim()) p.set("q", q.value.trim());
     const qs = p.toString();
-    dl.setAttribute("href", safeURL("/-/api/logs/download" + (qs ? "?" + qs : "")));
     const n = ++seq;
     refresh.disabled = true;
     try {
-      const d = await api("logs?limit=500" + (qs ? "&" + qs : ""));
+      const d = await api("logs?limit=" + (filtered ? 2000 : 500) + (qs ? "&" + qs : ""));
       if (!isLive() || n !== seq) return;
-      const logs = d.logs || [];
+      const logs = (d.logs || []).filter((r) => (!repository || matchesLogRepo(r.attrs, repository)) &&
+        (!range.value || (Date.parse(r.time) >= since && Date.parse(r.time) <= until)));
       put(box, logs.length ? logs.map((r) => h("div", { class: logClass(r.level) },
         fmtDate(r.time) + " " + r.level + " " + r.message + (r.attrs ? " " + r.attrs : ""))) : h("div", null, t("logs.none")));
       box.scrollTop = 0;
       count.textContent = t("logs.count", { n: fmtNum(logs.length) });
+      if (filtered) {
+        const text = logs.slice().reverse().map((r) => [r.time, r.level, r.message, r.attrs].filter(Boolean).join(" ").replace(/[\r\n]/g, " ")).join("\n");
+        downloadURL = URL.createObjectURL(new Blob([text ? text + "\n" : ""], { type: "text/plain;charset=utf-8" }));
+        dl.setAttribute("href", downloadURL); // trusted URL created above
+      } else dl.setAttribute("href", safeURL("/-/api/logs/download" + (qs ? "?" + qs : "")));
+      dl.removeAttribute("aria-disabled");
     } catch (e) {
       if (!isLive() || n !== seq) return;
       put(box, h("div", null, t("logs.failed")));
@@ -194,10 +294,15 @@ export function logsCard(isLive) {
   const later = debounce(load, 300);
   state.leaving.push(later.cancel);
   level.addEventListener("change", load);
+  repo.addEventListener("input", later);
+  range.addEventListener("change", load);
   q.addEventListener("input", later);
   refresh.addEventListener("click", load);
   load();
-  return card(t("logs.title"), t("logs.sub"), [h("div", { class: "toolbar" }, level, q, refresh, dl, count), box]);
+  const panel = card(t("logs.title"), t("logs.sub"), [h("div", { class: "toolbar" }, level, repo, range, q, refresh, dl, count),
+    h("p", { class: "tiny muted" }, t("logs.retained")), box]);
+  panel.id = "repository-logs";
+  return panel;
 }
 
 // ---- cleanup policies ----------------------------------------------------------------

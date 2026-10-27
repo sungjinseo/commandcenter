@@ -101,6 +101,10 @@ export function parse(hash) {
     return { key: "browse/component", params: [repo], criteria };
   }
 
+  // Repository operations links carry log filters in the hash query.
+  m = /^admin\/support\/status\?(.*)$/.exec(raw);
+  if (m) return { key: "admin/support/status", params: [], criteria: new URLSearchParams(m[1]) };
+
   // Everything else: <head>[:<param>[:<param>...]], decoded per segment.
   const parts = raw.split(":");
   const head = parts.shift();
@@ -157,7 +161,7 @@ async function show(view, r) {
       "admin/repository/cleanuppolicies": t("nav.cleanup"), "admin/repository/blobstores": t("nav.blobstores"), "admin/system/general": t("nav.general") };
     return needAdmin(view, titles[r.key] || t("need.admin"));
   }
-  const out = showSettings(view, r.key, p0, p1);
+  const out = showSettings(view, r.key, p0, p1, r.criteria);
   if (out) return out;
   return viewNotFound(view);
 }

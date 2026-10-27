@@ -317,7 +317,7 @@ func TestOpsWired(t *testing.T) {
 	for file, wants := range map[string][]string{
 		"shell.js":    {`"#admin/repository/cleanuppolicies"`, `t("nav.cleanup")`},
 		"app.js":      {`"admin/repository/cleanuppolicies": true`},
-		"admin.js":    {`viewPolicies(view, p0)`, `logsCard(isLive)`, `trendCard(isLive, "24h"`},
+		"admin.js":    {`viewPolicies(view, p0)`, `logsCard(isLive, criteria)`, `trendCard(isLive, "24h"`},
 		"dash.js":     {`trendCard(isLive, "7d"`, `api("events?limit=6")`},
 		"ops.js":      {`"cleanup/policies"`, `"/preview"`, `"/run"`, `"/-/api/logs/download"`, `api("stats/requests?range="`},
 		"repoform.js": {`cleanupPolicy: policy ? policy.value : storedPolicy`},

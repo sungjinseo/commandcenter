@@ -7,7 +7,7 @@ import {
   pageHead, loading, card, stat, bar, tbl, nameCell, onlineBadge, icon, taskName,
 } from "./util.js";
 import { t } from "./i18n.js";
-import { trendCard } from "./ops.js";
+import { trendCard, repositoryStatsCard } from "./ops.js";
 
 // Recent activity (plan 11 Decision 3): each event kind has its own label.
 const EV = {
@@ -74,7 +74,7 @@ export async function viewWelcome(view) {
   majorCard.appendChild(major);
   const storageCard = card(t("dash.storage"), t("dash.storageSub"), storage);
   const activity = h("div", null, loading());
-  put(view, head, statsBox, attn,
+  put(view, head, statsBox, attn, me.admin ? repositoryStatsCard(isLive) : null,
     me.admin
       ? h("div", { class: "two" },
         h("div", { class: "stack" }, trendCard(isLive, "7d", t("dash.trend"), t("dash.trendSub")), majorCard),
