@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] - 2026-10-27
+
+The first release: Maven, npm, PyPI, Go, Cargo, Docker, raw and Helm repositories (hosted, proxy,
+group), users, roles, LDAP and OIDC, API tokens, cleanup policies and scheduled tasks, file and S3
+blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
+
 ### Upgrade notes
 
 - Back up before you upgrade. Downgrades are not supported: an older version can misbehave
