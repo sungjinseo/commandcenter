@@ -2,6 +2,7 @@
 listen: ":8081"
 baseURL: "http://localhost:8081"   # 클라이언트가 접속하는 주소
 dataDir: "/data"
+# backupDir: "/backup"            # 온라인 백업 위치(프로세스 설정). 기본 /backup, docker-compose가 ./backup을 마운트
 memoryLimitMiB: 80
 # secretKeyFile: /run/secrets/commandcenter-secret-key  # 저장된 비밀값(SMTP·LDAP·remoteAuth)을 암호화하는 키 파일. 만들기: head -c 32 /dev/urandom | base64
 # maxUploadMiB: 1024               # 업로드 본문 최대 크기(MiB). 기본 1024, 1..1048576. 초과하면 413

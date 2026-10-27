@@ -538,3 +538,31 @@ func TestValidateDefinitionTypeFields(t *testing.T) {
 		t.Fatalf("proxy changed: %v %+v", notes, p)
 	}
 }
+
+func TestBackupDir(t *testing.T) {
+	c, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.BackupDir != "/backup" {
+		t.Fatalf("default backupDir %q", c.BackupDir)
+	}
+	c, err = Parse([]byte(validYAML + "backupDir: /srv/backups/\n"))
+	if err != nil || c.BackupDir != "/srv/backups" {
+		t.Fatalf("backupDir %q %v", c.BackupDir, err)
+	}
+	if _, err := Parse([]byte(validYAML + "dataDir: /data\nbackupDir: /data\n")); err == nil || !strings.Contains(err.Error(), "backupDir") {
+		t.Fatalf("backupDir equal to dataDir: %v", err)
+	}
+}
+
+func TestBackupDirNotNestedWithDataDir(t *testing.T) {
+	for _, bad := range []string{"dataDir: /data\nbackupDir: /data/backup\n", "dataDir: /srv/cc/data\nbackupDir: /srv/cc\n"} {
+		if _, err := Parse([]byte(validYAML + bad)); err == nil || !strings.Contains(err.Error(), "backupDir") {
+			t.Errorf("%q: %v", bad, err)
+		}
+	}
+	if _, err := Parse([]byte(validYAML + "dataDir: /data\nbackupDir: /data-backup\n")); err != nil {
+		t.Fatalf("a sibling with a common prefix: %v", err)
+	}
+}

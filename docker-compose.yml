@@ -18,6 +18,7 @@ services:
     volumes:
       - ./config.yaml:/etc/commandcenter/config.yaml:ro
       - data:/data
+      - ./backup:/backup   # online backups (backupDir); the server runs as uid 65532, which must be able to write here
     environment:
       GOMEMLIMIT: 80MiB
       # HTTPS_PROXY: http://proxy.example.com:3128   # set if a corporate proxy is required

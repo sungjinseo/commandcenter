@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -21,6 +22,7 @@ import (
 	"commandcenter/internal/app"
 	"commandcenter/internal/auth"
 	"commandcenter/internal/config"
+	"commandcenter/internal/datalock"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/meta"
 )
@@ -61,11 +63,15 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return gc(args[1:], stdout)
 	case "healthcheck":
 		return healthcheck(args[1:])
+	case "backup":
+		return backupCmd(args[1:], stdout)
+	case "restore":
+		return restoreCmd(args[1:], stdout)
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return nil
 	}
-	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, healthcheck, version)", args[0])
+	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, backup, restore, healthcheck, version)", args[0])
 }
 
 // pickConfigPath returns the config file to load. A -config given explicitly
@@ -120,6 +126,16 @@ func serve(args []string) error {
 	if os.Getenv("GOMEMLIMIT") == "" && cfg.MemoryLimitMiB > 0 {
 		debug.SetMemoryLimit(int64(cfg.MemoryLimitMiB) << 20)
 	}
+	// A server holds .server.lock while it runs, so the offline restore (and a
+	// second server) can tell the data directory is in use.
+	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
+		return err
+	}
+	srvLock, err := datalock.TryAcquire(filepath.Join(cfg.DataDir, datalock.ServerFileName))
+	if err != nil {
+		return fmt.Errorf("data directory %s is in use by another commandcenter process: %w", cfg.DataDir, err)
+	}
+	defer srvLock.Release()
 	a, err := app.New(cfg, log, app.WithLogRing(ring))
 	if err != nil {
 		return err
@@ -167,11 +183,37 @@ func token(args []string, stdout io.Writer) error {
 	return nil
 }
 
+// gc compacts the blob stores offline. It takes the data directory lock that
+// a running server holds during compaction and backups, so it never deletes
+// blobs a backup is copying; while a server holds it, gc waits -wait and
+// then points at the server-side task.
 func gc(args []string, stdout io.Writer) error {
-	cfg, _, err := loadConfig("gc", args)
+	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
+	path := fs.String("config", defaultConfig, "config file")
+	wait := fs.Duration("wait", 30*time.Second, "how long to wait for a running server's compaction or backup to finish")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	explicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			explicit = true
+		}
+	})
+	cfg, err := config.Load(pickConfigPath(*path, explicit, legacyConfig, func(msg string) { fmt.Fprintln(os.Stderr, msg) }))
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), *wait)
+	lock, err := datalock.Acquire(ctx, filepath.Join(cfg.DataDir, datalock.FileName))
+	cancel()
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("a server is running; use the task 'compact-blobstore' or POST /-/api/gc (%v)", err)
+	}
+	if err != nil {
+		return fmt.Errorf("data directory lock: %w", err)
+	}
+	defer lock.Release()
 	a, err := app.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		return err

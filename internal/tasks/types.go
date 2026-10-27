@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 
+	"commandcenter/internal/backup"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/meta"
 )
@@ -24,12 +25,120 @@ type typeDef struct {
 	name   string
 	params func(s *Service, raw json.RawMessage, check bool) (string, []string) // check: against the repositories
 	run    func(ctx context.Context, s *Service, t meta.Task, actor string, log *RunLog) (summary, error)
+	// dataLock: the run holds the cross-process data directory lock (Service.DataLock).
+	dataLock bool
 }
 
 var types = map[string]typeDef{
-	TypeCompact: {name: "Compact blob store", params: compactParams, run: runCompact},
-	TypeCleanup: {name: "Cleanup repositories", params: cleanupParamsOf, run: runCleanup},
-	TypeRebuild: {name: "Rebuild Maven metadata", params: rebuildParamsOf, run: runRebuild},
+	TypeCompact:      {name: "Compact blob store", params: compactParams, run: runCompact, dataLock: true},
+	TypeCleanup:      {name: "Cleanup repositories", params: cleanupParamsOf, run: runCleanup},
+	TypeRebuild:      {name: "Rebuild Maven metadata", params: rebuildParamsOf, run: runRebuild},
+	TypeBackup:       {name: "Back up", params: backupParams, run: runBackup, dataLock: true},
+	TypeBackupVerify: {name: "Verify backup (deep)", params: backupVerifyParams, run: runBackupVerify},
+}
+
+// backupDisabled refuses the backup task types when the backup service is
+// disabled (PostgreSQL: backup.ErrPostgres).
+func backupDisabled(s *Service) []string {
+	if s != nil && s.Backup != nil && s.Backup.Disabled != nil {
+		return []string{s.Backup.Disabled.Error()}
+	}
+	return nil
+}
+
+// ---- backup.verify ----
+
+// backupVerifyParams takes {name}: the backup to deep-verify, empty for the
+// newest one.
+func backupVerifyParams(s *Service, raw json.RawMessage, _ bool) (string, []string) {
+	if errs := backupDisabled(s); errs != nil {
+		return "", errs
+	}
+	var p struct {
+		Name string `json:"name,omitempty"`
+	}
+	if err := decodeParams(raw, &p); err != nil {
+		return "", []string{err.Error() + " (backup.verify takes an optional name)"}
+	}
+	if p.Name != "" {
+		if err := backup.ValidSubdir(p.Name); err != nil {
+			return "", []string{"name: " + err.Error()}
+		}
+	}
+	return encodeParams(p), nil
+}
+
+func runBackupVerify(ctx context.Context, s *Service, t meta.Task, actor string, log *RunLog) (summary, error) {
+	if s.Backup == nil {
+		return summary{msg: "backup is not available"}, errors.New("backup is not available")
+	}
+	var p struct {
+		Name string `json:"name,omitempty"`
+	}
+	if err := json.Unmarshal([]byte(t.Params), &p); err != nil {
+		return summary{msg: "invalid params"}, fmt.Errorf("decode params: %w", err)
+	}
+	res, err := s.Backup.VerifyAndRepair(ctx, p.Name, actor, log)
+	if err != nil {
+		return summary{msg: "verify failed"}, err
+	}
+	sum := summary{msg: fmt.Sprintf("backup %s: %d blobs verified (deep), %d missing, %d corrupt, %d removed for re-copy",
+		res.Name, res.Blobs, res.Missing, res.Corrupt, res.Repaired), removed: res.Repaired, bytes: res.Bytes}
+	if !res.OK {
+		return sum, fmt.Errorf("backup %s did not verify", res.Name)
+	}
+	return sum, nil
+}
+
+// ---- backup ----
+
+// backupParams takes {subdir, keep, verify, deep} (plan 14 Decision 3); the
+// canonical form has keep filled in and verify set when deep is.
+func backupParams(s *Service, raw json.RawMessage, _ bool) (string, []string) {
+	if errs := backupDisabled(s); errs != nil {
+		return "", errs
+	}
+	var p backup.Params
+	if err := decodeParams(raw, &p); err != nil {
+		return "", []string{err.Error() + " (backup takes subdir, keep, verify and deep)"}
+	}
+	// An explicit keep of 0 is refused (omitting it means the default).
+	var probe struct {
+		Keep *int `json:"keep"`
+	}
+	if !isNull(raw) && json.Unmarshal(raw, &probe) == nil && probe.Keep != nil && *probe.Keep < 1 {
+		return "", []string{fmt.Sprintf("keep must be between 1 and %d", backup.MaxKeep)}
+	}
+	p, err := p.Normalize()
+	if err != nil {
+		return "", []string{err.Error()}
+	}
+	return encodeParams(p), nil
+}
+
+func runBackup(ctx context.Context, s *Service, t meta.Task, actor string, log *RunLog) (summary, error) {
+	if s.Backup == nil {
+		return summary{msg: "backup is not available"}, errors.New("backup is not available")
+	}
+	var p backup.Params
+	if err := json.Unmarshal([]byte(t.Params), &p); err != nil {
+		return summary{msg: "invalid params"}, fmt.Errorf("decode params: %w", err)
+	}
+	m, err := s.Backup.Run(ctx, p, actor, log)
+	sum := summary{bytes: m.CopiedBytes}
+	if m.Name != "" {
+		sum.msg = fmt.Sprintf("backup %s: %d blobs (%d bytes), copied %d new blobs (%d bytes)", m.Name, m.Blobs, m.Bytes, m.CopiedBlobs, m.CopiedBytes)
+		if m.Verified != nil {
+			sum.msg += "; verified"
+		}
+		if m.PrunedBackups > 0 || m.SweptBlobs > 0 {
+			sum.msg += fmt.Sprintf("; pruned %d old backups and %d pool blobs", m.PrunedBackups, m.SweptBlobs)
+		}
+		if m.SweepSkipped != "" {
+			sum.msg += "; " + m.SweepSkipped
+		}
+	}
+	return sum, err
 }
 
 // ---- blobstore.compact ----

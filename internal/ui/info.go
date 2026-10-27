@@ -302,6 +302,7 @@ func (u *UI) systemInformation(w http.ResponseWriter, r *http.Request) {
 	if c := u.Config; c != nil {
 		cfg["dataDir"] = c.DataDir
 		cfg["database"] = u.DB.Driver() // never the URL: it may hold a password
+		cfg["backupDir"] = c.BackupDir
 		cfg["listen"] = c.Listen
 		cfg["memoryLimitMiB"] = c.MemoryLimitMiB
 	}

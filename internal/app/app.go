@@ -17,9 +17,11 @@ import (
 	"time"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/backup"
 	"commandcenter/internal/blob"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/config"
+	"commandcenter/internal/datalock"
 	"commandcenter/internal/events"
 	"commandcenter/internal/format/cargo"
 	"commandcenter/internal/format/docker"
@@ -394,8 +396,23 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		}
 		return a.GCStore(ctx, store, time.Hour)
 	}
+	// Online backups run as the backup task, under the run lock that
+	// compaction (the only blob delete) also takes.
+	lockPath := filepath.Join(cfg.DataDir, datalock.FileName)
+	taskSvc.DataLock = func(ctx context.Context) (func(), error) {
+		l, err := datalock.Acquire(ctx, lockPath)
+		if err != nil {
+			return nil, err
+		}
+		return l.Release, nil
+	}
+	taskSvc.Backup = &backup.Service{DB: db, Store: store, Dir: cfg.BackupDir, Version: Version, Events: evts, Log: log}
+	if db.Driver() == "postgresql" {
+		taskSvc.Backup.Disabled = backup.ErrPostgres // the online backup copies the SQLite file meta.db
+	}
 	a.Tasks = taskSvc
 	webUI := &ui.UI{
+		Backups: taskSvc.Backup,
 		Repos:   registry,
 		Auth:    authn,
 		DB:      db,

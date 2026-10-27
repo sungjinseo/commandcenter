@@ -2,14 +2,19 @@ package tasks
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime/debug"
 	"time"
 
+	"commandcenter/internal/backup"
 	"commandcenter/internal/events"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/repo"
 )
 
 // Results of a run.
@@ -181,6 +186,131 @@ func (s *Service) RunAsync(id, actor string) error {
 	return nil
 }
 
+// maxAdHoc is how many ad-hoc run outcomes are kept for AdHoc.
+const maxAdHoc = 32
+
+// StartAdHoc validates params for a task of type typ and starts an
+// unrecorded run of it for actor in the background (POST /-/api/backup). It
+// returns the run's id, which AdHoc answers for. A *repo.ValidationError for
+// bad params or an unknown type, a *BusyError when a task is running.
+func (s *Service) StartAdHoc(typ string, params json.RawMessage, actor string) (string, error) {
+	return s.StartAdHocAs(typ, params, actor, true)
+}
+
+// StartAdHocAs is StartAdHoc for a caller that is interactive (a password or
+// session login) or not (a token, a script). A non-interactive backup run
+// cannot change what is destructive: its keep and deep are ignored (the ad-hoc
+// row's stored values, set by an interactive run, or the defaults apply) and
+// the row is not rewritten with its params.
+func (s *Service) StartAdHocAs(typ string, params json.RawMessage, actor string, interactive bool) (string, error) {
+	def, ok := types[typ]
+	if !ok {
+		return "", &repo.ValidationError{Errors: []string{fmt.Sprintf("unknown type %q", typ)}}
+	}
+	canonical, errs := def.params(s, params, true)
+	if len(errs) > 0 {
+		return "", &repo.ValidationError{Errors: errs}
+	}
+	if !s.runMu.TryLock() {
+		return "", &BusyError{Running: s.Running()}
+	}
+	var b [6]byte
+	rand.Read(b[:])
+	runID := typ + "-" + hex.EncodeToString(b[:])
+	// The run is recorded on the type's ad-hoc task row, so its log persists
+	// like a scheduled run's; without the row (task limit, DB error) it runs
+	// unrecorded.
+	if !interactive && typ == TypeBackup {
+		canonical = s.limitBackupParams(canonical)
+	}
+	t, mode := s.adhocRow(typ, canonical, interactive), recordManual
+	if t.ID == "" {
+		t, mode = meta.Task{ID: runID, Name: TypeName(typ), Type: typ, Params: canonical}, recordNone
+	}
+	s.mu.Lock()
+	if s.adhoc == nil {
+		s.adhoc = map[string]Outcome{}
+	}
+	s.adhoc[runID] = Outcome{TaskID: t.ID} // Result "": running
+	s.adhocOrder = append(s.adhocOrder, runID)
+	s.runningRun = runID
+	for len(s.adhocOrder) > maxAdHoc {
+		delete(s.adhoc, s.adhocOrder[0])
+		s.adhocOrder = s.adhocOrder[1:]
+	}
+	s.mu.Unlock()
+	done := s.begin(t.ID)
+	go func() {
+		defer s.runMu.Unlock()
+		out := s.execute(t, actor, mode, done)
+		s.mu.Lock()
+		if _, ok := s.adhoc[runID]; ok {
+			s.adhoc[runID] = out
+		}
+		s.runningRun = ""
+		s.mu.Unlock()
+	}()
+	return runID, nil
+}
+
+// AdHocTaskID is the id of the task row that records the ad-hoc (API/CLI)
+// runs of a task type.
+func AdHocTaskID(typ string) string { return "api-" + typ }
+
+// adhocRow returns the type's ad-hoc task row with params set, creating it
+// (manual schedule) when missing; the zero Task when it cannot. The caller
+// holds runMu.
+func (s *Service) adhocRow(typ, params string, store bool) meta.Task {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	id := AdHocTaskID(typ)
+	// The row keeps the params without a backup subdir: "Run now" on it then
+	// writes a fresh timestamped backup instead of failing on the last API
+	// run's directory. This run still uses the subdir it was given.
+	run := params
+	if typ == TypeBackup {
+		var p backup.Params
+		if json.Unmarshal([]byte(params), &p) == nil {
+			p.Subdir = ""
+			params = encodeParams(p)
+		}
+	}
+	t, err := s.DB.GetTask(ctx, id)
+	switch {
+	case errors.Is(err, meta.ErrNotFound):
+		t = meta.Task{ID: id, Name: TypeName(typ) + " (API/CLI)", Type: typ, Schedule: "manual", Params: params,
+			Enabled: true, NotifyEmail: []string{}}
+		if err := s.DB.CreateTask(ctx, t); err != nil {
+			s.log().Warn("could not create the task that records API runs; this run is not recorded", "task", id, "err", logsafe.Err(err))
+			return meta.Task{}
+		}
+		t.Params = run
+		return t
+	case err != nil:
+		s.log().Warn("could not read the task that records API runs; this run is not recorded", "task", id, "err", logsafe.Err(err))
+		return meta.Task{}
+	case t.Type != typ:
+		return meta.Task{}
+	}
+	if store {
+		t.Params = params
+		if err := s.DB.UpdateTask(ctx, t); err != nil {
+			s.log().Warn("could not store the params of an API run", "task", id, "err", logsafe.Err(err))
+		}
+	}
+	t.Params = run
+	return t
+}
+
+// AdHoc returns what is known of ad-hoc run id: running, or its outcome
+// once it finished. ok is false for an unknown (or forgotten) id.
+func (s *Service) AdHoc(id string) (out Outcome, running, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out, ok = s.adhoc[id]
+	return out, ok && out.Result == "", ok
+}
+
 // RunCompact runs blob store compaction for actor and waits for it (POST
 // /-/api/gc): the first blobstore.compact task when one exists, so its
 // state is recorded, otherwise an unrecorded run with the type as the
@@ -304,6 +434,14 @@ func (s *Service) execute(t meta.Task, actor string, mode recordMode, done chan 
 		if !ok {
 			return summary{msg: "unknown task type"}, fmt.Errorf("unknown task type %q", t.Type)
 		}
+		if def.dataLock && s.DataLock != nil {
+			rlog.Infof("taking the data directory lock")
+			release, err := s.DataLock(ctx)
+			if err != nil {
+				return summary{msg: "the data directory lock was not acquired"}, fmt.Errorf("data directory lock: %w", err)
+			}
+			defer release()
+		}
 		return def.run(ctx, s, t, actor, rlog)
 	}()
 	if err == nil && ctx.Err() != nil {
@@ -405,4 +543,39 @@ func (s *Service) record(t meta.Task, out Outcome, rlog *RunLog, scheduled bool)
 	default:
 		s.log().Error("could not record the task run", "task", t.ID, "err", logsafe.Err(err))
 	}
+}
+
+// RunningRun returns the id of the ad-hoc run (StartAdHoc) in progress, ""
+// when none: a scheduled or "run now" run has a task id (Running) but no
+// ad-hoc run id.
+func (s *Service) RunningRun() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runningRun
+}
+
+// limitBackupParams is what a non-interactive caller's backup params become:
+// keep and deep are those stored on the ad-hoc row (set by an interactive
+// admin) or the defaults, whatever the caller asked for. A requested verify
+// stays (a plain verify changes nothing). The caller holds runMu.
+func (s *Service) limitBackupParams(canonical string) string {
+	var p backup.Params
+	if json.Unmarshal([]byte(canonical), &p) != nil {
+		return canonical
+	}
+	asked := p.Verify
+	p.Keep, p.Deep = backup.DefaultKeep, false
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if row, err := s.DB.GetTask(ctx, AdHocTaskID(TypeBackup)); err == nil && row.Type == TypeBackup {
+		var stored backup.Params
+		if json.Unmarshal([]byte(row.Params), &stored) == nil {
+			if stored.Keep >= 1 && stored.Keep <= backup.MaxKeep {
+				p.Keep = stored.Keep
+			}
+			p.Deep = stored.Deep
+		}
+	}
+	p.Verify = asked || p.Deep
+	return encodeParams(p)
 }

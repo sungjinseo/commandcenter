@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -107,6 +108,7 @@ type Config struct {
 	Listen              string          `yaml:"listen"`
 	BaseURL             string          `yaml:"baseURL"`
 	DataDir             string          `yaml:"dataDir"`
+	BackupDir           string          `yaml:"backupDir"` // root of the online backups (plan 14); a process setting, default /backup
 	MemoryLimitMiB      int             `yaml:"memoryLimitMiB"`
 	MaxUploadMiB        int             `yaml:"maxUploadMiB"`
 	MetricsFlushSeconds int             `yaml:"metricsFlushSeconds"` // hidden: how often download/request counters are written (default 30)
@@ -308,6 +310,10 @@ func (c *Config) applyDefaults() {
 	if c.DataDir == "" {
 		c.DataDir = "/data"
 	}
+	if c.BackupDir == "" {
+		c.BackupDir = "/backup"
+	}
+	c.BackupDir = filepath.Clean(c.BackupDir)
 	if c.MaxUploadMiB == 0 {
 		c.MaxUploadMiB = 1024
 	}
@@ -360,6 +366,9 @@ func (c *Config) validate() error {
 	}
 	if c.Database.MaxConns < 0 || c.Database.MaxConns > 1000 {
 		add("database.maxConns must be between 1 and 1000 (0: the default)")
+	}
+	if data := filepath.Clean(c.DataDir); nestedOrSame(data, c.BackupDir) || nestedOrSame(c.BackupDir, data) {
+		add("backupDir (%s) and dataDir (%s) must not be the same directory or inside each other", c.BackupDir, c.DataDir)
 	}
 	// baseURL and maxUploadMiB are import-only (plan 12): a problem is
 	// reported in SettingsErr and only matters before the first import.
@@ -663,3 +672,12 @@ func topLevelKeys(b []byte) map[string]bool {
 // AccessKeys are the top-level keys imported into the database once
 // (plan 12) and ignored afterwards.
 var AccessKeys = []string{"users", "roles", "anonymousRead", "baseURL", "maxUploadMiB"}
+
+// nestedOrSame reports whether child is parent or lies inside it.
+func nestedOrSame(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}

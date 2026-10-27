@@ -23,6 +23,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"commandcenter/internal/backup"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/logsafe"
@@ -32,9 +33,11 @@ import (
 
 // Task types.
 const (
-	TypeCompact = "blobstore.compact"
-	TypeCleanup = "repository.cleanup"
-	TypeRebuild = "repository.rebuild-metadata"
+	TypeCompact      = "blobstore.compact"
+	TypeCleanup      = "repository.cleanup"
+	TypeRebuild      = "repository.rebuild-metadata"
+	TypeBackup       = "backup"
+	TypeBackupVerify = "backup.verify"
 )
 
 // Seed task (Decision 7): created on the first start after plan 11 unless
@@ -81,10 +84,15 @@ type Service struct {
 	GC       func(ctx context.Context, store string) (int, int64, error) // blobstore.compact: blobs and bytes removed; store "" means all
 	Deleters *cleanup.Registry                                           // repository.cleanup
 	Maven    *maven.Handler                                              // repository.rebuild-metadata
-	Events   repo.EventSink                                              // task.run and cleanup events; nil records none
-	Mail     Mailer                                                      // failure e-mails (SendAsync never blocks); nil: none
-	Metrics  Flusher                                                     // pending download counts, flushed before cleanup evaluates; nil: none
-	Log      *slog.Logger                                                // run logs go here too (and so to the log ring)
+	Backup   *backup.Service                                             // backup; runs under the run lock, so compaction waits
+	// DataLock takes the cross-process data directory lock (datalock) and
+	// returns its release; compaction and backup runs hold it, so an offline
+	// `commandcenter gc` cannot delete blobs meanwhile. Nil: no lock.
+	DataLock func(ctx context.Context) (release func(), err error)
+	Events   repo.EventSink // task.run and cleanup events; nil records none
+	Mail     Mailer         // failure e-mails (SendAsync never blocks); nil: none
+	Metrics  Flusher        // pending download counts, flushed before cleanup evaluates; nil: none
+	Log      *slog.Logger   // run logs go here too (and so to the log ring)
 
 	// Test hooks and limits; zero values mean the defaults.
 	Now           func() time.Time
@@ -115,6 +123,12 @@ type Service struct {
 	// scheduled run could not be recorded (the stored next_run is stale):
 	// the task is not due before it. The zero time: not due again.
 	deferred map[string]time.Time
+	// adhoc holds the outcomes of the last ad-hoc runs (StartAdHoc), oldest
+	// first in adhocOrder; at most maxAdHoc are kept.
+	adhoc      map[string]Outcome
+	adhocOrder []string
+	// runningRun is the id of the ad-hoc run in progress, "" if none.
+	runningRun string
 }
 
 // Mailer queues an e-mail without blocking (mail.Sender).
