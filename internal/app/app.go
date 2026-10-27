@@ -34,6 +34,7 @@ import (
 	"commandcenter/internal/mail"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/metrics"
+	"commandcenter/internal/nexusapi"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/resolve"
@@ -421,8 +422,9 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	}
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
+	nexus := &nexusapi.Handler{Repos: registry, Auth: authn, DB: db, BaseURL: baseURL, UI: webUI}
 	srv := &server.Server{Registry: registry, Handlers: handlers, Auth: authn, Log: log,
-		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Requests: recorder.Request, Docker: dockerH}
+		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Nexus: nexus, Requests: recorder.Request, Docker: dockerH}
 	a.Handler = srv.Handler()
 	return a, nil
 }

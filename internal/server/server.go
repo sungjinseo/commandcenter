@@ -42,6 +42,10 @@ type Server struct {
 	// UI registers the web UI routes; nil serves no UI.
 	UI interface{ Routes(*http.ServeMux) }
 
+	// Nexus serves the Nexus REST API compatibility layer under
+	// /service/rest/v1/ (nexusapi.Handler); nil serves only the status ping.
+	Nexus http.Handler
+
 	// Docker serves the Docker/OCI registry API at /v2/ and renders its
 	// errors; nil serves none. It authenticates Bearer tokens there itself
 	// (the tokens its /v2/token issues); Basic credentials are checked here.
@@ -81,6 +85,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.UI != nil {
 		s.UI.Routes(mux) // still behind wrap: authenticated and logged
+	}
+	if s.Nexus != nil {
+		mux.Handle("/service/rest/v1/", s.Nexus) // the exact status route above stays the plain ping
 	}
 	return s.wrap(mux)
 }
