@@ -420,8 +420,8 @@ func TestCargoUsageUsesPublishedName(t *testing.T) {
 func TestUserListKeepsPrincipalsApart(t *testing.T) {
 	js := readStatic(t, "access.js")
 	for _, want := range []string{
-		`const over = (id) => stored.has(id) && stored.get(id).source === "ldap";`,
-		`key: stored.has(id) ? "ldap:" + id : id`,
+		`const over = (id) => stored.has(id) && isDir(stored.get(id).source);`,
+		`key: stored.has(id) ? (u.source || "ldap") + ":" + id : id`,
 		`.find((x) => x.key === id)`,
 		`ldap ? kv(t("acct.owner"), h("code", null, me.owner)) : null`,
 	} {
