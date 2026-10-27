@@ -280,6 +280,33 @@ func readLine(br *bufio.Reader) ([]byte, error) {
 	}
 }
 
+// CachedName returns the spelling name was published with, from the first
+// line of the proxy's cached index file, or "" when that file is not cached
+// or its first line does not start with a valid name equal to name ignoring
+// case. It reads at most 4 KiB of the file and never asks the upstream, so
+// the UI can call it for each crate it shows (QA L-20).
+func CachedName(ctx context.Context, s *repo.Store, repoName, name string) string {
+	a, err := s.Get(ctx, repoName, indexKey(IndexPath(name)))
+	if err != nil {
+		return ""
+	}
+	f, err := s.Open(a)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	// ponytail: "name" must be the first key, as crates.io and cargo write
+	// it; decode further into the line if an upstream writes it later.
+	dec := json.NewDecoder(io.LimitReader(f, 4<<10))
+	open, _ := dec.Token()
+	key, _ := dec.Token()
+	val, _ := dec.Token()
+	if n, ok := val.(string); ok && open == json.Delim('{') && key == "name" && ValidName(n) && strings.EqualFold(n, name) {
+		return n
+	}
+	return ""
+}
+
 // download returns a crate file. Proxies find its checksum in the cached index
 // and the upstream download URL in the upstream config.json.
 func (h *Handler) download(ctx context.Context, rp *repo.Repository, name, version string) (proxy.Result, error) {

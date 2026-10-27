@@ -13,10 +13,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Back up before you upgrade. Downgrades are not supported: an older version can misbehave
   silently on data a newer one has written, so the way back is the backup taken before the upgrade,
   restored together with the old image ("업그레이드" in the operations guide).
-- After upgrading, run `repository.rebuild-metadata` once for each Maven hosted repository (a task
-  with the schedule `manual`, then "Run now"). It removes the versions, `latest`/`release` values
-  and foreign `groupId`/`artifactId` that older builds took from uploaded `maven-metadata.xml`
-  files; without it they stay until the next upload to the same `groupId:artifactId` (QA L-11).
+- After upgrading, run `repository.rebuild-metadata` once for each Maven hosted repository and each
+  Maven proxy (a task with the schedule `manual`, then "Run now"). In a hosted repository it removes
+  the versions, `latest`/`release` values and foreign `groupId`/`artifactId` that older builds took
+  from uploaded `maven-metadata.xml` files, also from documents of GAs that have no artifacts;
+  without it they stay until the next upload to the same `groupId:artifactId` (QA L-11). In a proxy
+  it deletes the directory listings and IDE indexes (`.index/`) that older builds cached at paths
+  that are not Maven files, which are no longer served but still show in Browse; files at
+  Maven-file paths are kept even when they are `text/html`, and the next `blobstore.compact`
+  reclaims the space (QA L-12).
 - Review npm and PyPI groups that relied on mixing hosted and proxy versions of the same name. Such
   a group now answers only from the first member that has the name, so versions, dist-tags and
   files that only a later member has disappear from it, and an offline member makes it answer 503
@@ -42,6 +47,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failures of that name in a row; give CI an API token. Scripts that create a role with a `repo:`
   privilege before its repository, a blob store with a relative path, or a user or role whose id
   differs from an existing one only in case now get 400 or 409 (see Changed and Security).
+- Deleting a repository now also removes the role privileges on it. Scripts that delete and
+  re-create a repository under the same name, for example to empty it, must grant those privileges
+  again (see Changed).
 - LDAP: a login name that is not printable ASCII, or that has leading, trailing or repeated spaces,
   is now refused like a wrong password (see Security). If your `userFilter` finds users by a
   non-ASCII value such as a Korean `cn`, they can no longer sign in with it; make the filter match
@@ -53,6 +61,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remote redirect within its own `https` origin, or point `remote` at the final `https` address. A
   proxy whose `remote` host is not ASCII must be changed to its punycode form (`xn--…`), or all its
   fetches are refused (see Changed and Security).
+- docker compose: `docker-compose.yml` now runs the release image and no longer builds the
+  checkout, and it does not start until `.env` next to it names the version, such as
+  `COMMANDCENTER_VERSION=1.2.3` (no `v`). To keep running your own build, build it with
+  `docker build` and set `COMMANDCENTER_IMAGE` and `COMMANDCENTER_VERSION` to it ("빠른 시작" in the
+  operations guide).
 
 ### Added
 
@@ -62,6 +75,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Reference Kubernetes manifests in `deploy/kubernetes/`. Liveness is a TCP connect, so a full
   connection table does not restart the pod; startup and readiness ask
   `GET /service/rest/v1/status`.
+- A Helm chart, `deploy/helm/commandcenter`, published with each release as
+  `oci://ghcr.io/sungjinseo/charts/commandcenter` (chart version and appVersion are the release
+  version) and signed with cosign like the image. CI lints and renders it and checks it and the
+  reference manifest with kubeconform. It runs one pod: a StatefulSet with no replicas setting, a ReadWriteOnce volume for
+  `/data`, `config.yaml` in a Secret, the secret key from an existing Secret
+  (`secretKey.existingSecret`), a non-root user with a read-only root filesystem, and a `helm test`
+  that asks the status API through the Service with the image's own
+  `commandcenter healthcheck -url`. It is published through an Ingress (`ingress.*`) or a Gateway
+  API HTTPRoute (`httpRoute.*`). `config.baseURL` and `config.adminPasswordHash` are required,
+  and `persistence.storageClass` must name block storage, never NFS or SMB. "Kubernetes" in the
+  operations guide covers installing, ingress settings for large uploads, upgrades, backups with
+  the pod stopped, and uninstalling, which keeps the volume. The README quick start now uses the
+  release image on Kubernetes and with docker compose; building from source is still described.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, this changelog, and issue and pull request templates.
 - Continuous integration (`.github/workflows/ci.yml`) on every push to `main` and every pull
   request: gofmt, `go vet`, `go test` (also with the race detector), govulncheck, a syntax check of
@@ -75,9 +101,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   floating image tags `<major>.<minor>`, `<major>` and `latest`, and the GitHub "Latest" release,
   move only to the highest stable release in their range: v1.2.5 after v1.3.0 gets `1.2.5` and
   `1.2` and leaves `1` and `latest` on 1.3.0. Prereleases get only their own tag and do not count.
+- Release images are signed with cosign, without a key. The signing certificate names the release
+  workflow at the tag,
+  `https://github.com/sungjinseo/commandcenter/.github/workflows/release.yml@refs/tags/v<version>`
+  (issuer `https://token.actions.githubusercontent.com`). The signature covers the multi-platform
+  index that the release's tags point to and is recorded in Sigstore's public transparency log.
+  Check it with `cosign verify` and cosign 3 or later (command in the operations guide).
 - Dependabot: weekly updates for Go modules, the Docker base images and GitHub Actions.
-- `COMMANDCENTER_VERSION` sets the version a compose build reports (`commandcenter version`, web
-  UI); without it the version is `dev`.
+- `COMMANDCENTER_VERSION` and `COMMANDCENTER_IMAGE` choose the image docker compose runs: by
+  default `ghcr.io/sungjinseo/commandcenter` at the version in `COMMANDCENTER_VERSION`, or a mirror
+  or local build named by `COMMANDCENTER_IMAGE`. The compose file has no `build:` section, so a
+  mistyped version or an unreachable registry fails instead of quietly building the checkout. A
+  local build reports the version given as `docker build --build-arg VERSION=…`, `dev` without
+  it.
 - `npm unpublish pkg@version` and `npm unpublish pkg --force` delete from a hosted repository, or
   through a group's `writeMember`, with the delete privilege (QA H-2, N-10). Dist-tags of removed
   versions go, `latest` moves to the newest remaining release, and an unpublish that would delete a
@@ -113,6 +149,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   query in a proxy's `remote` URL is not encrypted: with a key, every start logs a warning that
   names those proxies (`the remote URL of these proxies holds a user name, password or
   query`); move user names and passwords to `remoteAuth`.
+- `commandcenter secret-key rotate -new-key-file FILE` changes the secret key. In one transaction
+  it re-encrypts the stored SMTP password, LDAP bind password and proxy `remoteAuth` secrets from
+  the current key (`COMMANDCENTER_SECRET_KEY` or `secretKeyFile`, as for the server) to the key in
+  FILE, and encrypts the ones still in plain text; if any stored secret does not decrypt with the
+  current key, it changes nothing. It prints only counts. Stop the server before running it and
+  start it with the new key afterwards, since a running server keeps the key it started with.
+  Backups taken before the change still need the old key.
+- `repository.rebuild-metadata` also takes a Maven proxy, which it refused with 400 before
+  (QA L-12). It deletes the proxy's cached files at paths a proxy no longer fetches, such as the
+  upstream directory listings and IDE indexes older builds cached, keeps every Maven file whatever
+  its content type, and leaves the blobs to `blobstore.compact`. The run log names the first 20
+  removed paths. The web UI's task editor lists Maven proxies next to hosted repositories, with
+  each repository's type.
 
 ### Changed
 
@@ -241,13 +290,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   paths, such as directories, answer 404 through proxies and groups without asking the remote; a
   `text/html` answer for a file not named `.html` is taken as not found and negative-cached, or, for
   a file already cached, as a failed check that serves the cached copy; and directory listings
-  cached by older builds are no longer served but stay in Browse until the proxy is re-created.
+  cached by older builds are no longer served; `repository.rebuild-metadata` run on the proxy
+  removes them (see Added).
 - **Cargo proxy and group index responses carry an `ETag`** (QA L-21) and answer a matching
   `If-None-Match` with 304, like hosted ones, so cargo stops downloading them again on every
   resolve. No Cargo index response sends `Last-Modified`.
 - **A version refuses to start on a `meta.db` written by a newer version** (QA N-30): the database
   now records its schema version (SQLite `user_version`), and the error names both versions and
-  points to restoring the pre-upgrade backup. Versions before this one do not check.
+  points to restoring the pre-upgrade backup. Versions before this one do not check. The first
+  start brings `meta.db` up to date and records the version in one transaction, so an interrupted
+  start leaves it as it was and the next start upgrades it again.
 - **Garbage collection of the default blob store keeps every blob any repository references** (QA
   N-30), including blobs that only a repository on a named store references, which a version
   without named stores may have written there.
@@ -264,6 +316,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A role privilege on `repo:<name>` needs an existing repository (400 `unknown repository`);
   targets the stored role already has may stay. A role cannot name the same target twice (QA N-25,
   L-9).
+- Deleting a repository also removes, in the same transaction, every role privilege whose target is
+  exactly `repo:<name>`, so a repository created later under that name starts without them (QA
+  N-25). `*`, `format:` and other repositories' targets stay, and a role left without privileges is
+  kept. The server logs one warning naming the repository and the changed roles (`removed the
+  privileges on a deleted repository from roles`), records a `role.update` event per role with the
+  detail `removed repo:<name>`, and the web UI's delete confirmation lists those roles. Privileges
+  that deletes in older versions left behind stay; the startup warning `role grants privileges on a
+  repository that does not exist` names them.
 - Blob store paths must be absolute: a relative path is refused instead of silently becoming
   `<dataDir>/blobstores/<name>`, and a store outside the data directory carries a `warning` in the
   API and on its page (QA N-22, N-23).
@@ -340,7 +400,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name keep publishing (QA L-19).
 - Mixed-case crate names showed in lower case in the web UI (search results and `cargo add`
   snippets), the packages API and upload events. They keep their published spelling now, while
-  lookups stay case-insensitive (QA L-20).
+  lookups stay case-insensitive. Crates cached by a proxy, which records no package rows, take the
+  spelling from the first line of their cached index file in the web UI: at most 4 KiB is read per
+  crate shown, the upstream is never asked, and a crate whose index file is not cached keeps the
+  lowercase name (QA L-20).
 - A Maven hosted repository accepted any content as a `.pom`, such as plain text or a POM naming
   other coordinates, while it rejected a broken `maven-metadata.xml` (QA N-6).
 - Maven proxies cached upstream HTML directory listings under the directory's name, served them as
@@ -353,12 +416,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Maven uploads accepted paths that are not valid UTF-8 (only a hand-made request such as `caf%E9`
   sends one), names that JSON responses such as the web UI's listings cannot carry unchanged. They
   now get 400 `invalid path`; files stored earlier stay readable.
+- `sbt publish` of an sbt plugin to a Maven hosted repository failed with 400. By default
+  (`sbtPluginPublishLegacyMavenStyle`), sbt 1.9 and later also upload the plugin in sbt's legacy
+  layout, named without the `_<scala>_<sbt>` suffix of the artifact directory
+  (`…/sbt-foo_2.12_1.0/1.0.0/sbt-foo-1.0.0.jar`); sbt before 1.9 uploads only that layout. Hosted
+  repositories now store such a file, and serve it also through groups, when its name is the
+  directory name without the suffix, `-`, the version, an optional classifier and an extension. A
+  legacy `.pom` must name that shorter `artifactId`. These files are not versions of the
+  `groupId:artifactId`, so `maven-metadata.xml` lists only the versions that have Maven-layout
+  files. The component search, cleanup and the components API count them, including the ones
+  proxies have cached, as files of the plugin version's component, so deleting the component,
+  in the web UI or through the API, deletes them too (sbt falls back to them when the
+  Maven-layout files are gone).
 - Clients that sent headers and then stalled their bodies, even without credentials, could fill the
   128 MiB container with idle connections (QA N-5).
 - A body that stalled past the idle timeout answered 500 and logged an ERROR (QA N-8).
 - A group whose members were all offline answered 404, which clients such as Maven cache (QA N-27).
 - Uploading a GA `maven-metadata.xml` could add versions without artifacts, a `<release>` or
   another artifact's IDs, and so steer version ranges such as `[1.0,)` (QA L-11).
+- Deleting a Maven artifact or component (also by a cleanup policy) and
+  `repository.rebuild-metadata` dropped the `<plugins>` of a `maven-metadata.xml` that a GA shares
+  with a plugin group (the plugins of groupId `org.example` and GA `org:example` both live in
+  `org/example/`), so `mvn <prefix>:<goal>` no longer found those plugins. The plugins now stay,
+  also when the GA's last version is deleted.
+- `repository.rebuild-metadata` kept the versions of a GA document whose GA has no artifacts when
+  the document named no `groupId`/`artifactId` or another GA, also held `<plugins>`, or sat inside
+  another GA's directory (`org/example/app/` under GA `org:example`). Those versions now go too, so
+  after the upgrade run no document an older build accepted adds versions to version-range,
+  `LATEST` or `RELEASE` resolution, also through groups.
 - `baseURL` accepted user info, a query or a fragment, so a credential in it reached every client in
   download URLs, and the config error repeated the value (QA N-24).
 - A placeholder `passwordHash` counted as a password: the last administrator who could really sign
@@ -374,11 +459,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Expired negative-cache rows were never deleted. They are now pruned at start and then daily.
 - Temp files of writes cut off by SIGKILL, OOM or a stop timeout stayed in each blob store's `tmp/`.
   Files untouched for an hour are now removed at start and by every compact run.
+- The `blobstore.compact` task reported 0 bytes however many blobs it removed (`bytes` of
+  `POST /-/api/gc`, the task's `lastBytes`). It now reports the bytes the removed blobs held, and
+  its run message and log say so: `removed 3 blobs (1234 bytes)`.
 - Concurrent `maven-metadata.xml` uploads of up to 10 MiB each could exhaust memory.
 - LDAP: the 10 s back-off after a failed re-check did not hold when the directory hung, because it
   ran from the start of the attempt; it now runs from its end. A client that disconnects no longer
   starts it, and a request waiting behind another's re-check of the same user ends when its client
   disconnects.
+- LDAP: when a sign-in's client went away, or the connection test reached its 30 s limit, between
+  two directory operations, the next operation still ran for up to `timeoutSeconds` (at most 60 s)
+  and held one of the directory slots. It now stops at once.
 - `commandcenter hash-password` accepted passwords that the web UI and `user reset-password`
   refuse. It now applies the same rules (at least 8 characters, at most 72 bytes).
 - LDAP users saw none of their own API tokens on the token page. `/-/api/me` now returns `owner`
@@ -423,6 +514,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A user allowed to deploy to a Maven hosted repository could steer version-range resolution with
   an uploaded `maven-metadata.xml` (QA L-11).
 - A credential in `baseURL` was sent to every client (QA N-24).
+- The privileges a role had on a deleted repository applied again to a repository created later
+  under the same name (QA N-25, see Changed).
 - A password reset with `user reset-password` did not reach a running server, so the old password
   and the user's sessions kept working until a restart (QA N-2). Response times no longer reveal
   accounts whose stored hash is not a bcrypt hash.

@@ -120,7 +120,7 @@ func TestGCKeepsReferencedBlob(t *testing.T) {
 	}
 	ageBlob(t, a.Config.DataDir, asset.BlobSHA256) // old, so only the in-use check can save it
 
-	n, err := a.GC(ctx, time.Hour)
+	n, _, err := a.GC(ctx, time.Hour)
 	if err != nil {
 		t.Fatalf("GC: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestGCRemovesUnreferencedBlob(t *testing.T) {
 	}
 	ageBlob(t, a.Config.DataDir, sums.SHA256)
 
-	n, err := a.GCStore(ctx, "default", time.Hour)
+	n, _, err := a.GCStore(ctx, "default", time.Hour)
 	if err != nil {
 		t.Fatalf("GCStore: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestGCDefaultKeepsBlobOfNamedStoreRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	ageBlob(t, a.Config.DataDir, sums.SHA256)
-	if n, err := a.GC(ctx, time.Hour); err != nil || n != 0 {
+	if n, _, err := a.GC(ctx, time.Hour); err != nil || n != 0 {
 		t.Fatalf("GC removed %d (err %v); a blob a repository references must survive in the default store", n, err)
 	}
 	if !present(t, a.Store.StoreByName("default"), sums.SHA256) {
@@ -195,7 +195,7 @@ func TestGCSweepsStaleTempFiles(t *testing.T) {
 	}
 	inB, inDefault := tmpFile(rootB), tmpFile(a.Config.DataDir)
 
-	if _, err := a.GCStore(context.Background(), "b", time.Hour); err != nil {
+	if _, _, err := a.GCStore(context.Background(), "b", time.Hour); err != nil {
 		t.Fatalf("GCStore(b): %v", err)
 	}
 	if _, err := os.Stat(inB); !os.IsNotExist(err) {
@@ -227,7 +227,7 @@ func TestGCStoreIsolation(t *testing.T) {
 	ageBlob(t, rootB, orphanB.SHA256)
 
 	// Collect store A only.
-	if _, err := a.GCStore(ctx, "default", time.Hour); err != nil {
+	if _, _, err := a.GCStore(ctx, "default", time.Hour); err != nil {
 		t.Fatalf("GCStore(default): %v", err)
 	}
 	if !present(t, a.Store.StoreByName("b"), kept.BlobSHA256) {
@@ -271,7 +271,7 @@ func TestGCPerStoreDedup(t *testing.T) {
 	ageBlob(t, rootB, sha)
 
 	// Collecting store B removes its now-unreferenced copy.
-	n, err := a.GCStore(ctx, "b", time.Hour)
+	n, _, err := a.GCStore(ctx, "b", time.Hour)
 	if err != nil {
 		t.Fatalf("GCStore(b): %v", err)
 	}
@@ -285,7 +285,7 @@ func TestGCPerStoreDedup(t *testing.T) {
 	if !present(t, a.Store.StoreByName("default"), sha) {
 		t.Fatal("store A lost its copy when store B was collected")
 	}
-	if nn, err := a.GCStore(ctx, "default", time.Hour); err != nil || nn != 0 {
+	if nn, _, err := a.GCStore(ctx, "default", time.Hour); err != nil || nn != 0 {
 		t.Fatalf("GCStore(default) removed %d (err %v); store A still references the blob", nn, err)
 	}
 	if !present(t, a.Store.StoreByName("default"), sha) {

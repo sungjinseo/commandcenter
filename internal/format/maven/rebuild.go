@@ -2,12 +2,13 @@ package maven
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path"
 	"sort"
 	"strings"
 
 	"commandcenter/internal/component"
+	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 )
 
@@ -26,7 +27,7 @@ var rebuildPage = 1000
 type RebuildResult struct {
 	GAs       int  // GA documents regenerated
 	Snapshots int  // SNAPSHOT version directories checked: document regenerated, kept as is when unchanged, or removed when no build is left
-	Removed   int  // GA documents removed because the GA has no artifacts left
+	Removed   int  // GA documents removed because the GA has no artifacts left (their <plugins> stay)
 	Failed    int  // GA or SNAPSHOT version rebuilds that failed (logged)
 	Truncated bool // the scan stopped at its budget: GAs past it were not rebuilt
 	// OrphansTruncated: more GA documents than the cap were found, so only the
@@ -171,12 +172,14 @@ scan:
 		res.Snapshots++
 	}
 
-	// Orphans: a GA-level document whose GA has no artifact left.
-	// Plugin-group documents are kept; version-level (SNAPSHOT) ones were
-	// handled above.
+	// Orphans: a GA-level document whose GA has no artifact left. The
+	// directory names the GA, whatever groupId and artifactId the document
+	// names (older builds stored uploads as sent). A plugin-group document
+	// keeps its <plugins>; version-level (SNAPSHOT) ones were handled above.
 	if !res.Truncated {
 		for _, d := range metaDirs {
-			if gas[dirGA(d)] || gas[dirGA(path.Dir(d))] {
+			k := dirGA(d)
+			if gas[k] || gaDir(k.group, k.artifact) != d {
 				continue
 			}
 			if err := h.checkRebuild(ctx, rp); err != nil {
@@ -188,16 +191,16 @@ scan:
 				logf("%s/maven-metadata.xml: %v", d, err)
 				continue
 			}
-			if m == nil || m.GroupID == "" || m.ArtifactID == "" || len(m.Plugins) > 0 || gaDir(m.GroupID, m.ArtifactID) != d {
+			if m == nil || m.Versioning == nil {
 				continue
 			}
-			if err := h.rebuildGA(ctx, rp, m.GroupID, m.ArtifactID, true); err != nil {
+			if err := h.rebuildGA(ctx, rp, k.group, k.artifact, true); err != nil {
 				res.Failed++
-				logf("%s:%s: removing the orphan metadata failed: %v", m.GroupID, m.ArtifactID, err)
+				logf("%s:%s: removing the orphan metadata failed: %v", k.group, k.artifact, err)
 				continue
 			}
 			res.Removed++
-			logf("%s:%s: removed maven-metadata.xml, the GA has no artifacts", m.GroupID, m.ArtifactID)
+			logf("%s:%s: removed the versions in maven-metadata.xml, the GA has no artifacts", k.group, k.artifact)
 		}
 	}
 	return res, nil
@@ -220,4 +223,59 @@ func dirGA(d string) gaKey {
 		return gaKey{}
 	}
 	return gaKey{strings.ReplaceAll(d[:i], "/", "."), d[i+1:]}
+}
+
+// PurgeUnfetchable deletes the assets of Maven proxy rp at paths a proxy no
+// longer fetches (fetchable): the directory listings and IDE indexes that
+// older builds cached, which are not served any more but still show in
+// Browse (QA L-12). An asset at a Maven-file path is kept whatever its
+// content type, as it may be a real artifact an upstream mislabelled. The
+// blobs are left to blobstore.compact. logf (may be nil) receives the first
+// removed paths. It returns how many assets it deleted.
+func (h *Handler) PurgeUnfetchable(ctx context.Context, rp *repo.Repository, logf func(format string, args ...any)) (int, error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	if rp.Format != "maven" || rp.Type != "proxy" {
+		return 0, fmt.Errorf("purge %s %s repository %q: %w", rp.Format, rp.Type, rp.Name, component.ErrNotSupported)
+	}
+	removed, after := 0, ""
+	for {
+		page, err := h.Store.DB.ScanAssets(ctx, rp.Name, after, rebuildPage)
+		if err != nil {
+			return removed, err
+		}
+		var gone []string
+		for _, a := range page {
+			if p, err := ParsePath(a.Path); err == nil && !p.fetchable() {
+				gone = append(gone, a.Path)
+			}
+		}
+		if len(gone) > 0 {
+			n := 0
+			err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+				for _, g := range gone {
+					if _, err := tx.DeleteAsset(ctx, rp.Name, g); err == nil {
+						n++
+					} else if !errors.Is(err, meta.ErrNotFound) {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				return removed, err
+			}
+			for i, g := range gone {
+				if removed+i < 20 {
+					logf("removed %q", g)
+				}
+			}
+			removed += n
+		}
+		if len(page) < rebuildPage {
+			return removed, nil
+		}
+		after = page[len(page)-1].Path
+	}
 }

@@ -11,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/component"
+	"commandcenter/internal/format/cargo"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -431,7 +433,7 @@ func (u *UI) asset(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	res := map[string]any{
 		"path":           a.Path,
 		"size":           a.Size,
 		"contentType":    a.ContentType,
@@ -447,7 +449,15 @@ func (u *UI) asset(w http.ResponseWriter, r *http.Request) {
 		"downloadUrl":    u.repoURL(rp.Name) + escapePath(a.Path),
 		// browse alone shows the asset but cannot download it (Decision 2)
 		"canDownload": u.Auth.Can(principal(r), rp.Name, auth.Read),
-	})
+	}
+	// A crate file's path holds the name lowercased; the asset view's
+	// `cargo add` needs the published spelling (QA L-20).
+	if rp.Format == "cargo" {
+		if _, name, _, ok := component.DeriveAsset("cargo", a.Path); ok {
+			res["crate"] = u.cargoName(r.Context(), rp.Name, name)
+		}
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // packageFormats are the formats that record packages in the metadata db.
@@ -491,10 +501,14 @@ func (u *UI) packages(w http.ResponseWriter, r *http.Request) {
 
 // cargoName is the spelling a crate was published with. Cargo rows and paths
 // hold it lowercased, but cargo matches dependency names exactly, so what
-// clients see (and copy into `cargo add`) must keep it (QA L-20). Proxies
-// have no rows, and any failure keeps name.
+// clients see (and copy into `cargo add`) must keep it (QA L-20). A proxy
+// has no rows: its cached index file has the spelling. Any failure keeps name.
 func (u *UI) cargoName(ctx context.Context, repoName, name string) string {
-	if n, err := u.DB.PublishedName(ctx, repoName, strings.ToLower(name)); err == nil && strings.EqualFold(n, name) {
+	n, err := u.DB.PublishedName(ctx, repoName, strings.ToLower(name))
+	if err == nil && n == "" && u.Store != nil {
+		n = cargo.CachedName(ctx, u.Store, repoName, name)
+	}
+	if err == nil && strings.EqualFold(n, name) {
 		return n
 	}
 	return name

@@ -93,7 +93,7 @@ func TestFailedRunSendsOneMail(t *testing.T) {
 			enableSMTP(t, h, lang)
 			m := &fakeMailer{}
 			h.s.Mail = m
-			h.s.GC = func(context.Context, string) (int, error) { return 0, errors.New("disk on fire") }
+			h.s.GC = func(context.Context, string) (int, int64, error) { return 0, 0, errors.New("disk on fire") }
 			tk := h.create(t, Def{Name: "Nightly compact", Type: TypeCompact, Schedule: "manual", NotifyEmail: []string{"ops@example.com"}})
 			out, err := h.s.RunNow(tk.ID, "admin")
 			if err != nil || out.Result != ResultFailed {
@@ -151,11 +151,11 @@ func TestNoMailForOKStoppedDisabledOrNoRecipients(t *testing.T) {
 
 	// Stopped run.
 	started, release := make(chan struct{}), make(chan struct{})
-	h.s.GC = func(ctx context.Context, _ string) (int, error) {
+	h.s.GC = func(ctx context.Context, _ string) (int, int64, error) {
 		close(started)
 		<-ctx.Done()
 		<-release
-		return 0, ctx.Err()
+		return 0, 0, ctx.Err()
 	}
 	stopped := h.create(t, Def{Name: "stopped", Type: TypeCompact, Schedule: "manual", NotifyEmail: notify})
 	if err := h.s.RunAsync(stopped.ID, "admin"); err != nil {
@@ -167,7 +167,7 @@ func TestNoMailForOKStoppedDisabledOrNoRecipients(t *testing.T) {
 	waitIdle(t, h.s)
 
 	// Failed, but no recipients / smtp disabled.
-	h.s.GC = func(context.Context, string) (int, error) { return 0, errors.New("boom") }
+	h.s.GC = func(context.Context, string) (int, int64, error) { return 0, 0, errors.New("boom") }
 	norcpt := h.create(t, Def{Name: "norcpt", Type: TypeCompact, Schedule: "manual"})
 	if out, _ := h.s.RunNow(norcpt.ID, "admin"); out.Result != ResultFailed {
 		t.Fatalf("%+v", out)
@@ -213,7 +213,7 @@ func TestNoRecipientsNeverTouchesMailer(t *testing.T) {
 	// A task without recipients must not even touch the mailer.
 	h := newHarness(t)
 	h.s.Mail = &blockingMailer{release: make(chan struct{})}
-	h.s.GC = func(context.Context, string) (int, error) { return 0, errors.New("boom") }
+	h.s.GC = func(context.Context, string) (int, int64, error) { return 0, 0, errors.New("boom") }
 	enableSMTP(t, h, "en")
 	tk := h.create(t, Def{Name: "x", Type: TypeCompact, Schedule: "manual"})
 	done := make(chan struct{})

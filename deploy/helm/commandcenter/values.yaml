@@ -1,0 +1,180 @@
+# Command Center chart. Read README.md (next to this file) and "Kubernetes" in docs/guide.md first.
+#
+# One pod, always: all locking is in-process, and meta.db is SQLite in WAL mode on the pod's
+# volume. The chart has no replicas setting on purpose. values.schema.json rejects unknown keys.
+
+image:
+  repository: ghcr.io/sungjinseo/commandcenter
+  # Defaults to the chart's appVersion. Pin a version; never use latest. Quote it ("1.10").
+  tag: ""
+  # Optional sha256:... digest, for example the one cosign verified. The tag stays for readability.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# Set these before the first install only: a new name is a new StatefulSet with a new, empty volume.
+nameOverride: ""
+fullnameOverride: ""
+
+# config.yaml at /etc/commandcenter/config.yaml. baseURL, anonymousRead, the users
+# (adminPasswordHash), roles, maxUploadMiB and repositories are imported into meta.db on the first
+# start only: change them in the web UI afterwards. The other keys are read on every start, and
+# only a change to those restarts the pod.
+config:
+  # A Secret holding the whole file under the key config.yaml, which you then keep up to date and
+  # restart the pod for. The other config values must stay empty.
+  existingSecret: ""
+  # The address clients use, https when TLS ends at the ingress. Required.
+  baseURL: ""
+  # Reading needs a sign-in unless this is true (repositories can override it).
+  anonymousRead: false
+  # bcrypt hash of the admin password: docker run --rm -i <image> hash-password. Required unless
+  # extra.users is set. Single-quote it on a command line: the shell eats "$2a$10$...".
+  adminPasswordHash: ""
+  # Repositories created on the first start, in the format of config.example.yaml.
+  repositories: []
+  # Other keys of config.yaml: users (replaces the admin user above), roles, maxUploadMiB,
+  # metricsFlushSeconds, secretKeyFile. listen and dataDir belong to the chart; memoryLimitMiB is
+  # goMemLimit below.
+  extra: {}
+
+# Encrypts the stored SMTP password, LDAP bind password and proxy remoteAuth credentials
+# (guide: "저장된 비밀값 암호화"). Keep the key apart from the volume's backups, and never remove or
+# replace it without "commandcenter secret-key rotate":
+#   kubectl create secret generic commandcenter-secret-key --from-literal=key="$(head -c 32 /dev/urandom | base64)"
+secretKey:
+  existingSecret: ""
+  key: key
+
+# Go's soft memory limit (GOMEMLIMIT). Keep it about 60-65 % of resources.limits.memory, and raise
+# both together. "" leaves it to memoryLimitMiB in an existingSecret's config.yaml.
+goMemLimit: 80MiB
+
+# For proxy repositories that reach the internet through a forward proxy. Put in-cluster remotes
+# in noProxy (".svc,.cluster.local"), or they go through the proxy too.
+proxy:
+  http: ""
+  https: ""
+  noProxy: ""
+
+extraEnv: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    # No CPU limit: bcrypt and upload hashing come in bursts, and throttling them only makes
+    # sign-ins and uploads slow.
+    memory: 128Mi
+
+persistence:
+  # Block storage only: a cloud disk, iSCSI or a local volume. Never NFS or SMB, since SQLite's
+  # WAL mode needs local file locking. Empty uses the cluster's default StorageClass; "-" sets
+  # storageClassName "" (pre-bound volumes).
+  storageClass: ""
+  # meta.db and the default blob store. Proxy caches grow until cleanup policies remove them.
+  # storageClass, size, accessModes and annotations are fixed at install: README.md says how to
+  # resize.
+  size: 50Gi
+  # ReadWriteOnce or ReadWriteOncePod.
+  accessModes: [ReadWriteOnce]
+  annotations: {}
+  # A PVC you made, such as a restored snapshot. It replaces the claim above, whose settings are
+  # then not used. Install time only.
+  existingClaim: ""
+
+service:
+  type: ClusterIP
+  port: 8081
+  annotations: {}
+
+# TLS ends here; set config.baseURL to the https address. Uploads need a body limit of at least
+# maxUploadMiB (1024 MiB by default) and long timeouts, for example with ingress-nginx:
+#   nginx.ingress.kubernetes.io/proxy-body-size: "0"   # the server enforces maxUploadMiB
+#   nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+#   nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+#   nginx.ingress.kubernetes.io/proxy-request-buffering: "off" # not on the shared controller's disk
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: repo.example.com
+      paths: [/]
+  tls: []
+  #  - secretName: repo-example-com-tls
+  #    hosts: [repo.example.com]
+
+# A Gateway API HTTPRoute, for clusters that publish services through a Gateway (Traefik,
+# Istio, Envoy Gateway, ...) instead of an Ingress. TLS ends at the Gateway; set
+# config.baseURL to the https address. The Gateway's own timeouts and body limits apply to
+# uploads (Traefik v3, for example, reads a request for at most 60 s by default).
+httpRoute:
+  enabled: false
+  annotations: {}
+  # The Gateway(s) to attach to. Required when enabled.
+  parentRefs: []
+  #  - name: traefik-gateway
+  #    namespace: traefik
+  hostnames: []
+  #  - repo.example.com
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+# OpenShift's restricted-v2 SCC assigns the user and groups itself: set runAsUser, runAsGroup and
+# fsGroup to null there (README.md).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532 # the image's nonroot user
+  runAsGroup: 65532
+  fsGroup: 65532 # makes the volume writable for that user
+  fsGroupChangePolicy: OnRootMismatch # no recursive chown of every blob on each start
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# On SIGTERM the server drains requests for up to 30 s, then writes the download counters,
+# queued e-mail and activity events and closes the database.
+terminationGracePeriodSeconds: 60
+
+startupProbe:
+  httpGet:
+    path: /service/rest/v1/status
+    port: http
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 60 # 5 minutes for a first start or a database upgrade
+readinessProbe:
+  httpGet:
+    path: /service/rest/v1/status
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+# A TCP connect, which the kernel completes even while all connection slots of the server are
+# busy. An HTTP check would wait behind them and restart a pod that is only saturated.
+livenessProbe:
+  tcpSocket:
+    port: http
+  periodSeconds: 30
+  timeoutSeconds: 5
+
+# More volumes, for example an NFS claim for a named blob store created in the web UI with that
+# path (blobs may live on NFS; meta.db may not).
+extraVolumes: []
+extraVolumeMounts: []

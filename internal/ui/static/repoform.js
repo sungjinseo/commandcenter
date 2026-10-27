@@ -181,11 +181,18 @@ function deleteDialog(name, isLive) {
   const msg = h("div", { class: "form-msg", role: "alert" });
   const cancel = h("button", { type: "button", class: "btn" }, t("common.cancel"));
   const del = h("button", { type: "submit", class: "btn danger", disabled: true, form: id + "-f" }, t("rf.delete"));
+  const roles = h("div", { class: "notice", hidden: true });
   const form = h("form", { id: id + "-f", novalidate: true },
     h("div", { class: "notice amber" }, strong("rf.delText", name)),
+    roles,
     h("div", { class: "field" }, h("label", { for: id }, t("rf.delType")), input),
     msg);
   const m = modal(t("rf.delTitle"), form, [cancel, del], { cls: "modal-small" });
+  // The delete also removes the roles' privileges on the repository (QA N-25).
+  api("roles").then((d) => {
+    const ids = (d.roles || []).filter((r) => (r.privileges || []).some((p) => p.target === "repo:" + name)).map((r) => r.id);
+    if (ids.length) { put(roles, t("rf.delRoles", { roles: ids.join(", ") })); roles.hidden = false; }
+  }).catch(() => {}); // the delete works without the list
   cancel.addEventListener("click", m.close);
   input.addEventListener("input", () => { del.disabled = busy || input.value !== name; msg.textContent = ""; });
   form.addEventListener("submit", async (ev) => {

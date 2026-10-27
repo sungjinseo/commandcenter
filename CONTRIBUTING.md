@@ -73,6 +73,8 @@ requests, uploads or proxy downloads are handled.
 - Document user-visible behaviour in [docs/guide.md](docs/guide.md) (Korean) and, where it matters,
   in both READMEs, and add a line under "Unreleased" in [CHANGELOG.md](CHANGELOG.md).
 - A maintainer reviews every change. Expect questions about memory use, limits and failure modes.
+- Maintainers tag releases on `main` and add the commit that Dependabot's Go module and golang
+  updates need before CI passes: see [RELEASING.md](RELEASING.md).
 
 ## License
 

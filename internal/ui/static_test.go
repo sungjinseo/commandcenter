@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"commandcenter/internal/component"
 )
 
 // staticNames are the files the shell cannot work without; every other
@@ -344,6 +346,35 @@ func TestComponentDeleteWired(t *testing.T) {
 	}
 }
 
+// TestComponentKeepsSbtLegacyFiles: the browser derives Maven components with
+// the server's sbt plugin rule, so "Delete component" also deletes the files
+// of sbt's legacy layout (sbt-foo-1.0.pom in sbt-foo_2.12_1.0/1.0/).
+func TestComponentKeepsSbtLegacyFiles(t *testing.T) {
+	js := readStatic(t, "browse.js")
+	want := "const SBT_PLUGIN_DIR = /" + component.SbtPluginDir.String() + "/;"
+	if !strings.Contains(js, want) {
+		t.Errorf("browse.js does not mirror component.SbtPluginDir: want %s", want)
+	}
+	if !strings.Contains(js, "(sbt && mavenFileMatches(file, sbt[1], version))") {
+		t.Error("deriveComp does not match sbt legacy-layout files")
+	}
+}
+
+// TestRepoDeleteListsRoles: the repository delete confirmation names the
+// roles whose privileges on the repository the delete removes (QA N-25).
+func TestRepoDeleteListsRoles(t *testing.T) {
+	js := readStatic(t, "repoform.js")
+	for _, want := range []string{
+		`api("roles").then((d) => {`,
+		`.some((p) => p.target === "repo:" + name)`,
+		`put(roles, t("rf.delRoles", { roles: ids.join(", ") })); roles.hidden = false;`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("repoform.js does not contain %s", want)
+		}
+	}
+}
+
 // TestMavenSetupEnablesSnapshots: the settings.xml shown for a Maven proxy or
 // group turns snapshots on through an active profile; following a mirror
 // alone breaks every SNAPSHOT dependency (QA M-17).
@@ -357,12 +388,12 @@ func TestMavenSetupEnablesSnapshots(t *testing.T) {
 }
 
 // TestCargoUsageUsesPublishedName: a cargo asset path holds the crate name
-// lowercased, so the asset view asks the packages API for the published
-// spelling before showing `cargo add`, and version paths built from a
-// published name are lowercased again (QA L-20).
+// lowercased, so the asset view takes the published spelling from the asset
+// API (hosted and proxy) before showing `cargo add`, and version paths built
+// from a published name are lowercased again (QA L-20).
 func TestCargoUsageUsesPublishedName(t *testing.T) {
 	js := readStatic(t, "browse.js")
-	for _, want := range []string{`r.format === "cargo" && r.type === "hosted"`, `"crates/" + c.name.toLowerCase() + "/"`} {
+	for _, want := range []string{`if (c && a.crate) c.name = a.crate;`, `"crates/" + c.name.toLowerCase() + "/"`} {
 		if !strings.Contains(js, want) {
 			t.Errorf("browse.js lacks %s", want)
 		}

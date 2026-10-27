@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"commandcenter/internal/config"
@@ -151,10 +152,13 @@ func (d *DB) UpdateRepository(ctx context.Context, def config.Repository) error 
 
 // DeleteRepository removes the definition and, in the same transaction, every
 // assets, packages, dist_tags and negative_cache row of that repository
-// (plan 9 Decision 4). Blobs are left for the GC. ErrNotFound if there is no
-// such definition.
-func (d *DB) DeleteRepository(ctx context.Context, name string) error {
-	return d.Tx(ctx, func(tx *Tx) error {
+// (plan 9 Decision 4) and every role privilege whose target is exactly
+// "repo:<name>", so a repository created later under the name does not get
+// them (QA N-25). It returns the ids of the roles it changed, ordered by id.
+// Blobs are left for the GC. ErrNotFound if there is no such definition.
+func (d *DB) DeleteRepository(ctx context.Context, name string) ([]string, error) {
+	var roles []string
+	err := d.Tx(ctx, func(tx *Tx) error {
 		res, err := tx.q.ExecContext(ctx, `DELETE FROM repositories WHERE name = ?`, name)
 		if err != nil {
 			return err
@@ -162,8 +166,43 @@ func (d *DB) DeleteRepository(ctx context.Context, name string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrNotFound
 		}
-		return purgeRepository(ctx, tx.q, name)
+		if err := purgeRepository(ctx, tx.q, name); err != nil {
+			return err
+		}
+		roles, err = dropRepoPrivileges(ctx, tx.q, name)
+		return err
 	})
+	if err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+// dropRepoPrivileges removes the privileges on exactly "repo:<name>" from
+// every stored role and returns the ids of the roles it changed.
+func dropRepoPrivileges(ctx context.Context, q querier, name string) ([]string, error) {
+	list, err := listRoles(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	var changed []string
+	for _, r := range list {
+		n := len(r.Privileges)
+		kept := slices.DeleteFunc(r.Privileges, func(p Privilege) bool { return p.Target == "repo:"+name })
+		if len(kept) == n {
+			continue
+		}
+		privs, err := json.Marshal(kept)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := q.ExecContext(ctx, `UPDATE roles SET privileges = ?, updated_at = ? WHERE id = ?`,
+			string(privs), toMs(time.Now()), r.ID); err != nil {
+			return nil, err
+		}
+		changed = append(changed, r.ID)
+	}
+	return changed, nil
 }
 
 func purgeRepository(ctx context.Context, q querier, name string) error {

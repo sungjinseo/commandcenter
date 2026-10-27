@@ -89,7 +89,7 @@ func newHarness(t *testing.T) *harness {
 	h := &harness{db: db, store: store, reg: reg, sink: sink, clock: c, mvn: mvn, defs: defs}
 	h.s = &Service{DB: db, Repos: reg, Deleters: deleters, Maven: mvn, Events: sink,
 		Log: slog.New(slog.DiscardHandler), Now: c.Now, Loc: time.UTC,
-		GC: func(context.Context, string) (int, error) { h.gcs.Add(1); return 3, nil }}
+		GC: func(context.Context, string) (int, int64, error) { h.gcs.Add(1); return 3, 30, nil }}
 	return h
 }
 
@@ -136,8 +136,8 @@ func TestDueTaskRunsOnce(t *testing.T) {
 		t.Fatalf("due task ran %d times, want 1", n)
 	}
 	got := h.get(t, tk.ID)
-	if got.LastResult != ResultOK || got.LastRemoved != 3 || got.LastMessage != "removed 3 blobs" || got.LastRun.IsZero() ||
-		!got.NextRun.Equal(time.Date(2026, 10, 21, 3, 0, 0, 0, time.UTC)) || !strings.Contains(got.LastLog, "removed 3 blobs") {
+	if got.LastResult != ResultOK || got.LastRemoved != 3 || got.LastBytes != 30 || got.LastMessage != "removed 3 blobs (30 bytes)" || got.LastRun.IsZero() ||
+		!got.NextRun.Equal(time.Date(2026, 10, 21, 3, 0, 0, 0, time.UTC)) || !strings.Contains(got.LastLog, "removed 3 blobs (30 bytes)") {
 		t.Fatalf("after run: %+v", got)
 	}
 	evs := h.sink.Events()
@@ -162,7 +162,7 @@ func TestRunsAreSerialized(t *testing.T) {
 	ctx := context.Background()
 	var active, peak atomic.Int32
 	entered, release := make(chan struct{}, 10), make(chan struct{})
-	h.s.GC = func(context.Context, string) (int, error) {
+	h.s.GC = func(context.Context, string) (int, int64, error) {
 		n := active.Add(1)
 		defer active.Add(-1)
 		if n > peak.Load() {
@@ -170,7 +170,7 @@ func TestRunsAreSerialized(t *testing.T) {
 		}
 		entered <- struct{}{}
 		<-release
-		return 0, nil
+		return 0, 0, nil
 	}
 	a := h.create(t, Def{Name: "a", Type: TypeCompact, Schedule: "daily:03:00"})
 	b := h.create(t, Def{Name: "b", Type: TypeCompact, Schedule: "daily:03:00"})
@@ -212,13 +212,13 @@ func TestRunsAreSerialized(t *testing.T) {
 
 	// Many concurrent callers: never more than one run.
 	var wg sync.WaitGroup
-	h.s.GC = func(context.Context, string) (int, error) {
+	h.s.GC = func(context.Context, string) (int, int64, error) {
 		if active.Add(1) > 1 {
 			t.Error("two runs at once")
 		}
 		time.Sleep(time.Millisecond)
 		active.Add(-1)
-		return 0, nil
+		return 0, 0, nil
 	}
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -272,7 +272,7 @@ func TestCompactRunsNamedStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	var gotStore string
-	h.s.GC = func(_ context.Context, store string) (int, error) { gotStore = store; return 1, nil }
+	h.s.GC = func(_ context.Context, store string) (int, int64, error) { gotStore = store; return 1, 0, nil }
 	tk := h.create(t, Def{Name: "one", Type: TypeCompact, Schedule: "manual", Params: json.RawMessage(`{"blobStore":"fast"}`)})
 	if _, err := h.s.RunNow(tk.ID, "admin"); err != nil {
 		t.Fatal(err)
@@ -293,27 +293,27 @@ func TestCompactRunsNamedStore(t *testing.T) {
 func TestRunFailureAndPanic(t *testing.T) {
 	h := newHarness(t)
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "manual"})
-	h.s.GC = func(context.Context, string) (int, error) { return 1, errors.New("disk on fire") }
+	h.s.GC = func(context.Context, string) (int, int64, error) { return 1, 10, errors.New("disk on fire") }
 	out, err := h.s.RunNow(tk.ID, "admin")
-	if err != nil || out.Result != ResultFailed || !strings.Contains(out.Message, "disk on fire") {
+	if err != nil || out.Result != ResultFailed || !strings.Contains(out.Message, "disk on fire") || out.Removed != 1 || out.Bytes != 10 {
 		t.Fatalf("failed run: %+v %v", out, err)
 	}
 	if got := h.get(t, tk.ID); got.LastResult != ResultFailed || !strings.Contains(got.LastLog, "disk on fire") || !got.NextRun.IsZero() {
 		t.Fatalf("recorded: %+v", got)
 	}
-	h.s.GC = func(context.Context, string) (int, error) { panic("boom") }
+	h.s.GC = func(context.Context, string) (int, int64, error) { panic("boom") }
 	if out, err := h.s.RunNow(tk.ID, "admin"); err != nil || out.Result != ResultFailed || !strings.Contains(out.Message, "panic: boom") {
 		t.Fatalf("panic run: %+v %v", out, err)
 	}
 	if h.s.Running() != "" {
 		t.Fatal("still running after a panic")
 	}
-	h.s.GC = func(context.Context, string) (int, error) { return 0, nil }
+	h.s.GC = func(context.Context, string) (int, int64, error) { return 0, 0, nil }
 	if out, err := h.s.RunNow(tk.ID, "admin"); err != nil || out.Result != ResultOK {
 		t.Fatalf("after panic: %+v %v", out, err)
 	}
 	evs := h.sink.Events()
-	if len(evs) != 3 || evs[0].Detail != "Failed: disk on fire (removed 1 blobs)" || !strings.HasPrefix(evs[1].Detail, "Failed: panic: boom") {
+	if len(evs) != 3 || evs[0].Detail != "Failed: disk on fire (removed 1 blobs (10 bytes))" || !strings.HasPrefix(evs[1].Detail, "Failed: panic: boom") {
 		t.Fatalf("events: %v", evs)
 	}
 }
@@ -321,7 +321,7 @@ func TestRunFailureAndPanic(t *testing.T) {
 func TestRunTimeout(t *testing.T) {
 	h := newHarness(t)
 	h.s.RunTimeout = 20 * time.Millisecond
-	h.s.GC = func(ctx context.Context, _ string) (int, error) { <-ctx.Done(); return 0, ctx.Err() }
+	h.s.GC = func(ctx context.Context, _ string) (int, int64, error) { <-ctx.Done(); return 0, 0, ctx.Err() }
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "manual"})
 	out, _ := h.s.RunNow(tk.ID, "admin")
 	if out.Result != ResultFailed || !strings.Contains(out.Message, "run timeout") {
@@ -474,6 +474,32 @@ func TestRebuildMetadataTask(t *testing.T) {
 	}
 }
 
+// QA L-12: a rebuild of a Maven proxy deletes the files older builds cached
+// there at paths that are not Maven files, which leaves their blobs to
+// blobstore.compact.
+func TestRebuildMetadataTaskPurgesProxy(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.put(t, "mvn-proxy", "org/up/lib/1.0", "<html>Index of /org/up/lib/1.0</html>")
+	h.put(t, "mvn-proxy", ".index/nexus-maven-repository-index.gz", "index")
+	h.put(t, "mvn-proxy", "org/up/lib/1.0/lib-1.0.jar", "jar")
+	listing, err := h.db.GetAsset(ctx, "mvn-proxy", "org/up/lib/1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk := h.create(t, Def{Name: "Purge", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"mvn-proxy"}`)})
+	out, err := h.s.RunNow(tk.ID, "admin")
+	if err != nil || out.Result != ResultOK || out.Removed != 2 || out.Message != "mvn-proxy: removed 2 cached files that are not Maven files" {
+		t.Fatalf("run: %+v %v", out, err)
+	}
+	if as, err := h.db.ListAssets(ctx, "mvn-proxy", ""); err != nil || len(as) != 1 || as[0].Path != "org/up/lib/1.0/lib-1.0.jar" {
+		t.Fatalf("left: %+v %v", as, err)
+	}
+	if used, err := h.db.BlobInUse(ctx, listing.BlobSHA256); err != nil || used {
+		t.Fatalf("listing blob in use: %v %v", used, err)
+	}
+}
+
 func TestValidation(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -493,7 +519,7 @@ func TestValidation(t *testing.T) {
 		{Def{Name: "x", Type: TypeCleanup, Schedule: "manual", Params: json.RawMessage(`{"repos":"mvn"}`)}, "invalid params"},
 		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual"}, "params.repo is required"},
 		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"missing"}`)}, "does not exist"},
-		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"mvn-proxy"}`)}, "Maven hosted repositories only"},
+		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"mvn-group"}`)}, "Maven hosted or proxy repository"},
 	}
 	for _, c := range cases {
 		_, err := h.s.Create(ctx, c.d)
@@ -535,7 +561,7 @@ func TestSchedulerLoop(t *testing.T) {
 	ticks := make(chan time.Time)
 	h.s.Ticks = ticks
 	ran := make(chan struct{}, 1)
-	h.s.GC = func(context.Context, string) (int, error) { ran <- struct{}{}; return 0, nil }
+	h.s.GC = func(context.Context, string) (int, int64, error) { ran <- struct{}{}; return 0, 0, nil }
 	h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "hourly:30"})
 	h.clock.Set(t0.Add(time.Hour))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -560,7 +586,11 @@ func TestStopCancelsRun(t *testing.T) {
 	h := newHarness(t)
 	h.s.Ticks = make(chan time.Time)
 	entered := make(chan struct{})
-	h.s.GC = func(ctx context.Context, _ string) (int, error) { close(entered); <-ctx.Done(); return 0, ctx.Err() }
+	h.s.GC = func(ctx context.Context, _ string) (int, int64, error) {
+		close(entered)
+		<-ctx.Done()
+		return 0, 0, ctx.Err()
+	}
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "manual"})
 	h.s.Start(context.Background())
 	done := make(chan Outcome)

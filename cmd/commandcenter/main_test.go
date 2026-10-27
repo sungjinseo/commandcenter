@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -154,5 +155,82 @@ func TestUserResetPassword(t *testing.T) {
 func TestUserCommandUsage(t *testing.T) {
 	if err := run([]string{"user"}, nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "reset-password") {
 		t.Fatalf("usage: %v", err)
+	}
+}
+
+// secret-key rotate seals the stored secrets with the key in -new-key-file
+// instead of the current one (here COMMANDCENTER_SECRET_KEY) and prints only
+// counts. It refuses to run without the new key file, its usage says to stop
+// the server first, and it never echoes a key.
+func TestSecretKeyRotate(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("dataDir: "+filepath.ToSlash(dir)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	oldKey, newKey := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
+	open := func(key []byte) *meta.DB {
+		t.Helper()
+		db, err := meta.Open(filepath.Join(dir, "meta.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.SetSecretKey(key); err != nil {
+			t.Fatal(err)
+		}
+		return db
+	}
+	db := open(oldKey)
+	l := meta.DefaultLDAP()
+	l.URL, l.UserBaseDN, l.BindDN, l.BindPassword = "ldap://dir", "dc=x", "cn=svc", "ldap-secret"
+	if err := db.SetSettingJSON(ctx, meta.SettingLDAP, l); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSettingJSON(ctx, meta.SettingSMTP, meta.SMTP{Host: "h", Port: 25, Security: meta.SMTPNone, From: "a@b.com", Password: "smtp-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	oldB64, newB64 := base64.StdEncoding.EncodeToString(oldKey), base64.StdEncoding.EncodeToString(newKey)
+	keyFile := filepath.Join(dir, "new.key")
+	if err := os.WriteFile(keyFile, []byte(newB64+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("COMMANDCENTER_SECRET_KEY", oldB64)
+
+	var out bytes.Buffer
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"secret-key"}, "stop the server first"},
+		{[]string{"secret-key", "rotate", "-config", cfgPath}, "-new-key-file is required"},
+		{[]string{"secret-key", "rotate", "-config", cfgPath, "-new-key-file", newB64}, "cannot read the file"}, // the key instead of its file
+	} {
+		err := run(c.args, nil, &out)
+		if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), newB64) || out.Len() != 0 {
+			t.Fatalf("%q: error %v, output %q; want %q", c.args, err, out.String(), c.want)
+		}
+	}
+	rotate := []string{"secret-key", "rotate", "-config", cfgPath, "-new-key-file", keyFile}
+	if err := run(rotate, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "re-encrypted 2 stored secrets with the new key and encrypted 0 that were plain text") {
+		t.Fatalf("output %q", out.String())
+	}
+	for _, s := range []string{oldB64, newB64, "smtp-secret", "ldap-secret"} {
+		if strings.Contains(out.String(), s) {
+			t.Fatalf("output %q holds %q", out.String(), s)
+		}
+	}
+	// Again with the old key: refused, as the secrets no longer open with it.
+	if err := run(rotate, nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("second rotation: %v", err)
+	}
+	db = open(newKey)
+	defer db.Close()
+	if set, err := db.LoadSettings(ctx); err != nil || set.SMTP.Password != "smtp-secret" || set.LDAP.BindPassword != "ldap-secret" {
+		t.Fatalf("with the new key: smtp %q ldap %q, %v", set.SMTP.Password, set.LDAP.BindPassword, err)
 	}
 }

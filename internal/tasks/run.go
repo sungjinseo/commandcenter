@@ -26,9 +26,9 @@ type Outcome struct {
 	DurationMs int64
 	Result     string // ResultOK, ResultFailed or ResultStopped
 	Message    string // URLs redacted
-	Removed    int64  // blobs (compact), components (cleanup), documents (rebuild)
-	Bytes      int64
-	Err        error // why the run failed or stopped; nil when Result is OK
+	Removed    int64  // blobs (compact), components (cleanup), documents or a proxy's cached files (rebuild)
+	Bytes      int64  // of the removed blobs (compact) or deleted assets (cleanup)
+	Err        error  // why the run failed or stopped; nil when Result is OK
 }
 
 // How a run is recorded on its task.

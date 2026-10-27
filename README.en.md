@@ -76,27 +76,59 @@ All of this comes with the Human Edition. There is no extra checkout step.
 
 ## Quick start
 
+Run it on Kubernetes with the Helm chart, or on a single server with docker compose. Both use the release image `ghcr.io/sungjinseo/commandcenter`. Replace `1.2.3` below with a version from the [releases](https://github.com/sungjinseo/commandcenter/releases).
+
+First make the hash of the admin password. Type a password (at least 8 characters, at most 72 bytes) and press Enter to get its hash.
+
+```bash
+docker run --rm -i ghcr.io/sungjinseo/commandcenter:1.2.3 hash-password
+```
+
+### Kubernetes (Helm)
+
+Set three values in `my-values.yaml`:
+
+```yaml
+config:
+  baseURL: http://localhost:8081            # the address clients use
+  adminPasswordHash: '<the hash from above>'
+persistence:
+  storageClass: <a block storage class>     # see kubectl get storageclass; never NFS or SMB
+```
+
+```bash
+helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 1.2.3 \
+  --namespace commandcenter --create-namespace -f my-values.yaml --wait
+helm test commandcenter -n commandcenter
+kubectl -n commandcenter port-forward svc/commandcenter 8081:8081
+```
+
+Open `http://localhost:8081/` and sign in as `admin`. For a team, set `baseURL` to your ingress's `https://` address (after the first start, change it in the web UI's general settings). Ingress and TLS, the secret key, upgrades, backups and uninstalling are in the "Kubernetes" section of the [operations guide](docs/guide.md#kubernetes) (Korean).
+
+### Docker compose
+
 All you need is Docker.
 
 ```bash
-docker compose build
-```
-
-```bash
-docker run --rm -i commandcenter:latest hash-password
-```
-
-Type a password (at least 8 characters, at most 72 bytes) and press Enter to get its hash. Copy `config.example.yaml` to `config.yaml` and put that hash into `passwordHash`.
-
-```bash
+git clone --depth 1 --branch v1.2.3 https://github.com/sungjinseo/commandcenter.git
+cd commandcenter
+echo COMMANDCENTER_VERSION=1.2.3 >> .env
 cp config.example.yaml config.yaml
 ```
+
+Compose pulls the release image of the version in `.env` (an image tag, so no `v`). Put the hash into `passwordHash` in `config.yaml` and start it:
 
 ```bash
 docker compose up -d
 ```
 
 Open `http://localhost:8081/` and you are done. No screen asks for a license key, because there isn't one.
+
+### Building from source
+
+Build with `docker build --build-arg VERSION=dev -t commandcenter:dev .` and put `COMMANDCENTER_IMAGE=commandcenter` and `COMMANDCENTER_VERSION=dev` into `.env`; compose then runs your image. Make the hash with `docker run --rm -i commandcenter:dev hash-password`; the rest is the same. On Kubernetes, push your build to your own registry and set the chart's `image.repository` and `image.tag` to it.
+
+### Client settings
 
 Client settings for each format (Maven `settings.xml`, `.npmrc`, `pip.conf`, `GOPROXY`, Cargo `config.toml`) are ready to copy from each repository's page in the web UI and from the [operations guide](docs/guide.md#포맷별-클라이언트-설정) (Korean).
 
@@ -107,11 +139,11 @@ The quick start is for trying it out. Before your team relies on it every day, r
 - Terminate TLS at a reverse proxy and set `baseURL` to the `https://` address.
 - For a private registry, turn anonymous read (`anonymousRead`) off.
 - Limit upload size, request body and response timeouts, and connections per client at the proxy.
-- Keep `meta.db` on local disk or block storage, never on NFS or SMB, and run exactly one instance.
-- Give the server 60 seconds to stop. The bundled compose file already sets `stop_grace_period: 60s`; with `docker run` (`--stop-timeout 60`) or Kubernetes, set it yourself.
+- Keep `meta.db` on local disk or block storage (`persistence.storageClass` in the chart), never on NFS or SMB, and run exactly one instance.
+- Give the server 60 seconds to stop. The bundled compose file and the Helm chart already do; with `docker run`, set `--stop-timeout 60` yourself.
 - Back up regularly and before every upgrade. Downgrades are not supported.
 - To encrypt stored secrets (SMTP, LDAP and proxy passwords), give a key with `COMMANDCENTER_SECRET_KEY` or `secretKeyFile`, and keep the key apart from the backups.
-- Reference Kubernetes manifests are in [deploy/kubernetes](deploy/kubernetes/commandcenter.yaml).
+- On Kubernetes, use the [Helm chart](deploy/helm/commandcenter). [Reference manifests](deploy/kubernetes/commandcenter.yaml) for running without Helm are there too.
 
 ## How light is it
 
@@ -155,8 +187,8 @@ Use it under MIT or Apache-2.0, whichever you prefer. Commercial use is fine. Th
 
 ## Documentation
 
-- [Operations guide](docs/guide.md) (Korean): installation, production deployment, configuration reference, authentication and permissions, LDAP, blob stores, client settings per format, backup and upgrades
-- [Kubernetes reference manifests](deploy/kubernetes/commandcenter.yaml)
+- [Operations guide](docs/guide.md) (Korean): installation, Kubernetes (Helm), production deployment, configuration reference, authentication and permissions, LDAP, blob stores, client settings per format, backup and upgrades
+- [Helm chart](deploy/helm/commandcenter) and [Kubernetes reference manifests](deploy/kubernetes/commandcenter.yaml)
 - [Changelog](CHANGELOG.md): what each release fixed and changed
 - [Contributing guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Security policy](SECURITY.md): how to report a vulnerability

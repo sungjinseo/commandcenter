@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"modernc.org/sqlite"
 )
 
 func openTest(t *testing.T) *DB {
@@ -181,6 +183,56 @@ func TestOpenSchemaVersion(t *testing.T) {
 	var v int
 	if err := raw.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != schemaVersion+1 {
 		t.Fatalf("refused database: user_version %d (err %v), want it untouched at %d", v, err, schemaVersion+1)
+	}
+}
+
+// Open creates the tables, migrates and stamps the version in one
+// transaction: when a step fails, as a crash would stop it (here the last
+// migration, on a tasks view that ALTER TABLE cannot change), the earlier
+// steps are undone too and the version stays 0, so the next start migrates
+// again instead of trusting a half-migrated database. That next start
+// commits once, so the stamp cannot lag the migration.
+func TestOpenMigratesInOneTransaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec("CREATE TABLE assets(repo TEXT, path TEXT, blob_sha256 TEXT); CREATE VIEW tasks AS SELECT 1 AS id"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "view") {
+		t.Fatalf("Open: %v, want the migration of the tasks view to fail", err)
+	}
+	var v, cols, tables int
+	if err := raw.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 0 {
+		t.Fatalf("user_version %d (err %v), want 0", v, err)
+	}
+	if err := raw.QueryRow("SELECT count(*) FROM pragma_table_info('assets') WHERE name = 'downloads'").Scan(&cols); err != nil || cols != 0 {
+		t.Fatalf("the failed Open added assets.downloads (%d, err %v)", cols, err)
+	}
+	if err := raw.QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'users'").Scan(&tables); err != nil || tables != 0 {
+		t.Fatalf("the failed Open created the users table (%d, err %v)", tables, err)
+	}
+
+	if _, err := raw.Exec("DROP VIEW tasks"); err != nil {
+		t.Fatal(err)
+	}
+	commits := 0
+	sqlite.RegisterConnectionHook(func(c sqlite.ExecQuerierContext, dsn string) error {
+		if strings.HasPrefix(dsn, "file:"+path+"?") { // Open's connections only
+			c.(sqlite.HookRegisterer).RegisterCommitHook(func() int32 { commits++; return 0 })
+		}
+		return nil
+	})
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if v := userVersion(t, db); commits != 1 || v != schemaVersion {
+		t.Fatalf("upgrade: %d commits, user_version %d; want one commit that stamps %d", commits, v, schemaVersion)
 	}
 }
 

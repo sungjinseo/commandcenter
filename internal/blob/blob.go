@@ -207,17 +207,14 @@ func mapErr(err error) error {
 	return err
 }
 
-// ModTime returns the blob's modification time, or ErrNotFound if it is missing.
-func (s *Store) ModTime(sha string) (time.Time, error) {
+// Stat returns the blob's file info, or ErrNotFound if it is missing.
+func (s *Store) Stat(sha string) (fs.FileInfo, error) {
 	if !validSHA(sha) {
-		return time.Time{}, fmt.Errorf("invalid blob id %q", sha)
+		return nil, fmt.Errorf("invalid blob id %q", sha)
 	}
 	info, err := os.Stat(s.path(sha))
 	if errors.Is(err, fs.ErrNotExist) {
-		return time.Time{}, ErrNotFound
+		return nil, ErrNotFound
 	}
-	if err != nil {
-		return time.Time{}, err
-	}
-	return info.ModTime(), nil
+	return info, err
 }

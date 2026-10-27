@@ -208,8 +208,8 @@ func (u *UI) checkRoleRefs(ctx context.Context, v *validation, ids []string) err
 
 // validatePrivileges checks a role's privileges. A "repo:" target must name
 // an existing repository (QA N-25) unless the stored role (kept) already
-// has it: a privilege left from a deleted repository may stay while the
-// role is edited.
+// has it: a privilege an older version left from a deleted repository may
+// stay while the role is edited.
 func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta.Privilege) {
 	valid := map[string]bool{}
 	for _, a := range meta.Actions {

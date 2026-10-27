@@ -1,0 +1,533 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Command Center chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "bcrypt": {
+      "description": "bcrypt hash from \"commandcenter hash-password\"",
+      "type": "string",
+      "pattern": "^\\$2[abxy]?\\$[0-9]{2}\\$[./A-Za-z0-9]{53}$"
+    },
+    "duration": {
+      "description": "\"24h\", \"10m\", \"30s\" or \"-1\" (never)",
+      "type": [
+        "string",
+        "integer"
+      ]
+    },
+    "strings": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "format",
+        "type"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "format": {
+          "enum": [
+            "maven",
+            "npm",
+            "pypi",
+            "go",
+            "cargo"
+          ]
+        },
+        "type": {
+          "enum": [
+            "hosted",
+            "proxy",
+            "group"
+          ]
+        },
+        "remote": {
+          "type": "string"
+        },
+        "remoteAuth": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "username": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string"
+            },
+            "bearerToken": {
+              "type": "string"
+            }
+          }
+        },
+        "metadataMaxAge": {
+          "$ref": "#/definitions/duration"
+        },
+        "contentMaxAge": {
+          "$ref": "#/definitions/duration"
+        },
+        "negativeCacheTTL": {
+          "$ref": "#/definitions/duration"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "writeMember": {
+          "type": "string"
+        },
+        "versionPolicy": {
+          "enum": [
+            "release",
+            "snapshot",
+            "mixed"
+          ]
+        },
+        "writePolicy": {
+          "enum": [
+            "allow",
+            "allow_once",
+            "deny"
+          ]
+        },
+        "anonymousRead": {
+          "type": "boolean"
+        },
+        "cleanupPolicy": {
+          "type": "string"
+        },
+        "online": {
+          "type": "boolean"
+        },
+        "blobStore": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "properties": {
+    "global": {
+      "type": "object"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "description": "An image tag; a digest goes in image.digest. Quote numbers: 1.10 would become 1.1.",
+          "type": [
+            "string",
+            "integer"
+          ],
+          "pattern": "^([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[a-f0-9]{64})?$"
+        },
+        "pullPolicy": {
+          "enum": [
+            "Always",
+            "IfNotPresent",
+            "Never"
+          ]
+        }
+      }
+    },
+    "imagePullSecrets": {
+      "type": "array"
+    },
+    "nameOverride": {
+      "type": "string"
+    },
+    "fullnameOverride": {
+      "type": "string"
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "baseURL": {
+          "description": "Absolute http(s) URL without user info, query or fragment",
+          "type": "string",
+          "pattern": "^(https?://[^\\s/?#@]+(/[^\\s?#]*)?)?$"
+        },
+        "anonymousRead": {
+          "type": "boolean"
+        },
+        "adminPasswordHash": {
+          "description": "bcrypt hash from \"commandcenter hash-password\"; single-quote it in a shell",
+          "type": "string",
+          "pattern": "^(\\$2[abxy]?\\$[0-9]{2}\\$[./A-Za-z0-9]{53})?$"
+        },
+        "repositories": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/repository"
+          }
+        },
+        "extra": {
+          "description": "listen and dataDir belong to the chart; memoryLimitMiB is goMemLimit",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "users": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "name",
+                  "passwordHash"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "passwordHash": {
+                    "$ref": "#/definitions/bcrypt"
+                  },
+                  "roles": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "roles": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "write": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "maxUploadMiB": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1048576
+            },
+            "metricsFlushSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "secretKeyFile": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "existingSecret": {
+                "const": ""
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "baseURL": {
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "existingSecret": {
+                "const": ""
+              },
+              "extra": {
+                "not": {
+                  "required": [
+                    "users"
+                  ]
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "adminPasswordHash": {
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "secretKey": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "goMemLimit": {
+      "description": "GOMEMLIMIT syntax: 80MiB, 512MiB, 1GiB (not 80Mi)",
+      "type": "string",
+      "pattern": "^([0-9]+(B|KiB|MiB|GiB|TiB)?|off)?$"
+    },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "http": {
+          "type": "string"
+        },
+        "https": {
+          "type": "string"
+        },
+        "noProxy": {
+          "type": "string"
+        }
+      }
+    },
+    "extraEnv": {
+      "type": "array"
+    },
+    "resources": {
+      "type": "object"
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "storageClass": {
+          "type": "string"
+        },
+        "size": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?([KMGTPE]i|[kMGTPE])?$"
+        },
+        "accessModes": {
+          "description": "meta.db needs a single-node volume: ReadWriteMany means a network file system",
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "enum": [
+              "ReadWriteOnce",
+              "ReadWriteOncePod"
+            ]
+          }
+        },
+        "annotations": {
+          "$ref": "#/definitions/strings"
+        },
+        "existingClaim": {
+          "type": "string"
+        }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "ClusterIP",
+            "NodePort",
+            "LoadBalancer"
+          ]
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "annotations": {
+          "$ref": "#/definitions/strings"
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "className": {
+          "type": "string"
+        },
+        "annotations": {
+          "$ref": "#/definitions/strings"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "host",
+              "paths"
+            ],
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "paths": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string",
+                  "pattern": "^/"
+                }
+              }
+            }
+          }
+        },
+        "tls": {
+          "type": "array"
+        }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "name": {
+          "type": "string"
+        },
+        "annotations": {
+          "$ref": "#/definitions/strings"
+        }
+      }
+    },
+    "podAnnotations": {
+      "$ref": "#/definitions/strings"
+    },
+    "podLabels": {
+      "$ref": "#/definitions/strings"
+    },
+    "nodeSelector": {
+      "$ref": "#/definitions/strings"
+    },
+    "tolerations": {
+      "type": "array"
+    },
+    "affinity": {
+      "type": "object"
+    },
+    "priorityClassName": {
+      "type": "string"
+    },
+    "podSecurityContext": {
+      "type": "object"
+    },
+    "securityContext": {
+      "type": "object"
+    },
+    "terminationGracePeriodSeconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "startupProbe": {
+      "type": "object"
+    },
+    "readinessProbe": {
+      "type": "object"
+    },
+    "livenessProbe": {
+      "type": "object"
+    },
+    "extraVolumes": {
+      "type": "array"
+    },
+    "extraVolumeMounts": {
+      "type": "array"
+    },
+    "httpRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "annotations": {
+          "$ref": "#/definitions/strings"
+        },
+        "parentRefs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "sectionName": {
+                "type": "string"
+              },
+              "port": {
+                "type": "integer"
+              },
+              "group": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "hostnames": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  }
+}

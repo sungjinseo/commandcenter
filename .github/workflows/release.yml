@@ -17,6 +17,7 @@ jobs:
     permissions:
       contents: write # the GitHub Release
       packages: write # the image on ghcr.io
+      id-token: write # the OIDC token cosign signs the image with
     env:
       VERSION: ${{ github.ref_name }}
     steps:
@@ -38,6 +39,26 @@ jobs:
             echo "major=$(highest "$major.")"
             echo "minor=$(highest "$major.$minor.")"
           } >>"$GITHUB_OUTPUT"
+      # No v4 major tag exists (v3 stopped at v3.9.1), so the release is pinned;
+      # Dependabot moves it. Installed before the push: a failed install stops
+      # the release before anything is published.
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Install helm
+        # Before the push as well. The same pinned helm as in ci.yml: bump both together.
+        env:
+          HELM_VERSION: v3.22.1
+          HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
+          echo "$HELM_SHA256  helm.tgz" | sha256sum -c -
+          mkdir bin
+          tar -xzf helm.tgz -C bin --strip-components=1 linux-amd64/helm
+          echo "$PWD/bin" >>"$GITHUB_PATH"
+      - name: Package the chart
+        # Also before the push: a chart that does not package stops the release. version and
+        # appVersion are the tag without the "v", and appVersion is the image tag the chart runs.
+        run: helm package deploy/helm/commandcenter --version "${VERSION#v}" --app-version "${VERSION#v}" --destination "$RUNNER_TEMP"
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
@@ -57,7 +78,8 @@ jobs:
             type=semver,pattern={{major}},enable=${{ steps.floating.outputs.major == 'true' && !startsWith(github.ref, 'refs/tags/v0.') }}
           # GitHub detects only the Apache license file.
           labels: org.opencontainers.image.licenses=MIT OR Apache-2.0
-      - uses: docker/build-push-action@v7
+      - id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -67,6 +89,23 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           sbom: true
           provenance: mode=max
+      - name: Sign the image
+        # Keyless: Sigstore's certificate names this workflow at the release tag,
+        # and the signature goes to its public transparency log. The digest is
+        # the multi-platform index, which every tag of this release points to.
+        # OCI names are lowercase: metadata-action lowercases the owner for the push, and
+        # ${GITHUB_REPOSITORY_OWNER,,} does it here and for the chart.
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/commandcenter@$DIGEST"
+      - name: Push and sign the chart
+        # After the image, which the chart runs: oci://ghcr.io/<owner>/charts/commandcenter at
+        # the chart version, signed the same keyless way. helm uses the docker login above.
+        run: |
+          set -o pipefail
+          repo="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts"
+          digest="$(helm push "$RUNNER_TEMP/commandcenter-${VERSION#v}.tgz" "oci://$repo" 2>&1 | tee /dev/stderr | sed -n 's/^Digest: //p')"
+          cosign sign --yes "$repo/commandcenter@$digest"
       - name: Package the binaries
         # The same build again, served from the builder's cache and exported as
         # files: the binaries are the image's, with the license texts the BSD and

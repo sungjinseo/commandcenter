@@ -67,8 +67,8 @@ func TestRunLogCap(t *testing.T) {
 // URLs in run logs, messages and event details lose credentials and query values.
 func TestRedaction(t *testing.T) {
 	h := newHarness(t)
-	h.s.GC = func(context.Context, string) (int, error) {
-		return 0, errors.New("fetch https://user:hunter2@repo.example.org/x?token=abc123 failed")
+	h.s.GC = func(context.Context, string) (int, int64, error) {
+		return 0, 0, errors.New("fetch https://user:hunter2@repo.example.org/x?token=abc123 failed")
 	}
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "manual"})
 	out, _ := h.s.RunNow(tk.ID, "admin")
@@ -86,7 +86,7 @@ func TestRedaction(t *testing.T) {
 func TestRunAsync(t *testing.T) {
 	h := newHarness(t)
 	release := make(chan struct{})
-	h.s.GC = func(context.Context, string) (int, error) { <-release; return 1, nil }
+	h.s.GC = func(context.Context, string) (int, int64, error) { <-release; return 1, 0, nil }
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "daily:03:00"})
 	if err := h.s.RunAsync(tk.ID, "admin"); err != nil {
 		t.Fatal(err)
@@ -119,12 +119,12 @@ func TestEditDuringRunKept(t *testing.T) {
 	ctx := context.Background()
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "daily:03:00"})
 	h.clock.Set(time.Date(2026, 10, 20, 4, 0, 0, 0, time.UTC))
-	h.s.GC = func(context.Context, string) (int, error) {
+	h.s.GC = func(context.Context, string) (int, int64, error) {
 		if _, err := h.s.Update(ctx, tk.ID, Def{Schedule: "daily:23:00"}); err != nil {
 			t.Error(err)
 		}
 		h.clock.Set(time.Date(2026, 10, 20, 5, 0, 0, 0, time.UTC))
-		return 0, nil
+		return 0, 0, nil
 	}
 	h.s.RunDue(ctx)
 	got := h.get(t, tk.ID)
@@ -134,11 +134,11 @@ func TestEditDuringRunKept(t *testing.T) {
 	// Disabled during the run: no next run afterwards.
 	h.clock.Set(time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC))
 	off := false
-	h.s.GC = func(context.Context, string) (int, error) {
+	h.s.GC = func(context.Context, string) (int, int64, error) {
 		if _, err := h.s.Update(ctx, tk.ID, Def{Enabled: &off}); err != nil {
 			t.Error(err)
 		}
-		return 0, nil
+		return 0, 0, nil
 	}
 	h.s.RunDue(ctx)
 	if got := h.get(t, tk.ID); got.Enabled || !got.NextRun.IsZero() || got.LastRun.Before(time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC)) {
@@ -153,10 +153,10 @@ func TestStopWithScheduledRun(t *testing.T) {
 	ticks := make(chan time.Time)
 	h.s.Ticks = ticks
 	entered := make(chan struct{}, 1)
-	h.s.GC = func(ctx context.Context, _ string) (int, error) {
+	h.s.GC = func(ctx context.Context, _ string) (int, int64, error) {
 		entered <- struct{}{}
 		<-ctx.Done()
-		return 0, ctx.Err()
+		return 0, 0, ctx.Err()
 	}
 	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "daily:03:00"})
 	h.clock.Set(time.Date(2026, 10, 20, 4, 0, 0, 0, time.UTC))
@@ -175,7 +175,7 @@ func TestStopWithScheduledRun(t *testing.T) {
 	ticks2 := make(chan time.Time)
 	h2.s.Ticks = ticks2
 	release := make(chan struct{})
-	h2.s.GC = func(context.Context, string) (int, error) { entered <- struct{}{}; <-release; return 0, nil } // ignores ctx
+	h2.s.GC = func(context.Context, string) (int, int64, error) { entered <- struct{}{}; <-release; return 0, 0, nil } // ignores ctx
 	h2.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "daily:03:00"})
 	h2.clock.Set(time.Date(2026, 10, 20, 4, 0, 0, 0, time.UTC))
 	h2.s.Start(context.Background())

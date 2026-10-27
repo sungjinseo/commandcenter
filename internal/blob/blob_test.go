@@ -197,19 +197,19 @@ func TestWriteReplacesCorruptBlob(t *testing.T) {
 	}
 }
 
-func TestModTime(t *testing.T) {
+func TestStat(t *testing.T) {
 	s, _ := Open(t.TempDir())
-	if _, err := s.ModTime(helloSHA256); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Stat(helloSHA256); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing blob: err = %v, want ErrNotFound", err)
 	}
 	if _, err := s.Write(strings.NewReader("hello")); err != nil {
 		t.Fatal(err)
 	}
-	m, err := s.ModTime(helloSHA256)
+	info, err := s.Stat(helloSHA256)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(m) > time.Minute {
-		t.Fatalf("unexpected mtime %v", m)
+	if time.Since(info.ModTime()) > time.Minute || info.Size() != 5 {
+		t.Fatalf("unexpected mtime %v or size %d", info.ModTime(), info.Size())
 	}
 }

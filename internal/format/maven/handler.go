@@ -173,14 +173,21 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 	if p.Metadata {
 		return h.putMetadata(ctx, rp, p.Main, r.Body)
 	}
-	if p.Coords == nil {
+	c := p.Coords
+	if c == nil {
+		c = sbtLegacy(p.Main)
+	}
+	if c == nil {
 		return repo.Errorf(http.StatusBadRequest, "%q is not a valid maven artifact path", p.Main)
 	}
-	if err := h.storeArtifact(ctx, rp, p, r.Body); err != nil {
+	if err := h.storeArtifact(ctx, rp, p, c, r.Body); err != nil {
 		return err
 	}
 	if !strings.HasSuffix(p.Main, ".asc") { // signatures are sidecars, not components
 		h.Store.Emit(r, "upload", rp.Name, p.Main, "")
+	}
+	if p.Coords == nil {
+		return nil // an sbt legacy-layout file: no version of the GA, so no metadata changes
 	}
 	// Best-effort: the artifact is already stored, so failing the PUT would make
 	// a retry hit allow_once; the next write to this GA, or the GA
@@ -199,8 +206,9 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 // storeArtifact writes the asset. The per-asset lock makes the writePolicy
 // and privilege checks and the write atomic: overwriting an existing asset
 // (writePolicy allow) needs Edit, a new one only the Add the server checked
-// (plan 12 Decision 2). A POM is checked once on disk, before it is recorded.
-func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path, body io.Reader) error {
+// (plan 12 Decision 2). A POM is checked once on disk, before it is recorded,
+// against c: p.Coords, or sbtLegacy's for a file in sbt's legacy layout.
+func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path, c *Coordinates, body io.Reader) error {
 	unlock := h.locks.Lock("asset\x00" + rp.Name + "\x00" + p.Main)
 	defer unlock()
 	_, err := h.Store.Get(ctx, rp.Name, p.Main)
@@ -213,7 +221,7 @@ func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path
 		return err
 	}
 	var verify func(blob.Sums) error
-	if c := p.Coords; c.Extension == "pom" && c.Classifier == "" {
+	if c.Extension == "pom" && c.Classifier == "" {
 		body = http.MaxBytesReader(nil, io.NopCloser(body), maxPOMSize)
 		verify = func(s blob.Sums) error {
 			select {
@@ -373,9 +381,9 @@ func (h *Handler) putMetadata(ctx context.Context, rp *repo.Repository, path str
 // rebuildGA updates groupId/artifactId/maven-metadata.xml from the stored artifacts.
 // Everything but <plugins> is the server's and regenerated (QA L-11); the
 // plugins of the stored document (a groupId directory that is also a GA) are
-// kept. With replace, the document is regenerated from scratch (used after
-// deletes), or removed when no artifact is left; without, a GA without
-// artifacts gets no document.
+// kept. With replace (used after deletes), a GA without artifacts loses its
+// versioning: the document is removed, or keeps only its plugins; without, a
+// GA without artifacts gets no document.
 func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, artifactID string, replace bool) error {
 	gaDir := strings.ReplaceAll(groupID, ".", "/") + "/" + artifactID
 	unlock := h.locks.Lock(rp.Name + "\x00" + gaDir)
@@ -399,26 +407,28 @@ func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, a
 		return err
 	}
 	path := gaDir + "/maven-metadata.xml"
-	if replace {
-		if len(versions) == 0 {
-			if err := h.Store.Delete(ctx, rp.Name, path); err != nil && !errors.Is(err, repo.ErrNotFound) {
-				return err
-			}
-			return nil
-		}
-		return h.storeMetadata(ctx, rp, path, ForVersions(groupID, artifactID, versions, h.Now()))
-	}
-	if len(versions) == 0 {
+	if len(versions) == 0 && !replace {
 		return nil
 	}
 	existing, err := h.loadMetadata(ctx, rp, path)
 	if err != nil {
 		return err
 	}
-	m := ForVersions(groupID, artifactID, versions, h.Now())
+	var plugins []Plugin
 	if existing != nil {
-		m.Plugins = existing.Plugins
+		plugins = existing.Plugins
 	}
+	if len(versions) == 0 {
+		if len(plugins) > 0 {
+			return h.storeMetadata(ctx, rp, path, Merge(&Metadata{Plugins: plugins}))
+		}
+		if err := h.Store.Delete(ctx, rp.Name, path); err != nil && !errors.Is(err, repo.ErrNotFound) {
+			return err
+		}
+		return nil
+	}
+	m := ForVersions(groupID, artifactID, versions, h.Now())
+	m.Plugins = plugins
 	return h.storeMetadata(ctx, rp, path, m)
 }
 

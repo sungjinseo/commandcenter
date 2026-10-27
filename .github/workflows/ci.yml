@@ -53,3 +53,74 @@ jobs:
         with:
           context: .
           platforms: linux/amd64,linux/arm64
+
+  helm:
+    # The chart in deploy/helm/commandcenter, and the plain manifest next to it.
+    runs-on: ubuntu-latest
+    env:
+      # Dependabot does not see these: bump them by hand, helm together with release.yml.
+      # Each SHA256 is that of the linux-amd64 tarball (helm: its .sha256sum file on
+      # get.helm.sh, kubeconform: CHECKSUMS in the GitHub release).
+      HELM_VERSION: v3.22.1
+      HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
+      KUBECONFORM_VERSION: v0.8.0
+      KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+      # An older and the newest Kubernetes release: every field the chart writes must exist in both.
+      KUBERNETES_VERSIONS: 1.30.0 1.37.0
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install helm and kubeconform
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSLo helm.tgz "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz"
+          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/$KUBECONFORM_VERSION/kubeconform-linux-amd64.tar.gz"
+          printf '%s  %s\n' "$HELM_SHA256" helm.tgz "$KUBECONFORM_SHA256" kubeconform.tgz | sha256sum -c -
+          mkdir bin
+          tar -xzf helm.tgz -C bin --strip-components=1 linux-amd64/helm
+          tar -xzf kubeconform.tgz -C bin kubeconform
+          echo "$PWD/bin" >>"$GITHUB_PATH"
+      - name: helm lint, helm template, kubeconform
+        # Three sets of test values: the required ones, the same with every optional value set,
+        # and config.yaml from an existing Secret. -strict fails on unknown and duplicate fields.
+        run: |
+          chart=deploy/helm/commandcenter out="$RUNNER_TEMP/rendered.yaml"
+          cat >"$RUNNER_TEMP/required.yaml" <<'EOF'
+          config:
+            baseURL: https://repo.example.com
+            adminPasswordHash: $2a$10$ci.test.value.not.a.real.bcrypt.hash
+          EOF
+          cat >"$RUNNER_TEMP/full.yaml" <<'EOF'
+          imagePullSecrets: [{name: registry-login}]
+          config:
+            repositories: [{name: maven-central, format: maven, type: proxy, remote: "https://repo1.maven.org/maven2/"}]
+            extra: {maxUploadMiB: 2048}
+          secretKey: {existingSecret: commandcenter-secret-key}
+          proxy: {http: "http://proxy.example.com:3128", https: "http://proxy.example.com:3128", noProxy: ".svc,.cluster.local"}
+          extraEnv: [{name: TZ, value: Asia/Seoul}]
+          persistence: {storageClass: "-", annotations: {example.com/backup: "true"}}
+          service: {annotations: {example.com/owner: platform}}
+          ingress:
+            enabled: true
+            className: nginx
+            annotations: {nginx.ingress.kubernetes.io/proxy-body-size: "0"}
+            tls: [{secretName: repo-example-com-tls, hosts: [repo.example.com]}]
+          serviceAccount: {annotations: {example.com/owner: platform}}
+          podAnnotations: {example.com/owner: platform}
+          podLabels: {example.com/team: platform}
+          nodeSelector: {kubernetes.io/os: linux}
+          tolerations: [{key: dedicated, operator: Equal, value: registry, effect: NoSchedule}]
+          affinity: {nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {nodeSelectorTerms: [{matchExpressions: [{key: kubernetes.io/arch, operator: In, values: [amd64, arm64]}]}]}}}
+          priorityClassName: registry
+          extraVolumes: [{name: blobs, persistentVolumeClaim: {claimName: commandcenter-blobs}}]
+          extraVolumeMounts: [{name: blobs, mountPath: /blobs}]
+          EOF
+          check() { # check <helm flags>: lint and render the chart with these values
+            helm lint --strict "$chart" "$@"
+            helm template cc "$chart" "$@" >>"$out"
+          }
+          check -f "$RUNNER_TEMP/required.yaml"
+          check -f "$RUNNER_TEMP/required.yaml" -f "$RUNNER_TEMP/full.yaml"
+          check --set config.existingSecret=commandcenter-config --set serviceAccount.create=false --set persistence.storageClass=fast
+          for k8s in $KUBERNETES_VERSIONS; do
+            kubeconform -strict -summary -kubernetes-version "$k8s" "$out" deploy/kubernetes/commandcenter.yaml
+          done

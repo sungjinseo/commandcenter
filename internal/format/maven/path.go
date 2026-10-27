@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"commandcenter/internal/component"
 	"commandcenter/internal/repo"
 )
 
@@ -36,9 +37,6 @@ var (
 	// timestampedVersionRE matches a resolved snapshot version such as
 	// 1.4-20260101.000000-1, which is not a release.
 	timestampedVersionRE = regexp.MustCompile(`-\d{8}\.\d{6}-\d+$`)
-	// sbtPluginRE matches an artifact directory with sbt's _<scala>_<sbt>
-	// plugin cross suffix, such as sbt-assembly_2.12_1.0.
-	sbtPluginRE = regexp.MustCompile(`^(.+)_\d+(?:\.\d+)*_\d+(?:\.\d+)*$`)
 )
 
 func ParsePath(p string) (Path, error) {
@@ -73,26 +71,29 @@ func ParsePath(p string) (Path, error) {
 // archetype catalog), an sbt plugin file in sbt's legacy layout, or a
 // checksum of one.
 func (p Path) fetchable() bool {
-	return p.Coords != nil || p.Metadata || p.Main == prefixesPath || p.Main == "archetype-catalog.xml" || sbtLegacy(p.Main)
+	return p.Coords != nil || p.Metadata || p.Main == prefixesPath || p.Main == "archetype-catalog.xml" || sbtLegacy(p.Main) != nil
 }
 
-// sbtLegacy reports whether path is an sbt plugin file in the legacy layout,
-// which sbt before 1.9 publishes and asks for (later versions fall back to
-// it): the artifact directory has the cross suffix and the file name does
-// not, as in com/eed3si9n/sbt-assembly_2.12_1.0/2.1.1/sbt-assembly-2.1.1.jar.
-// Such a path has no Coords, so hosted repositories still refuse it.
-func sbtLegacy(path string) bool {
+// sbtLegacy returns the coordinates of path, with the artifactId its POM
+// names, if it is an sbt plugin file in sbt's legacy layout: the artifact
+// directory has the cross suffix (component.SbtPluginDir) and the file name
+// does not, as in com/eed3si9n/sbt-assembly_2.12_1.0/2.1.1/sbt-assembly-2.1.1.jar.
+// sbt before 1.9 publishes only this layout; later versions also publish it,
+// beside the Maven one, while sbtPluginPublishLegacyMavenStyle is true (the
+// default), and fall back to it. Such a path has no Coords: a hosted
+// repository stores it, but it is no version of the GA.
+func sbtLegacy(path string) *Coordinates {
 	segs := strings.Split(path, "/")
 	n := len(segs)
 	if n < 4 {
-		return false
+		return nil
 	}
-	m := sbtPluginRE.FindStringSubmatch(segs[n-3])
+	m := component.SbtPluginDir.FindStringSubmatch(segs[n-3])
 	if m == nil {
-		return false
+		return nil
 	}
 	segs[n-3] = m[1]
-	return parseCoords(segs) != nil
+	return parseCoords(segs)
 }
 
 // validateWritePath refuses names a new upload may not use: bytes that are

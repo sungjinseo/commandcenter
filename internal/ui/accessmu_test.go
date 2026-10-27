@@ -90,3 +90,33 @@ func TestRoleDeleteRefusedWhileLDAPReferencesIt(t *testing.T) {
 	wantStatus(t, e.admin(t, "GET", "/-/api/roles/devs", ""), http.StatusOK)
 	wantStatus(t, e.admin(t, "DELETE", "/-/api/roles/free", ""), http.StatusNoContent)
 }
+
+// QA N-25: a repository delete changes roles, so it waits for an access
+// change in progress; a role edit that read the role before the delete
+// cannot save the removed privilege back.
+func TestRepoDeleteSerialisedWithRoleChanges(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	wantStatus(t, e.admin(t, "POST", "/-/api/repositories", `{"name":"tmp-repo","format":"maven","type":"hosted"}`), http.StatusCreated)
+	const privs = `"privileges":[{"target":"repo:tmp-repo","actions":["read"]},{"target":"*","actions":["browse"]}]`
+	wantStatus(t, e.admin(t, "POST", "/-/api/roles", `{"id":"keeper",`+privs+`}`), http.StatusCreated)
+
+	e.ui.accessMu.Lock() // a role change between its read and its write
+	done := make(chan resp, 1)
+	go func() { done <- e.admin(t, "DELETE", "/-/api/repositories/tmp-repo", "") }()
+	select {
+	case r := <-done:
+		e.ui.accessMu.Unlock()
+		t.Fatalf("the delete did not wait for the access change: %d %s", r.status, r.body)
+	case <-time.After(200 * time.Millisecond):
+	}
+	e.ui.accessMu.Unlock()
+	wantStatus(t, <-done, http.StatusNoContent)
+
+	if r := e.admin(t, "GET", "/-/api/roles/keeper", ""); !strings.Contains(r.body, `"privileges":[{"target":"*","actions":["browse"]}]`) {
+		t.Fatalf("keeper after the delete: %s", r.body)
+	}
+	r := e.admin(t, "PUT", "/-/api/roles/keeper", `{`+privs+`}`)
+	if r.status != http.StatusBadRequest || !strings.Contains(r.body, `unknown repository \"tmp-repo\"`) {
+		t.Fatalf("stale role form: %d %s", r.status, r.body)
+	}
+}

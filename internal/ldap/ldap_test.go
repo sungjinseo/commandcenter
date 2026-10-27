@@ -333,6 +333,38 @@ func TestReadTimeout(t *testing.T) {
 	}
 }
 
+// A context that ended between two operations stops the next one: setting
+// that operation's deadline must not undo the one the context's end set.
+func TestCancelBetweenOperations(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			time.Sleep(3 * time.Second) // never answers
+			c.Close()
+		}
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	c, err := ldap.Dial(ctx, ldap.DialOptions{URL: "ldap://" + ln.Addr().String(), Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	cancel()
+	time.Sleep(100 * time.Millisecond) // the end of ctx reaches the connection before the bind
+	start := time.Now()
+	if err := c.Bind("cn=x", "pw"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("bind after cancel: %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("bind after cancel took %v", took)
+	}
+}
+
 func TestMapRoles(t *testing.T) {
 	cfg := meta.DefaultLDAP()
 	cfg.GroupMappings = []meta.GroupMapping{

@@ -11,6 +11,8 @@ func TestDeriveMaven(t *testing.T) {
 		{"org/example/app/1.0/app-1.0.jar.sha1", "org.example", "app", "1.0", true},
 		{"org/example/app/1.0/app-1.0-sources.jar", "org.example", "app", "1.0", true},
 		{"com/x/a/1.0-SNAPSHOT/a-1.0-20261019.1-1.jar", "com.x", "a", "1.0-SNAPSHOT", true},
+		{"com/x/sbt-a_2.12_1.0/1.0/sbt-a_2.12_1.0-1.0.jar", "com.x", "sbt-a_2.12_1.0", "1.0", true},
+		{"com/x/sbt-a_2.12_1.0/1.0/sbt-a-1.0-sources.jar", "com.x", "sbt-a_2.12_1.0", "1.0", true}, // sbt's legacy layout
 		{"org/example/app/maven-metadata.xml", "", "", "", false},
 		{"org/example/app/maven-metadata.xml.sha1", "", "", "", false},
 		{"com/x/a/1.0-SNAPSHOT/maven-metadata.xml", "", "", "", false},
@@ -94,6 +96,10 @@ func TestDeriveMavenFileMatch(t *testing.T) {
 		{"g/a/1.0-SNAPSHOT/a-1.0-SNAPSHOT.jar", true},
 		{"g/a/1.0-SNAPSHOT/a-2.0-20261019.123456-7.jar", false},
 		{"g/a/1.0-SNAPSHOT/a-1.0-notastamp.jar", false},
+		{"g/sbt-a_2.12_1.0/1.0-SNAPSHOT/sbt-a-1.0-20261019.123456-7.jar", true},
+		{"g/sbt-a_2.12_1.0/1.0/sbt-b-1.0.jar", false},
+		{"g/sbt-a_2.12_1.0/1.0/sbt-a-2.0.jar", false},
+		{"g/sbt-a_2.12/1.0/sbt-a-1.0.jar", false}, // a Scala suffix only
 	}
 	for _, tc := range tests {
 		if _, _, _, ok := DeriveMaven(tc.path); ok != tc.ok {

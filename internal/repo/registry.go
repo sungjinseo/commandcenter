@@ -39,8 +39,11 @@ type Registry struct {
 	nextGen uint64
 
 	// OnDelete, if set, is called after a repository is deleted, with the
-	// write lock held. The app uses it to warn about roles naming it.
-	OnDelete func(name string)
+	// write lock held, the delete's ctx and the ids of the roles whose
+	// privileges on it the delete removed (QA N-25). The app uses it to apply
+	// those role changes before a repository of that name can be created
+	// again.
+	OnDelete func(ctx context.Context, name string, roles []string)
 
 	// Policies looks up a cleanup policy's format ("all" or a format) by
 	// name; ok is false when there is no such policy (cleanup.PolicyLookup).
@@ -277,9 +280,9 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	return cloneDef(def), nil
 }
 
-// Delete removes the named repository and purges its rows (plan 9 Decision
-// 4). A repository that is a member or writeMember of a group is refused
-// with 409, naming the groups.
+// Delete removes the named repository, purges its rows (plan 9 Decision 4)
+// and removes the role privileges on it (QA N-25). A repository that is a
+// member or writeMember of a group is refused with 409, naming the groups.
 func (r *Registry) Delete(ctx context.Context, name string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -299,7 +302,8 @@ func (r *Registry) Delete(ctx context.Context, name string) error {
 	if len(groups) > 0 {
 		return Errorf(http.StatusConflict, "repository %q is used by group repositories: %s", name, strings.Join(groups, ", "))
 	}
-	if err := r.db.DeleteRepository(ctx, name); err != nil {
+	roles, err := r.db.DeleteRepository(ctx, name)
+	if err != nil {
 		if errors.Is(err, meta.ErrNotFound) {
 			return Errorf(http.StatusNotFound, "repository %q not found", name)
 		}
@@ -310,7 +314,7 @@ func (r *Registry) Delete(ctx context.Context, name string) error {
 	delete(r.gens, name)
 	r.snap.Store(newSnapshot(list, r.gens))
 	if r.OnDelete != nil {
-		r.OnDelete(name)
+		r.OnDelete(ctx, name, roles)
 	}
 	return nil
 }

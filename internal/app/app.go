@@ -114,33 +114,17 @@ const secretKeyEnv = "COMMANDCENTER_SECRET_KEY"
 // secrets still stored in plain text. Without a key secrets stay plain text,
 // as before, and one warning says so. The key is never logged.
 func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
-	val, src := os.Getenv(secretKeyEnv), secretKeyEnv
-	switch {
-	case val != "" && cfg.SecretKeyFile != "":
-		return fmt.Errorf("set %s or secretKeyFile, not both", secretKeyEnv)
-	case cfg.SecretKeyFile != "":
-		b, err := os.ReadFile(cfg.SecretKeyFile)
-		if err != nil {
-			// Without the path: it is the key itself when that was given
-			// here by mistake instead of the file holding it.
-			var pe *os.PathError
-			if errors.As(err, &pe) {
-				err = pe.Err
-			}
-			return fmt.Errorf("secretKeyFile: cannot read the file it names: %w", err)
-		}
-		val, src = string(b), "secretKeyFile "+cfg.SecretKeyFile
-	case val == "":
+	key, err := secretKey(cfg)
+	if err != nil {
+		return err
+	}
+	if key == nil {
 		log.Warn("no secret key is configured: the SMTP password, the LDAP bind password and proxy remoteAuth " +
 			"credentials are stored in meta.db in plain text; set " + secretKeyEnv + " or secretKeyFile to encrypt them")
 		return nil
 	}
-	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(val))
-	if err == nil {
-		err = db.SetSecretKey(key)
-	}
-	if err != nil {
-		return fmt.Errorf("%s must hold 32 random bytes in base64 (make them with: head -c 32 /dev/urandom | base64)", src)
+	if err := db.SetSecretKey(key); err != nil {
+		return err
 	}
 	n, err := db.SealSecrets(context.Background())
 	if err != nil {
@@ -150,6 +134,77 @@ func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
 		log.Info("encrypted the stored secrets that were plain text", "rows", n)
 	}
 	return nil
+}
+
+// secretKey returns the key in COMMANDCENTER_SECRET_KEY or in the file
+// secretKeyFile names, or nil when neither is set.
+func secretKey(cfg *config.Config) ([]byte, error) {
+	val := os.Getenv(secretKeyEnv)
+	switch {
+	case val != "" && cfg.SecretKeyFile != "":
+		return nil, fmt.Errorf("set %s or secretKeyFile, not both", secretKeyEnv)
+	case cfg.SecretKeyFile != "":
+		return readSecretKey(cfg.SecretKeyFile, "secretKeyFile")
+	case val == "":
+		return nil, nil
+	}
+	return decodeSecretKey(val, secretKeyEnv)
+}
+
+// readSecretKey reads the key in the file at path, which the setting or flag
+// name gives.
+func readSecretKey(path, name string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// Without the path: it is the key itself when that was given
+		// here by mistake instead of the file holding it.
+		var pe *os.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return nil, fmt.Errorf("%s: cannot read the file it names: %w", name, err)
+	}
+	return decodeSecretKey(string(b), name+" "+path)
+}
+
+// decodeSecretKey decodes the key val holds; src says where val is from.
+func decodeSecretKey(val, src string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(val))
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("%s must hold 32 random bytes in base64 (make them with: head -c 32 /dev/urandom | base64)", src)
+	}
+	return key, nil
+}
+
+// RotateSecretKey seals the stored secrets with the key in newKeyFile (the
+// -new-key-file of "secret-key rotate") instead of the configured one, as
+// meta.DB.RotateSecretKey does, and returns how many had the configured key
+// and how many were plain text. The server must be stopped meanwhile and
+// started with the new key afterwards: it keeps the key it started with.
+func RotateSecretKey(cfg *config.Config, newKeyFile string) (resealed, plain int, err error) {
+	newKey, err := readSecretKey(newKeyFile, "-new-key-file")
+	if err != nil {
+		return 0, 0, err
+	}
+	key, err := secretKey(cfg)
+	if err != nil {
+		return 0, 0, err
+	}
+	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	if err != nil {
+		return 0, 0, fmt.Errorf("open metadata db: %w", err)
+	}
+	defer db.Close()
+	if key != nil {
+		if err := db.SetSecretKey(key); err != nil {
+			return 0, 0, err
+		}
+	}
+	resealed, plain, err = db.RotateSecretKey(context.Background(), newKey)
+	if err != nil {
+		return 0, 0, fmt.Errorf("stored secrets (nothing was changed): %w", err)
+	}
+	return resealed, plain, nil
 }
 
 // openBlobStores seeds the default blob store (its tree stays at
@@ -263,15 +318,31 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		}
 		return ""
 	}
-	warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot(), "")
-	registry.OnDelete = func(name string) { warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot(), name) }
+	warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot())
+	// A repository delete removed the roles' privileges on it (QA N-25). The
+	// registry's write lock is still held, so the live snapshot drops them
+	// before a repository of that name can be created again.
+	registry.OnDelete = func(ctx context.Context, name string, roles []string) {
+		if len(roles) == 0 {
+			return
+		}
+		if err := authn.Reload(context.Background()); err != nil { // the delete is done, even if its client is gone
+			log.Warn("could not reload users, roles and settings after a repository delete; the removed privileges stay in force until the next reload",
+				"repository", name, "err", logsafe.Err(err))
+		}
+		log.Warn("removed the privileges on a deleted repository from roles", "repository", name, "roles", strings.Join(roles, ", "))
+		actor := auth.FromContext(ctx).Owner()
+		for _, id := range roles {
+			evts.Emit("role.update", actor, name, id, "removed repo:"+name)
+		}
+	}
 
 	authn.Log = log // redacted LDAP failures, sign-in throttling
 	authn.Sessions = auth.NewSessions()
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, log: log}
 	taskSvc.Repos, taskSvc.Events = registry, evts
-	taskSvc.GC = func(ctx context.Context, store string) (int, error) {
+	taskSvc.GC = func(ctx context.Context, store string) (int, int64, error) {
 		if store == "" {
 			return a.GC(ctx, time.Hour)
 		}
@@ -442,13 +513,12 @@ func loadAccess(cfg *config.Config, log *slog.Logger, db *meta.DB) (*auth.Authen
 }
 
 // warnUnknownRoleRepos logs roles with a privilege on a repository the
-// registry lacks. With only set, it reports just that repository (after a
-// delete).
-func warnUnknownRoleRepos(log *slog.Logger, a *auth.Snapshot, s *repo.Snapshot, only string) {
+// registry lacks, as an older version or the config import may have left.
+func warnUnknownRoleRepos(log *slog.Logger, a *auth.Snapshot, s *repo.Snapshot) {
 	for _, role := range a.Roles() {
 		for _, p := range role.Privileges {
 			name, ok := strings.CutPrefix(p.Target, "repo:")
-			if !ok || s.ByName[name] != nil || (only != "" && name != only) {
+			if !ok || s.ByName[name] != nil {
 				continue
 			}
 			log.Warn("role grants privileges on a repository that does not exist", "role", role.ID, "repository", name)
@@ -568,23 +638,23 @@ func (a *App) reloadAccess(ctx context.Context) {
 }
 
 // GC runs garbage collection over every blob store and returns the total
-// number of blobs removed. A store whose collection fails does not stop the
-// others; the errors are joined, each naming its store.
-func (a *App) GC(ctx context.Context, minAge time.Duration) (int, error) {
-	total := 0
+// number of blobs removed and the bytes they held. A store whose collection
+// fails does not stop the others; the errors are joined, each naming its store.
+func (a *App) GC(ctx context.Context, minAge time.Duration) (int, int64, error) {
+	total, freed := 0, int64(0)
 	var errs []error
 	for _, name := range a.Store.StoreNames() {
 		if err := ctx.Err(); err != nil {
 			errs = append(errs, err)
 			break
 		}
-		n, err := a.GCStore(ctx, name, minAge)
-		total += n
+		n, b, err := a.GCStore(ctx, name, minAge)
+		total, freed = total+n, freed+b
 		if err != nil {
 			errs = append(errs, fmt.Errorf("blob store %q: %w", name, err))
 		}
 	}
-	return total, errors.Join(errs...)
+	return total, freed, errors.Join(errs...)
 }
 
 // gcScope returns the repositories whose assets keep blobs of a named store
@@ -598,7 +668,8 @@ func (a *App) gcScope(storeName string) []string {
 
 // GCStore removes blobs that no asset in the store's own repositories
 // references and that are older than minAge, deleting only from that store's
-// *blob.Store. "In use" is scoped to the store's repositories (gcScope) so that a blob
+// *blob.Store, and returns how many it removed and the bytes they held.
+// "In use" is scoped to the store's repositories (gcScope) so that a blob
 // shared by name across stores (dedup is per store) is never wrongly removed.
 // The default store keeps every blob any asset references: a build without
 // named stores (an unsupported downgrade) writes all repositories' blobs
@@ -606,13 +677,13 @@ func (a *App) gcScope(storeName string) []string {
 // The age guard protects uploads written but not yet recorded; the ModTime and
 // in-use re-check immediately before removal protects uploads that raced the
 // walk.
-func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duration) (int, error) {
+func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duration) (int, int64, error) {
 	if storeName == "" {
 		storeName = repo.DefaultStore
 	}
 	bs := a.Store.StoreByName(storeName)
 	if bs == nil {
-		return 0, fmt.Errorf("unknown blob store %q", storeName)
+		return 0, 0, fmt.Errorf("unknown blob store %q", storeName)
 	}
 	// The walk below sees only blobs; temp files a killed process left are swept here.
 	if n, err := bs.SweepTmp(); err != nil {
@@ -626,7 +697,7 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		inUse = func(sha string) (bool, error) { return a.DB.BlobInUseInRepos(ctx, sha, repos) }
 	}
 	cutoff := time.Now().Add(-minAge)
-	removed := 0
+	removed, freed := 0, int64(0)
 	err := bs.Walk(func(sha string, mod time.Time) error {
 		if mod.After(cutoff) {
 			return nil
@@ -637,14 +708,14 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		}
 		// Re-check right before removal: a concurrent upload may have refreshed
 		// the blob or recorded an asset since the walk saw it.
-		mod, err = bs.ModTime(sha)
+		info, err := bs.Stat(sha)
 		if errors.Is(err, blob.ErrNotFound) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if mod.After(cutoff) {
+		if info.ModTime().After(cutoff) {
 			return nil
 		}
 		used, err = inUse(sha)
@@ -654,10 +725,10 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		if err := bs.Remove(sha); err != nil {
 			return err
 		}
-		removed++
+		removed, freed = removed+1, freed+info.Size()
 		return nil
 	})
-	return removed, err
+	return removed, freed, err
 }
 
 // Close stops the event writer (it drains its queue first) and closes the database.

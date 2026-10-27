@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/logring"
 	"commandcenter/internal/meta"
 )
 
@@ -217,6 +219,61 @@ func TestStartupWarnings(t *testing.T) {
 	}
 	if logs := buf.String(); !strings.Contains(logs, "stored baseURL is no longer accepted") || strings.Contains(logs, "s3cret") {
 		t.Fatalf("baseURL warning: %s", logs)
+	}
+}
+
+// QA N-25: deleting a repository removes the roles' privileges on it at
+// once, without the reload loop, so a repository created again under the
+// name does not let the roles' users in. One warning names the roles and
+// each changed role gets a role.update event.
+func TestRepositoryDeleteDropsRolePrivileges(t *testing.T) {
+	cfg := testConfig(t, "  - { name: scratch, format: maven, type: hosted }\n")
+	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	cfg.Users = append(cfg.Users, config.User{Name: "root", PasswordHash: string(h), Roles: []string{"admin"}})
+	cfg.Roles["deployer"] = config.Role{Write: []string{"maven-releases", "scratch"}}
+	cfg.Roles["viewer"] = config.Role{Write: []string{"scratch"}}
+	ring := logring.NewRing(100, 1<<20)
+	a, err := New(cfg, slog.New(logring.NewHandler(slog.NewTextHandler(io.Discard, nil), ring)), WithLogRing(ring))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ts := httptest.NewServer(a.Handler)
+	defer ts.Close()
+	const jar = "/org/example/app/1.0/app-1.0.jar"
+
+	if st, body := do(t, "PUT", ts.URL+"/repository/scratch"+jar, "ci", "jar", false); st != http.StatusCreated {
+		t.Fatalf("PUT before the delete: %d %s", st, body)
+	}
+	if st, body := do(t, "DELETE", ts.URL+"/-/api/repositories/scratch", "root", "", true); st != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", st, body)
+	}
+	if st, body := do(t, "POST", ts.URL+"/-/api/repositories", "root", `{"name":"scratch","format":"maven","type":"hosted"}`, true); st != http.StatusCreated {
+		t.Fatalf("create again: %d %s", st, body)
+	}
+	if st, body := do(t, "PUT", ts.URL+"/repository/scratch"+jar, "ci", "jar", false); st != http.StatusForbidden {
+		t.Fatalf("PUT to the new repository: %d %s", st, body)
+	}
+	if st, body := do(t, "PUT", ts.URL+"/repository/maven-releases"+jar, "ci", "jar", false); st != http.StatusCreated {
+		t.Fatalf("PUT to the role's other repository: %d %s", st, body)
+	}
+
+	warns := ring.Snapshot(slog.LevelWarn, "privileges on a deleted repository", 0)
+	if len(warns) != 1 || warns[0].Attrs != `repository=scratch roles="deployer, viewer"` {
+		t.Fatalf("warnings = %+v", warns)
+	}
+	var evs []meta.Event
+	for deadline := time.Now().Add(5 * time.Second); len(evs) < 2 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if evs, err = a.DB.ListEvents(context.Background(), 10, 0, "role.update"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	for _, e := range evs {
+		got = append(got, e.Actor+" "+e.Repo+" "+e.Subject+" "+e.Detail)
+	}
+	if strings.Join(got, "; ") != "root scratch viewer removed repo:scratch; root scratch deployer removed repo:scratch" {
+		t.Fatalf("role.update events (newest first) = %q", got)
 	}
 }
 

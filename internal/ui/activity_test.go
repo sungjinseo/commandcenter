@@ -22,7 +22,7 @@ func TestEventSitesInUI(t *testing.T) {
 	sink := &repotest.Sink{}
 	e.ui.Events = sink
 	e.ui.Tasks.Events = sink
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 3, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 3, 0, nil }
 
 	last := func() repotest.Event {
 		t.Helper()
@@ -72,9 +72,9 @@ func TestEventSitesInUI(t *testing.T) {
 	}
 
 	// A failed task run is recorded too.
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 0, errors.New("disk on fire") }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 0, 0, errors.New("disk on fire") }
 	e.admin(t, "POST", "/-/api/gc", "")
-	if got := last(); got.Kind != "task.run" || got.Detail != "Failed: disk on fire (removed 0 blobs)" {
+	if got := last(); got.Kind != "task.run" || got.Detail != "Failed: disk on fire (removed 0 blobs (0 bytes))" {
 		t.Fatalf("failed run: %+v", got)
 	}
 

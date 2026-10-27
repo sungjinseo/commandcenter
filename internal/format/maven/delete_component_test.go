@@ -39,10 +39,14 @@ func (e *env) putAll(t *testing.T, repoName string, paths ...string) {
 }
 
 // fileBody is what putAll uploads to p: the path itself, or for a POM one
-// that names p's coordinates (QA N-6).
+// that names p's coordinates (QA N-6), sbtLegacy's in sbt's legacy layout.
 func fileBody(p string) string {
 	pp, _ := ParsePath(p)
-	if c := pp.Coords; c != nil && c.Extension == "pom" && c.Classifier == "" {
+	c := pp.Coords
+	if c == nil {
+		c = sbtLegacy(pp.Main)
+	}
+	if c != nil && c.Extension == "pom" && c.Classifier == "" {
 		return "<project><groupId>" + c.GroupID + "</groupId><artifactId>" + c.ArtifactID +
 			"</artifactId><version>" + c.BaseVersion + "</version></project>"
 	}
@@ -103,6 +107,22 @@ func TestDeleteComponentRelease(t *testing.T) {
 	}
 	if got := sink.Events(); len(got) != 0 {
 		t.Fatalf("events for a missing component: %v", got)
+	}
+}
+
+// An sbt plugin version's files in both layouts are one component: deleting
+// it leaves no legacy-layout file, which sbt falls back to, behind.
+func TestDeleteComponentSbtPluginBothLayouts(t *testing.T) {
+	e := newEnv(t)
+	const dir = "com/example/sbt-foo_2.12_1.0/1.0.0/"
+	e.putAll(t, "releases", dir+"sbt-foo_2.12_1.0-1.0.0.pom", dir+"sbt-foo_2.12_1.0-1.0.0.jar", dir+"sbt-foo-1.0.0.pom", dir+"sbt-foo-1.0.0.jar")
+	c := component.Component{Format: "maven", Group: "com.example", Name: "sbt-foo_2.12_1.0", Version: "1.0.0"}
+	res, err := e.h.DeleteComponent(context.Background(), e.repos["releases"], c, "system")
+	if err != nil || res.Assets != 4 {
+		t.Fatalf("DeleteComponent: %+v %v, want 4 assets", res, err)
+	}
+	if got := assetPaths(t, e, "releases", ""); got != "" {
+		t.Fatalf("left behind: %s", got)
 	}
 }
 

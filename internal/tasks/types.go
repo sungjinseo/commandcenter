@@ -69,13 +69,13 @@ func runCompact(ctx context.Context, s *Service, t meta.Task, _ string, log *Run
 	} else {
 		log.Infof("compacting every blob store: removing blobs no asset references")
 	}
-	n, err := s.GC(ctx, p.BlobStore)
-	sum := summary{msg: fmt.Sprintf("removed %d blobs", n), removed: int64(n)}
+	n, freed, err := s.GC(ctx, p.BlobStore)
+	sum := summary{msg: fmt.Sprintf("removed %d blobs (%d bytes)", n, freed), removed: int64(n), bytes: freed}
 	if err != nil {
-		log.Errorf("compact failed after removing %d blobs: %v", n, err)
+		log.Errorf("compact failed after removing %d blobs (%d bytes): %v", n, freed, err)
 		return sum, err
 	}
-	log.Infof("removed %d blobs", n)
+	log.Infof("%s", sum.msg)
 	return sum, nil
 }
 
@@ -347,8 +347,8 @@ func rebuildParamsOf(s *Service, raw json.RawMessage, check bool) (string, []str
 	case !check:
 	case rp == nil:
 		return "", []string{fmt.Sprintf("repository %q does not exist", p.Repo)}
-	case rp.Format != "maven" || rp.Type != "hosted":
-		return "", []string{fmt.Sprintf("repository %q is %s %s: metadata is rebuilt for Maven hosted repositories only", p.Repo, rp.Format, rp.Type)}
+	case rp.Format != "maven" || (rp.Type != "hosted" && rp.Type != "proxy"):
+		return "", []string{fmt.Sprintf("repository %q is %s %s: the task takes a Maven hosted or proxy repository", p.Repo, rp.Format, rp.Type)}
 	}
 	return encodeParams(p), nil
 }
@@ -365,8 +365,17 @@ func runRebuild(ctx context.Context, s *Service, t meta.Task, _ string, log *Run
 	switch {
 	case rp == nil:
 		return summary{}, fmt.Errorf("repository %q no longer exists: edit or delete this task", p.Repo)
-	case rp.Format != "maven" || rp.Type != "hosted":
-		return summary{}, fmt.Errorf("repository %q is now %s %s, not Maven hosted: edit or delete this task", p.Repo, rp.Format, rp.Type)
+	case rp.Format != "maven" || (rp.Type != "hosted" && rp.Type != "proxy"):
+		return summary{}, fmt.Errorf("repository %q is now %s %s, not Maven hosted or proxy: edit or delete this task", p.Repo, rp.Format, rp.Type)
+	}
+	if rp.Type == "proxy" {
+		// A proxy's metadata is the remote's: what is repaired is the cache,
+		// which older builds filled with files that are not Maven files (QA L-12).
+		log.Infof("%s: removing cached files that are not Maven files", rp.Name)
+		n, err := s.Maven.PurgeUnfetchable(ctx, rp, log.Infof)
+		sum := summary{msg: fmt.Sprintf("%s: removed %d cached files that are not Maven files", rp.Name, n), removed: int64(n)}
+		log.Infof("%s", sum.msg)
+		return sum, err
 	}
 	log.Infof("%s: rebuilding maven-metadata.xml of every GA", rp.Name)
 	res, err := s.Maven.RebuildMetadata(ctx, rp, s.RebuildScan, log.Infof)

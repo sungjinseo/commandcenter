@@ -123,12 +123,12 @@ func TestGC(t *testing.T) {
 	a.Store.Put(ctx, "maven-releases", "drop", "", strings.NewReader("drop"))
 	a.Store.Delete(ctx, "maven-releases", "drop")
 
-	if n, err := a.GC(ctx, time.Hour); err != nil || n != 0 {
-		t.Fatalf("young blobs must be kept: n=%d err=%v", n, err)
+	if n, freed, err := a.GC(ctx, time.Hour); err != nil || n != 0 || freed != 0 {
+		t.Fatalf("young blobs must be kept: n=%d freed=%d err=%v", n, freed, err)
 	}
-	n, err := a.GC(ctx, 0)
-	if err != nil || n != 1 {
-		t.Fatalf("n=%d err=%v", n, err)
+	n, freed, err := a.GC(ctx, 0)
+	if err != nil || n != 1 || freed != int64(len("drop")) {
+		t.Fatalf("n=%d freed=%d err=%v", n, freed, err)
 	}
 	if _, err := a.Store.Get(ctx, "maven-releases", "keep"); err != nil {
 		t.Fatal(err)
@@ -281,7 +281,7 @@ func TestGCKeepsReuploadedBlob(t *testing.T) {
 	if _, err := a.Store.StoreByName(repo.DefaultStore).Write(strings.NewReader("same")); err != nil {
 		t.Fatal(err)
 	}
-	n, err := a.GC(ctx, time.Hour)
+	n, _, err := a.GC(ctx, time.Hour)
 	if err != nil || n != 0 {
 		t.Fatalf("re-uploaded blob must survive GC: n=%d err=%v", n, err)
 	}

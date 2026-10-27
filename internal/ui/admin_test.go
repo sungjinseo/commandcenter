@@ -132,7 +132,7 @@ func TestTokenListTruncated(t *testing.T) {
 
 func TestAdminEndpointsAuthLevels(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 0, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 0, 0, nil }
 	cases := []struct{ method, path string }{
 		{"GET", "/-/api/tokens"}, {"POST", "/-/api/tokens"}, {"DELETE", "/-/api/tokens/x"},
 		{"POST", "/-/api/gc"}, {"GET", "/-/api/status"},
@@ -147,7 +147,7 @@ func TestAdminEndpointsAuthLevels(t *testing.T) {
 
 func TestAdminMutationsNeedUIHeader(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { t.Error("gc ran"); return 0, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { t.Error("gc ran"); return 0, 0, nil }
 	id, _ := e.newToken(t, "admin", "")
 	for _, c := range []struct{ method, path, body string }{
 		{"POST", "/-/api/tokens", ""}, {"DELETE", "/-/api/tokens/" + id, ""}, {"POST", "/-/api/gc", ""},
@@ -180,11 +180,11 @@ func TestGCConcurrency(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	entered, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int32
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) {
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) {
 		calls.Add(1)
 		entered <- struct{}{}
 		<-release
-		return 7, nil
+		return 7, 70, nil
 	}
 	first := make(chan resp, 1)
 	go func() { first <- e.req(t, "POST", "/-/api/gc", "", "admin", nil, true) }()
@@ -203,7 +203,7 @@ func TestGCConcurrency(t *testing.T) {
 	case r1 := <-first:
 		wantStatus(t, r1, http.StatusOK)
 		m := r1.json(t)
-		if m["removed"] != float64(7) {
+		if m["removed"] != float64(7) || m["bytes"] != float64(70) {
 			t.Fatalf("body %s", r1.body)
 		}
 		if _, ok := m["ms"]; !ok {
@@ -213,7 +213,7 @@ func TestGCConcurrency(t *testing.T) {
 		t.Fatal("first gc did not finish")
 	}
 	// The lock is released: a later run proceeds.
-	e.ui.Tasks.GC = func(context.Context, string) (int, error) { return 0, nil }
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { return 0, 0, nil }
 	wantStatus(t, e.req(t, "POST", "/-/api/gc", "", "admin", nil, true), http.StatusOK)
 	if calls.Load() != 1 {
 		t.Fatalf("blocking gc called %d times", calls.Load())
