@@ -875,6 +875,43 @@ func TestPackagesCargoPublishedName(t *testing.T) {
 	if a := c.Components[0].Assets; len(a) != 1 || a[0].Path != "crates/foo-bar/1.0.0.crate" {
 		t.Fatalf("assets keep the stored path: %+v", a)
 	}
+	if got := e.get(t, "/-/api/repositories/cargo-hosted/asset?path=crates/foo-bar/1.0.0.crate", "admin").json(t)["crate"]; got != "Foo-Bar" {
+		t.Fatalf("asset crate = %v", got)
+	}
+}
+
+// TestCargoProxyPublishedName: a proxy has no package rows, so component
+// search and the asset API read a crate's published spelling from its cached
+// index file; a crate whose index file is not cached keeps the path's name
+// (QA L-20).
+func TestCargoProxyPublishedName(t *testing.T) {
+	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
+		c.Repositories = append(c.Repositories, config.Repository{Name: "cargo-proxy", Format: "cargo", Type: "proxy", Remote: "https://index.crates.io/"})
+	})
+	bs, err := blob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &repo.Store{Blobs: map[string]*blob.Store{repo.DefaultStore: bs}, DB: e.db, Now: time.Now}
+	e.ui.Store = store
+	for p, body := range map[string]string{
+		"index/in/fl/inflector":         `{"name":"Inflector","vers":"0.11.4","deps":[],"cksum":"x","features":{},"yanked":false}` + "\n",
+		"crates/inflector/0.11.4.crate": "crate",
+		"crates/inflate/0.4.5.crate":    "crate", // its index file is not cached
+	} {
+		if _, err := store.Put(context.Background(), "cargo-proxy", p, "", strings.NewReader(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := searchComponents(t, e, "name=infl&format=cargo", "admin", 200)
+	if got, want := names(c), "cargo-proxy::inflate:0.4.5,cargo-proxy::Inflector:0.11.4"; got != want {
+		t.Fatalf("components = %s, want %s", got, want)
+	}
+	for p, want := range map[string]any{"crates/inflector/0.11.4.crate": "Inflector", "crates/inflate/0.4.5.crate": "inflate", "index/in/fl/inflector": nil} {
+		if got := e.get(t, "/-/api/repositories/cargo-proxy/asset?path="+url.QueryEscape(p), "admin").json(t)["crate"]; got != want {
+			t.Errorf("%s: crate = %v, want %v", p, got, want)
+		}
+	}
 }
 
 func TestPackagesQueryCap(t *testing.T) {

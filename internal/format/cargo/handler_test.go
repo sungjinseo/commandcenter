@@ -45,6 +45,8 @@ func fakeIndex(hits *atomic.Int32, files string) http.HandlerFunc {
 		case "/it/oa/itoa":
 			io.WriteString(w, `{"name":"itoa","vers":"1.0.0","deps":[],"cksum":"`+sum("itoa-1.0.0")+`","features":{},"yanked":false}`+"\n"+
 				`{"name":"itoa","vers":"1.0.1","deps":[],"cksum":"`+sum("other")+`","features":{},"yanked":false}`+"\n")
+		case "/in/fl/inflector":
+			io.WriteString(w, `{"name":"Inflector","vers":"0.11.4","deps":[],"cksum":"`+sum("x")+`","features":{},"yanked":false}`+"\n")
 		case "/no/su/nosum":
 			io.WriteString(w, `{"name":"nosum","vers":"1.0.0","deps":[],"cksum":"","features":{},"yanked":false}`+"\n")
 		case "/ev/il/evil":
@@ -214,6 +216,40 @@ func TestProxyDownloadIgnoresForeignIndexNames(t *testing.T) {
 	e := newEnv(t)
 	if w := e.do("GET", "cargo-proxy", "crates/evil/1.0.0/download", nil); w.Code != 404 {
 		t.Fatalf("foreign names: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestCachedName: a proxied crate's published spelling comes from the first
+// line of its cached index file, never from the upstream; a file it cannot
+// read that way gives "" (QA L-20).
+func TestCachedName(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if got := CachedName(ctx, e.h.Store, "cargo-proxy", "inflector"); got != "" {
+		t.Fatalf("before the index is cached: %q", got)
+	}
+	if w := e.do("GET", "cargo-proxy", "in/fl/inflector", nil); w.Code != 200 {
+		t.Fatalf("index: %d %s", w.Code, w.Body.String())
+	}
+	for _, name := range []string{"inflector", "INFLECTOR"} {
+		if got := CachedName(ctx, e.h.Store, "cargo-proxy", name); got != "Inflector" {
+			t.Errorf("%s: %q", name, got)
+		}
+	}
+	for name, body := range map[string]string{
+		"empty":  "",
+		"other":  `{"name":"Another","vers":"1.0.0"}`,
+		"kelvin": `{"name":"\u212Aelvin","vers":"1.0.0"}`, // the Kelvin sign folds to k, but is not a crate name
+		"later":  `{"links":"Later","name":"Later"}`,      // "name" is not the first key
+		"array":  `["name","Array"]`,
+		"padded": strings.Repeat(" ", 4<<10) + `{"name":"Padded"}`, // past the 4 KiB read
+	} {
+		if _, err := e.h.Store.Put(ctx, "cargo-proxy", indexKey(IndexPath(name)), "", strings.NewReader(body)); err != nil {
+			t.Fatal(err)
+		}
+		if got := CachedName(ctx, e.h.Store, "cargo-proxy", name); got != "" {
+			t.Errorf("%s: %q", name, got)
+		}
 	}
 }
 

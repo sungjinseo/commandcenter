@@ -465,10 +465,9 @@ export async function assetView(r, path, opts) {
   const a = await api(apiRepo(r.name, "/asset?path=" + enc(path)));
   const c = deriveComp(r.format, a.path);
   // A cargo path holds the crate name lowercased; cargo add needs the
-  // published spelling, which the packages API knows (QA L-20).
-  if (c && r.format === "cargo" && r.type === "hosted") {
-    try { c.name = (await api(apiRepo(r.name, "/packages/" + encPath(c.name)))).name || c.name; } catch (e) { /* keep the path's spelling */ }
-  }
+  // published spelling, which the asset API reads from the package rows or,
+  // for a proxy, its cached index (QA L-20).
+  if (c && a.crate) c.name = a.crate;
   const proxy = r.type === "proxy";
   let target = a.downloadUrl;
   try { target = new URL(a.downloadUrl, location.href).pathname; } catch (e) { /* use as is */ }

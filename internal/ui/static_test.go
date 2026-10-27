@@ -372,12 +372,12 @@ func TestMavenSetupEnablesSnapshots(t *testing.T) {
 }
 
 // TestCargoUsageUsesPublishedName: a cargo asset path holds the crate name
-// lowercased, so the asset view asks the packages API for the published
-// spelling before showing `cargo add`, and version paths built from a
-// published name are lowercased again (QA L-20).
+// lowercased, so the asset view takes the published spelling from the asset
+// API (hosted and proxy) before showing `cargo add`, and version paths built
+// from a published name are lowercased again (QA L-20).
 func TestCargoUsageUsesPublishedName(t *testing.T) {
 	js := readStatic(t, "browse.js")
-	for _, want := range []string{`r.format === "cargo" && r.type === "hosted"`, `"crates/" + c.name.toLowerCase() + "/"`} {
+	for _, want := range []string{`if (c && a.crate) c.name = a.crate;`, `"crates/" + c.name.toLowerCase() + "/"`} {
 		if !strings.Contains(js, want) {
 			t.Errorf("browse.js lacks %s", want)
 		}
