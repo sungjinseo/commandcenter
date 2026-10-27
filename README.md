@@ -4,7 +4,7 @@
 
 <p align="center">
   Nexus Repository를 대신하는, 작고 단단한 오픈소스 아티팩트 레지스트리.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum을 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT를 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
 </p>
 
 <p align="center">
@@ -49,8 +49,10 @@
 | raw | ✅ | ✅ | ✅ | curl, 브라우저 (디렉터리 목록) |
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
 | Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata 자동 생성) |
+| NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) |
+| APT | ✅ | ✅ | ✅ | apt (signed Release 지원) |
 
-NuGet과 APT는 개발 중입니다. 지원하지 않는 포맷은 [제한 사항](docs/guide.md#제한-사항)에 있습니다.
+지원하지 않는 포맷은 [제한 사항](docs/guide.md#제한-사항)에 있습니다.
 
 ## 기능
 
@@ -161,7 +163,7 @@ docker compose up -d
 ## 현황과 제한
 
 - 인스턴스 하나로 돌도록 만들었습니다. 이중화 · 수평 확장은 없습니다(Nexus OSS와 같습니다).
-- NuGet, APT, RubyGems, Conan, Conda, Composer는 아직 없습니다. 앞의 둘은 개발 중입니다.
+- RubyGems, Conan, Conda, Composer는 아직 없습니다.
 - Nexus REST API는 저장소 · 컴포넌트 · 자산 · 검색 · 상태 엔드포인트를 지원합니다. 사용자 · 역할 쓰기, 스크립트 API는 없습니다.
 - 알려진 제한은 [제한 사항](docs/guide.md#제한-사항), 릴리스마다 고친 것과 바뀐 것은 [CHANGELOG](CHANGELOG.md)에 있습니다.
 - 버그는 이슈로, 보안 문제는 [보안 정책](SECURITY.md)대로 비공개로 알려 주세요.

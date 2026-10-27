@@ -18,7 +18,7 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "yum-hosted", "apt-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted"] }
 
 repositories:
   - name: maven-central
@@ -133,6 +133,20 @@ repositories:
     type: group
     members: [helm-hosted, helm-proxy]
     writeMember: helm-hosted
+  - name: nuget-hosted                # dotnet nuget push x.nupkg -s <host>/repository/nuget-hosted/index.json -k <API 토큰>
+    format: nuget
+    type: hosted
+    writePolicy: allow_once           # allow: 같은 버전 덮어쓰기 허용(edit 권한)
+  - name: nuget-proxy                 # dotnet nuget add source <host>/repository/nuget-proxy/index.json
+    format: nuget
+    type: proxy
+    remote: "https://api.nuget.org/v3/index.json"   # V3 서비스 인덱스 URL
+    metadataMaxAge: "1h"              # 서비스 인덱스·버전 목록·registration·검색 재확인 주기. .nupkg는 영구 캐시
+  - name: nuget-all                   # dotnet nuget add source <host>/repository/nuget-all/index.json — hosted가 가진 id는 hosted 버전만
+    format: nuget
+    type: group
+    members: [nuget-hosted, nuget-proxy]
+    writeMember: nuget-hosted
   - name: yum-hosted                  # curl -u ci:pw --upload-file demo-1.0-1.el9.x86_64.rpm <host>/repository/yum-hosted/el9/
     format: yum
     type: hosted

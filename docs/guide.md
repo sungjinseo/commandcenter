@@ -16,6 +16,12 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
 | PyPI | O | O | O |
 | Go | O | O | O |
 | Cargo | O | O | O |
+| Docker / OCI | O | O | O |
+| raw | O | O | O |
+| Helm | O | O | O |
+| NuGet | O | O | O |
+| APT | O | O | O |
+| Yum / DNF | O | O | O |
 
 - **hosted**: 직접 업로드한 패키지를 저장합니다.
 - **proxy**: 원격 저장소(Maven Central, npmjs, pypi.org, proxy.golang.org, crates.io 등)를 처음 요청할 때 가져와 캐시합니다.
@@ -456,6 +462,100 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
    - **클라이언트 설정의 id.** 웹 UI와 이 문서의 새 클라이언트 설정 예시는 서버 id와 레지스트리 이름으로 `commandcenter`를 씁니다. `repolite`를 쓰는 기존 `settings.xml`과 cargo 설정은 그대로 동작합니다. 다만 `settings.xml`에서는 `<server>`의 `<id>`와 저장소(`<repository>`, `<mirror>`)의 id가 서로 같아야 인증이 붙습니다. 새 이름으로 바꾸려면 둘을 함께 바꾸세요.
 5. **이미지와 컨테이너 이름.** 이미지는 `ghcr.io/sungjinseo/commandcenter:<버전>`(직접 빌드했다면 `.env`의 `COMMANDCENTER_IMAGE`에 적은 이름), compose 서비스와 컨테이너는 `commandcenter`입니다. `docker logs commandcenter`, `docker exec commandcenter ...`처럼 이름을 쓰는 스크립트와 모니터링을 고치세요. 바이너리 서브커맨드(`commandcenter hash-password`, `token create`, `gc`, `healthcheck`)도 같은 이름입니다. `token create`는 `-config`를 생략하면 기본 경로(`/etc/commandcenter/config.yaml`)를 쓰고, 없으면 이전 경로로 대체하므로 예시에서는 `-config`를 쓰지 않습니다. 다른 경로의 파일을 쓸 때만 `-config <경로>`를 붙이세요.
 
+## Nexus에서 이전하기
+
+Sonatype Nexus Repository 3의 hosted 저장소 내용을 Command Center로 복사할 때는 `commandcenter import-nexus` 서브커맨드를 씁니다. Nexus의 REST API(v1)로 컴포넌트 목록을 읽고, 포맷마다 Command Center가 원래 받는 업로드 방식(Maven PUT, npm publish, PyPI 업로드, raw PUT, helm PUT, docker blob/manifest 업로드)으로 그대로 올리므로 서버의 검증이 모두 적용됩니다. 서버 쪽에 추가 설정은 없습니다.
+
+1. **준비.** Nexus에 읽기 권한이 있는 사용자와 비밀번호, Command Center에 대상 저장소 쓰기 권한이 있는 사용자와 API 토큰(`commandcenter token create`, Basic 비밀번호 자리에 씁니다)을 준비합니다. 비밀번호와 토큰은 파일(첫 줄)이나 환경 변수 `NEXUS_PASSWORD`, `COMMANDCENTER_TOKEN`로 넘깁니다. 명령줄 인자나 URL(`http://user:pw@...`)에는 넣을 수 없고, 출력에도 찍히지 않습니다. 도구를 실행하는 곳에서 두 서버에 모두 접속할 수 있어야 합니다. 사설망 주소의 Nexus도 됩니다.
+2. **대상 저장소를 먼저 만들기.** Command Center에 같은 포맷의 hosted 저장소를 먼저 만듭니다. Nexus 포맷과의 대응은 maven2→maven, npm→npm, pypi→pypi, raw→raw, helm→helm, docker→docker입니다. 이름이 같을 필요는 없고 `-repo <Nexus 저장소>=<Command Center 저장소>`로 짝을 지어 줍니다. 이름이 같으면 `-repo <이름>`만 써도 됩니다. Maven 저장소는 `versionPolicy`(release/snapshot)를 Nexus 쪽과 맞춰 두세요. 정책에 맞지 않는 버전은 업로드가 거부되어 오류로 집계됩니다.
+3. **먼저 확인(dry run).**
+
+   ```bash
+   echo -n '<nexus 비밀번호>' > nexus.pw; echo -n '<cc 토큰>' > cc.token; chmod 600 nexus.pw cc.token
+   commandcenter import-nexus -from https://nexus.example.com -from-user admin -from-password-file nexus.pw \
+     -to https://cc.example.com -to-user ci -to-token-file cc.token \
+     -repo maven-releases -repo npm-hosted=npm-internal -dry-run
+   ```
+
+   컴포넌트마다 한 줄(`저장소 포맷 이름 버전 파일수 바이트 상태`)과 저장소별 요약을 출력합니다. dry run은 아무것도 쓰지 않고 `would copy`로 표시합니다.
+4. **복사.** `-dry-run`을 빼고 같은 명령을 실행합니다. `-all`을 주면 Nexus의 모든 hosted 저장소를 같은 이름의 Command Center 저장소로 복사합니다. `-concurrency`(기본 4)는 동시에 옮기는 컴포넌트 수입니다. 자체 서명 인증서는 `-ca <PEM>`으로 신뢰시키고, 테스트 환경에서만 `-insecure`를 쓰세요. 오류가 하나라도 있으면 종료 코드가 1이고 마지막 줄에 개수가 나옵니다. 각 줄의 `error:` 메시지는 Command Center 서버가 돌려준 이유(예: POM 좌표 불일치, PEP 440이 아닌 버전)이므로 그 파일만 손보면 됩니다.
+
+**복사되는 것과 되지 않는 것.** hosted 저장소의 컴포넌트와 파일만 복사합니다. Maven은 pom/jar/sources/javadoc/asc 등 파일 전부를 경로 그대로 올리고, 체크섬 파일과 `maven-metadata.xml`은 Command Center가 다시 만들므로 건너뜁니다. npm은 tarball의 package.json으로 publish 문서를 만들어 올리고, 버전을 다 옮긴 뒤 Nexus의 dist-tags(`latest` 등)를 그대로 설정합니다. PyPI는 wheel/sdist 파일을 twine이 보내는 형식으로 올리며, 메타데이터는 서버가 파일 안의 METADATA/PKG-INFO에서 읽습니다. helm은 `<이름>-<버전>.tgz`만 올립니다(`.prov`는 제외). 다음은 복사하지 **않습니다**. proxy·group 저장소(목록에 `skipped`로 표시되고 Command Center에서 새로 만들면 됩니다), go와 cargo 등 지원하지 않는 포맷(마찬가지로 `skipped`), 사용자·역할·권한, cleanup 정책, 예약 작업, 라우팅 규칙, 다운로드 수 같은 통계. 사용자와 역할은 "인증과 권한"을 보고 설정 파일이나 관리자 화면에서 다시 만듭니다.
+
+**Docker.** Nexus의 docker hosted 저장소는 REST API가 아니라 저장소마다 따로 연 커넥터 포트(예: 8082)의 레지스트리 API로 읽어야 합니다. `-docker-from http://nexus.example.com:8082`로 그 저장소의 커넥터 주소를 주고, docker 저장소는 한 번에 하나씩 옮깁니다(`-repo docker-hosted -docker-from ...`). 주지 않으면 docker 저장소는 `skipped`로 표시됩니다. 이미지의 태그마다 매니페스트를 읽어 blob 중 대상에 없는 것만 올리고, 멀티 플랫폼 이미지(index)는 하위 매니페스트를 먼저 올린 뒤 태그를 붙입니다. 대상에서는 `docker pull cc.example.com/<저장소>/<이미지>:<태그>`로 받습니다("Docker 설정").
+
+**다시 실행하기.** 중간에 끊겨도 같은 명령을 다시 실행하면 됩니다. 기본값(`-skip-existing`)으로는 대상에 이미 있는 파일·버전·태그를 HEAD로 확인해 `skipped`로 세고 다시 올리지 않으므로, 몇 번을 돌려도 결과가 같습니다. Nexus에 새로 올라온 것만 추가로 옮기는 데도 같은 방법을 씁니다. 모든 파일은 Nexus가 알려 준 sha256과 대조한 뒤에만 업로드되며, 임시 파일을 거쳐 옮기므로 큰 파일도 메모리를 많이 쓰지 않습니다. `-skip-existing=false`는 존재 확인을 생략할 뿐이고, 이미 있는 것은 저장소의 `writePolicy`가 정한 대로 거부(allow_once)되거나 덮어써집니다(allow).
+
+## Nexus REST API 호환
+
+Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, Terraform provider(`datadrivers/terraform-provider-nexus`), `nexus-cli` 같은 도구가 실제로 쓰는 엔드포인트를 `/service/rest/v1` 아래에서 같은 경로와 같은 JSON 필드 이름으로 제공합니다. 인증은 다른 경로와 같습니다(Basic 비밀번호, API 토큰, UI 세션). 저장소 관리는 admin, 컴포넌트·자산 조회는 해당 저장소의 read 권한, 삭제는 delete 권한이 필요합니다. 익명으로 읽을 수 없으면 `401`(Basic 챌린지 포함), 로그인했지만 권한이 없으면 `403`, 볼 수 없는 저장소는 `404`로 답합니다. 오류 본문은 Nexus처럼 `{"message": "..."}`이고, 저장소 본문의 검증 오류는 `400`에 `[{"id": "...", "message": "..."}]` 배열입니다.
+
+| 엔드포인트 | 지원 |
+|---|---|
+| `GET /repositories`, `GET /repositories/{name}` | 읽을 수 있는 저장소의 `name`, `format`, `type`, `url`, `attributes.proxy.remoteUrl` |
+| `GET /repositorySettings`, `GET /repositories/{format}/{type}/{name}` | admin. `online`, `storage`, `cleanup`, `proxy`, `negativeCache`, `httpClient.authentication`(사용자 이름만), `group`, `maven` 등 Command Center에 대응 값이 있는 항목 |
+| `POST /repositories/{format}/{type}` → 201, `PUT /repositories/{format}/{type}/{name}` → 204, `DELETE /repositories/{name}` → 204 | admin. maven, npm, pypi, raw, docker, helm, go, cargo |
+| `GET /components?repository=`, `GET /components/{id}`, `DELETE /components/{id}` | 50개씩, `continuationToken`으로 다음 페이지 |
+| `GET /assets?repository=`, `GET /assets/{id}`, `DELETE /assets/{id}` | 삭제는 raw 파일만(아래 차이점) |
+| `GET /search`, `GET /search/assets`, `GET /search/assets/download` | `q`, `repository`, `format`, `group`, `name`, `version`(`*` 와일드카드), `sort`, `direction`, `maven.groupId/artifactId/baseVersion/extension/classifier`, `npm.scope`, `docker.imageName/imageTag` |
+| `GET /status`, `GET /status/writable`, `GET /status/check` | check는 admin, 상태 화면의 점검 결과를 Nexus 형식으로 |
+| `GET /security/users?userId=`, `GET /security/roles`, `GET /blobstores`, `GET /tasks` | admin, 읽기 전용 |
+
+포맷 이름은 Nexus 표기를 따릅니다. Maven 저장소는 응답에서 `"format": "maven2"`이고, 생성·수정 경로는 Nexus와 같이 `/repositories/maven/hosted`처럼 씁니다. `search`의 `format=` 파라미터는 `maven2`와 `maven` 둘 다 받습니다.
+
+자주 쓰는 호출 예(`-u admin:비밀번호`는 Basic 인증입니다):
+
+```bash
+# 저장소 목록과 설정
+curl -u admin:pw http://localhost:8081/service/rest/v1/repositories
+curl -u admin:pw http://localhost:8081/service/rest/v1/repositories/maven/hosted/maven-releases
+
+# Nexus 문서의 본문 그대로 hosted 저장소 만들기(201)
+curl -u admin:pw -X POST -H 'Content-Type: application/json' \
+  http://localhost:8081/service/rest/v1/repositories/maven/hosted -d '{
+  "name": "maven-snapshots", "online": true,
+  "storage": {"blobStoreName": "default", "strictContentTypeValidation": true, "writePolicy": "ALLOW"},
+  "cleanup": {"policyNames": []},
+  "maven": {"versionPolicy": "SNAPSHOT", "layoutPolicy": "STRICT"}}'
+
+# 프록시(분 단위 캐시, 원격 인증)와 그룹
+curl -u admin:pw -X POST -H 'Content-Type: application/json' \
+  http://localhost:8081/service/rest/v1/repositories/npm/proxy -d '{
+  "name": "npm-proxy", "online": true, "storage": {"blobStoreName": "default", "strictContentTypeValidation": true},
+  "proxy": {"remoteUrl": "https://registry.npmjs.org", "contentMaxAge": 1440, "metadataMaxAge": 60},
+  "negativeCache": {"enabled": true, "timeToLive": 5},
+  "httpClient": {"blocked": false, "autoBlock": true, "authentication": {"type": "username", "username": "bob", "password": "secret"}}}'
+curl -u admin:pw -X POST -H 'Content-Type: application/json' \
+  http://localhost:8081/service/rest/v1/repositories/maven/group -d '{
+  "name": "maven-all", "online": true, "storage": {"blobStoreName": "default", "strictContentTypeValidation": true},
+  "group": {"memberNames": ["maven-releases", "maven-central"], "writableMember": "maven-releases"}}'
+
+# 컴포넌트 나열(페이지 넘기기)과 삭제
+curl -u ci:pw 'http://localhost:8081/service/rest/v1/components?repository=maven-releases'
+curl -u ci:pw 'http://localhost:8081/service/rest/v1/components?repository=maven-releases&continuationToken=<이전 응답의 continuationToken>'
+curl -u ci:pw -X DELETE http://localhost:8081/service/rest/v1/components/<id>
+
+# 검색과 최신 버전 내려받기(302)
+curl 'http://localhost:8081/service/rest/v1/search?repository=maven-releases&maven.groupId=org.x&maven.artifactId=lib&sort=version&direction=desc'
+curl -L -o lib.jar 'http://localhost:8081/service/rest/v1/search/assets/download?repository=maven-releases&group=org.x&name=lib&maven.extension=jar&maven.classifier=&sort=version&direction=desc'
+
+# 상태
+curl http://localhost:8081/service/rest/v1/status/writable
+curl -u admin:pw http://localhost:8081/service/rest/v1/status/check
+```
+
+Nexus와 다른 점:
+
+- 컴포넌트와 자산의 `id`는 서버가 만든 불투명한 값입니다(컴포넌트는 저장소·그룹·이름·버전, 자산은 저장소·경로를 base64url로 묶은 것). 응답에서 받은 값을 그대로 쓰면 되고, 저장소를 지우고 다시 만들어도 같은 값이 나오지만 Nexus처럼 값의 형식에 기대지는 마세요.
+- `DELETE /assets/{id}`는 raw 파일만 지웁니다. Command Center는 파일 하나가 아니라 컴포넌트 단위로 지우므로 다른 포맷은 `400`으로 답하고 `DELETE /components/{id}`를 쓰라고 알려 줍니다. 컴포넌트 삭제는 웹 UI의 컴포넌트 삭제와 같은 경로로 처리되어 hosted 저장소에서만, `writePolicy: deny`가 아닐 때만 되고 활동 이벤트에 남습니다.
+- 저장소 생성·수정·삭제는 웹 UI의 저장소 API를 그대로 호출하므로 검증 규칙과 메시지가 UI와 같고, 비밀번호 또는 세션 로그인이 필요합니다(API 토큰으로는 `403`). 같은 이름이 이미 있으면 `409`가 아니라 `400` 검증 오류입니다.
+- 본문 가운데 Command Center에 대응 값이 없는 항목(`docker`, `component.proprietaryComponents`, `httpClient.connection`, `routingRule`, `storage.strictContentTypeValidation` 등)은 무시합니다. `cleanup.policyNames`는 첫 번째 정책만 적용되고(저장소당 하나), `negativeCache.enabled: false`는 무시되며 `timeToLive`만 반영됩니다. 그룹 본문의 `storage.blobStoreName`은 버립니다(그룹에는 blob store가 없습니다). 응답의 `httpClient.authentication`에는 사용자 이름만 있고 비밀번호는 나오지 않습니다.
+- 시간 값은 Nexus처럼 분 단위 정수이고 `-1`은 만료 없음입니다(`contentMaxAge: -1`은 설정의 `contentMaxAge: "-1"`).
+- Docker 컴포넌트는 Nexus처럼 `name`이 이미지, `version`이 태그이며, 삭제는 그 태그가 가리키는 매니페스트(다이제스트)를 지웁니다. raw 컴포넌트는 `name`이 경로, `group`이 디렉터리(`/docs`, 최상위는 `/`), `version`은 `null`입니다. npm의 `group`은 `@` 없는 스코프입니다.
+- `search/assets/download`는 자산이 둘 이상이면 Nexus처럼 `400`으로 거절하며, `sort`를 주면 정렬 뒤 첫 번째로 보냅니다(`sort=version&direction=desc`가 최신). `sort=version`의 기본 방향은 desc입니다.
+- 컴포넌트 목록과 검색은 요청마다 저장소의 자산 경로를 모두 읽어 파생하므로 자산이 수십만 개인 저장소에서는 한 페이지에 수 초가 걸릴 수 있습니다. 전체 목록에 `continuationToken`으로 이어 받습니다.
+- `security/*`, `blobstores`, `tasks`는 읽기 전용이고 역할의 `privileges`는 `"<대상>:<동작>"` 문자열입니다. 스크립트 API, 정리 정책 API, 라우팅 규칙, `swagger.json`은 없습니다. 모르는 경로는 JSON `404`입니다.
+
 ## 웹 UI
 
 브라우저에서 `http://localhost:8081/`(또는 `baseURL`)에 접속하면 `/ui/`로 이동합니다. 별도 설치나 외부 리소스 없이 서버에 내장되어 있어 폐쇄망에서도 동작합니다. 정적 파일 합계는 512 KiB 이하이며 바이너리에 포함됩니다. 화면 구조(사이드바, 상단 막대, 카드와 표)는 직접 디자인한 것이고 다른 제품의 로고, 아이콘, CSS 같은 자산은 쓰지 않습니다. 해시 경로는 `#browse/...`, `#admin/...` 형태입니다.
@@ -640,16 +740,20 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 | 키 | 대상 | 기본값 | 설명 |
 |---|---|---|---|
 | `name` | 모두 | 필수 | 저장소 이름. URL의 `/repository/<name>/`. `/`, 공백, `\` 불가, 중복 불가. UI/API로 만들 때는 영문자·숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만, 최대 64자, `create`는 예약어. |
-| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm` 중 하나. |
+| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum` 중 하나. |
 | `type` | 모두 | 필수 | `hosted`, `proxy`, `group` 중 하나. |
 | `remote` | proxy | 필수 | 원격 저장소의 `http(s)` URL. Cargo는 `sparse+` 없는 sparse index URL. 원격 인증 정보는 URL에 넣지 말고 `remoteAuth`에 넣으세요(URL은 암호화하지 않습니다. "저장된 비밀값 암호화" 참고). |
 | `remoteAuth` | proxy | 없음 | 원격 인증: `username`/`password` 또는 `bearerToken`(둘 다 있으면 토큰 우선). 설정한 `remote`와 스킴·호스트·포트가 같은 곳에만 보내며, 리다이렉트를 따라갈 때도 같습니다. 예외는 같은 호스트의 `http`(80)에서 `https`(443)로 옮기는 리다이렉트로, 첫 요청이 이미 그 호스트에 보냈으므로 자격 증명을 유지합니다. 그 밖에 포트나 스킴이 다른 곳(`https`에서 `http`로 내려가는 경우 포함)과 하위 도메인으로 가는 리다이렉트는 자격 증명 없이 따라갑니다. |
-| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`)를 다시 확인하기까지의 시간. |
-| `contentMaxAge` | proxy | `"-1"` | 아티팩트 본문(jar, tgz, 휠, zip, crate)의 재확인 주기. 기본은 영구 캐시. |
+| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`, NuGet 서비스 인덱스·registration·검색 결과, APT `dists/`, Yum `repodata/`)를 다시 확인하기까지의 시간. |
+| `contentMaxAge` | proxy | `"-1"` | 아티팩트 본문(jar, tgz, 휠, zip, crate, nupkg, deb, rpm)의 재확인 주기. 기본은 영구 캐시. |
 | `negativeCacheTTL` | proxy | `"10m"` | 원격이 404/410을 준 경로, 그리고 체크섬이 맞지 않은 다운로드를 다시 묻지 않는 시간. 만료된 기록은 서버가 시작할 때와 그 뒤 하루에 한 번 DB에서 지웁니다. |
 | `members` | group | 필수 | 멤버 저장소 이름 목록. 순서대로 조회하며 같은 포맷이어야 하고 순환할 수 없습니다. |
 | `writeMember` | group | 없음 | 업로드를 받을 hosted 멤버(`members`에 포함되어야 함). 없으면 group에 쓰기는 405. |
 | `versionPolicy` | Maven hosted | `release` | `release`, `snapshot`, `mixed`. Maven에서만 쓸 수 있습니다. |
+| `depth` | yum hosted | `0` | `repodata/` 위치: `0`은 저장소 루트에 하나, `1`은 첫 디렉터리마다("Yum 설정" 참고). |
+| `distribution` | apt hosted | `stable` | `dists/<distribution>/` 경로와 sources.list의 suite가 됩니다("APT 설정" 참고). |
+| `component` | apt hosted | `main` | `dists/<distribution>/<component>/` 경로와 `pool/<component>/`, sources.list의 component가 됩니다. |
+| `signingKey` | apt hosted | 없음 | 비밀번호 없는 RSA(2048비트 이상) OpenPGP 개인키를 ASCII armor로 넣습니다. 있으면 `Release.gpg`·`InRelease`를 만들고 공개키를 `/repository/<저장소>/public.key`로 제공합니다. `remoteAuth`처럼 암호화되어 저장되는 쓰기 전용 값이며 API·UI에는 설정 여부(`signingKeySet`)만 나옵니다. |
 | `writePolicy` | hosted | `allow_once` | `allow`(덮어쓰기 허용), `allow_once`(같은 경로 재업로드 거부), `deny`(읽기 전용). 아래 설명 참고. |
 | `anonymousRead` | 모두 | 최상위 값 | 이 저장소만 익명 읽기를 켜거나 끕니다. |
 | `cleanupPolicy` | hosted, proxy | 없음 | 연결할 Cleanup 정책 이름 하나(없으면 비움). 정책의 포맷이 `all`이거나 저장소와 같아야 하며 Cargo hosted에는 쓸 수 없습니다("Cleanup 정책" 참고). |
@@ -671,7 +775,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - 거절되면 클라이언트는 502(만료된 캐시가 있으면 그 캐시)를 받습니다. 로그의 `remote fetch failed` 줄에는 `address refused by the remote egress policy`가 남습니다.
 - `HTTPS_PROXY`/`HTTP_PROXY`의 사내 프록시를 거치는 요청은 프록시가 대신 접속하므로 IP 주소로 적힌 목적지만 검사합니다(위의 다른 IPv4 표기와 ASCII가 아닌 호스트의 거절 포함). 호스트 이름으로 적힌 목적지는 내부 주소로 해석되더라도 프록시가 그대로 접속하므로, 프록시에서 내부 대역으로 가는 요청을 막거나 사내 도메인과 대역을 `NO_PROXY`에 넣으세요. 프록시 자체의 주소는 막지 않습니다. `NO_PROXY`에 넣은 호스트에는 직접 접속하므로 위 검사를 모두 받습니다.
 
-**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm과 Docker도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
+**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
 
 ## 인증과 권한
 
@@ -1227,6 +1331,85 @@ helm cm-push demo-1.0.0.tgz cc-hosted      # helm-push 플러그인. 응답 201 
 - 삭제는 웹 UI·API의 컴포넌트 삭제("컴포넌트 삭제" 참고)와 Cleanup 정책(helm hosted·proxy 모두 가능)으로 하며, 지우면 `index.yaml`이 바로 갱신됩니다. 역할 권한 대상으로 `format:helm`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 description·home·dependencies를 보여 줍니다.
 - `helm push chart.tgz oci://<host>/<docker 저장소>/<차트>`는 OCI 매니페스트 push이므로 docker 저장소를 쓰세요("Docker 설정" 참고). helm 저장소의 `index.yaml`에는 OCI 차트가 나오지 않습니다.
 
+### NuGet 설정
+
+NuGet V3 피드(Nexus의 nuget 포맷)입니다. `dotnet restore`, `nuget.exe`, Visual Studio가 쓰는 서비스 인덱스 `index.json`, flat container(`v3-flatcontainer/`), registration(`registration/`), 검색(`query`), push API(`api/v2/package`)를 `/repository/<저장소>/` 아래에서 제공합니다. 모든 문서는 `baseURL`로 만든 절대 URL을 담으므로 `baseURL`이 클라이언트가 여는 주소와 같아야 합니다.
+
+```bash
+dotnet nuget add source http://localhost:8081/repository/nuget-all/index.json -n cc \
+  -u ci -p <비밀번호 또는 API 토큰> --store-password-in-clear-text   # 읽기에 인증이 필요할 때
+dotnet restore
+
+# 올리기: API 키 자리에 API 토큰을 씁니다("API 토큰 발급" 참고). add 권한이 필요합니다.
+dotnet nuget push Demo.Pkg.1.0.0.nupkg -s http://localhost:8081/repository/nuget-hosted/index.json -k <API 토큰>
+nuget push Demo.Pkg.1.0.0.nupkg -Source http://localhost:8081/repository/nuget-hosted/index.json -ApiKey <API 토큰>
+curl -u ci:<비밀번호> -T Demo.Pkg.1.0.0.nupkg http://localhost:8081/repository/nuget-hosted/api/v2/package   # 파일을 본문으로 보내도 됩니다
+dotnet nuget delete Demo.Pkg 1.0.0 -s http://localhost:8081/repository/nuget-hosted/index.json -k <API 토큰> --non-interactive   # delete 권한
+```
+
+- hosted는 올린 `.nupkg`(zip)의 루트에서 `.nuspec`(1 MiB 이하)을 읽어 `id`, `version`, `description`, `authors`, `license`/`licenseUrl`, `projectUrl`, `tags`, 대상 프레임워크별 `dependencies`를 저장하고, 파일은 `<id>/<버전>/<id>.<버전>.nupkg`와 `.nuspec`로 둡니다(id는 소문자, 버전은 NuGet 정규화: 앞의 0 제거, `1.0`→`1.0.0`, 네 번째 자리 0 제거, 빌드 메타데이터 제거). registration과 flat container는 이 행에서 바로 만들므로 따로 인덱스 파일이 없습니다. zip이 아니거나 `.nuspec`이 없으면 400, 심볼 패키지(`.snupkg`)는 400으로 거부하며(서비스 인덱스에 `SymbolPackagePublish`가 없어 `dotnet nuget push`는 `.snupkg`를 건너뜁니다) 업로드 본문은 `maxUploadMiB`를 따릅니다.
+- push 인증은 `X-NuGet-ApiKey` 헤더의 API 토큰(`-k`/`-ApiKey`), 또는 Basic(비밀번호나 토큰)입니다. `dotnet nuget push`는 먼저 `index.json`을 읽으므로 익명 읽기가 꺼진 저장소에는 `dotnet nuget add source`에 사용자/비밀번호도 넣어 두세요.
+- `writePolicy`: `allow_once`(기본)는 같은 버전 재push를 409로 거부(`--skip-duplicate`가 이를 인식), `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.
+- proxy의 `remote`는 V3 서비스 인덱스 URL입니다(예: `https://api.nuget.org/v3/index.json`; 그 디렉터리 URL도 됩니다). 서비스 인덱스·flat container 목록·registration·검색 결과는 `metadataMaxAge`마다 다시 확인하고, 문서 안의 registration·flat container URL을 proxy 주소로 바꿔 제공합니다(여러 페이지로 나뉜 registration은 클라이언트가 따라올 때 그 페이지만 가져옵니다). `.nupkg`/`.nuspec`은 처음 받을 때 캐시합니다(`contentMaxAge`). 원격이 응답하지 않으면 캐시된 문서를 `Warning: 110`과 함께 제공하고, 캐시에 없는 것은 502입니다. `remote`에 서비스 인덱스가 없으면 502로 그 URL을 알려 줍니다.
+- group은 멤버 순서상 그 패키지 id를 처음 가진 멤버만으로 답합니다(hosted를 proxy보다 앞에 두세요). 소유 멤버에 없는 버전은 뒤 멤버에 있어도 404입니다. 검색은 멤버 결과를 합치되 같은 id는 앞 멤버 것만 냅니다. `writeMember`가 있으면 group에 push한 패키지는 그 hosted로 갑니다.
+- 삭제는 `dotnet nuget delete`(delete 권한), 웹 UI·API의 컴포넌트 삭제, Cleanup 정책(nuget hosted·proxy)으로 하며 row와 파일만 지우면 registration이 바로 갱신됩니다. 역할 권한 대상으로 `format:nuget`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 description·license·projectUrl·repository와 대상 프레임워크별 dependencies를 보여 줍니다.
+
+### APT 설정
+
+Debian·Ubuntu 패키지 저장소(Nexus의 apt 포맷)입니다. `.deb` 파일은 `pool/` 아래에, apt가 읽는 메타데이터는 `dists/<distribution>/` 아래에 두며, hosted는 `Release`, `<component>/binary-<arch>/Packages`(와 `.gz`)를 서버가 직접 만들어 유지합니다(패키지를 올리거나 지울 때마다 같은 트랜잭션에서 다시 생성). 서명 키가 있으면 `Release.gpg`(분리 서명)와 `InRelease`(클리어 서명)도 함께 만듭니다.
+
+```bash
+# 서명 키가 있는 저장소: 공개키를 받아 signed-by로 지정합니다.
+curl -fsSL http://localhost:8081/repository/apt-hosted/public.key | sudo gpg --dearmor -o /usr/share/keyrings/commandcenter.gpg
+echo "deb [signed-by=/usr/share/keyrings/commandcenter.gpg] http://localhost:8081/repository/apt-hosted stable main" | sudo tee /etc/apt/sources.list.d/commandcenter.list
+# (옛 방식) sudo apt-key add 로 공개키를 등록해도 됩니다: curl -fsSL .../public.key | sudo apt-key add -
+
+# 서명 키가 없는 저장소: trusted=yes 로 서명 검사를 건너뜁니다(내부망 전용으로만 권장).
+echo "deb [trusted=yes] http://localhost:8081/repository/apt-hosted stable main" | sudo tee /etc/apt/sources.list.d/commandcenter.list
+sudo apt update && sudo apt install hello
+
+# 올리기: 파일 PUT(curl) 또는 multipart POST(필드 이름 file). add 권한이 필요합니다. 응답 201과 저장된 경로를 JSON으로 돌려줍니다.
+curl -u ci:<비밀번호> -T hello_1.0_amd64.deb http://localhost:8081/repository/apt-hosted/pool/hello_1.0_amd64.deb
+curl -u ci:<비밀번호> -F file=@hello_1.0_amd64.deb http://localhost:8081/repository/apt-hosted/
+```
+
+- hosted는 올린 `.deb`(ar 아카이브)의 `control` 파일을 읽어 `Package`, `Version`, `Architecture`, `Maintainer`, `Depends`, `Description` 등 모든 필드를 `Packages` 항목으로 저장하고, 파일은 PUT 경로와 무관하게 Debian pool 규칙대로 `pool/<component>/<첫 글자 또는 lib?>/<패키지>/<패키지>_<버전>_<아키텍처>.deb`에 둡니다(버전의 `:`는 dpkg처럼 `%3a`로 씀). `Packages`에는 `Filename`, `Size`, `MD5sum`, `SHA1`, `SHA256`가 붙습니다. `Architecture: all` 패키지는 모든 아키텍처의 `Packages`에 함께 나오고, `Release`의 `Architectures`는 저장된 패키지에서 도출합니다(아키텍처별 패키지가 하나도 없으면 `all`만 나오므로 클라이언트 아키텍처의 패키지를 하나는 올려 두세요). 업로드 본문은 `maxUploadMiB`를 따릅니다.
+- **control 아카이브는 gzip(`control.tar.gz`)이나 무압축 `control.tar`만 읽습니다.** xz·zstd로 압축된 패키지(`dpkg-deb` 기본값이 xz/zstd인 최근 배포판)는 400으로 거부하므로 `dpkg-deb -Zgzip -b …`로 만들거나 nfpm·fpm(기본 gzip)을 쓰세요. 패키지 이름은 소문자·숫자·`+.-` 두 글자 이상, 버전은 숫자로 시작해야 합니다(Debian 정책).
+- 저장소 설정 `distribution`(기본 `stable`)과 `component`(기본 `main`)가 `dists/<distribution>/<component>/…` 경로와 sources.list의 suite·component가 됩니다. `signingKey`에는 비밀번호 없는 RSA(2048비트 이상) OpenPGP 개인키를 ASCII armor로 넣습니다(`gpg --batch --passphrase '' --quick-gen-key 'CC <apt@example.com>' rsa4096 sign never` 뒤 `gpg --armor --export-secret-keys apt@example.com`). 키는 원격 인증 정보처럼 암호화되어 저장되고 API·UI에는 설정 여부(`signingKeySet`)만 나오며, 공개키는 `/repository/<저장소>/public.key`로 제공합니다. 키가 없으면 서명 파일 없이 제공하므로 클라이언트에 `[trusted=yes]`가 필요합니다. 비밀번호가 걸린 키, v5/v6 키, RSA가 아닌 주키는 거부합니다.
+- `writePolicy`: `allow_once`(기본)는 같은 패키지·버전·아키텍처 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.
+- proxy의 `remote`는 `dists/`와 `pool/`이 있는 저장소 URL입니다(예: `https://deb.debian.org/debian/`, `https://archive.ubuntu.com/ubuntu/`). 원격이 주는 파일을 경로 그대로 캐시하며 `dists/` 아래(`InRelease`, `Packages.xz`, `by-hash/…` 등)는 `metadataMaxAge`마다 다시 확인하고 `pool/`의 `.deb`는 영구 캐시합니다(`contentMaxAge`). 원격의 서명(`InRelease`, `Release.gpg`)은 손대지 않고 그대로 전달하므로 클라이언트는 배포판의 키링(`debian-archive-keyring`)으로 그대로 검증합니다: `deb http://localhost:8081/repository/apt-proxy bookworm main`. 원격이 응답하지 않으면 만료된 메타데이터를 `Warning: 110`과 함께 제공합니다.
+- group은 경로마다 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다(raw와 같은 규칙). hosted 멤버들의 `Packages`를 합치지는 않으므로(Nexus도 같음) 같은 distribution 이름을 쓰는 hosted 두 개를 한 group에 넣으면 앞 멤버의 `dists/`만 보입니다. hosted와 proxy를 섞을 때는 distribution 이름이 겹치지 않게 하고(예: hosted `stable`, proxy `bookworm`) sources.list에 group URL로 두 줄을 쓰면 됩니다. `public.key`는 키가 있는 첫 멤버의 것이고, `writeMember`가 있으면 group에 올린 패키지는 그 hosted로 갑니다.
+- 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(apt hosted·proxy 모두 가능)으로 하며, 지우면 `dists/`가 바로 갱신됩니다. 컴포넌트는 `.deb` 파일 하나이며 그룹 자리에 아키텍처, 이름에 패키지, 버전에 Debian 버전이 들어갑니다(Cleanup `namePattern`은 `amd64:hello`처럼 `아키텍처:패키지`에 맞춥니다). 역할 권한 대상으로 `format:apt`를 쓸 수 있고, 컴포넌트 메타데이터 탭은 Description·Maintainer·Homepage와 Depends(`depends`), Pre-Depends, Recommends, Suggests를 보여 줍니다.
+
+### Yum 설정
+
+Yum/DNF(RPM) 저장소(Nexus의 yum 포맷)입니다. `.rpm` 파일과 그 목록인 `repodata/`(`repomd.xml`, `primary`/`filelists`/`other`의 sha256 이름 gz 파일)를 `/repository/<저장소>/` 아래에서 제공하며, hosted는 서버가 `repodata/`를 직접 만들어 유지합니다(패키지를 올리거나 지울 때마다 같은 트랜잭션에서 createrepo_c와 같은 모양으로 다시 생성).
+
+```ini
+# /etc/yum.repos.d/cc.repo
+[cc-el9]
+name=Command Center el9
+baseurl=http://localhost:8081/repository/yum-hosted/el9/
+enabled=1
+gpgcheck=1            # 서명된 RPM은 그대로 검증됩니다
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-mine
+repo_gpgcheck=0       # repomd.xml은 서명하지 않으므로 0으로 둡니다
+```
+
+```bash
+# 올리기: 파일 PUT(curl). add 권한이 필요합니다. 파일 이름은 패키지의 <이름>-<버전>-<릴리스>.<아키>.rpm 이어야 합니다.
+curl -u ci:<비밀번호> --upload-file demo-1.0-1.el9.x86_64.rpm http://localhost:8081/repository/yum-hosted/el9/
+dnf --repo cc-el9 makecache && dnf install demo
+```
+
+- hosted는 올린 RPM의 헤더를 읽어 name, epoch/version/release, arch, summary, description, license, url, vendor, group, buildhost, sourcerpm, provides/requires/conflicts/obsoletes, 파일 목록, changelog를 저장하고 `primary.xml.gz`(`checksum type="sha256" pkgid="YES"`, `header-range`), `filelists.xml.gz`, `other.xml.gz`, `repomd.xml`을 다시 만듭니다. 파일 이름이 헤더의 `<이름>-<버전>-<릴리스>.<아키>.rpm`과 다르거나, RPM이 아니거나, `repodata/` 아래이면 400입니다. 업로드 본문은 `maxUploadMiB`를 따릅니다. 첫 업로드 전에는 `repodata/repomd.xml`이 404입니다.
+- `depth`(hosted 전용, 기본 0): `repodata/`를 두는 위치입니다. `0`이면 저장소 루트에 하나를 두고 모든 경로의 RPM을 나열하며, `1`이면 첫 디렉터리마다(`el8/`, `el9/` …) 각각 두고 그 아래 RPM만 나열합니다(Nexus의 repodata depth). `depth: 1`에서는 루트에 바로 올릴 수 없고(400) `baseurl`은 `…/yum-hosted/el9/`처럼 디렉터리까지 적습니다. `location href`는 그 디렉터리 기준 상대 경로입니다.
+- `writePolicy`: `allow_once`(기본)는 같은 패키지(이름·버전·릴리스·아키 같음) 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요, repodata도 갱신), `deny`는 읽기 전용(400)입니다.
+- `repomd.xml`은 서명하지 않으므로 클라이언트의 `.repo`에 `repo_gpgcheck=0`을 두세요. `gpgcheck=1`은 RPM 자체의 서명을 검사하므로 서명된 패키지를 올리면 그대로 동작합니다.
+- proxy의 `remote`는 미러의 URL이며 요청 경로를 그대로 원격에 붙여 캐시합니다(예: `remote: https://dl.rockylinux.org/pub/`, `baseurl=http://localhost:8081/repository/yum-proxy/rocky/9/BaseOS/x86_64/os/`). `repodata/` 아래 파일은 `metadataMaxAge`마다 다시 확인하고, RPM은 `contentMaxAge`(기본 영구)로 캐시합니다. 원격의 디렉터리 목록(HTML)은 파일로 캐시하지 않고 404로 답합니다. 내용을 바꾸지 않으므로 미러의 `repomd.xml` 서명(`repomd.xml.asc`)도 그대로 전달되어 `repo_gpgcheck=1`을 쓸 수 있습니다.
+- group은 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다. Nexus와 같이 멤버의 `repodata/`를 병합하지 않으므로 hosted와 proxy의 패키지를 한 `baseurl`로 합치려 하지 말고, 디렉터리(`depth: 1`)나 저장소별로 `.repo` 항목을 나누세요. `writeMember`가 있으면 group에 올린 RPM은 그 hosted로 갑니다.
+- 컴포넌트는 디렉터리를 포함한 이름(`el9/x/demo`)과 `<버전>-<릴리스>.<아키>`(`1.0-1.el9.x86_64`)로 나타나며, 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: yum`, hosted·proxy 모두)으로 하고 지우면 `repodata/`가 바로 갱신됩니다. 역할 권한 대상으로 `format:yum`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 summary·description, license, url, requires/provides를 보여 줍니다.
+
 ## 운영
 
 | 작업 | 명령 |
@@ -1259,7 +1442,7 @@ curl -u admin http://localhost:8081/-/metrics
 
 ### Cleanup 정책
 
-오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
+오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
 
 | 기준 | 의미 |
 |---|---|
@@ -1462,10 +1645,12 @@ docker compose start
 
 ## 제한 사항
 
-- 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML과 Go·Cargo 업로드 화면은 없습니다(Go·Cargo는 클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. Docker proxy·group, S3 등 원격 blob 저장소, 포맷 고유의 검색(`npm search` 포함)도 없습니다.
+- 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML과 Go·Cargo 업로드 화면은 없습니다(Go·Cargo는 클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. 포맷 고유의 검색(`npm search` 포함)도 없습니다.
+- **지원하지 않는 포맷**: RubyGems, Conan, Conda, Composer, p2, Git LFS는 없습니다.
+- **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브가 gzip(`control.tar.gz`)이나 무압축 tar인 `.deb`만 받습니다(xz·zstd는 400). Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
 - **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
 - HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
-- **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**, 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기, S3 같은 원격 blob store(경로는 로컬 디렉터리만), 이미 만든 저장소의 blob store 이동.
+- **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**, 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기, 이미 만든 저장소의 blob store 이동.
 - Go 체크섬 DB(`sumdb/`)는 프록시하지 않습니다. 사내 모듈에는 `GONOSUMDB`를 쓰세요.
 - Go zip 검사는 go 명령의 규칙을 전부 옮기지는 않았습니다. 하위 디렉터리의 `go.mod`, 루트의 `GO.MOD`처럼 대소문자가 다른 `go.mod`, 파일 이름의 `*`·`?`·`"`·`'`·`<`·`>`·`|`·백틱과 제어 문자, `.`으로 끝나는 이름, 다른 항목의 상위 디렉터리와 이름이 같은 파일(`a`와 `a/b.go`)은 받아들이지만, go 명령은 이런 zip을 내려받을 때 거부합니다. 이런 zip은 올리지 마세요.
 - 삭제는 hosted 저장소에서만 됩니다(`npm unpublish`와 Go `DELETE`는 group으로 보내면 `writeMember`에서 지웁니다). proxy의 캐시는 Cleanup 정책으로만 지웁니다. twine과 cargo에는 삭제 명령이 없으므로 PyPI와 Cargo는 웹 UI나 API로 지우고, 패키지 문서가 10 MiB를 넘는 npm 패키지는 버전 하나를 지우는 `npm unpublish`가 413이므로 역시 웹 UI나 API로 지웁니다("컴포넌트 삭제" 참고).
@@ -1478,6 +1663,7 @@ docker compose start
   | PyPI | 400 `File already exists.` |
   | Go | 409 (`writePolicy: allow`이면 허용) |
   | Cargo | 409 |
+  | NuGet, APT, Yum (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
 
   Cargo는 `-`/`_`와 대소문자만 다른 이름, 빌드 메타데이터(`+…`)만 다른 버전도 같은 것으로 보고 409로 거부합니다.
 - **group과 의존성 혼동**: group은 멤버를 순서대로 조회합니다. Maven과 Go는 `latest`를 멤버 전체 중 가장 새로운 버전으로 고르므로, hosted 멤버를 앞에 두어도 proxy 쪽에 더 높은 버전이 있으면 그것이 `latest`가 됩니다. npm·PyPI·Cargo group은 그 패키지(프로젝트, crate)를 처음 가진 멤버 하나만으로 답하므로, hosted를 proxy보다 앞에 두면 같은 이름의 공개 버전이 섞이지 않습니다. npm과 PyPI는 앞선 멤버가 Offline이거나 오류를 내면 503·5xx로 실패하고, tarball·파일 URL을 직접 요청해도 그 멤버의 것만 줍니다. Cargo group은 Offline 멤버를 건너뛰고, crate 파일 다운로드 URL은 멤버 순서대로 찾습니다. Maven·Go·Cargo에서 사내 패키지 이름을 공개 저장소에서 선점당하지 않으려면 사내 전용 group을 따로 두거나 proxy 멤버를 넣지 마세요.

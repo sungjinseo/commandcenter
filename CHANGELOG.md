@@ -8,7 +8,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- The `nuget` format: NuGet V3 feeds at `/repository/<repo>/index.json` for `dotnet restore`,
+  `nuget.exe` and Visual Studio (service index, flat container, registration with inline pages,
+  search, `PackagePublish/2.0.0`). Hosted repositories take `dotnet nuget push` (`PUT api/v2/package`,
+  the API key being an API token in `X-NuGet-ApiKey`, or Basic auth), read the `.nuspec` out of the
+  `.nupkg`, normalize the version as NuGet does and derive the registration and flat container from
+  the rows; `writePolicy` applies as for Helm (409 on a re-push under `allow_once`, overwriting under
+  `allow` needs edit); `DELETE api/v2/package/<id>/<version>` (`dotnet nuget delete`) removes the
+  version; `.snupkg` symbol packages are refused with 400. Proxies of api.nuget.org or another V3
+  feed (`remote` = the service index URL) cache the flat container, registration pages (split pages
+  fetched when followed), search results and packages, with the documents' URLs rewritten to the
+  proxy; groups answer from the first member that has the package id, merge search results and push
+  to their `writeMember`. Cleanup policies (format `nuget`), the web UI's component delete and
+  metadata (dependencies per target framework), and `format:nuget` role privileges cover nuget
+  repositories.
+- The `yum` format: Yum/DNF (RPM) repositories. A hosted repository takes RPMs with
+  `PUT /repository/<repo>/<dir>/<name>-<version>-<release>.<arch>.rpm` (the file name must be the
+  package's own), parses the RPM header and regenerates `repodata/` (`repomd.xml` and the sha256-named
+  `primary`, `filelists` and `other` files, as createrepo_c writes them) in the same transaction as
+  every upload and component delete. `depth` (0, the default, or 1) says whether one `repodata/` at the
+  root lists every package or each top-level directory has its own, as in Nexus. A proxy caches a
+  mirror's files at their paths (`repodata/` revalidated after `metadataMaxAge`, packages kept); a
+  group answers from the first member that has the path, without merging. `writePolicy`, cleanup
+  policies (`format: yum`), the component delete, `format:yum` privileges and the component metadata
+  tab (summary, license, url, requires and provides) work as for Helm. `repomd.xml` is not signed:
+  use `repo_gpgcheck=0` (`gpgcheck=1` still verifies signed packages) ("Yum 설정" in the
+  operations guide).
+- `commandcenter import-nexus`: copies the hosted repositories of a Sonatype Nexus Repository 3
+  into Command Center repositories you created first (`-repo <nexus>=<cc>` or `-all`). It reads the
+  Nexus REST API v1 and writes each format through its own upload protocol (Maven PUT, npm publish,
+  PyPI upload, raw PUT, helm PUT, docker blob upload and manifest PUT via `-docker-from`, the
+  connector URL), so every server-side check applies; maven2, npm, pypi, raw, helm and docker are
+  supported, proxies, groups and other formats are listed and skipped. It is resumable: what the
+  target already has is skipped (`-skip-existing`, default), `-dry-run` lists what would be copied,
+  and the credentials come from files or `NEXUS_PASSWORD`/`COMMANDCENTER_TOKEN`, never from the
+  command line or the output ("Nexus에서 이전하기" in the operations guide).
+- apt (Debian/Ubuntu) repositories: hosted, proxy and group, under `/repository/<repo>/`. A
+  hosted repository takes `.deb` uploads (`PUT pool/<any>/<file>.deb` or a multipart `POST /`
+  with the file in `file`), reads the control file and keeps `dists/<distribution>/Release`,
+  `<component>/binary-<arch>/Packages` and `Packages.gz` itself, regenerated in the transaction of
+  every upload and delete; with an RSA signing key (repository setting `signingKey`, sealed at rest
+  like the remote credentials) it also writes `Release.gpg` and `InRelease` and serves the public
+  key at `public.key`. The control archive must be a `control.tar.gz` (or an uncompressed tar):
+  xz- and zstd-compressed ones are refused with 400. A proxy caches whatever its remote serves
+  (`dists/` as metadata, `pool/` as content, signatures untouched); a group answers from the
+  first member that has the path. Cleanup policies, component delete and the metadata tab
+  (description, maintainer, homepage, depends) cover apt; `format:apt` is a privilege target.
+- A Sonatype Nexus Repository 3 REST API compatibility layer under `/service/rest/v1`
+  (`internal/nexusapi`), so scripts, CI jobs, the Terraform provider and `nexus-cli` written
+  against Nexus keep working: repositories (list, settings, create, update, delete with Nexus
+  bodies and `maven2` format spelling), components and assets with continuation tokens and
+  Nexus-style ids, `search`, `search/assets` and `search/assets/download` (302 to the single
+  match, 400 when ambiguous), `status/check` in Nexus's shape, and read-only
+  `security/users`, `security/roles`, `blobstores` and `tasks`. Writes go through the web UI's
+  own API handlers, so validation, events and privileges are the same; asset delete works for
+  raw files only (Command Center deletes whole components). "Nexus REST API 호환" in the guide.
 
 ## [0.1.1] - 2026-10-27
 
@@ -84,39 +139,6 @@ blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
   downgrade once an S3 store exists; the backup from before the upgrade is the way back.
 
 ### Added
-- The `yum` format: Yum/DNF (RPM) repositories. A hosted repository takes RPMs with
-  `PUT /repository/<repo>/<dir>/<name>-<version>-<release>.<arch>.rpm` (the file name must be the
-  package's own), parses the RPM header and regenerates `repodata/` (`repomd.xml` and the sha256-named
-  `primary`, `filelists` and `other` files, as createrepo_c writes them) in the same transaction as
-  every upload and component delete. `depth` (0, the default, or 1) says whether one `repodata/` at the
-  root lists every package or each top-level directory has its own, as in Nexus. A proxy caches a
-  mirror's files at their paths (`repodata/` revalidated after `metadataMaxAge`, packages kept); a
-  group answers from the first member that has the path, without merging. `writePolicy`, cleanup
-  policies (`format: yum`), the component delete, `format:yum` privileges and the component metadata
-  tab (summary, license, url, requires and provides) work as for Helm. `repomd.xml` is not signed:
-  use `repo_gpgcheck=0` (`gpgcheck=1` still verifies signed packages) ("Yum 설정" in the
-  operations guide).
-- `commandcenter import-nexus`: copies the hosted repositories of a Sonatype Nexus Repository 3
-  into Command Center repositories you created first (`-repo <nexus>=<cc>` or `-all`). It reads the
-  Nexus REST API v1 and writes each format through its own upload protocol (Maven PUT, npm publish,
-  PyPI upload, raw PUT, helm PUT, docker blob upload and manifest PUT via `-docker-from`, the
-  connector URL), so every server-side check applies; maven2, npm, pypi, raw, helm and docker are
-  supported, proxies, groups and other formats are listed and skipped. It is resumable: what the
-  target already has is skipped (`-skip-existing`, default), `-dry-run` lists what would be copied,
-  and the credentials come from files or `NEXUS_PASSWORD`/`COMMANDCENTER_TOKEN`, never from the
-  command line or the output ("Nexus에서 이전하기" in the operations guide).
-
-- apt (Debian/Ubuntu) repositories: hosted, proxy and group, under `/repository/<repo>/`. A
-  hosted repository takes `.deb` uploads (`PUT pool/<any>/<file>.deb` or a multipart `POST /`
-  with the file in `file`), reads the control file and keeps `dists/<distribution>/Release`,
-  `<component>/binary-<arch>/Packages` and `Packages.gz` itself, regenerated in the transaction of
-  every upload and delete; with an RSA signing key (repository setting `signingKey`, sealed at rest
-  like the remote credentials) it also writes `Release.gpg` and `InRelease` and serves the public
-  key at `public.key`. The control archive must be a `control.tar.gz` (or an uncompressed tar):
-  xz- and zstd-compressed ones are refused with 400. A proxy caches whatever its remote serves
-  (`dists/` as metadata, `pool/` as content, signatures untouched); a group answers from the
-  first member that has the path. Cleanup policies, component delete and the metadata tab
-  (description, maintainer, homepage, depends) cover apt; `format:apt` is a privilege target.
 - The `oidc` realm: browser login through an OpenID Connect provider (Gitea, Keycloak, ...)
   with the authorization code flow and PKCE, configured under Realms (`GET/PUT /-/api/realms/oidc`,
   `POST /-/api/realms/oidc/test` reads the provider's discovery document) and offered on the login
