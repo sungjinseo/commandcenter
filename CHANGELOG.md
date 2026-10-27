@@ -403,9 +403,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   legacy `.pom` must name that shorter `artifactId`. These files are not versions of the
   `groupId:artifactId`, so `maven-metadata.xml` lists only the versions that have Maven-layout
   files. The component search, cleanup and the components API count them, including the ones
-  proxies have cached, as files of the plugin version's component, so deleting the component
-  deletes them too (sbt falls back to them when the Maven-layout files are gone); the web UI's
-  "Delete component", which deletes Maven files one by one, still leaves them.
+  proxies have cached, as files of the plugin version's component, so deleting the component,
+  in the web UI or through the API, deletes them too (sbt falls back to them when the
+  Maven-layout files are gone).
 - Clients that sent headers and then stalled their bodies, even without credentials, could fill the
   128 MiB container with idle connections (QA N-5).
 - A body that stalled past the idle timeout answered 500 and logged an ERROR (QA N-8).

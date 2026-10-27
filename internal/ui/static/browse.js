@@ -84,6 +84,11 @@ const PY_EXTS = [".whl", ".tar.gz", ".tar.bz2", ".zip", ".egg"];
 const normPy = (s) => s.toLowerCase().replace(/[-_.]+/g, "-");
 const pyExt = (f) => PY_EXTS.find((e) => f.endsWith(e) && f.length > e.length);
 
+// SBT_PLUGIN_DIR is component.SbtPluginDir: the artifact directory of an sbt
+// plugin carries a cross suffix (_2.12_1.0) that the file names of sbt's
+// legacy layout leave out, so those files belong to the same component.
+const SBT_PLUGIN_DIR = /^(.+)_\d+(?:\.\d+)*_\d+(?:\.\d+)*$/;
+
 function mavenFileMatches(file, name, version) {
   const boundary = (rest) => rest === "" || rest[0] === "-" || rest[0] === ".";
   let pre = name + "-" + version;
@@ -126,7 +131,8 @@ export function deriveComp(format, p) {
     case "maven": {
       if (n < 4 || file.startsWith("maven-metadata.xml")) return null;
       const name = segs[n - 3], version = segs[n - 2], g = segs.slice(0, n - 3);
-      if (!name || !version || g.some((x) => !x) || !mavenFileMatches(file, name, version)) return null;
+      const sbt = SBT_PLUGIN_DIR.exec(name);
+      if (!name || !version || g.some((x) => !x) || !(mavenFileMatches(file, name, version) || (sbt && mavenFileMatches(file, sbt[1], version)))) return null;
       return c(g.join("."), name, version);
     }
     case "npm": {

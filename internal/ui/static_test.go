@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"commandcenter/internal/component"
 )
 
 // staticNames are the files the shell cannot work without; every other
@@ -341,6 +343,20 @@ func TestComponentDeleteWired(t *testing.T) {
 		if !strings.Contains(js, want) {
 			t.Errorf("browse.js does not contain %s", want)
 		}
+	}
+}
+
+// TestComponentKeepsSbtLegacyFiles: the browser derives Maven components with
+// the server's sbt plugin rule, so "Delete component" also deletes the files
+// of sbt's legacy layout (sbt-foo-1.0.pom in sbt-foo_2.12_1.0/1.0/).
+func TestComponentKeepsSbtLegacyFiles(t *testing.T) {
+	js := readStatic(t, "browse.js")
+	want := "const SBT_PLUGIN_DIR = /" + component.SbtPluginDir.String() + "/;"
+	if !strings.Contains(js, want) {
+		t.Errorf("browse.js does not mirror component.SbtPluginDir: want %s", want)
+	}
+	if !strings.Contains(js, "(sbt && mavenFileMatches(file, sbt[1], version))") {
+		t.Error("deriveComp does not match sbt legacy-layout files")
 	}
 }
 
