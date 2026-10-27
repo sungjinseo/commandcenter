@@ -579,6 +579,89 @@ func TestReleaseRepoRejectsTimestampedSnapshot(t *testing.T) {
 	}
 }
 
+// sbt 1.9+ publishes a plugin in two layouts into one version directory: the
+// Maven one, whose file names carry the _<scala>_<sbt> cross suffix of the
+// artifact directory, and, while sbtPluginPublishLegacyMavenStyle is true
+// (the default), sbt's legacy one, whose file names and POM artifactId do
+// not (sbt before 1.9 publishes only that one). A hosted repository takes and
+// serves both, also through a group, and checks a legacy POM against the name
+// without the suffix. The legacy files are no version of the GA: the GA
+// document lists the Maven-layout versions, and the name without the suffix
+// gets none.
+func TestPutSbtPluginBothLayouts(t *testing.T) {
+	e := newEnv(t)
+	const ga = "com/example/sbt-foo_2.12_1.0"
+	files := func(version string, names ...string) []string {
+		var out []string
+		for _, n := range names {
+			for _, s := range []string{".pom", ".jar", "-sources.jar", "-javadoc.jar"} {
+				out = append(out, ga+"/"+version+"/"+n+"-"+version+s)
+			}
+		}
+		return out
+	}
+	const legacyPOM = ga + "/1.0.0/sbt-foo-1.0.0.pom"
+	for body, want := range map[string]string{
+		strings.Replace(fileBody(legacyPOM), ">sbt-foo<", ">sbt-foo_2.12_1.0<", 1): `declares "com.example:sbt-foo_2.12_1.0:1.0.0", want "com.example:sbt-foo:1.0.0"`,
+		strings.Replace(fileBody(legacyPOM), ">com.example<", ">evil<", 1):         `declares "evil:sbt-foo:1.0.0"`,
+	} {
+		if w := e.do("PUT", "releases", legacyPOM, body); w.Code != 400 || !strings.Contains(w.Body.String(), want) {
+			t.Errorf("PUT %s %q: %d %s, want 400 %s", legacyPOM, body, w.Code, w.Body, want)
+		}
+	}
+	stored := append(files("1.0.0", "sbt-foo_2.12_1.0", "sbt-foo"), files("0.9.0", "sbt-foo")...) // 0.9.0 as sbt before 1.9 publishes it
+	for _, p := range stored {
+		e.putAll(t, "releases", p, p+".sha1", p+".md5")
+	}
+	for _, p := range stored {
+		for _, rp := range []string{"releases", "public"} {
+			if w := e.do("GET", rp, p, ""); w.Code != 200 || w.Body.String() != fileBody(p) {
+				t.Errorf("GET %s %s: %d %q", rp, p, w.Code, w.Body)
+			}
+			if w := e.do("GET", rp, p+".sha1", ""); w.Code != 200 || w.Body.String() != sha1hex(fileBody(p)) {
+				t.Errorf("GET %s %s.sha1: %d %q", rp, p, w.Code, w.Body)
+			}
+		}
+	}
+	versions := func(when string) {
+		t.Helper()
+		w := e.do("GET", "releases", ga+"/maven-metadata.xml", "")
+		m, err := ParseMetadata(w.Body)
+		if w.Code != 200 || err != nil || m.ArtifactID != "sbt-foo_2.12_1.0" || strings.Join(m.Versioning.Versions, ",") != "1.0.0" {
+			t.Fatalf("GA metadata %s: %d %v %+v", when, w.Code, err, m)
+		}
+		if w := e.do("GET", "releases", "com/example/sbt-foo/maven-metadata.xml", ""); w.Code != 404 {
+			t.Fatalf("metadata of the name without the suffix %s: %d %s", when, w.Code, w.Body)
+		}
+	}
+	versions("after the PUTs")
+	if _, err := e.h.RebuildMetadata(context.Background(), e.repos["releases"], 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	versions("after a rebuild")
+	if w := e.do("DELETE", "releases", ga+"/1.0.0/sbt-foo-1.0.0.jar", ""); w.Code != 204 {
+		t.Fatalf("DELETE: %d %s", w.Code, w.Body)
+	}
+	versions("after a DELETE")
+
+	// Only the legacy names of the version directory's files are taken, and
+	// the version policy still applies.
+	for _, p := range []string{
+		ga + "/1.1.0/sbt-bar-1.1.0.jar",
+		ga + "/1.1.0/sbt-foo-1.1.1.jar",
+		ga + "/1.1.0/sbt-foo-1.1.0",
+		ga + "/1.1.0/sbt-foo_2.12-1.1.0.jar",
+		"com/example/sbt-foo_2.12/1.1.0/sbt-foo-1.1.0.jar", // a Scala suffix only
+		"sbt-foo_2.12_1.0/1.1.0/sbt-foo-1.1.0.jar",         // no groupId
+		ga + "/1.1.0-SNAPSHOT/sbt-foo-1.1.0-SNAPSHOT.jar",
+	} {
+		if w := e.do("PUT", "releases", p, "x"); w.Code != 400 {
+			t.Errorf("PUT %s: %d %s, want 400", p, w.Code, w.Body)
+		}
+	}
+	e.putAll(t, "snapshots", ga+"/1.1.0-SNAPSHOT/sbt-foo-1.1.0-SNAPSHOT.jar")
+}
+
 // doRaw is e.do for paths that would not survive URL parsing; the handler
 // takes the repository path as an argument.
 func (e *env) doRaw(method, repoName, path, body string) *httptest.ResponseRecorder {

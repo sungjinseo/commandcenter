@@ -173,14 +173,21 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 	if p.Metadata {
 		return h.putMetadata(ctx, rp, p.Main, r.Body)
 	}
-	if p.Coords == nil {
+	c := p.Coords
+	if c == nil {
+		c = sbtLegacy(p.Main)
+	}
+	if c == nil {
 		return repo.Errorf(http.StatusBadRequest, "%q is not a valid maven artifact path", p.Main)
 	}
-	if err := h.storeArtifact(ctx, rp, p, r.Body); err != nil {
+	if err := h.storeArtifact(ctx, rp, p, c, r.Body); err != nil {
 		return err
 	}
 	if !strings.HasSuffix(p.Main, ".asc") { // signatures are sidecars, not components
 		h.Store.Emit(r, "upload", rp.Name, p.Main, "")
+	}
+	if p.Coords == nil {
+		return nil // an sbt legacy-layout file: no version of the GA, so no metadata changes
 	}
 	// Best-effort: the artifact is already stored, so failing the PUT would make
 	// a retry hit allow_once; the next write to this GA, or the GA
@@ -199,8 +206,9 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 // storeArtifact writes the asset. The per-asset lock makes the writePolicy
 // and privilege checks and the write atomic: overwriting an existing asset
 // (writePolicy allow) needs Edit, a new one only the Add the server checked
-// (plan 12 Decision 2). A POM is checked once on disk, before it is recorded.
-func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path, body io.Reader) error {
+// (plan 12 Decision 2). A POM is checked once on disk, before it is recorded,
+// against c: p.Coords, or sbtLegacy's for a file in sbt's legacy layout.
+func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path, c *Coordinates, body io.Reader) error {
 	unlock := h.locks.Lock("asset\x00" + rp.Name + "\x00" + p.Main)
 	defer unlock()
 	_, err := h.Store.Get(ctx, rp.Name, p.Main)
@@ -213,7 +221,7 @@ func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path
 		return err
 	}
 	var verify func(blob.Sums) error
-	if c := p.Coords; c.Extension == "pom" && c.Classifier == "" {
+	if c.Extension == "pom" && c.Classifier == "" {
 		body = http.MaxBytesReader(nil, io.NopCloser(body), maxPOMSize)
 		verify = func(s blob.Sums) error {
 			select {

@@ -90,6 +90,8 @@ func (c Component) Label() string {
 
 // DeriveMaven maps a Maven asset path g1/g2/artifact/version/file to its
 // component. Metadata files and paths without a group are not components.
+// An sbt plugin's files in sbt's legacy layout, named without the cross
+// suffix of their artifact directory, belong to that directory's component.
 func DeriveMaven(p string) (group, name, version string, ok bool) {
 	segs := strings.Split(p, "/")
 	if len(segs) < 4 {
@@ -100,7 +102,7 @@ func DeriveMaven(p string) (group, name, version string, ok bool) {
 		return "", "", "", false
 	}
 	name, version = segs[len(segs)-3], segs[len(segs)-2]
-	if name == "" || version == "" || !mavenFileMatches(file, name, version) {
+	if name == "" || version == "" || (!mavenFileMatches(file, name, version) && !sbtLegacyFile(file, name, version)) {
 		return "", "", "", false
 	}
 	for _, s := range segs[:len(segs)-3] {
@@ -133,6 +135,19 @@ func mavenFileMatches(file, name, version string) bool {
 	}
 	stamp := SnapshotStamp.FindString(rest)
 	return stamp != "" && boundary(rest[len(stamp):])
+}
+
+// SbtPluginDir matches an artifact directory with sbt's _<scala>_<sbt>
+// plugin cross suffix, such as sbt-assembly_2.12_1.0. Its submatch is the
+// name without the suffix, which names the files of sbt's legacy layout there.
+var SbtPluginDir = regexp.MustCompile(`^(.+)_\d+(?:\.\d+)*_\d+(?:\.\d+)*$`)
+
+// sbtLegacyFile reports whether file, in artifact directory name, is named
+// as sbt's legacy layout names a plugin file: mavenFileMatches with the name
+// without the cross suffix.
+func sbtLegacyFile(file, name, version string) bool {
+	m := SbtPluginDir.FindStringSubmatch(name)
+	return m != nil && mavenFileMatches(file, m[1], version)
 }
 
 // DeriveNpm maps a tarball path name/-/name-version.tgz (or the scoped
