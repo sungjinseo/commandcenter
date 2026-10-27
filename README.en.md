@@ -3,225 +3,166 @@
 <p align="center"><a href="README.md">한국어</a> · <b>English</b></p>
 
 <p align="center">
-  <b>The Terran main base is the Command Center.</b><br>
-  <b>Not Community. Not Pro. We are Human.</b><br>
-  Maven · npm · PyPI · Go · Cargo in one server, a package repository that lives in 128 MiB.
+  A small, solid open-source artifact registry that takes the place of Nexus Repository.<br>
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum in one binary, running as a single Kubernetes pod.
 </p>
 
 <p align="center">
-  <img alt="Race: Terran" src="https://img.shields.io/badge/race-Terran-1e6fd9?style=flat-square">
-  <img alt="Edition: Human" src="https://img.shields.io/badge/edition-Human-ff6b6b?style=flat-square">
-  <img alt="Pro edition: none" src="https://img.shields.io/badge/Pro%20edition-none-555555?style=flat-square">
-  <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
+  <a href="https://github.com/sungjinseo/commandcenter/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/sungjinseo/commandcenter/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/sungjinseo/commandcenter/releases"><img alt="Release" src="https://img.shields.io/github/v/release/sungjinseo/commandcenter?style=flat-square"></a>
   <img alt="Go 1.26" src="https://img.shields.io/badge/Go-1.26-00add8?style=flat-square&logo=go&logoColor=white">
-  <img alt="Memory: 128 MiB is plenty" src="https://img.shields.io/badge/memory-128%20MiB%20is%20plenty-2f7bf5?style=flat-square">
+  <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
 </p>
 
 <p align="center">
-  <a href="#the-lore">Lore</a> ·
-  <a href="#what-it-does">Features</a> ·
+  <a href="#why-command-center">Why</a> ·
+  <a href="#formats">Formats</a> ·
+  <a href="#features">Features</a> ·
   <a href="#quick-start">Quick start</a> ·
-  <a href="#how-light-is-it">How light</a> ·
+  <a href="#moving-off-nexus">Moving off Nexus</a> ·
   <a href="docs/guide.md">Operations guide (Korean)</a> ·
-  <a href="#faq">FAQ</a> ·
-  <a href="#license">License</a>
+  <a href="#status-and-limits">Status</a>
 </p>
 
 ---
 
-## The lore
+## Why Command Center
 
-> In the distant Koprulu Sector... no, right here in your company's infrastructure.
+Most in-house package repositories start as Nexus Repository OSS, and then meet a 4 GB JVM heap, a slow UI and "available in Pro". Command Center is built to take over that seat.
 
-Two kinds of beings live in the package repository universe.
+- **The same URL layout.** `/repository/<name>/...` and Docker's `/v2/` are unchanged, so clients only need a new host name.
+- **The same operating model.** hosted, proxy and group repositories, users, roles and privileges, cleanup policies, scheduled tasks, blob stores: nothing to relearn.
+- **Nexus REST API compatibility and a migration tool.** Existing scripts and the Terraform provider keep working against `/service/rest/v1`, and `import-nexus` copies hosted repositories wholesale.
+- **Small.** One Go binary without CGO. It runs in a 128 MiB container; the load test peaks at 43 MiB RSS.
+- **No editions.** LDAP, OIDC (SSO), S3 blob stores and PostgreSQL are all included, under MIT or Apache-2.0, your choice.
 
-| Race | Main base | Traits |
-|---|---|---|
-| **Aliens** | **Decepticons** | Highly advanced alien technology. But every technology worth using carries the name **Pro**, and Pro can only be bought with money. |
-| **Humans** | **Command Center** | Clunky technology, but everything it has, it shares. This repository is that base. |
+## Formats
 
-The **Protoss** are the race that holds out the **Pro** and makes you **toss** your wallet. At first they hand out Community technology for free and make friends with the humans. Then one day a hologram appears: "This technology is available in Pro tier and above." Usage hits the limit, the feature you need is only ticked in the Pro column, and a quote warps in. The humans fall into confusion. The alarm never stops: more pylons needed... no, more licenses.
+| Format | hosted | proxy | group | Verified with |
+|---|:-:|:-:|:-:|---|
+| Maven | ✅ | ✅ | ✅ | mvn, Gradle |
+| npm | ✅ | ✅ | ✅ | npm, pnpm, yarn |
+| PyPI | ✅ | ✅ | ✅ | pip, twine, uv (PEP 503/658, JSON API) |
+| Go | ✅ | ✅ | ✅ | go (GOPROXY) |
+| Cargo | ✅ | ✅ | ✅ | cargo (sparse index) |
+| Docker / OCI | ✅ | ✅ | ✅ | docker, skopeo, crane, helm push oci:// |
+| raw | ✅ | ✅ | ✅ | curl, browsers (directory listings) |
+| Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
+| Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) |
 
-So the Terrans built the **Command Center**.
+NuGet and APT are in progress. Unsupported formats are listed under [limitations](docs/guide.md#제한-사항).
 
-## The Human liberation manifesto
+## Features
 
-> We do not buy alien technology with money.<br>
-> There is no **Pro** in our base. There is only **Human**.<br>
-> With nowhere to upgrade to, there is nothing to be downgraded from.
-
-Command Center has exactly one edition, and it is called the **Human Edition**. Not Community, not Pro (alien tech): just an edition for people. It travels the same roads (URLs) as the Protoss base, but it charges no toll.
-
-## What it does
-
-A repository server that follows the widely used `/repository/<repository-name>/...` URL convention. If your clients are already configured with that convention, **just change the host name**.
-
-| Format | hosted (upload) | proxy (remote cache) | group (aggregate) |
-|---|:-:|:-:|:-:|
-| Maven | ✅ | ✅ | ✅ |
-| npm | ✅ | ✅ | ✅ |
-| PyPI | ✅ | ✅ | ✅ |
-| Go | ✅ | ✅ | ✅ |
-| Cargo | ✅ | ✅ | ✅ |
-
-All of this comes with the Human Edition. There is no extra checkout step.
-
-- **Web UI**: browse, search, upload and manage repositories. Korean and English, built into the binary, so it works on air-gapped networks too.
-- **Access control**: users, roles, per-repository privileges (browse, read, add, edit, delete) and API tokens.
-- **Realms and LDAP**: an LDAPv3 client built with nothing but the Go standard library. It maps groups to roles and fails closed when the directory is down.
-- **Multiple blob stores**: pick a storage location per repository, see disk usage, and run blob cleanup (GC) per store.
-- **Operations**: cleanup policies, scheduled tasks, activity log, request trends, download counts, and failure notification e-mail (SMTP).
-- **Repository online/offline switch**: take a single repository down for maintenance.
-- **Break-glass recovery**: forgot the admin password? `commandcenter user reset-password` gets you back in. No need to call customer support. There is no customer support.
+- **Web UI**: browse, search, upload, component metadata (dependencies, licenses), and administration of repositories, users, roles, realms, blob stores and tasks. Korean and English, light and dark, embedded in the binary so it works offline.
+- **Authentication and authorization**: local users, roles with per-repository privileges (browse, read, add, edit, delete), API tokens, **LDAP** (standard-library client), **OIDC** (Keycloak, Gitea, GitHub and others, with group-to-role mapping), Docker token auth.
+- **Operational visibility**: per-repository requests, error rate, latency, upstream failures and cache hit rate; request trends, activity log, health checks, log viewer, failure e-mails.
+- **Storage**: file or **S3-compatible** blob stores (several at once), content-addressed deduplication, blob GC. Metadata in **SQLite** or **PostgreSQL**, with a migration command between them.
+- **Housekeeping**: cleanup policies (age, last download, name pattern), scheduled tasks, per-repository online/offline.
+- **Kubernetes first**: a Helm chart (StatefulSet, values schema, PostgreSQL, NFS and HTTPRoute support, `helm test`), a reference manifest, and amd64/arm64 images with SBOM and provenance on every release.
+- **Nexus compatibility**: the repositories, components, assets, search and status endpoints of `/service/rest/v1`, and `commandcenter import-nexus`.
 
 ## Quick start
 
-Run it on Kubernetes with the Helm chart, or on a single server with docker compose. Both use the release image `ghcr.io/sungjinseo/commandcenter`. Replace `1.2.3` below with a version from the [releases](https://github.com/sungjinseo/commandcenter/releases).
+Release images live at `ghcr.io/sungjinseo/commandcenter`. Replace `0.1.1` below with the [latest release](https://github.com/sungjinseo/commandcenter/releases).
 
-First make the hash of the admin password. Type a password (at least 8 characters, at most 72 bytes) and press Enter to get its hash.
+Create the admin password hash first (8 characters or more).
 
 ```bash
-docker run --rm -i ghcr.io/sungjinseo/commandcenter:1.2.3 hash-password
+docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.1.1 hash-password
 ```
 
 ### Kubernetes (Helm)
 
-Set three values in `my-values.yaml`:
-
 ```yaml
+# my-values.yaml
 config:
-  baseURL: http://localhost:8081            # the address clients use
-  adminPasswordHash: '<the hash from above>'
+  baseURL: https://packages.example.com       # the address clients use
+  adminPasswordHash: '<hash from above>'
 persistence:
-  storageClass: <a block storage class>     # see kubectl get storageclass; never NFS or SMB
+  storageClass: <StorageClass>                 # blob storage; NFS works
+database:
+  existingSecret: commandcenter-db             # omit for SQLite; PostgreSQL per the guide
 ```
 
 ```bash
-helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 1.2.3 \
+helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.1.1 \
   --namespace commandcenter --create-namespace -f my-values.yaml --wait
 helm test commandcenter -n commandcenter
-kubectl -n commandcenter port-forward svc/commandcenter 8081:8081
 ```
 
-Open `http://localhost:8081/` and sign in as `admin`. For a team, set `baseURL` to your ingress's `https://` address (after the first start, change it in the web UI's general settings). Ingress and TLS, the secret key, upgrades, backups and uninstalling are in the "Kubernetes" section of the [operations guide](docs/guide.md#kubernetes) (Korean).
+Ingress/HTTPRoute, TLS, PostgreSQL, the secret key, backups and upgrades are in the guide's [Kubernetes](docs/guide.md#kubernetes) section.
 
 ### Docker compose
 
-All you need is Docker.
-
 ```bash
-git clone --depth 1 --branch v1.2.3 https://github.com/sungjinseo/commandcenter.git
+git clone --depth 1 --branch v0.1.1 https://github.com/sungjinseo/commandcenter.git
 cd commandcenter
-echo COMMANDCENTER_VERSION=1.2.3 >> .env
-cp config.example.yaml config.yaml
-```
-
-Compose pulls the release image of the version in `.env` (an image tag, so no `v`). Put the hash into `passwordHash` in `config.yaml` and start it:
-
-```bash
+echo COMMANDCENTER_VERSION=0.1.1 >> .env
+cp config.example.yaml config.yaml     # put the hash in passwordHash
 docker compose up -d
 ```
 
-Open `http://localhost:8081/` and you are done. No screen asks for a license key, because there isn't one.
+Open `http://localhost:8081/` and sign in as `admin`.
 
-### Building from source
+### Client setup
 
-Build with `docker build --build-arg VERSION=dev -t commandcenter:dev .` and put `COMMANDCENTER_IMAGE=commandcenter` and `COMMANDCENTER_VERSION=dev` into `.env`; compose then runs your image. Make the hash with `docker run --rm -i commandcenter:dev hash-password`; the rest is the same. On Kubernetes, push your build to your own registry and set the chart's `image.repository` and `image.tag` to it.
+Each repository's "usage" tab shows copy-ready client configuration (Maven `settings.xml`, `.npmrc`, `pip.conf`, `GOPROXY`, Cargo `config.toml`, `docker login`, `helm repo add`, `.repo` files). The full list is in the guide under [포맷별 클라이언트 설정](docs/guide.md#포맷별-클라이언트-설정).
 
-### Client settings
+## Moving off Nexus
 
-Client settings for each format (Maven `settings.xml`, `.npmrc`, `pip.conf`, `GOPROXY`, Cargo `config.toml`) are ready to copy from each repository's page in the web UI and from the [operations guide](docs/guide.md#포맷별-클라이언트-설정) (Korean).
+1. Create repositories of the same formats in Command Center (web UI, config file, or the Nexus-compatible `POST /service/rest/v1/repositories/<format>/<type>`).
+2. Copy the hosted repositories.
+
+   ```bash
+   commandcenter import-nexus -from https://nexus.example.com -from-user admin -from-password-file nexus.pw \
+     -to https://packages.example.com -to-user ci -to-token-file cc.token -all -dry-run   # check first
+   commandcenter import-nexus ... -all                                                  # copy (safe to rerun)
+   ```
+
+   Maven, npm, PyPI, raw, Helm and Docker are written through each format's own upload protocol, so every server-side check applies. Proxies refill themselves on first use.
+3. Change the host name in client configuration. Scripts that use the Nexus REST API stay as they are.
+
+Details: [Nexus에서 이전하기](docs/guide.md#nexus에서-이전하기) and [Nexus REST API 호환](docs/guide.md#nexus-rest-api-호환).
 
 ## Production checklist
 
-The quick start is for trying it out. Before your team relies on it every day, read the production deployment section of the [operations guide](docs/guide.md#프로덕션-배포) (Korean). In short:
+- Terminate TLS at the Ingress or reverse proxy and set `baseURL` to the `https://` address.
+- Turn off anonymous read (`anonymousRead`) for internal use; give CI API tokens, not passwords.
+- Set a key for stored secrets (SMTP, LDAP, OIDC, remote credentials, S3) with `COMMANDCENTER_SECRET_KEY` or `secretKeyFile`, and keep it apart from backups.
+- Keep metadata in PostgreSQL or in SQLite on block storage (never SQLite on NFS). Run one instance.
+- A 60-second stop grace period (already in the chart and compose file), regular backups, and a backup before every upgrade. Downgrades are not supported.
 
-- Terminate TLS at a reverse proxy and set `baseURL` to the `https://` address.
-- For a private registry, turn anonymous read (`anonymousRead`) off.
-- Limit upload size, request body and response timeouts, and connections per client at the proxy.
-- Keep `meta.db` on local disk or block storage (`persistence.storageClass` in the chart), never on NFS or SMB, and run exactly one instance.
-- Give the server 60 seconds to stop. The bundled compose file and the Helm chart already do; with `docker run`, set `--stop-timeout 60` yourself.
-- Back up regularly and before every upgrade. Downgrades are not supported.
-- To encrypt stored secrets (SMTP, LDAP and proxy passwords), give a key with `COMMANDCENTER_SECRET_KEY` or `secretKeyFile`, and keep the key apart from the backups.
-- On Kubernetes, use the [Helm chart](deploy/helm/commandcenter). [Reference manifests](deploy/kubernetes/commandcenter.yaml) for running without Helm are there too.
+The full list is under [프로덕션 배포](docs/guide.md#프로덕션-배포).
 
 ## How light is it
 
-A single Go binary with no CGO. It runs in a 128 MiB container with `GOMEMLIMIT=80MiB`.
-
 | Measurement (`test/e2e.sh`) | Result |
 |---|---|
-| Smoke tests per format (Maven, npm, PyPI, Go, Cargo, UI, LDAP, mail) | 6 to 37 MiB |
-| Load test: concurrent 100 MiB downloads, concurrent uploads, hostile uploads | 43 MiB peak RSS |
+| Smoke tests per format, including UI, LDAP and mail | 6 to 37 MiB |
+| Load test: concurrent 100 MiB downloads and uploads, hostile uploads | 43 MiB peak RSS |
+| Helm proxy of a bitnami-sized (30 MB) index.yaml | about 40 MiB (streamed) |
 
-Compare that with the memory recommended for JVM-based servers that do the same job, and you will see why we called it human liberation. Your server is human too. Probably.
+The default container limit is 128 MiB (`GOMEMLIMIT=80MiB`).
 
-## Honest status
+## Status and limits
 
-The Human Edition was made by humans. So it has bugs. You will not see an "all problems solved" hologram here.
-
-- We work through the findings of black-box QA runs one by one, and every fix gets a regression test. Some findings are still open.
-- Known limitations and what is not supported yet are in the [limitations section of the operations guide](docs/guide.md#제한-사항) (Korean); what each release fixed and changed is in the [CHANGELOG](CHANGELOG.md).
-- The server is built to run as a single instance. High availability and running several instances are not supported.
-- Report bugs as issues, and security problems privately as the [security policy](SECURITY.md) describes.
-
-## FAQ
-
-**Is there really no Pro edition?**<br>
-There isn't, and there are no plans for one. If a Pro ever shows up, that is a Command Center assimilated by the Protoss. When that happens, please fork it and stand with the humans again.
-
-**Why is it called Command Center?**<br>
-If the Protoss have a main base, the human main base is the Command Center. It travels the same URL roads, so from the client's point of view you only swap the base.
-
-**What about a Community edition?**<br>
-Everyone who contributes is the community. The word is too good to waste on an edition name, so we are saving it.
-
-**What is the Human Edition's limitation?**<br>
-Just one: it was made by humans. Help us fix it with issues and PRs.
-
-**Can I move the data I used in the Protoss base?**<br>
-There is no automatic migration tool. The URLs are compatible, so client settings only need the host changed, and proxy repositories fetch packages again the first time they are requested.
-
-**Can I use it at work?**<br>
-Use it under MIT or Apache-2.0, whichever you prefer. Commercial use is fine. There is no warranty, though. We are only human.
+- Designed for a single instance; no high availability or horizontal scaling (the same as Nexus OSS).
+- NuGet, APT, RubyGems, Conan, Conda and Composer are not available yet; the first two are in progress.
+- The Nexus REST API covers repositories, components, assets, search and status. User and role writes and the script API are not available.
+- Known limitations are listed in the guide ([제한 사항](docs/guide.md#제한-사항)); every release's fixes and changes are in the [CHANGELOG](CHANGELOG.md).
+- Report bugs as issues and security problems privately per the [security policy](SECURITY.md).
 
 ## Documentation
 
-- [Operations guide](docs/guide.md) (Korean): installation, Kubernetes (Helm), production deployment, configuration reference, authentication and permissions, LDAP, blob stores, client settings per format, backup and upgrades
-- [Helm chart](deploy/helm/commandcenter) and [Kubernetes reference manifests](deploy/kubernetes/commandcenter.yaml)
-- [Changelog](CHANGELOG.md): what each release fixed and changed
-- [Contributing guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md)
-- [Security policy](SECURITY.md): how to report a vulnerability
-- [Attribution](ATTRIBUTION.md): authors and licenses of the third-party code we ship
+- [Operations guide](docs/guide.md) (Korean): installation, Kubernetes, production deployment, configuration reference, authentication, LDAP and OIDC, blob stores, per-format client setup, backup and upgrade, Nexus migration and the compatibility API
+- [Helm chart](deploy/helm/commandcenter) · [Kubernetes reference manifest](deploy/kubernetes/commandcenter.yaml)
+- [CHANGELOG](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md) · [Attribution](ATTRIBUTION.md)
 
 ## Contributing
 
-**SCVs wanted.** No one builds a base alone. Bug reports, doc fixes, bug fixes and new formats are all welcome. We can't pay you in minerals, but your name stays in the commit history forever.
-
-Builds and tests run in a container, with no local Go install.
-
-```bash
-bash scripts/go.sh test ./...
-```
-
-```bash
-bash test/e2e.sh
-```
-
-`test/e2e.sh` runs smoke tests that drive every format with the real clients (mvn, npm, pip, go, cargo), plus a 128 MiB load test. It takes about 20 minutes, so get a coffee. Coffee is not included in the Human Edition.
-
-Before you send an issue or a PR, please read the [contributing guide](CONTRIBUTING.md): it covers the code conventions and what we expect from a PR.
+Issues, documentation fixes, bug fixes and new formats are all welcome. The development setup and test commands are in [CONTRIBUTING.md](CONTRIBUTING.md) and the guide's [개발](docs/guide.md#개발) section.
 
 ## License
 
-Choose [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), whichever you like. The required notices are in [NOTICE](NOTICE), and the list of third-party code we ship is in [ATTRIBUTION.md](ATTRIBUTION.md).
-
-Copyright (c) 2026 the Command Center contributors.
-
-<sub>Command Center is an independent open-source project. It is not affiliated with, sponsored by or endorsed by the maker of any commercial repository product, and it contains no code, logos, icons or stylesheets from other products. Maven, npm, PyPI, Go, Cargo and the other names may be trademarks of their respective owners.</sub>
-
-<sub>StarCraft, Protoss, Terran, Zerg, SCV, Pylon and related StarCraft names are trademarks or works of Blizzard Entertainment, Inc. Command Center is not affiliated with, sponsored by or endorsed by Blizzard. This document mentions the game's races and buildings only as a parody, and contains no images, logos, audio or original dialogue from the game.</sub>
-
-<sub>Decepticons and related Transformers names are trademarks of Hasbro, Inc. Command Center is not affiliated with, sponsored by or endorsed by Hasbro. This document mentions the name only as a parody, and contains no related images or logos.</sub>
-
-<p align="center"><sub>Made by Terrans, for humans. 🧑‍🤝‍🧑</sub></p>
+MIT or Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). The IBM Plex fonts in the web UI are under the SIL Open Font License.

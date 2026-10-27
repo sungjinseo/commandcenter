@@ -3,225 +3,166 @@
 <p align="center"><b>한국어</b> · <a href="README.en.md">English</a></p>
 
 <p align="center">
-  <b>테란의 본진은 Command Center입니다.</b><br>
-  <b>Community도 아니고 Pro도 아닙니다. 우리는 Human입니다.</b><br>
-  Maven · npm · PyPI · Go · Cargo를 한 서버에 담은, 128 MiB에서 사는 패키지 저장소.
+  Nexus Repository를 대신하는, 작고 단단한 오픈소스 아티팩트 레지스트리.<br>
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum을 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
 </p>
 
 <p align="center">
-  <img alt="Race: Terran" src="https://img.shields.io/badge/race-Terran-1e6fd9?style=flat-square">
-  <img alt="Edition: Human" src="https://img.shields.io/badge/edition-Human-ff6b6b?style=flat-square">
-  <img alt="Pro edition: none" src="https://img.shields.io/badge/Pro%20edition-%EC%97%86%EC%9D%8C-555555?style=flat-square">
-  <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
+  <a href="https://github.com/sungjinseo/commandcenter/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/sungjinseo/commandcenter/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/sungjinseo/commandcenter/releases"><img alt="Release" src="https://img.shields.io/github/v/release/sungjinseo/commandcenter?style=flat-square"></a>
   <img alt="Go 1.26" src="https://img.shields.io/badge/Go-1.26-00add8?style=flat-square&logo=go&logoColor=white">
-  <img alt="Memory: 128 MiB" src="https://img.shields.io/badge/memory-128%20MiB%EB%A9%B4%20%EC%B6%A9%EB%B6%84-2f7bf5?style=flat-square">
+  <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
 </p>
 
 <p align="center">
-  <a href="#세계관">세계관</a> ·
-  <a href="#무엇을-하나요">기능</a> ·
+  <a href="#왜-command-center인가">왜</a> ·
+  <a href="#지원-포맷">포맷</a> ·
+  <a href="#기능">기능</a> ·
   <a href="#빠른-시작">빠른 시작</a> ·
-  <a href="#얼마나-가볍나요">가벼움</a> ·
+  <a href="#nexus에서-갈아타기">Nexus에서 갈아타기</a> ·
   <a href="docs/guide.md">운영 가이드</a> ·
-  <a href="#자주-묻는-질문">FAQ</a> ·
-  <a href="#라이선스">라이선스</a>
+  <a href="#현황과-제한">현황</a>
 </p>
 
 ---
 
-## 세계관
+## 왜 Command Center인가
 
-> 머나먼 코프룰루 구역…… 이 아니라, 바로 당신의 사내 인프라에서.
+사내 패키지 저장소는 대부분 Nexus Repository OSS로 시작합니다. 그러다 JVM 힙 4 GB, 느린 UI, 그리고 "이 기능은 Pro에서만"을 만납니다. Command Center는 그 자리를 그대로 이어받도록 만들었습니다.
 
-패키지 저장소의 우주에는 두 종족이 삽니다.
+- **같은 URL 규칙.** `/repository/<이름>/...`과 Docker의 `/v2/`를 그대로 쓰므로 클라이언트 설정은 호스트 이름만 바꾸면 됩니다.
+- **같은 운영 모델.** hosted · proxy · group, 사용자 · 역할 · 권한, Cleanup 정책, 예약 작업, blob store. Nexus를 써 본 사람에게 설명이 필요 없는 구조입니다.
+- **Nexus REST API 호환과 이전 도구.** 기존 스크립트와 Terraform 프로바이더가 `/service/rest/v1`로 그대로 동작하고, `import-nexus`가 hosted 저장소를 통째로 옮겨 줍니다.
+- **작습니다.** CGO 없는 Go 바이너리 하나. 128 MiB 컨테이너에서 돌고, 부하 테스트 최대 RSS는 43 MiB입니다.
+- **에디션이 없습니다.** LDAP, OIDC(SSO), S3 blob store, PostgreSQL까지 전부 들어 있고, 라이선스는 MIT 또는 Apache-2.0 중 고르면 됩니다.
 
-| 종족 | 본진 | 특징 |
-|---|---|---|
-| **외계인** | **Decepticons** | 고도로 발달한 외계 기술을 가졌습니다. 그런데 쓸 만한 기술에는 꼭 **Pro**라는 이름이 붙고, Pro는 돈으로만 살 수 있습니다. |
-| **사람** | **Command Center** | 기술은 투박하지만 가진 건 다 나눕니다. 이 저장소가 바로 그 본진입니다. |
+## 지원 포맷
 
-**Protoss**는, **Pro**를 내밀고, 지갑을 **toss**(던지게) 만드는 종족입니다. 처음엔 무료로 Community 기술을 나눠 주며 인간과 친해지다가, 어느 날 "이 기술은 Pro 등급 이상에서 사용할 수 있습니다"라는 홀로그램을 띄웁니다. 사용량이 한도에 닿고, 필요한 기능은 Pro 칸에만 체크되어 있고, 견적서가 워프되어 도착합니다. 인간들은 혼란에 빠집니다. 추가 파일런이, 아니, 추가 라이선스가 필요하다는 경고가 끝없이 울립니다.
+| 포맷 | hosted | proxy | group | 검증한 클라이언트 |
+|---|:-:|:-:|:-:|---|
+| Maven | ✅ | ✅ | ✅ | mvn, Gradle |
+| npm | ✅ | ✅ | ✅ | npm, pnpm, yarn |
+| PyPI | ✅ | ✅ | ✅ | pip, twine, uv (PEP 503/658, JSON API) |
+| Go | ✅ | ✅ | ✅ | go (GOPROXY) |
+| Cargo | ✅ | ✅ | ✅ | cargo (sparse 인덱스) |
+| Docker / OCI | ✅ | ✅ | ✅ | docker, skopeo, crane, helm push oci:// |
+| raw | ✅ | ✅ | ✅ | curl, 브라우저 (디렉터리 목록) |
+| Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
+| Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata 자동 생성) |
 
-그래서 테란은 **Command Center**를 지었습니다.
+NuGet과 APT는 개발 중입니다. 지원하지 않는 포맷은 [제한 사항](docs/guide.md#제한-사항)에 있습니다.
 
-## 인간 해방 선언
+## 기능
 
-> 우리는 외계 기술을 돈 주고 사지 않는다.<br>
-> 우리의 본진에는 **Pro**가 없다. **Human**만 있다.<br>
-> 업그레이드할 곳이 없으니 다운그레이드당할 일도 없다.
-
-Command Center의 에디션은 하나뿐이고, 이름은 **Human Edition**입니다. Community(공동체)도 Pro(외계 기술)도 아닌, 그냥 사람을 위한 에디션입니다. 프로토스 본진과 같은 길(URL)로 다니지만, 통행료는 받지 않습니다.
-
-## 무엇을 하나요
-
-업계에서 널리 쓰이는 `/repository/<저장소이름>/...` 경로 규칙을 따르는 저장소 서버입니다. 이미 이 규칙으로 클라이언트를 설정해 두었다면 **호스트 이름만 바꾸면** 됩니다.
-
-| 포맷 | hosted (업로드) | proxy (원격 캐시) | group (묶음) |
-|---|:-:|:-:|:-:|
-| Maven | ✅ | ✅ | ✅ |
-| npm | ✅ | ✅ | ✅ |
-| PyPI | ✅ | ✅ | ✅ |
-| Go | ✅ | ✅ | ✅ |
-| Cargo | ✅ | ✅ | ✅ |
-
-Human Edition에 기본으로 들어 있는 것들입니다. 추가 결제 단계는 없습니다.
-
-- **웹 UI**: 둘러보기, 검색, 업로드, 저장소 관리. 한국어와 영어를 지원하고 바이너리에 내장되어 있어서 폐쇄망에서도 뜹니다.
-- **접근 제어**: 사용자, 역할, 저장소별 권한(browse, read, add, edit, delete), API 토큰.
-- **Realm과 LDAP**: 표준 라이브러리만으로 만든 LDAPv3 클라이언트. 그룹을 역할로 매핑하고, 디렉터리가 내려가면 안전하게 거부합니다.
-- **여러 blob store**: 저장소마다 저장 위치를 고르고, 디스크 사용량을 보고, blob 정리(GC)를 store별로 돌립니다.
-- **운영 기능**: Cleanup 정책, 예약 작업, 활동 로그, 요청 추이, 다운로드 수, 실패 알림 메일(SMTP).
-- **저장소 Online/Offline 전환**: 점검할 때 저장소 하나만 잠시 내립니다.
-- **비상 복구**: 관리자 비밀번호를 잊어도 `commandcenter user reset-password`로 다시 들어옵니다. 고객센터에 전화할 필요는 없습니다. 고객센터도 없습니다.
+- **웹 UI**: 둘러보기, 검색, 업로드, 컴포넌트 메타데이터(의존성·라이선스), 저장소 · 사용자 · 역할 · Realm · Blob store · 작업 관리. 한국어 · 영어, 라이트 · 다크. 바이너리에 내장되어 폐쇄망에서도 뜹니다.
+- **인증과 권한**: 로컬 사용자, 역할과 저장소별 권한(browse · read · add · edit · delete), API 토큰, **LDAP**(표준 라이브러리 구현), **OIDC**(Keycloak · Gitea · GitHub 등, 그룹→역할 매핑), Docker 토큰 인증.
+- **운영 가시성**: 저장소별 요청 수 · 오류율 · 응답 시간 · 원격 실패 · 캐시 적중률, 요청 추이, 활동 로그, 상태 점검, 로그 뷰어, 실패 알림 메일.
+- **스토리지**: 파일 또는 **S3 호환** blob store(여러 개), 내용 주소 저장으로 중복 제거, blob GC. 메타데이터는 **SQLite** 또는 **PostgreSQL**, 둘 사이의 이전 도구 포함.
+- **정리와 자동화**: Cleanup 정책(나이 · 마지막 다운로드 · 이름 패턴), 예약 작업, 저장소 Online/Offline 전환.
+- **Kubernetes 우선**: Helm 차트(StatefulSet, values 스키마, PostgreSQL · NFS · HTTPRoute 지원, `helm test`), 참조 매니페스트, 릴리스마다 amd64 · arm64 이미지와 SBOM · provenance.
+- **Nexus 호환**: `/service/rest/v1`의 repositories · components · assets · search · status API, `commandcenter import-nexus`.
 
 ## 빠른 시작
 
-Kubernetes에는 Helm 차트로, 서버 한 대에는 Docker compose로 띄웁니다. 둘 다 릴리스 이미지 `ghcr.io/sungjinseo/commandcenter`를 씁니다. 아래의 `1.2.3`은 [릴리스](https://github.com/sungjinseo/commandcenter/releases)의 버전으로 바꾸세요.
+릴리스 이미지는 `ghcr.io/sungjinseo/commandcenter`입니다. 아래의 `0.1.1`은 [최신 릴리스](https://github.com/sungjinseo/commandcenter/releases) 버전으로 바꾸세요.
 
-먼저 관리자 비밀번호의 해시를 만듭니다. 비밀번호(8자 이상, 72바이트 이하)를 입력하고 Enter를 누르면 해시가 나옵니다.
+먼저 관리자 비밀번호 해시를 만듭니다(8자 이상).
 
 ```bash
-docker run --rm -i ghcr.io/sungjinseo/commandcenter:1.2.3 hash-password
+docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.1.1 hash-password
 ```
 
 ### Kubernetes (Helm)
 
-`my-values.yaml`에 세 값을 정합니다.
-
 ```yaml
+# my-values.yaml
 config:
-  baseURL: http://localhost:8081              # 클라이언트가 접속하는 주소
+  baseURL: https://packages.example.com       # 클라이언트가 접속하는 주소
   adminPasswordHash: '<위에서 나온 해시>'
 persistence:
-  storageClass: <블록 스토리지 StorageClass>   # kubectl get storageclass. NFS·SMB는 안 됩니다
+  storageClass: <StorageClass>                 # blob 저장소. NFS도 됩니다
+database:
+  existingSecret: commandcenter-db             # 비우면 SQLite. PostgreSQL은 가이드 참고
 ```
 
 ```bash
-helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 1.2.3 \
+helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.1.1 \
   --namespace commandcenter --create-namespace -f my-values.yaml --wait
 helm test commandcenter -n commandcenter
-kubectl -n commandcenter port-forward svc/commandcenter 8081:8081
 ```
 
-`http://localhost:8081/`을 열고 `admin`으로 로그인합니다. 팀에서 쓸 때는 Ingress의 `https://` 주소를 `baseURL`로 둡니다(설치한 뒤에는 웹 UI의 일반 설정에서 바꿉니다). Ingress와 TLS, 비밀값 키, 업그레이드, 백업, 삭제는 운영 가이드의 [Kubernetes](docs/guide.md#kubernetes)에 있습니다.
+Ingress/HTTPRoute, TLS, PostgreSQL, 비밀값 키, 백업과 업그레이드는 운영 가이드의 [Kubernetes](docs/guide.md#kubernetes)에 있습니다.
 
 ### Docker compose
 
-Docker만 있으면 됩니다.
-
 ```bash
-git clone --depth 1 --branch v1.2.3 https://github.com/sungjinseo/commandcenter.git
+git clone --depth 1 --branch v0.1.1 https://github.com/sungjinseo/commandcenter.git
 cd commandcenter
-echo COMMANDCENTER_VERSION=1.2.3 >> .env
-cp config.example.yaml config.yaml
-```
-
-`.env`의 버전(이미지 태그라서 `v`가 없습니다)으로 compose가 릴리스 이미지를 받습니다. `config.yaml`의 `passwordHash` 자리에 해시를 넣고 띄웁니다.
-
-```bash
+echo COMMANDCENTER_VERSION=0.1.1 >> .env
+cp config.example.yaml config.yaml     # passwordHash 자리에 해시를 넣습니다
 docker compose up -d
 ```
 
-`http://localhost:8081/`을 열면 끝입니다. 라이선스 키를 묻는 화면은 나오지 않습니다. 원래 없으니까요.
-
-### 소스에서 빌드
-
-`docker build --build-arg VERSION=dev -t commandcenter:dev .`로 빌드하고 `.env`에 `COMMANDCENTER_IMAGE=commandcenter`와 `COMMANDCENTER_VERSION=dev`를 적으면 compose가 그 이미지를 씁니다. 해시는 `docker run --rm -i commandcenter:dev hash-password`로 만들고, 나머지는 위와 같습니다. Kubernetes에서는 빌드한 이미지를 사내 레지스트리에 올리고 차트의 `image.repository`와 `image.tag`를 그 이미지로 정합니다.
+`http://localhost:8081/`을 열고 `admin`으로 로그인합니다.
 
 ### 클라이언트 설정
 
-포맷별 클라이언트 설정(Maven `settings.xml`, `.npmrc`, `pip.conf`, `GOPROXY`, Cargo `config.toml`)은 웹 UI의 저장소 화면과 [운영 가이드](docs/guide.md#포맷별-클라이언트-설정)에 복사해서 쓸 수 있는 형태로 있습니다.
+저장소 화면의 "사용법" 탭이 포맷별 설정(Maven `settings.xml`, `.npmrc`, `pip.conf`, `GOPROXY`, Cargo `config.toml`, `docker login`, `helm repo add`, `.repo` 파일)을 복사할 수 있는 형태로 보여 줍니다. 전체 목록은 [포맷별 클라이언트 설정](docs/guide.md#포맷별-클라이언트-설정)에 있습니다.
+
+## Nexus에서 갈아타기
+
+1. Command Center에 같은 포맷의 저장소를 만듭니다(웹 UI, 설정 파일, 또는 Nexus 호환 API `POST /service/rest/v1/repositories/<format>/<type>`).
+2. hosted 저장소의 내용을 옮깁니다.
+
+   ```bash
+   commandcenter import-nexus -from https://nexus.example.com -from-user admin -from-password-file nexus.pw \
+     -to https://packages.example.com -to-user ci -to-token-file cc.token -all -dry-run   # 먼저 확인
+   commandcenter import-nexus ... -all                                                  # 복사 (재실행 안전)
+   ```
+
+   Maven · npm · PyPI · raw · Helm · Docker를 각 포맷의 업로드 프로토콜로 옮기므로 서버 검증이 그대로 적용됩니다. proxy는 새로 만들면 첫 요청 때 다시 채워집니다.
+3. 클라이언트 설정의 호스트만 바꿉니다. Nexus REST API를 쓰던 스크립트는 그대로 둡니다.
+
+자세한 절차는 [Nexus에서 이전하기](docs/guide.md#nexus에서-이전하기)와 [Nexus REST API 호환](docs/guide.md#nexus-rest-api-호환)에 있습니다.
 
 ## 프로덕션 체크리스트
 
-빠른 시작은 시험용 구성입니다. 팀이 매일 쓰는 저장소로 올리기 전에 운영 가이드의 [프로덕션 배포](docs/guide.md#프로덕션-배포)를 읽어 주세요. 요약하면 이렇습니다.
+- TLS는 Ingress나 리버스 프록시에서 끝내고 `baseURL`을 `https://` 주소로 둡니다.
+- 사내 전용이면 익명 읽기(`anonymousRead`)를 끕니다. CI에는 비밀번호 대신 API 토큰을 줍니다.
+- 저장된 비밀값(SMTP · LDAP · OIDC · 원격 인증 · S3)을 암호화하는 키(`COMMANDCENTER_SECRET_KEY` 또는 `secretKeyFile`)를 두고 백업과 따로 보관합니다.
+- 메타데이터는 PostgreSQL이나 블록 스토리지의 SQLite에 둡니다(SQLite를 NFS에 두지 마세요). 인스턴스는 하나입니다.
+- 중지 대기 시간 60초(차트와 compose에 들어 있음), 정기 백업, 업그레이드 전 백업. 다운그레이드는 지원하지 않습니다.
 
-- TLS는 리버스 프록시에서 끝내고 `baseURL`을 `https://` 주소로 둡니다.
-- 사내 전용이면 익명 읽기(`anonymousRead`)를 끕니다.
-- 프록시에서 업로드 크기, 본문 수신·응답 전송 타임아웃, 연결 수를 제한합니다.
-- `meta.db`는 로컬 디스크나 블록 스토리지에 둡니다(차트에서는 `persistence.storageClass`). NFS·SMB는 안 됩니다. 인스턴스는 하나만 띄웁니다.
-- 중지 대기 시간을 60초로 둡니다. 들어 있는 compose 파일과 Helm 차트에는 이미 들어 있고, `docker run`에서는 `--stop-timeout 60`으로 직접 정합니다.
-- 정기적으로, 그리고 업그레이드 전에 백업합니다. 다운그레이드는 지원하지 않습니다.
-- 저장된 비밀값(SMTP·LDAP·프록시 비밀번호)을 암호화하려면 `COMMANDCENTER_SECRET_KEY`나 `secretKeyFile`로 키를 주고, 키는 백업과 따로 보관합니다.
-- Kubernetes에는 [Helm 차트](deploy/helm/commandcenter)를 씁니다. Helm 없이 쓰는 [참조 매니페스트](deploy/kubernetes/commandcenter.yaml)도 있습니다.
+전체 목록은 [프로덕션 배포](docs/guide.md#프로덕션-배포)에 있습니다.
 
 ## 얼마나 가볍나요
 
-Go 단일 바이너리이고 CGO를 쓰지 않습니다. 128 MiB 컨테이너에서 `GOMEMLIMIT=80MiB`로 돌립니다.
-
 | 측정 (`test/e2e.sh`) | 결과 |
 |---|---|
-| 포맷별 스모크 테스트 (Maven, npm, PyPI, Go, Cargo, UI, LDAP, 메일) | 6 ~ 37 MiB |
-| 부하 테스트: 100 MiB 파일 동시 다운로드, 동시 업로드, 적대적 업로드 | 최대 RSS 43 MiB |
+| 포맷별 스모크 테스트 (UI, LDAP, 메일 포함) | 6 ~ 37 MiB |
+| 부하 테스트: 100 MiB 파일 동시 다운로드 · 업로드, 적대적 업로드 | 최대 RSS 43 MiB |
+| Helm proxy, bitnami 크기(30 MB) index.yaml | 약 40 MiB (스트리밍 처리) |
 
-같은 일을 하는 JVM 기반 서버에게 권장되는 메모리와 비교해 보시면, 왜 "인간 해방"이라고 했는지 아실 겁니다. 여러분의 서버도 인간입니다. 아마도.
+기본 컨테이너 한도는 128 MiB(`GOMEMLIMIT=80MiB`)입니다.
 
-## 정직한 현황
+## 현황과 제한
 
-Human Edition은 인간이 만들었습니다. 그래서 버그가 있습니다. "모든 문제가 해결되었습니다" 같은 홀로그램은 띄우지 않겠습니다.
-
-- 블랙박스 QA에서 나온 문제를 차례로 고치고 있고, 고친 문제에는 회귀 테스트를 붙입니다. 아직 고치지 못한 문제도 있습니다.
-- 알려진 제한과 아직 지원하지 않는 기능은 [운영 가이드의 제한 사항](docs/guide.md#제한-사항)에, 릴리스마다 고친 것과 바뀐 것은 [CHANGELOG](CHANGELOG.md)에 적습니다.
-- 서버는 한 대로 돌도록 만들었습니다. 이중화나 여러 대로 늘리는 구성은 지원하지 않습니다.
+- 인스턴스 하나로 돌도록 만들었습니다. 이중화 · 수평 확장은 없습니다(Nexus OSS와 같습니다).
+- NuGet, APT, RubyGems, Conan, Conda, Composer는 아직 없습니다. 앞의 둘은 개발 중입니다.
+- Nexus REST API는 저장소 · 컴포넌트 · 자산 · 검색 · 상태 엔드포인트를 지원합니다. 사용자 · 역할 쓰기, 스크립트 API는 없습니다.
+- 알려진 제한은 [제한 사항](docs/guide.md#제한-사항), 릴리스마다 고친 것과 바뀐 것은 [CHANGELOG](CHANGELOG.md)에 있습니다.
 - 버그는 이슈로, 보안 문제는 [보안 정책](SECURITY.md)대로 비공개로 알려 주세요.
-
-## 자주 묻는 질문
-
-**정말 Pro 에디션이 없나요?**<br>
-없습니다. 만들 계획도 없습니다. 어느 날 Pro가 생긴다면, 그건 프로토스에게 동화된 Command Center입니다. 그때는 포크해서 다시 인간 편에 서 주세요.
-
-**왜 이름이 Command Center인가요?**<br>
-프로토스에게 본진이 있다면, 인간의 본진은 Command Center니까요. 같은 URL 규칙으로 다니기 때문에 클라이언트 입장에서는 본진만 갈아 끼우면 됩니다.
-
-**그럼 Community 에디션은요?**<br>
-기여해 주시는 분들 모두가 커뮤니티입니다. 에디션 이름으로 쓰기엔 아까운 단어라서 아껴 두었습니다.
-
-**Human Edition의 제약은 무엇인가요?**<br>
-인간이 만들었다는 것 하나입니다. 이슈와 PR로 함께 고쳐 주세요.
-
-**프로토스 본진에서 쓰던 데이터를 옮길 수 있나요?**<br>
-자동 이전 도구는 없습니다. URL이 호환되니 클라이언트 설정은 호스트만 바꾸면 되고, 패키지는 proxy 저장소가 처음 요청될 때 다시 가져옵니다.
-
-**업무용으로 써도 되나요?**<br>
-MIT 또는 Apache-2.0 중 원하는 쪽으로 쓰시면 됩니다. 상업적 사용도 됩니다. 다만 보증은 없습니다. 인간이니까요.
 
 ## 문서
 
-- [운영 가이드](docs/guide.md): 설치, Kubernetes(Helm), 프로덕션 배포, 설정 레퍼런스, 인증·권한, LDAP, blob store, 포맷별 클라이언트 설정, 백업과 업그레이드
-- [Helm 차트](deploy/helm/commandcenter)와 [Kubernetes 참조 매니페스트](deploy/kubernetes/commandcenter.yaml)
-- [변경 기록](CHANGELOG.md): 릴리스마다 고친 것과 바뀐 것
-- [기여 안내](CONTRIBUTING.md)와 [행동 강령](CODE_OF_CONDUCT.md)
-- [보안 정책](SECURITY.md): 취약점 신고 방법
-- [출처 표기](ATTRIBUTION.md): 함께 배포되는 서드파티 코드의 저자와 라이선스
+- [운영 가이드](docs/guide.md): 설치, Kubernetes, 프로덕션 배포, 설정 레퍼런스, 인증 · 권한, LDAP · OIDC, blob store, 포맷별 설정, 백업과 업그레이드, Nexus 이전과 호환 API
+- [Helm 차트](deploy/helm/commandcenter) · [Kubernetes 참조 매니페스트](deploy/kubernetes/commandcenter.yaml)
+- [CHANGELOG](CHANGELOG.md) · [기여 안내](CONTRIBUTING.md) · [행동 강령](CODE_OF_CONDUCT.md) · [보안 정책](SECURITY.md) · [출처 표기](ATTRIBUTION.md)
 
 ## 기여
 
-**SCV를 모집합니다.** 본진은 혼자 짓지 못합니다. 이슈 신고, 문서 수정, 버그 수정, 새 포맷 지원 모두 환영합니다. 미네랄은 드리지 못하지만, 커밋 기록에 이름은 영원히 남습니다.
-
-빌드와 테스트는 로컬 Go 없이 컨테이너로 돌립니다.
-
-```bash
-bash scripts/go.sh test ./...
-```
-
-```bash
-bash test/e2e.sh
-```
-
-`test/e2e.sh`는 실제 클라이언트(mvn, npm, pip, go, cargo)로 모든 포맷을 돌려 보는 스모크 테스트와 128 MiB 부하 테스트를 함께 실행합니다. 20분쯤 걸리니 커피를 한 잔 준비하세요. 커피는 Human Edition에 포함되어 있지 않습니다.
-
-이슈와 PR을 보내기 전에 [기여 안내](CONTRIBUTING.md)를 읽어 주세요. 코드 규칙과 PR에 기대하는 것을 적어 두었습니다.
+이슈, 문서 수정, 버그 수정, 새 포맷 모두 환영합니다. 개발 환경과 테스트 방법은 [기여 안내](CONTRIBUTING.md)와 [운영 가이드의 개발 절](docs/guide.md#개발)에 있습니다.
 
 ## 라이선스
 
-[MIT](LICENSE-MIT) 또는 [Apache-2.0](LICENSE-APACHE) 중 원하는 것을 고르세요. 필요한 고지는 [NOTICE](NOTICE)에, 함께 배포되는 서드파티 코드의 목록은 [ATTRIBUTION.md](ATTRIBUTION.md)에 있습니다.
-
-Copyright (c) 2026 the Command Center contributors.
-
-<sub>Command Center는 독립적인 오픈소스 프로젝트이며 어떤 상용 저장소 제품의 제작사와도 제휴하거나 후원 또는 보증을 받지 않았습니다. 다른 제품의 코드, 로고, 아이콘, 스타일시트를 포함하지 않습니다. Maven, npm, PyPI, Go, Cargo 등 각 이름은 해당 소유자의 상표일 수 있습니다.</sub>
-
-<sub>StarCraft, Protoss, Terran, Zerg, SCV, 파일런 등 스타크래프트 관련 명칭은 Blizzard Entertainment, Inc.의 상표이거나 저작물입니다. Command Center는 Blizzard와 무관하며 후원이나 보증을 받지 않았습니다. 이 문서는 패러디 목적의 비유로만 게임 속 종족과 건물을 언급하고, 게임의 이미지, 로고, 음성, 대사 원문을 포함하지 않습니다.</sub>
-
-<sub>Decepticons와 Transformers 관련 명칭은 Hasbro, Inc.의 상표입니다. Command Center는 Hasbro와 무관하며 후원이나 보증을 받지 않았습니다. 이 문서는 패러디 목적의 비유로만 그 이름을 언급하고, 관련 이미지나 로고를 포함하지 않습니다.</sub>
-
-<p align="center"><sub>Made by Terrans, for humans. 🧑‍🤝‍🧑</sub></p>
+MIT 또는 Apache-2.0 중 원하는 쪽으로 쓰시면 됩니다([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). 웹 UI의 IBM Plex 글꼴은 SIL Open Font License입니다.
