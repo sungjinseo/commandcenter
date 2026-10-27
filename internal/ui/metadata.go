@@ -303,24 +303,83 @@ func (u *UI) helmMetadata(ctx context.Context, rp *repo.Repository, name, versio
 }
 
 func (u *UI) pypiMetadata(ctx context.Context, rp *repo.Repository, name, version string, m *componentMetadata) (bool, error) {
-	// PyPI rows are per file (Version holds the file name); the server keeps
-	// no Requires-Dist, so only existence is answered.
-	pkgs, err := u.DB.ListPackages(ctx, rp.Name, pypi.Normalize(name))
+	// PyPI rows are per file (Version holds the file name). The core
+	// metadata of a file is its PEP 658 sidecar, <file>.metadata, which
+	// uploads store and older files get on their first request.
+	project := pypi.Normalize(name)
+	pkgs, err := u.DB.ListPackages(ctx, rp.Name, project)
 	if err != nil {
 		return false, err
 	}
+	found := false
 	for _, p := range pkgs {
-		if p.Version == version {
-			return true, nil
-		}
 		var a struct {
 			Version string `json:"version"`
 		}
-		if json.Unmarshal([]byte(p.Attrs), &a) == nil && a.Version == version {
-			return true, nil
+		if p.Version != version && !(json.Unmarshal([]byte(p.Attrs), &a) == nil && a.Version == version) {
+			continue
+		}
+		found = true
+		b, ok, err := u.readStored(ctx, rp, "packages/"+project+"/"+p.Version+".metadata")
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			continue
+		}
+		fillCoreMetadata(string(b), m)
+		m.Collected = true
+		break // one file's metadata describes the release
+	}
+	return found, nil
+}
+
+// fillCoreMetadata reads Python core metadata (RFC 822 headers up to the
+// first blank line): Summary, License, Home-page, Project-URL and
+// Requires-Dist. Extras markers are kept in the requirement as declared.
+func fillCoreMetadata(doc string, m *componentMetadata) {
+	head, _, _ := strings.Cut(doc, "\n\n")
+	var repoURL string
+	for _, line := range strings.Split(strings.ReplaceAll(head, "\r\n", "\n"), "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		k, v = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(v)
+		switch k {
+		case "summary":
+			m.Description = optStr(v)
+		case "license", "license-expression":
+			if m.License == nil || k == "license-expression" {
+				m.License = optStr(v)
+			}
+		case "home-page":
+			m.Homepage = optStr(v)
+		case "project-url":
+			label, url, ok := strings.Cut(v, ",")
+			if ok && repoURL == "" && strings.Contains(strings.ToLower(label), "source") || ok && strings.Contains(strings.ToLower(label), "repository") {
+				repoURL = strings.TrimSpace(url)
+			}
+			if m.Homepage == nil && ok && strings.Contains(strings.ToLower(label), "homepage") {
+				m.Homepage = optStr(strings.TrimSpace(url))
+			}
+		case "requires-dist":
+			name, rest := v, ""
+			if i := strings.IndexAny(v, " (;<>=!~["); i >= 0 {
+				name, rest = v[:i], strings.TrimSpace(v[i:])
+			}
+			scope := "runtime"
+			if strings.Contains(rest, "extra ==") {
+				scope = "optional"
+			}
+			if len(m.Dependencies) < 2000 {
+				m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: name, Requirement: rest, Optional: scope == "optional"})
+			}
 		}
 	}
-	return false, nil
+	if repoURL != "" {
+		m.RepositoryURL = optStr(repoURL)
+	}
 }
 
 func (u *UI) goMetadata(ctx context.Context, rp *repo.Repository, module, version string, m *componentMetadata) (bool, error) {

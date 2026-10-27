@@ -137,10 +137,18 @@ func TestComponentMetadata(t *testing.T) {
 		t.Fatalf("helm missing: %d", st)
 	}
 
-	// pypi stores nothing usable beyond existence
+	// pypi: the file's PEP 658 sidecar holds the core metadata; a file without one is "not collected"
 	pkg("pypi-hosted", "pypi", "meta-pkg", "meta_pkg-1.0.tar.gz", `{"filename":"meta_pkg-1.0.tar.gz","version":"1.0","sha256":"x"}`)
 	if st, m := get("admin", "pypi-hosted", "name=Meta.Pkg&version=1.0"); st != 200 || m.Collected {
+		t.Fatalf("pypi without a sidecar: %d %+v", st, m)
+	}
+	put("pypi-hosted", "packages/meta-pkg/meta_pkg-1.0.tar.gz.metadata", "Metadata-Version: 2.1\r\nName: meta-pkg\r\nVersion: 1.0\r\nSummary: A package\r\nLicense: MIT\r\nHome-page: https://example.org/mp\r\nProject-URL: Source, https://git.example.org/mp\r\nRequires-Dist: requests>=2.0\r\nRequires-Dist: pytest; extra == \"test\"\r\n\r\nLong description with Requires-Dist: nope\r\n")
+	st, m = get("admin", "pypi-hosted", "name=Meta.Pkg&version=1.0")
+	if st != 200 || !m.Collected || *m.Description != "A package" || *m.License != "MIT" || *m.Homepage != "https://example.org/mp" || *m.RepositoryURL != "https://git.example.org/mp" {
 		t.Fatalf("pypi: %d %+v", st, m)
+	}
+	if got := deps(m); got != "runtime::requests:>=2.0:req optional::pytest:; extra == \"test\":opt" {
+		t.Fatalf("pypi deps: %s", got)
 	}
 
 	// Read access is required. Signed-in users read every repository when
