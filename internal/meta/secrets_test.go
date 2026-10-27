@@ -3,6 +3,7 @@ package meta
 import (
 	"bytes"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -158,5 +159,71 @@ func TestSealRefusesSealedLookingPlainText(t *testing.T) {
 	err := db.SetSettingJSON(ctx, SettingSMTP, SMTP{Host: "h", Port: 25, Security: SMTPNone, From: "a@b.com", Password: sealedPrefix + "x"})
 	if err == nil {
 		t.Fatal("a plain secret starting with the sealed prefix was stored")
+	}
+}
+
+// Key rotation seals every stored secret with the new key, from the current
+// key or from plain text, in one transaction. A sealed secret the current key
+// does not open stops it before anything is written, also when it comes
+// after secrets that did open.
+func TestRotateSecretKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.db")
+	open := func(key byte) *DB { // key 0: none
+		t.Helper()
+		db, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		if key != 0 {
+			if err := db.SetSecretKey(bytes.Repeat([]byte{key}, 32)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return db
+	}
+	// smtp and p sealed with key 1, ldap in plain text, q sealed with key 3.
+	storeSecrets(t, open(0))
+	a := open(1)
+	if err := a.SetSettingJSON(ctx, SettingSMTP, SMTP{Host: "h", Port: 25, Security: SMTPNone, From: "a@b.com", Password: "smtp-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.UpdateRepository(ctx, config.Repository{Name: "p", Format: "maven", Type: "proxy", Remote: "https://r",
+		RemoteAuth: &config.RemoteAuth{Username: "u", Password: "remote-secret"}}); err != nil {
+		t.Fatal(err)
+	}
+	q := config.Repository{Name: "q", Format: "npm", Type: "proxy", Remote: "https://n", RemoteAuth: &config.RemoteAuth{BearerToken: "bearer-secret"}}
+	if err := open(3).UpdateRepository(ctx, q); err != nil {
+		t.Fatal(err)
+	}
+	newKey := bytes.Repeat([]byte{2}, 32)
+	before := rawSecrets(t, a)
+	for _, c := range []struct {
+		db   *DB
+		want string
+	}{{open(0), "no secret key is set"}, {open(3), "another key"}, {a, `repository "q"`}} {
+		if _, _, err := c.db.RotateSecretKey(ctx, newKey); err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), "-secret") {
+			t.Errorf("RotateSecretKey = %v, want %q", err, c.want)
+		}
+		if after := rawSecrets(t, a); !slices.Equal(after, before) {
+			t.Fatalf("a refused rotation wrote %v", after)
+		}
+	}
+
+	if err := a.UpdateRepository(ctx, q); err != nil { // q sealed with key 1 too
+		t.Fatal(err)
+	}
+	if resealed, plain, err := a.RotateSecretKey(ctx, newKey); err != nil || resealed != 3 || plain != 1 {
+		t.Fatalf("RotateSecretKey = %d, %d, %v; want 3 sealed (smtp, p, q) and 1 plain (ldap)", resealed, plain, err)
+	}
+	for _, raw := range rawSecrets(t, a) {
+		if strings.Contains(raw, "secret") || !strings.Contains(raw, sealedPrefix) {
+			t.Errorf("row not sealed: %s", raw)
+		}
+	}
+	checkSecretsRead(t, a) // a has the new key now
+	checkSecretsRead(t, open(2))
+	if _, err := open(1).LoadSettings(ctx); err == nil || !strings.Contains(err.Error(), "another key") {
+		t.Fatalf("the old key: %v", err)
 	}
 }

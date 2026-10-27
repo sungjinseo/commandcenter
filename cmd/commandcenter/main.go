@@ -56,6 +56,8 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return token(args[1:], stdout)
 	case "user":
 		return user(args[1:], stdin, stdout)
+	case "secret-key":
+		return secretKey(args[1:], stdout)
 	case "gc":
 		return gc(args[1:], stdout)
 	case "healthcheck":
@@ -64,7 +66,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		fmt.Fprintln(stdout, version)
 		return nil
 	}
-	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, gc, healthcheck, version)", args[0])
+	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, healthcheck, version)", args[0])
 }
 
 // pickConfigPath returns the config file to load. A -config given explicitly
@@ -290,5 +292,46 @@ func resetPassword(ctx context.Context, cfg *config.Config, name, pw string, adm
 		fmt.Fprintln(stdout, c)
 	}
 	fmt.Fprintln(stdout, "done; sign in as "+name+" (a running server applies the change within a few seconds)")
+	return nil
+}
+
+const rotateUsage = "usage: commandcenter secret-key rotate -config PATH -new-key-file FILE (stop the server first: it keeps " +
+	"the key it started with; the current key comes from COMMANDCENTER_SECRET_KEY or secretKeyFile, as for serve; " +
+	"then start the server with the new key)"
+
+// secretKey runs the secret-key subcommands; rotate seals the stored secrets
+// with a new key, offline like user reset-password.
+func secretKey(args []string, stdout io.Writer) error {
+	if len(args) == 0 || args[0] != "rotate" {
+		return errors.New(rotateUsage)
+	}
+	fs := flag.NewFlagSet("secret-key rotate", flag.ContinueOnError)
+	path := fs.String("config", defaultConfig, "config file")
+	newKeyFile := fs.String("new-key-file", "", "file holding the new key, 32 random bytes in base64 (required; "+
+		"stop the server first and start it with this key afterwards)")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if *newKeyFile == "" {
+		return errors.New("-new-key-file is required; " + rotateUsage)
+	}
+	explicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "config" {
+			explicit = true
+		}
+	})
+	p := pickConfigPath(*path, explicit, legacyConfig, func(msg string) { fmt.Fprintln(os.Stderr, msg) })
+	cfg, err := config.Load(p)
+	if err != nil {
+		return err
+	}
+	resealed, plain, err := app.RotateSecretKey(cfg, *newKeyFile)
+	if err != nil {
+		return err
+	}
+	// Counts only: never a key or a secret.
+	fmt.Fprintf(stdout, "re-encrypted %d stored secrets with the new key and encrypted %d that were plain text\n", resealed, plain)
+	fmt.Fprintln(stdout, "done; start the server with the new key in COMMANDCENTER_SECRET_KEY or secretKeyFile")
 	return nil
 }

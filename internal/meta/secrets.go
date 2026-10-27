@@ -36,19 +36,27 @@ type sealer struct{ aead cipher.AEAD }
 // SetSecretKey makes d seal secrets with key (32 bytes) from now on and open
 // the sealed ones. Call it before d is used.
 func (d *DB) SetSecretKey(key []byte) error {
+	box, err := newSealer(key)
+	if err != nil {
+		return err
+	}
+	d.box = box
+	return nil
+}
+
+func newSealer(key []byte) (sealer, error) {
 	if len(key) != 32 {
-		return errors.New("the secret key must be 32 bytes")
+		return sealer{}, errors.New("the secret key must be 32 bytes")
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return err
+		return sealer{}, err
 	}
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		return err
+		return sealer{}, err
 	}
-	d.box = sealer{aead}
-	return nil
+	return sealer{aead}, nil
 }
 
 // HasSecretKey reports whether SetSecretKey gave d a key.
@@ -173,19 +181,62 @@ func (d *DB) SealSecrets(ctx context.Context) (int, error) {
 	if d.box.aead == nil {
 		return 0, errors.New("no secret key is set")
 	}
-	// seal seals *v unless it is empty or sealed; a sealed one must open.
-	seal := func(v *string, changed *bool) error {
+	return d.rewriteSecrets(ctx, func(v string) (string, error) {
+		if strings.HasPrefix(v, sealedPrefix) { // it must open
+			_, err := d.box.open(v)
+			return v, err
+		}
+		return d.box.seal(v)
+	})
+}
+
+// RotateSecretKey seals every stored secret with newKey (32 bytes) instead
+// of d's key, and the ones still in plain text too, in one transaction:
+// nothing is written when a sealed one does not open with d's key (or d has
+// none). From then on d uses newKey. It returns how many sealed secrets it
+// sealed again and how many plain-text ones it sealed. Nothing else may use
+// the database meanwhile: a server goes on sealing with the key it has.
+func (d *DB) RotateSecretKey(ctx context.Context, newKey []byte) (resealed, plain int, err error) {
+	to, err := newSealer(newKey)
+	if err != nil {
+		return 0, 0, err
+	}
+	_, err = d.rewriteSecrets(ctx, func(v string) (string, error) {
+		if strings.HasPrefix(v, sealedPrefix) {
+			resealed++
+		} else {
+			plain++
+		}
+		p, err := d.box.open(v)
+		if err != nil {
+			return v, err
+		}
+		return to.seal(p)
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+	d.box = to
+	return resealed, plain, nil
+}
+
+// rewriteSecrets passes every stored secret that is not empty through fn and
+// writes back the rows in which fn changed one, in one transaction: nothing
+// is written when fn fails. It returns how many settings and repository rows
+// it rewrote.
+func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)) (int, error) {
+	// rewrite passes *v through fn unless it is empty, and notes a change.
+	rewrite := func(v *string, changed *bool) error {
 		if *v == "" {
 			return nil
 		}
-		if strings.HasPrefix(*v, sealedPrefix) {
-			_, err := d.box.open(*v)
+		w, err := fn(*v)
+		if err != nil {
 			return err
 		}
-		*changed = true
-		var err error
-		*v, err = d.box.seal(*v)
-		return err
+		*changed = *changed || w != *v
+		*v = w
+		return nil
 	}
 	n := 0
 	err := d.Tx(ctx, func(tx *Tx) error {
@@ -206,7 +257,7 @@ func (d *DB) SealSecrets(ctx context.Context) (int, error) {
 			if !found {
 				continue
 			}
-			if err := seal(st.secret, &changed); err != nil {
+			if err := rewrite(st.secret, &changed); err != nil {
 				return fmt.Errorf("setting %q: %w", st.key, err)
 			}
 			if !changed {
@@ -248,10 +299,10 @@ func (d *DB) SealSecrets(ctx context.Context) (int, error) {
 		}
 		for _, def := range defs {
 			name, changed := def.Name, false
-			if err := seal(&def.RemoteAuth.Password, &changed); err != nil {
+			if err := rewrite(&def.RemoteAuth.Password, &changed); err != nil {
 				return fmt.Errorf("repository %q: remoteAuth password: %w", name, err)
 			}
-			if err := seal(&def.RemoteAuth.BearerToken, &changed); err != nil {
+			if err := rewrite(&def.RemoteAuth.BearerToken, &changed); err != nil {
 				return fmt.Errorf("repository %q: remoteAuth bearerToken: %w", name, err)
 			}
 			if !changed {

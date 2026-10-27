@@ -114,33 +114,17 @@ const secretKeyEnv = "COMMANDCENTER_SECRET_KEY"
 // secrets still stored in plain text. Without a key secrets stay plain text,
 // as before, and one warning says so. The key is never logged.
 func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
-	val, src := os.Getenv(secretKeyEnv), secretKeyEnv
-	switch {
-	case val != "" && cfg.SecretKeyFile != "":
-		return fmt.Errorf("set %s or secretKeyFile, not both", secretKeyEnv)
-	case cfg.SecretKeyFile != "":
-		b, err := os.ReadFile(cfg.SecretKeyFile)
-		if err != nil {
-			// Without the path: it is the key itself when that was given
-			// here by mistake instead of the file holding it.
-			var pe *os.PathError
-			if errors.As(err, &pe) {
-				err = pe.Err
-			}
-			return fmt.Errorf("secretKeyFile: cannot read the file it names: %w", err)
-		}
-		val, src = string(b), "secretKeyFile "+cfg.SecretKeyFile
-	case val == "":
+	key, err := secretKey(cfg)
+	if err != nil {
+		return err
+	}
+	if key == nil {
 		log.Warn("no secret key is configured: the SMTP password, the LDAP bind password and proxy remoteAuth " +
 			"credentials are stored in meta.db in plain text; set " + secretKeyEnv + " or secretKeyFile to encrypt them")
 		return nil
 	}
-	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(val))
-	if err == nil {
-		err = db.SetSecretKey(key)
-	}
-	if err != nil {
-		return fmt.Errorf("%s must hold 32 random bytes in base64 (make them with: head -c 32 /dev/urandom | base64)", src)
+	if err := db.SetSecretKey(key); err != nil {
+		return err
 	}
 	n, err := db.SealSecrets(context.Background())
 	if err != nil {
@@ -150,6 +134,77 @@ func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
 		log.Info("encrypted the stored secrets that were plain text", "rows", n)
 	}
 	return nil
+}
+
+// secretKey returns the key in COMMANDCENTER_SECRET_KEY or in the file
+// secretKeyFile names, or nil when neither is set.
+func secretKey(cfg *config.Config) ([]byte, error) {
+	val := os.Getenv(secretKeyEnv)
+	switch {
+	case val != "" && cfg.SecretKeyFile != "":
+		return nil, fmt.Errorf("set %s or secretKeyFile, not both", secretKeyEnv)
+	case cfg.SecretKeyFile != "":
+		return readSecretKey(cfg.SecretKeyFile, "secretKeyFile")
+	case val == "":
+		return nil, nil
+	}
+	return decodeSecretKey(val, secretKeyEnv)
+}
+
+// readSecretKey reads the key in the file at path, which the setting or flag
+// name gives.
+func readSecretKey(path, name string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		// Without the path: it is the key itself when that was given
+		// here by mistake instead of the file holding it.
+		var pe *os.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return nil, fmt.Errorf("%s: cannot read the file it names: %w", name, err)
+	}
+	return decodeSecretKey(string(b), name+" "+path)
+}
+
+// decodeSecretKey decodes the key val holds; src says where val is from.
+func decodeSecretKey(val, src string) ([]byte, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(val))
+	if err != nil || len(key) != 32 {
+		return nil, fmt.Errorf("%s must hold 32 random bytes in base64 (make them with: head -c 32 /dev/urandom | base64)", src)
+	}
+	return key, nil
+}
+
+// RotateSecretKey seals the stored secrets with the key in newKeyFile (the
+// -new-key-file of "secret-key rotate") instead of the configured one, as
+// meta.DB.RotateSecretKey does, and returns how many had the configured key
+// and how many were plain text. The server must be stopped meanwhile and
+// started with the new key afterwards: it keeps the key it started with.
+func RotateSecretKey(cfg *config.Config, newKeyFile string) (resealed, plain int, err error) {
+	newKey, err := readSecretKey(newKeyFile, "-new-key-file")
+	if err != nil {
+		return 0, 0, err
+	}
+	key, err := secretKey(cfg)
+	if err != nil {
+		return 0, 0, err
+	}
+	db, err := meta.Open(filepath.Join(cfg.DataDir, "meta.db"))
+	if err != nil {
+		return 0, 0, fmt.Errorf("open metadata db: %w", err)
+	}
+	defer db.Close()
+	if key != nil {
+		if err := db.SetSecretKey(key); err != nil {
+			return 0, 0, err
+		}
+	}
+	resealed, plain, err = db.RotateSecretKey(context.Background(), newKey)
+	if err != nil {
+		return 0, 0, fmt.Errorf("stored secrets (nothing was changed): %w", err)
+	}
+	return resealed, plain, nil
 }
 
 // openBlobStores seeds the default blob store (its tree stays at
