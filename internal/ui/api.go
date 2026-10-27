@@ -519,6 +519,11 @@ type versionJSON struct {
 	Version string `json:"version"`
 	Created string `json:"created"`
 	Yanked  bool   `json:"yanked"`
+	// docker only: the manifest's media type, the bytes its layers add up
+	// to, and the platforms an index lists.
+	MediaType string   `json:"mediaType,omitempty"`
+	Size      int64    `json:"size,omitempty"`
+	Platforms []string `json:"platforms,omitempty"`
 }
 
 // packageVersions lists a package's versions, newest first, at most
@@ -554,6 +559,9 @@ func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 	versions := make([]versionJSON, 0, len(list))
 	for _, v := range list {
 		versions = append(versions, versionJSON{Version: v.Version, Created: rfc3339(v.Created), Yanked: v.Yanked})
+	}
+	if rp.Format == "docker" {
+		u.dockerVersionDetails(r.Context(), rp.Name, name, versions)
 	}
 	tags := map[string]string{}
 	if rp.Format == "npm" || rp.Format == "docker" {
@@ -624,4 +632,28 @@ func (u *UI) search(w http.ResponseWriter, r *http.Request) {
 		out = append(out, hitJSON{Repo: h.Repo, Format: formats[h.Repo], Path: h.Path})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": out, "truncated": truncated})
+}
+
+// dockerVersionDetails fills the media type, layer bytes and platforms of
+// docker manifests from their stored attrs. Failures leave the fields
+// empty: the listing is more useful than an error here.
+func (u *UI) dockerVersionDetails(ctx context.Context, repoName, image string, versions []versionJSON) {
+	pkgs, err := u.DB.ListPackages(ctx, repoName, image)
+	if err != nil {
+		return
+	}
+	byDigest := make(map[string]string, len(pkgs))
+	for _, p := range pkgs {
+		byDigest[p.Version] = p.Attrs
+	}
+	for i := range versions {
+		var a struct {
+			MediaType  string   `json:"mediaType"`
+			LayerBytes int64    `json:"layerBytes"`
+			Platforms  []string `json:"platforms"`
+		}
+		if json.Unmarshal([]byte(byDigest[versions[i].Version]), &a) == nil {
+			versions[i].MediaType, versions[i].Size, versions[i].Platforms = a.MediaType, a.LayerBytes, a.Platforms
+		}
+	}
 }

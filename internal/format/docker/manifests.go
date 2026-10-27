@@ -33,15 +33,25 @@ type descriptor struct {
 	MediaType string `json:"mediaType"`
 	Digest    string `json:"digest"`
 	Size      int64  `json:"size"`
+	Platform  *struct {
+		OS           string `json:"os"`
+		Architecture string `json:"architecture"`
+		Variant      string `json:"variant"`
+	} `json:"platform,omitempty"`
 }
 
 // manifestAttrs is a manifest row's Attrs: its media type, size and the
 // digests it references, so a delete can tell which blobs became garbage.
 type manifestAttrs struct {
 	MediaType string   `json:"mediaType"`
-	Size      int64    `json:"size"`
+	Size      int64    `json:"size"`                // of the manifest document
 	Blobs     []string `json:"blobs,omitempty"`     // config and layers
 	Manifests []string `json:"manifests,omitempty"` // an index's platform manifests
+	// For the web UI: the bytes the image's layers add up to (0 for an
+	// index, whose children carry their own) and the platforms, os/arch
+	// [/variant], an index lists or a manifest's config implies.
+	LayerBytes int64    `json:"layerBytes,omitempty"`
+	Platforms  []string `json:"platforms,omitempty"`
 }
 
 // parseManifest validates body as a schema2 manifest or list, or an OCI
@@ -84,12 +94,22 @@ func parseManifest(body []byte, contentType string) (manifestAttrs, error) {
 			}
 			m.Blobs = append(m.Blobs, d.Digest)
 		}
+		for _, d := range doc.Layers {
+			m.LayerBytes += d.Size
+		}
 	case mtManifestList, mtOCIIndex:
 		for _, d := range doc.Manifests {
 			if !ValidDigest(d.Digest) {
 				return manifestAttrs{}, invalid("invalid digest %q in manifest list", d.Digest)
 			}
 			m.Manifests = append(m.Manifests, d.Digest)
+			if p := d.Platform; p != nil && p.OS != "" && p.Architecture != "" {
+				s := p.OS + "/" + p.Architecture
+				if p.Variant != "" {
+					s += "/" + p.Variant
+				}
+				m.Platforms = append(m.Platforms, s)
+			}
 		}
 	default:
 		return manifestAttrs{}, Err(http.StatusUnsupportedMediaType, CodeUnsupported, "unsupported manifest media type "+mt)
