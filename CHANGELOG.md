@@ -10,6 +10,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.1.1] - 2026-10-27
+
+The first published release. The `v0.1.0` tag's release build failed in CI on a test that measured
+allocations under the race detector; 0.1.1 is the same software with that test fixed.
+
 ## [0.1.0] - 2026-10-27
 
 The first release: Maven, npm, PyPI, Go, Cargo, Docker, raw and Helm repositories (hosted, proxy,
