@@ -438,7 +438,7 @@ function instanceHost() {
 
 // ---- sidebar (Decision 6: real features only) ---------------------------------
 
-// Share the favicon's package-and-hub mark across both brand areas.
+// Share the favicon's low armored dome and command tower across both brand areas.
 function brandMark() {
   return h("img", { src: "/ui/icon.svg", alt: "", "aria-hidden": "true", width: 24, height: 24 });
 }

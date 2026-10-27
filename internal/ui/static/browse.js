@@ -355,7 +355,8 @@ async function versionList(r, c) {
     return { entries: d.entries || [], truncated: !!d.truncated };
   };
   switch (r.format) {
-    case "docker": return pkgVersions(c.name);
+    case "docker":
+    case "helm": return pkgVersions(c.name);
     case "maven": {
       const dir = (c.group ? c.group.split(".").join("/") + "/" : "") + c.name + "/";
       const d = await listDir(dir);
@@ -555,6 +556,7 @@ function setupSnippets(r) {
   const cred = "<server><id>commandcenter</id><username>ci</username><password>" + t("setup.password") + "</password></server>";
   switch (r.format) {
     case "docker": return dockerSnippets(r);
+    case "helm": return helmSnippets(r);
     case "maven": {
       // The mirror alone leaves Maven's "central" with snapshots off, so no
       // SNAPSHOT dependency is ever requested; the profile turns them on for
@@ -688,6 +690,68 @@ async function viewDocker(view, r, path, head, isLive) {
   }
 }
 
+// Helm uses the existing package and version APIs; Chart.yaml fields may
+// arrive on a version or through the component metadata endpoint.
+const shellArg = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
+function helmSnippets(r, name, version) {
+  return [["helm repo add", "helm repo add commandcenter " + shellArg(r.url) + "\nhelm repo update"],
+    ["helm install", "helm install my-release " + (name ? shellArg("commandcenter/" + name) : "commandcenter/<chart>") + (version ? " --version " + shellArg(version) : "")]];
+}
+function helmUsage(r, name, version) {
+  return helmSnippets(r, name, version).map(([title, text]) => {
+    const pre = h("pre", { class: "code" }, text);
+    return h("div", { class: "snippet" }, h("div", { class: "codebar" }, h("span", null, title), copyButton(text, pre, t("usage.copy"))), pre);
+  });
+}
+async function viewHelm(view, r, path, head, isLive) {
+  const out = h("div", null, loading());
+  const colon = path.lastIndexOf(":");
+  const name = colon < 0 ? path : path.slice(0, colon), version = colon < 0 ? "" : path.slice(colon + 1);
+  const link = (n, v) => browseLink(r.name, n + (v ? ":" + v : ""));
+  const crumbs = h("nav", { class: "crumbs", "aria-label": t("crumb.aria") },
+    h("a", { href: browseLink(r.name) }, t("helm.charts")),
+    name ? [h("span", { class: "sep" }, "/"), h("a", { href: link(name) }, name)] : null,
+    version ? [h("span", { class: "sep" }, "/"), h("span", { "aria-current": "page" }, version)] : null);
+  put(view, head, crumbs, out);
+  try {
+    let nodes;
+    if (!name) {
+      const d = await api(apiRepo(r.name, "/packages"));
+      const names = [...new Set((d.packages || []).map((p) => typeof p === "string" ? p : p && p.name).filter(Boolean))];
+      nodes = [card(t("helm.charts"), null, tbl([t("col.name")], names.map((n) =>
+        h("tr", null, h("td", null, h("a", { href: link(n) }, n)))), t("helm.noCharts"))),
+        d.truncated ? truncNote(t("helm.truncated")) : null];
+    } else {
+      const d = await versionList(r, { name });
+      if (version) {
+        const v = d.list.find((v) => v.version === version);
+        let meta = v || {};
+        if (meta.description == null || meta.appVersion == null) {
+          try {
+            const m = await api(apiRepo(r.name, "/components/metadata?" + new URLSearchParams({ name, version })));
+            meta = Object.assign({}, meta, Object.fromEntries(Object.entries(m).filter(([, value]) => value != null)));
+          } catch (e) { if (e.status !== 400 && e.status !== 404) throw e; }
+        }
+        nodes = [card(name, version, [
+          kv(t("col.version"), version), kv(t("meta.description"), meta.description), kv(t("helm.appVersion"), meta.appVersion),
+          v ? null : h("p", { class: "hint" }, t("helm.unavailable"))])];
+      } else {
+        nodes = [card(t("helm.versions"), name, tbl([t("col.version"), t("meta.description"), t("helm.appVersion")],
+          d.list.map((v) => h("tr", null,
+            h("td", null, h("a", { href: link(name, v.version) }, v.version)),
+            h("td", null, v.description || "—"), h("td", null, v.appVersion || "—"))), t("helm.noVersions"))),
+          d.truncated ? truncNote(t("helm.truncated")) : null];
+      }
+    }
+    if (isLive()) put(out, nodes, card(t("usage.title"), null, helmUsage(r, name, version)));
+  } catch (e) {
+    if (!isLive()) return;
+    put(out, h("div", { class: "empty" }, e.status === 400 || e.status === 404 ? t("helm.unavailable") : t("detail.loadFailed")),
+      card(t("usage.title"), null, helmUsage(r, name, version)));
+    if (e.status !== 400 && e.status !== 404) handleError(e);
+  }
+}
+
 // ---- tree browser ------------------------------------------------------------------
 
 // viewTree: #browse/browse:<repo>[:<path>] — a lazy tree (left) and the
@@ -717,6 +781,11 @@ export async function viewTree(view, name, path) {
         : h("div", { class: "empty" }, t("tree.noMembers"))),
       card(t("repo.info"), null, [kv(t("col.format"), fmtBadge(fmt)), kv(t("col.type"), typeBadge(r.type)), kv("URL", copyLine(r.url, t("repos.copyUrlFor", { name: r.name })))])),
     setupCard(r));
+    return;
+  }
+
+  if (fmt === "helm") {
+    await viewHelm(view, r, path || "", head, () => alive);
     return;
   }
 

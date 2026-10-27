@@ -41,9 +41,9 @@ function stepper() {
 
 // helpAside is the concept's form help, with the chosen format highlighted.
 function helpAside(format) {
-  const text = { maven: t("up.helpMaven"), npm: t("up.helpNpm"), pypi: t("up.helpPypi") };
+  const text = { maven: t("up.helpMaven"), npm: t("up.helpNpm"), pypi: t("up.helpPypi"), raw: t("up.helpRaw"), helm: t("up.helpHelm") };
   return h("aside", { class: "form-help" }, h("h3", null, t("up.helpTitle")),
-    ["maven", "npm", "pypi"].map((f) => h("p", { class: f === format ? "on" : null }, h("b", null, FORMAT_NAMES[f]), h("br"), text[f])),
+    ["maven", "npm", "pypi", "raw", "helm"].map((f) => h("p", { class: f === format ? "on" : null }, h("b", null, FORMAT_NAMES[f]), h("br"), text[f])),
     h("p", null, t("up.helpClients")));
 }
 
@@ -424,9 +424,50 @@ function pypiForm(r, ui) {
   };
 }
 
+// ---- Raw ------------------------------------------------------------------------
+
+function rawForm(r, ui) {
+  const file = fileInput("");
+  const path = input({ placeholder: "releases/app.zip", maxlength: 2048 });
+  const check1 = () => file.files[0] ? [] : [t("up.e.noFile")];
+  function plan() {
+    const errs = check1(), target = path.value.trim(), f = file.files[0];
+    if (!target || /[\\\x00-\x1f\x7f]/.test(target) || target.split("/").some((s) => !s || s === "." || s === "..")) errs.push(t("up.e.rawPath"));
+    if (errs.length) return { errs };
+    return {
+      comp: target,
+      steps: [{ label: f.name + " → " + target, go: (p) => ui.send("PUT", repoBase(r) + encPath(target), f, f.type || "application/octet-stream", p) }],
+      link: browseLink(r.name, target),
+    };
+  }
+  return { files: [field(t("up.file"), file, null, true)],
+    meta: [field(t("up.rawPath"), path, t("up.rawPathHelp"), true)], check1, plan };
+}
+
 // ---- the stepper ----------------------------------------------------------------
 
-const FORMS = { maven: mavenForm, npm: npmForm, pypi: pypiForm };
+function helmForm(r, ui) {
+  const file = fileInput(".tgz");
+  const check1 = () => {
+    const f = file.files[0];
+    if (!f) return [t("up.e.noFile")];
+    return /^[^/\\\x00-\x1f\x7f]+-[0-9][^/\\\x00-\x1f\x7f]*\.tgz$/.test(f.name) ? [] : [t("up.e.helmFile")];
+  };
+  function plan() {
+    const errs = check1();
+    if (errs.length) return { errs };
+    const f = file.files[0];
+    return {
+      comp: f.name,
+      steps: [{ label: f.name, go: (p) => ui.send("PUT", repoBase(r) + enc(f.name), f, "application/gzip", p) }],
+      link: browseLink(r.name),
+    };
+  }
+  return { files: [field(t("up.file"), file, t("up.helpHelm"), true)],
+    meta: [h("p", { class: "hint" }, t("up.helmMetadata"))], check1, plan };
+}
+
+const FORMS = { maven: mavenForm, npm: npmForm, pypi: pypiForm, raw: rawForm, helm: helmForm };
 
 function why(r) {
   if (r.type !== "hosted") return t("up.whyHosted");

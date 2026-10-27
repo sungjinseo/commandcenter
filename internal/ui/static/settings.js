@@ -25,6 +25,9 @@ const storeLink = (name) => "#admin/repository/blobstores" + (name ? ":" + enc(n
 const known = (n) => typeof n === "number" && n > 0;
 const pctOf = (used, total) => (known(total) ? (Number(used) / total) * 100 : 0);
 
+const storeType = (s) => s.type === "s3" ? "S3" : t("blob.file");
+const storeLocation = (s) => s.type === "s3" ? "s3://" + ((s.s3 || {}).bucket || "") + "/" + ((s.s3 || {}).prefix || "") : s.path;
+
 // ---- blob stores -----------------------------------------------------------------
 
 export async function viewBlobStores(view, name) {
@@ -39,40 +42,73 @@ export async function viewBlobStores(view, name) {
     fs.ok,
     list.length ? h("div", { class: "equal" }, list.map((s) => {
       const p = pctOf(s.usedBytes, s.fsTotal);
-      return card(s.name, t("blob.cardSub", { n: fmtNum(s.repoCount || 0) }), [
+      return card(s.name, storeType(s) + " · " + t("blob.repoCount", { n: fmtNum(s.repoCount || 0) }), [
         h("div", { class: "stat-value" }, known(s.fsTotal) ? fmtBytes(s.usedBytes || 0) + " / " + fmtBytes(s.fsTotal) : fmtBytes(s.usedBytes || 0),
           known(s.fsTotal) ? null : h("small", null, t("blob.capUnknown"))),
         known(s.fsTotal) ? bar(p, p > 70 ? "amber" : null) : null,
         kv(t("blob.count"), fmtNum(s.blobCount || 0)),
-        kv(t("blob.path"), h("span", { class: "mono" }, s.path)),
+        kv(t("blob.path"), h("span", { class: "mono" }, storeLocation(s))),
       ], h("a", { class: "btn small", href: storeLink(s.name) }, t("common.details")));
     })) : notFound(t("blob.none")),
     notice(t("blob.note")));
 }
 
 function storeCreate(view) {
+  const isLive = alive();
   const back = h("a", { class: "btn", href: storeLink() }, t("blob.back"));
   const nameIn = textIn("", { required: true, maxlength: 64 });
   const pathIn = textIn("", { class: "mono", placeholder: "/data/blobstores/archive" });
+  const type = sel([["file", t("blob.file")], ["s3", "S3"]], "file");
+  const bucket = textIn("", { required: true }), prefix = textIn(""), region = textIn(""), endpoint = textIn("", { type: "url", placeholder: "https://s3.example.com" });
+  const accessKey = textIn("", { autocomplete: "off" });
+  const secretKey = h("input", { type: "password", autocomplete: "new-password" });
+  const pathStyle = h("input", { type: "checkbox" });
+  const sse = sel([["", t("blob.sseDefault")], ["AES256", "AES256"], ["aws:kms", "aws:kms"]], "");
+  const fileFields = fields(field(t("blob.path"), pathIn, t("blob.pathHelp"), { full: true }));
+  const s3Fields = fields(field(t("blob.bucket"), bucket, null, { req: true }), field(t("blob.prefix"), prefix),
+    field(t("blob.region"), region), field(t("blob.endpoint"), endpoint),
+    field(t("blob.accessKey"), accessKey), field(t("blob.secretKey"), secretKey, t("blob.secretHelp")),
+    field(t("blob.pathStyle"), pathStyle), field(t("blob.sse"), sse));
+  const syncType = () => {
+    fileFields.hidden = type.value !== "file";
+    s3Fields.hidden = type.value !== "s3";
+    pathIn.disabled = type.value !== "file";
+    for (const el of s3Fields.querySelectorAll("input, select")) el.disabled = type.value !== "s3";
+    if (type.value !== "s3") secretKey.value = "";
+  };
+  type.addEventListener("change", syncType);
+  syncType();
   const save = h("button", { type: "submit", class: "btn primary" }, t("blob.createBtn"));
   const form = h("form", { novalidate: true });
   const fs = formState(form);
   put(form, fs.err,
-    fields(field(t("blob.name"), nameIn, t("blob.nameHelp"), { req: true, full: true }), field(t("blob.path"), pathIn, t("blob.pathHelp"), { full: true })),
+    fields(field(t("blob.name"), nameIn, t("blob.nameHelp"), { req: true }), field(t("blob.type"), type)), fileFields, s3Fields,
     h("div", { class: "actions end" }, back, save));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
+    if (save.disabled) return;
     fs.clear();
-    const body = { name: nameIn.value.trim(), path: pathIn.value.trim() };
+    const body = { name: nameIn.value.trim() };
     if (!body.name) { fs.show([t("blob.e.name")]); return; }
+    if (type.value === "s3") {
+      if (!bucket.value.trim()) { fs.show([t("blob.e.bucket")]); return; }
+      body.type = "s3";
+      body.s3 = { bucket: bucket.value.trim(), prefix: prefix.value.trim(), region: region.value.trim(), endpoint: endpoint.value.trim(),
+        pathStyle: pathStyle.checked, accessKeyId: accessKey.value.trim(), secretAccessKey: secretKey.value, sse: sse.value };
+    } else body.path = pathIn.value.trim(); // retain compatibility with file-only servers
+    secretKey.value = "";
     save.disabled = true;
     try {
       const out = await api("blobstores", { method: "POST", body });
-      fs.done(storeLink(out.name), t("blob.created"));
+      if (isLive()) fs.done(storeLink(out.name), t("blob.created"));
     } catch (e) {
       save.disabled = false;
+      if (!isLive()) return;
       if (e.status === 401 || e.status === 403) { handleError(e); return; }
-      fs.show(errList(e));
+      const secret = body.s3 && body.s3.secretAccessKey;
+      fs.show(errList(e).map((msg) => secret ? String(msg).split(secret).join("••••") : msg));
+    } finally {
+      if (body.s3) delete body.s3.secretAccessKey;
     }
   });
   put(view, pageHead(t("blob.createTitle"), sub(t("blob.createSub")), acts(back), { eyebrow: t("blob.eyebrow") }),
@@ -124,8 +160,16 @@ async function storeDetail(view, name) {
   const settings = card(t("blob.settings"), t("blob.settingsSub"), [
     err,
     kv(t("blob.name"), s.name),
-    kv(t("blob.type"), t("blob.file")),
-    kv(t("blob.path"), h("span", { class: "mono" }, s.path)),
+    kv(t("blob.type"), storeType(s)),
+    kv(t("blob.path"), h("span", { class: "mono" }, storeLocation(s))),
+    s.type === "s3" ? [
+      kv(t("blob.bucket"), (s.s3 || {}).bucket), kv(t("blob.prefix"), (s.s3 || {}).prefix),
+      kv(t("blob.region"), (s.s3 || {}).region), kv(t("blob.endpoint"), (s.s3 || {}).endpoint),
+      kv(t("blob.pathStyle"), String(!!(s.s3 || {}).pathStyle)), kv(t("blob.sse"), (s.s3 || {}).sse),
+      kv(t("blob.accessKey"), (s.s3 || {}).accessKeyId || (s.s3 || {}).accessKey),
+      kv(t("blob.secretKey"), typeof ((s.s3 || {}).secretSet ?? s.secretSet) === "boolean"
+        ? (((s.s3 || {}).secretSet ?? s.secretSet) ? t("blob.secretSet") : t("blob.secretUnset")) : dash),
+    ] : null,
     h("p", { class: "hint" }, t("blob.pathFixed")),
     s.warning ? notice(t("blob.outside"), "amber") : null]);
   const usage = card(t("blob.usage"), t("blob.usageSub"), [

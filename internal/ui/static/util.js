@@ -152,12 +152,12 @@ export function fmtUptime(sec) {
   return t("time.ms", { m: mm, s: sec % 60 });
 }
 
-export const FORMATS = ["maven", "npm", "pypi", "go", "cargo", "docker"];
+export const FORMATS = ["maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm"];
 const TYPES = { hosted: "hosted", proxy: "proxy", group: "group" };
 export const fmtBadge = (f) => h("span", { class: "badge" + (FORMATS.includes(f) ? " f-" + f : "") }, f);
 export const typeBadge = (ty) => h("span", { class: "badge" + (TYPES[ty] ? " t-" + ty : "") }, ty);
-export const FORMAT_NAMES = { maven: "Maven", npm: "npm", pypi: "PyPI", go: "Go", cargo: "Cargo", docker: "Docker" };
-const TILES = { maven: "m", npm: "n", pypi: "Py", go: "Go", cargo: "Rs", docker: "D" };
+export const FORMAT_NAMES = { maven: "Maven", npm: "npm", pypi: "PyPI", go: "Go", cargo: "Cargo", docker: "Docker", raw: "Raw", helm: "Helm" };
+const TILES = { maven: "m", npm: "n", pypi: "Py", go: "Go", cargo: "Rs", docker: "D", raw: "R", helm: "H" };
 // fmtTile is the concept's coloured format tile.
 export const fmtTile = (f) => h("span", { class: "format" + (FORMATS.includes(f) ? " " + f : ""), "aria-hidden": "true" },
   FORMATS.includes(f) ? TILES[f] : String(f || "?").slice(0, 1));
@@ -225,7 +225,7 @@ export const componentLink = (c, from) => {
   return "#browse/component:" + enc(c.repo) + "?" + q;
 };
 // Upload (plan 9 Decision 8): hosted maven, npm and pypi repositories the user can write.
-export const canUpload = (r) => r.type === "hosted" && ["maven", "npm", "pypi"].includes(r.format) && !!r.canWrite;
+export const canUpload = (r) => r.type === "hosted" && ["maven", "npm", "pypi", "raw", "helm"].includes(r.format) && !!r.canWrite;
 export const uploadLink = (repo) => "#browse/upload" + (repo ? "/" + enc(repo) : "");
 // repoBase is the same-origin path of a repository: baseURL may name another
 // host than the browser uses, and the session cookie needs the same origin.

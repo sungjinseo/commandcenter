@@ -18,7 +18,7 @@ const tk = (base, k) => t(base + "." + k);
 const createLink = (recipe) => adminRepoLink("create") + (recipe ? ":" + encodeURIComponent(recipe) : "");
 
 // Recipe names: "maven2" is our "maven" format.
-const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"]];
+const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"]];
 const TYPES = ["hosted", "proxy", "group"];
 const RECIPES = RECIPE_FORMATS.flatMap(([label, format]) => TYPES.map((type) => ({ id: label + "-" + type, format, type })));
 const recipeOf = (format, type) => RECIPES.find((r) => r.format === format && r.type === type);
@@ -32,7 +32,7 @@ const DEPLOY = [["allow", "rf.deployAllow"], ["allow_once", "rf.deployDisable"],
 const VERSION = [["release", "Release"], ["snapshot", "Snapshot"], ["mixed", "Mixed"]];
 const REMOTE_EXAMPLE = {
   maven: "https://repo1.maven.org/maven2/", npm: "https://registry.npmjs.org/", pypi: "https://pypi.org/",
-  go: "https://proxy.golang.org/", cargo: "https://index.crates.io/", docker: "https://registry-1.docker.io",
+  go: "https://proxy.golang.org/", cargo: "https://index.crates.io/", docker: "https://registry-1.docker.io", helm: "https://charts.helm.sh/stable/",
 };
 const ANON = [["", "rf.anonInherit"], ["true", "rf.anonAllow"], ["false", "rf.anonDeny"]];
 
