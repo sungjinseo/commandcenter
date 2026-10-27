@@ -344,6 +344,21 @@ func TestComponentDeleteWired(t *testing.T) {
 	}
 }
 
+// TestRepoDeleteListsRoles: the repository delete confirmation names the
+// roles whose privileges on the repository the delete removes (QA N-25).
+func TestRepoDeleteListsRoles(t *testing.T) {
+	js := readStatic(t, "repoform.js")
+	for _, want := range []string{
+		`api("roles").then((d) => {`,
+		`.some((p) => p.target === "repo:" + name)`,
+		`put(roles, t("rf.delRoles", { roles: ids.join(", ") })); roles.hidden = false;`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("repoform.js does not contain %s", want)
+		}
+	}
+}
+
 // TestMavenSetupEnablesSnapshots: the settings.xml shown for a Maven proxy or
 // group turns snapshots on through an active profile; following a mirror
 // alone breaks every SNAPSHOT dependency (QA M-17).

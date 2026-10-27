@@ -436,18 +436,30 @@ func TestRegistryDeleteGroupMemberConflicts(t *testing.T) {
 	if reg.Get("p") == nil {
 		t.Fatal("rejected delete removed the repository")
 	}
-	// Deleting the groups first frees the members, and purges their rows.
+	// Deleting the groups first frees the members, and purges their rows and
+	// the role privileges on them (QA N-25).
 	if err := db.PutAsset(ctx, meta.Asset{Repo: "p", Path: "a.jar", BlobSHA256: "s"}); err != nil {
 		t.Fatal(err)
 	}
+	for _, id := range []string{"r1", "r2"} {
+		if err := db.CreateRole(ctx, meta.Role{ID: id, Privileges: []meta.Privilege{{Target: "repo:p", Actions: []string{"read"}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var deleted []string
-	reg.OnDelete = func(name string) { deleted = append(deleted, name) }
+	reg.OnDelete = func(_ context.Context, name string, roles []string) {
+		if reg.mu.TryLock() { // the app applies the role changes before a create can run
+			reg.mu.Unlock()
+			t.Error("OnDelete ran without the write lock")
+		}
+		deleted = append(deleted, name+"["+strings.Join(roles, " ")+"]")
+	}
 	for _, n := range []string{"g", "g2", "p"} {
 		if err := reg.Delete(ctx, n); err != nil {
 			t.Fatalf("delete %s: %v", n, err)
 		}
 	}
-	if strings.Join(deleted, ",") != "g,g2,p" {
+	if strings.Join(deleted, ",") != "g[],g2[],p[r1 r2]" {
 		t.Fatalf("OnDelete calls = %v", deleted)
 	}
 	if _, err := db.GetAsset(ctx, "p", "a.jar"); !errors.Is(err, meta.ErrNotFound) {

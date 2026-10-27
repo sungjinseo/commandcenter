@@ -568,8 +568,9 @@ func TestSelfServicePasswordMustChange(t *testing.T) {
 	wantStatus(t, put(`{"currentPassword":"same-password","newPassword":"another-pw"}`), http.StatusNoContent)
 }
 
-// QA N-25: a "repo:" target must name an existing repository; a target the
-// stored role already has may stay after its repository is deleted.
+// QA N-25: a "repo:" target must name an existing repository, unless the
+// stored role already has it (as an older version left it after a delete).
+// A delete now removes the target, so a form that still shows it gets 400.
 func TestRoleRepoTargetMustExist(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	r := e.admin(t, "POST", "/-/api/roles", `{"id":"future","privileges":[{"target":"repo:future-repo","actions":["read"]}]}`)
@@ -579,6 +580,12 @@ func TestRoleRepoTargetMustExist(t *testing.T) {
 	wantStatus(t, e.admin(t, "POST", "/-/api/repositories", `{"name":"tmp-repo","format":"maven","type":"hosted"}`), http.StatusCreated)
 	wantStatus(t, e.admin(t, "POST", "/-/api/roles", `{"id":"keeper","privileges":[{"target":"repo:tmp-repo","actions":["read"]}]}`), http.StatusCreated)
 	wantStatus(t, e.admin(t, "DELETE", "/-/api/repositories/tmp-repo", ""), http.StatusNoContent)
+	wantStatus(t, e.admin(t, "PUT", "/-/api/roles/keeper", `{"privileges":[{"target":"repo:tmp-repo","actions":["read"]}]}`), http.StatusBadRequest)
+	// As an older version left it.
+	if err := e.db.UpdateRole(context.Background(), meta.Role{ID: "keeper",
+		Privileges: []meta.Privilege{{Target: "repo:tmp-repo", Actions: []string{"read"}}}}); err != nil {
+		t.Fatal(err)
+	}
 	wantStatus(t, e.admin(t, "PUT", "/-/api/roles/keeper",
 		`{"description":"kept","privileges":[{"target":"repo:tmp-repo","actions":["read","browse"]}]}`), http.StatusOK)
 	wantStatus(t, e.admin(t, "PUT", "/-/api/roles/keeper",

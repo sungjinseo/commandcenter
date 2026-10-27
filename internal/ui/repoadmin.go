@@ -258,6 +258,10 @@ func (u *UI) deleteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
+	// The delete removes the roles' privileges on the repository (QA N-25):
+	// a role edit read before it must not write one back (final review I3).
+	u.accessMu.Lock()
+	defer u.accessMu.Unlock()
 	if err := u.Repos.Delete(r.Context(), name); err != nil {
 		u.writeRepoError(w, r, err)
 		return

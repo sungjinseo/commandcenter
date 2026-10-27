@@ -97,10 +97,10 @@ func TestRepositoryCRUD(t *testing.T) {
 		t.Fatalf("update missing: %v", err)
 	}
 
-	if err := db.DeleteRepository(ctx, "p"); err != nil {
+	if _, err := db.DeleteRepository(ctx, "p"); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.DeleteRepository(ctx, "p"); !errors.Is(err, ErrNotFound) {
+	if _, err := db.DeleteRepository(ctx, "p"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete missing: %v", err)
 	}
 	if got, _ := db.ListRepositories(ctx); len(got) != 0 {
@@ -131,7 +131,7 @@ func TestDeleteRepositoryPurgesOnlyThatRepo(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := db.DeleteRepository(ctx, "a"); err != nil {
+	if _, err := db.DeleteRepository(ctx, "a"); err != nil {
 		t.Fatal(err)
 	}
 	count := func(table, repo string) int {
@@ -150,6 +150,72 @@ func TestDeleteRepositoryPurgesOnlyThatRepo(t *testing.T) {
 				t.Fatalf("%s has %d rows for %s, want 1", table, n, other)
 			}
 		}
+	}
+}
+
+// QA N-25: a repository delete removes, in the same transaction, the role
+// privileges on exactly that repository, so a repository created later
+// under the name does not get them. Other targets stay as they were.
+func TestDeleteRepositoryDropsRolePrivileges(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	for _, name := range []string{"a", "ab"} {
+		if err := db.CreateRepository(ctx, config.Repository{Name: name, Format: "npm", Type: "hosted"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := []string{ActionRead}
+	roles := []Role{
+		{ID: "mixed", Privileges: []Privilege{{Target: "*", Actions: read}, {Target: "repo:a", Actions: read},
+			{Target: "repo:ab", Actions: read}, {Target: "format:npm", Actions: read}}},
+		{ID: "only-a", Privileges: []Privilege{{Target: "repo:a", Actions: []string{ActionRead, ActionAdd}}}},
+		{ID: "other", Privileges: []Privilege{{Target: "repo:ab", Actions: read}, {Target: "repo:A", Actions: read}}},
+		{ID: "stale", Privileges: []Privilege{{Target: "repo:gone", Actions: read}}}, // left by an older version
+	}
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, r := range roles {
+		r.UpdatedAt = old
+		if err := db.CreateRole(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := db.DeleteRepository(ctx, "a")
+	if err != nil || !reflect.DeepEqual(got, []string{"mixed", "only-a"}) {
+		t.Fatalf("changed roles = %v, %v", got, err)
+	}
+	if _, err := db.DeleteRepository(ctx, "gone"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing: %v", err)
+	}
+	for id, want := range map[string][]Privilege{
+		"mixed":  {{Target: "*", Actions: read}, {Target: "repo:ab", Actions: read}, {Target: "format:npm", Actions: read}},
+		"only-a": {},
+		"other":  roles[2].Privileges,
+		"stale":  roles[3].Privileges,
+	} {
+		r, err := db.GetRole(ctx, id)
+		if err != nil || !reflect.DeepEqual(r.Privileges, want) {
+			t.Fatalf("role %s = %+v, %v; want %+v", id, r.Privileges, err, want)
+		}
+		if changed := id == "mixed" || id == "only-a"; r.UpdatedAt.Equal(old) == changed {
+			t.Fatalf("role %s updated at %v (changed: %v)", id, r.UpdatedAt, changed)
+		}
+	}
+
+	// A failure while changing the roles keeps the repository and its rows.
+	if err := db.PutAsset(ctx, Asset{Repo: "ab", Path: "x/1.tgz", BlobSHA256: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.ExecContext(ctx, `UPDATE roles SET privileges = 'not json' WHERE id = 'stale'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DeleteRepository(ctx, "ab"); err == nil {
+		t.Fatal("delete with an unreadable role succeeded")
+	}
+	if defs, _ := db.ListRepositories(ctx); len(defs) != 1 || defs[0].Name != "ab" {
+		t.Fatalf("repositories after the failed delete = %+v", defs)
+	}
+	if _, err := db.GetAsset(ctx, "ab", "x/1.tgz"); err != nil {
+		t.Fatalf("asset after the failed delete: %v", err)
 	}
 }
 

@@ -263,8 +263,24 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		}
 		return ""
 	}
-	warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot(), "")
-	registry.OnDelete = func(name string) { warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot(), name) }
+	warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot())
+	// A repository delete removed the roles' privileges on it (QA N-25). The
+	// registry's write lock is still held, so the live snapshot drops them
+	// before a repository of that name can be created again.
+	registry.OnDelete = func(ctx context.Context, name string, roles []string) {
+		if len(roles) == 0 {
+			return
+		}
+		if err := authn.Reload(context.Background()); err != nil { // the delete is done, even if its client is gone
+			log.Warn("could not reload users, roles and settings after a repository delete; the removed privileges stay in force until the next reload",
+				"repository", name, "err", logsafe.Err(err))
+		}
+		log.Warn("removed the privileges on a deleted repository from roles", "repository", name, "roles", strings.Join(roles, ", "))
+		actor := auth.FromContext(ctx).Owner()
+		for _, id := range roles {
+			evts.Emit("role.update", actor, name, id, "removed repo:"+name)
+		}
+	}
 
 	authn.Log = log // redacted LDAP failures, sign-in throttling
 	authn.Sessions = auth.NewSessions()
@@ -442,13 +458,12 @@ func loadAccess(cfg *config.Config, log *slog.Logger, db *meta.DB) (*auth.Authen
 }
 
 // warnUnknownRoleRepos logs roles with a privilege on a repository the
-// registry lacks. With only set, it reports just that repository (after a
-// delete).
-func warnUnknownRoleRepos(log *slog.Logger, a *auth.Snapshot, s *repo.Snapshot, only string) {
+// registry lacks, as an older version or the config import may have left.
+func warnUnknownRoleRepos(log *slog.Logger, a *auth.Snapshot, s *repo.Snapshot) {
 	for _, role := range a.Roles() {
 		for _, p := range role.Privileges {
 			name, ok := strings.CutPrefix(p.Target, "repo:")
-			if !ok || s.ByName[name] != nil || (only != "" && name != only) {
+			if !ok || s.ByName[name] != nil {
 				continue
 			}
 			log.Warn("role grants privileges on a repository that does not exist", "role", role.ID, "repository", name)
