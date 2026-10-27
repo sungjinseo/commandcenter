@@ -133,6 +133,33 @@ FROM request_stats WHERE hour >= ? AND hour < ? GROUP BY repo ORDER BY repo`, fr
 	return out, rows.Err()
 }
 
+// RepoTrafficPoint is one repository's requests in [T, T+step).
+type RepoTrafficPoint struct {
+	Repo        string
+	T, Requests int64
+}
+
+// RepoTrafficSeries buckets the requests of every repository with from <=
+// hour < to into step seconds (3600 or 86400), by repository then time.
+// Buckets without traffic are not returned.
+func (d *DB) RepoTrafficSeries(ctx context.Context, from, to, step int64) ([]RepoTrafficPoint, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT repo, (hour / ?) * ? AS t, SUM(requests) FROM request_stats
+WHERE hour >= ? AND hour < ? GROUP BY repo, t ORDER BY repo, t`, step, step, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RepoTrafficPoint
+	for rows.Next() {
+		var p RepoTrafficPoint
+		if err := rows.Scan(&p.Repo, &p.T, &p.Requests); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // PruneRequestStats deletes the statistics of hours before the cutoff (unix
 // seconds) and returns how many rows went.
 func (d *DB) PruneRequestStats(ctx context.Context, before int64) (int64, error) {

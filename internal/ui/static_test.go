@@ -70,7 +70,10 @@ func TestStaticJSListed(t *testing.T) {
 
 func TestStaticSizeBudget(t *testing.T) {
 	const budget = 512 << 10 // 524288 bytes (190 KiB, raised to 320 KiB in plan 10, to 400 KiB in plan 11 and to 512 KiB in plan 12, by ruling)
-	total := 0
+	// The IBM Plex web fonts (static/fonts, OFL) have their own budget: three
+	// Korean weights subset to KS X 1001 plus two mono weights, cached by ETag.
+	const fontBudget = 768 << 10
+	total, fonts := 0, 0
 	err := fs.WalkDir(staticFiles, "static", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -79,7 +82,11 @@ func TestStaticSizeBudget(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		total += int(info.Size())
+		if strings.HasPrefix(path, "static/fonts/") {
+			fonts += int(info.Size())
+		} else {
+			total += int(info.Size())
+		}
 		return nil
 	})
 	if err != nil {
@@ -87,6 +94,9 @@ func TestStaticSizeBudget(t *testing.T) {
 	}
 	if total >= budget {
 		t.Errorf("static files total %d bytes, budget is < %d", total, budget)
+	}
+	if fonts >= fontBudget {
+		t.Errorf("static/fonts total %d bytes, budget is < %d", fonts, fontBudget)
 	}
 }
 

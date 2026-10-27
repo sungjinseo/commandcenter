@@ -73,21 +73,23 @@ func (u *UI) requestStats(w http.ResponseWriter, r *http.Request) {
 // GET /-/api/stats/repositories?range=1h|24h|7d (admin): every repository's
 // traffic over the period, from the hourly statistics (so "1h" is the current
 // and the previous hour; "since" says exactly). Proxies also report their
-// remote fetches and cache lookups. Counters are flushed every
-// metricsFlushSeconds, so the last few seconds are missing.
+// remote fetches and cache lookups, and "series": the requests per hour
+// (per UTC day for 7d) over the period, oldest first, for a sparkline.
+// Counters are flushed every metricsFlushSeconds, so the last few seconds
+// are missing.
 func (u *UI) repositoryStats(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
 	rng := r.URL.Query().Get("range")
-	var hours int64
+	var hours, step int64 = 0, 3600 // step: the bucket of the per-repository series
 	switch rng {
 	case "1h":
 		hours = 2
 	case "", "24h":
 		rng, hours = "24h", 24
 	case "7d":
-		hours = 7 * 24
+		hours, step = 7*24, 86400
 	default:
 		writeError(w, http.StatusBadRequest, "range must be 1h, 24h or 7d")
 		return
@@ -104,6 +106,28 @@ func (u *UI) repositoryStats(w http.ResponseWriter, r *http.Request) {
 	for _, s := range got {
 		byRepo[s.Repo] = s
 	}
+	// The series start at the first whole bucket so the 7d buckets are UTC days.
+	seriesStart := start / step * step
+	if seriesStart < start {
+		seriesStart += step
+	}
+	points, err := u.DB.RepoTrafficSeries(r.Context(), seriesStart, end, step)
+	if err != nil {
+		u.fail(w, r, err)
+		return
+	}
+	nBuckets := int((end - seriesStart) / step)
+	series := map[string][]int64{}
+	for _, p := range points {
+		sl := series[p.Repo]
+		if sl == nil {
+			sl = make([]int64, nBuckets)
+			series[p.Repo] = sl
+		}
+		if i := int((p.T - seriesStart) / step); i >= 0 && i < nBuckets {
+			sl[i] = p.Requests
+		}
+	}
 	avg := func(sum, n int64) int64 {
 		if n == 0 {
 			return 0
@@ -118,6 +142,10 @@ func (u *UI) repositoryStats(w http.ResponseWriter, r *http.Request) {
 			"requests": s.Requests, "errors": s.Errors, "errorRate": 0.0,
 			"bytesIn": s.BytesIn, "bytesOut": s.Bytes,
 			"latencyAvgMs": avg(s.Ms, s.Requests), "latencyMaxMs": s.MaxMs,
+			"series": series[rp.Name],
+		}
+		if row["series"] == nil {
+			row["series"] = make([]int64, nBuckets)
 		}
 		if s.Requests > 0 {
 			row["errorRate"] = float64(s.Errors) / float64(s.Requests)

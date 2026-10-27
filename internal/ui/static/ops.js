@@ -190,7 +190,7 @@ export function repositoryStatsCard(isLive) {
         at: d.collectedAt ? collectedTime(d.collectedAt) : dash,
       }));
       put(body, tbl([
-        t("col.repo"), t("col.status"), ...[
+        t("col.repo"), t("col.status"), { t: t("repoOps.traffic"), cls: "sparkcell" }, ...[
           t("repoOps.requests"), t("repoOps.errorRate"), t("repoOps.upstreamFailures"), t("repoOps.upstreamLatency"),
           t("repoOps.cache"), t("repoOps.bytesIn"), t("repoOps.bytesOut"), t("repoOps.latency"),
         ].map((label) => ({ t: label, cls: "num" })),
@@ -213,6 +213,7 @@ export function repositoryStatsCard(isLive) {
         },
           h("td", null, nameCell(r.format, h("a", { href: open }, h("strong", null, r.name)), r.format + " · " + r.type)),
           h("td", null, badge([h("i", { class: "dot", "aria-hidden": "true" }), status], bad ? "red" : r.requests > 0 ? "green" : null)),
+          h("td", { class: "sparkcell" }, sparkline(r.series)),
           cell(r.requests), cell(r.requests > 0 ? r.errorRate : null, percent), cell(proxy ? r.upstreamFailures : null),
           latencyCell(proxy ? r.upstreamLatencyAvgMs : null, r.upstreamLatencyMaxMs),
           cell(proxy && cacheTotal > 0 ? r.cacheHits / cacheTotal : null, percent),
@@ -231,6 +232,21 @@ export function repositoryStatsCard(isLive) {
   refresh.addEventListener("click", load);
   load();
   return panel;
+}
+
+// sparkline draws the per-bucket request counts as an 80x20 line with the
+// area under it and the last point marked; no traffic draws a dash.
+function sparkline(values) {
+  if (!Array.isArray(values) || values.length < 2 || !values.some((v) => v > 0)) return h("span", { class: "muted" }, dash);
+  const W = 80, H = 20, max = Math.max(...values.map((v) => Number(v) || 0));
+  const pts = values.map((v, i) => [i * (W / (values.length - 1)), H - 1.5 - ((Number(v) || 0) / max) * (H - 3)]);
+  const line = pts.map(([x, y], i) => (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1)).join("");
+  const svg = s("svg", { class: "tspark", viewBox: "0 0 " + W + " " + H, "aria-hidden": "true", focusable: "false" });
+  svg.appendChild(s("path", { class: "ta", d: line + "V" + H + "H0Z" }));
+  svg.appendChild(s("path", { class: "tl", d: line }));
+  const [lx, ly] = pts[pts.length - 1];
+  svg.appendChild(s("circle", { class: "te", cx: lx.toFixed(1), cy: ly.toFixed(1), r: 2 }));
+  return svg;
 }
 
 // ---- log viewer -------------------------------------------------------------------

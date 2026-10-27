@@ -1,6 +1,6 @@
 // The Command Center console shell (plan 10 Decisions 3, 4, 6 and 7): the
 // sidebar, the topbar, menus and dialogs, the theme and the language.
-import { state, ANON, h, put, api, icon, loadRepos, hideBanner, showError, canUpload, isBusy } from "./util.js";
+import { state, ANON, h, put, api, icon, s, loadRepos, hideBanner, showError, canUpload, isBusy } from "./util.js";
 import { t, getLang, setLang, onLangChange, applyServerDefault } from "./i18n.js";
 
 const hooks = { rerender: () => {} };
@@ -378,7 +378,15 @@ function instanceHost() {
 
 // ---- sidebar (Decision 6: real features only) ---------------------------------
 
-function brandMark() { return "CC"; }
+// brandMark is the ledger mark: an ink square with a "C" and three ruled lines, one orange.
+function brandMark() {
+  const svg = s("svg", { viewBox: "0 0 26 26", "aria-hidden": "true", focusable: "false" });
+  svg.appendChild(s("rect", { class: "bm-bg", x: 1, y: 1, width: 24, height: 24, rx: 4 }));
+  svg.appendChild(s("path", { class: "bm-fg", d: "M11.5 9.5H9a3.5 3.5 0 0 0 0 7h2.5" }));
+  svg.appendChild(s("path", { class: "bm-fg", d: "M15 9.5h4.5M15 13h4.5" }));
+  svg.appendChild(s("path", { class: "bm-acc", d: "M15 16.5h3" }));
+  return svg;
+}
 
 const SEARCH_SUB = [["cargo", "cargo"], ["docker", "docker"], ["go", "golang"], ["maven", "maven"], ["npm", "npm"], ["pypi", "pypi"]];
 
@@ -452,7 +460,8 @@ function renderSidebar(route) {
     h("a", { class: "brand", href: "#browse/welcome", "aria-label": t("brand.name") },
       h("div", { class: "brandmark" }, brandMark()),
       h("div", { class: "brandtext" }, h("strong", null, "Command Center"), h("small", { title: host }, host))),
-    h("button", { type: "button", class: "icon-btn drawer-close", "aria-label": t("dialog.close"), onclick: () => setDrawer(false) }, icon("close")), nav);
+    h("button", { type: "button", class: "icon-btn drawer-close", "aria-label": t("dialog.close"), onclick: () => setDrawer(false) }, icon("close")), nav,
+    state.me.version ? h("div", { class: "nav-foot" }, h("span", null, "v" + state.me.version), h("span", null, t("brand.foot"))) : null);
   if (focused) {
     const again = [...side.querySelectorAll("a[href]")].find((a) => a.getAttribute("href") === focused);
     if (again) again.focus();

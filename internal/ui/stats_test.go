@@ -177,6 +177,9 @@ func TestRepositoryStatsAPI(t *testing.T) {
 		p["upstreamLatencyMaxMs"] != float64(700) || p["cacheHits"] != float64(6) || p["cacheMisses"] != float64(4) {
 		t.Fatalf("proxy row: %v", p)
 	}
+	if sr, ok := p["series"].([]any); !ok || len(sr) != 2 || sr[0] != float64(10) || sr[1] != float64(10) {
+		t.Fatalf("1h series: %v", p["series"])
+	}
 	hosted := rows["maven-releases"]
 	if hosted["requests"] != float64(0) || hosted["errorRate"] != float64(0) {
 		t.Fatalf("hosted row outside the range: %v", hosted)
@@ -188,6 +191,10 @@ func TestRepositoryStatsAPI(t *testing.T) {
 	for _, x := range m["repositories"].([]any) {
 		if row := x.(map[string]any); row["name"] == "maven-releases" && (row["requests"] != float64(3) || row["latencyMaxMs"] != float64(9)) {
 			t.Fatalf("24h hosted row: %v", row)
+		} else if row["name"] == "maven-releases" {
+			if sr := row["series"].([]any); len(sr) != 24 || sr[21] != float64(3) || sr[23] != float64(0) {
+				t.Fatalf("24h series: %v", sr)
+			}
 		}
 	}
 }
