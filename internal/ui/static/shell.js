@@ -1,6 +1,6 @@
 // The Command Center console shell (plan 10 Decisions 3, 4, 6 and 7): the
 // sidebar, the topbar, menus and dialogs, the theme and the language.
-import { state, ANON, h, put, api, icon, loadRepos, hideBanner, showError, canUpload, isBusy } from "./util.js";
+import { state, ANON, h, put, api, icon, loadRepos, hideBanner, showError, canUpload, isBusy, fmtNum } from "./util.js";
 import { t, getLang, setLang, onLangChange, applyServerDefault } from "./i18n.js";
 
 const hooks = { rerender: () => {} };
@@ -220,6 +220,7 @@ const SEARCH_HASH = "#browse/search/generic";
 function buildTopbar() {
   const hdr = document.getElementById("hdr");
   els.crumb = h("nav", { class: "crumb" });
+  els.resources = h("div", { class: "resource-strip" });
 
   const q = h("input", { id: "hdr-search", type: "search", autocomplete: "off" });
   els.kbd = h("kbd", { "aria-hidden": "true" }, "/");
@@ -242,8 +243,26 @@ function buildTopbar() {
   els.role = h("span", { class: "top-role" });
   els.who = h("div", { class: "who" });
 
-  put(hdr, els.crumb, h("div", { class: "top-actions" }, form, els.theme, els.lang, els.role, els.who));
+  put(hdr, h("div", { class: "top-console" }, els.crumb, els.resources),
+    h("div", { class: "top-actions" }, form, els.theme, els.lang, els.role, els.who));
   applyTheme();
+}
+
+// Only summarize repositories already visible to this session. Groups repeat
+// their members' assets, so count files in hosted/proxy repositories once.
+function renderResources() {
+  const repos = state.repos;
+  const files = repos ? repos.filter((r) => r.type !== "group")
+    .reduce((n, r) => n + (Number(r.assets) || 0), 0) : null;
+  const offline = repos ? repos.filter((r) => r.online === false).length : null;
+  const resource = (label, ico, value, warning) => h("div", {
+    class: "resource" + (warning ? " warning" : ""), title: label,
+  }, icon(ico), h("span", { class: "sr-only" }, label + ": "),
+  h("strong", null, value === null ? "—" : fmtNum(value)));
+  put(els.resources,
+    resource(t("dash.repos"), "repos", repos ? repos.length : null),
+    resource(t("col.files"), "file", files),
+    resource(t("repo.down"), "status", offline, offline > 0));
 }
 
 // applyTexts refreshes the language-dependent text of the static chrome.
@@ -499,10 +518,10 @@ function renderSidebar(route) {
   const nav = h("nav", { class: "nav-scroll", "aria-label": t("nav.aria") },
     navSections().map(([title, items]) => [
       h("div", { class: "nav-label" }, title),
-      items.filter(Boolean).map(([href, label, ico, active]) => [
+      h("div", { class: "nav-commands" }, items.filter(Boolean).map(([href, label, ico, active]) => [
         navLink(href, label, ico, active(key)),
         href === SEARCH_HASH ? searchChildren(key) : null,
-      ]),
+      ])),
     ]));
   els.footer = h("div", { class: "nav-footer" });
   renderFooter();
@@ -604,6 +623,7 @@ export function renderChrome(route) {
   lastRoute = route;
   closeMenu();
   renderWho();
+  renderResources();
   renderSidebar(route);
   syncHealth();
   renderCrumb(route);

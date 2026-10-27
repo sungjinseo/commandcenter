@@ -9,7 +9,7 @@ import { viewTokens, showSettings } from "./admin.js";
 import { viewAccount } from "./access.js";
 import { viewWelcome } from "./dash.js";
 import { viewRepos, viewTree } from "./browse.js";
-import { viewSearch } from "./search.js";
+import { viewSearch, viewComponent } from "./search.js";
 import { dropFlash } from "./repoform.js";
 import { viewUploadList, viewUpload } from "./upload.js";
 
@@ -91,6 +91,16 @@ export function parse(hash) {
     return { key: "browse/upload", params: repo === undefined ? [] : [repo] };
   }
 
+  // Component detail: browse/component:<repo>?group=&name=&version=.
+  m = /^browse\/component:([^?]+)\?(.*)$/.exec(raw);
+  if (m) {
+    const repo = dec(m[1]);
+    const criteria = new URLSearchParams(m[2]);
+    if (!repo || badSeg(repo) || repo.includes("/") || dec(m[2]) === null ||
+        !criteria.get("name") || !criteria.get("version")) return { notFound: true };
+    return { key: "browse/component", params: [repo], criteria };
+  }
+
   // Everything else: <head>[:<param>[:<param>...]], decoded per segment.
   const parts = raw.split(":");
   const head = parts.shift();
@@ -135,6 +145,7 @@ async function show(view, r) {
     case "browse/browse":
       if (p0 === undefined) return viewRepos(view);
       return viewTree(view, p0, p1);
+    case "browse/component": return viewComponent(view, p0, r.criteria);
     case "browse/upload": return p0 === undefined ? viewUploadList(view) : viewUpload(view, p0);
     case "user/account": return viewAccount(view);
     case "user/usertoken": return viewTokens(view, false);

@@ -697,12 +697,11 @@ export async function viewTree(view, name, path) {
   let alive = true;
   state.leaving.push(() => { alive = false; });
   const fmt = r.format;
-  // Search skips group repositories, so a group's link searches everything.
   const head = pageHead(r.name, h("p", { class: "badges" }, fmtBadge(fmt), typeBadge(r.type)),
     h("div", { class: "actions" },
       h("a", { class: "btn", href: browseLink() }, "← " + t("tree.back")),
       full(copyButton(r.url, null, t("repos.copyUrlFor", { name: r.name }), t("repos.copyUrl"))),
-      h("a", { class: "btn", href: searchLink("generic", r.type === "group" ? null : { repo: name }) }, icon("search"), t("tree.search")),
+      h("a", { class: "btn", href: searchLink("generic", { repo: name }) }, icon("search"), t("tree.search")),
       state.me.admin ? h("a", { class: "btn", href: adminRepoLink(r.name) }, t("tree.settings")) : null,
       canUpload(r) ? h("a", { class: "btn primary", href: uploadLink(r.name) }, icon("upload"), t("tree.upload")) : null),
     { eyebrow: t("tree.eyebrow") });

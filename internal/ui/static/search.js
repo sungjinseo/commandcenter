@@ -2,7 +2,7 @@
 // /-/api/search/components, filtering live as the criteria change, with a
 // drilldown to component and asset details (plan 10 Decision 8).
 import {
-  h, put, api, apiRepo, enc, APIError, browseLink, searchLink, fmtDate, nameCell, FORMATS, FORMAT_NAMES,
+  h, put, api, apiRepo, enc, APIError, browseLink, componentLink, searchLink, fmtDate, nameCell, FORMATS, FORMAT_NAMES,
   tbl, pageHead, loading, truncNote, debounce, handleError, icon, loadRepos, state,
 } from "./util.js";
 import { t } from "./i18n.js";
@@ -43,15 +43,17 @@ export async function viewSearch(view, kind, criteria) {
     const el = h("select", { id }, opts);
     return [el, h("div", { class: "field" }, h("label", { for: id }, label), el)];
   };
-  let fmtSel = null, repoSel = null, body;
+  const repos = await loadRepos();
+  let fmtSel = null, repoSel, repoField, body;
+  [repoSel, repoField] = select("sc-repo", t("col.repo"), []);
+  const updateRepos = (want = repoSel.value) => {
+    const format = k.fmt || (fmtSel && fmtSel.value) || "";
+    put(repoSel, h("option", { value: "" }, t("search.allRepos")),
+      repos.filter((r) => !format || r.format === format).map((r) =>
+        h("option", { value: r.name, selected: r.name === want }, r.name)));
+  };
   if (generic) {
-    const repos = (await loadRepos()).filter((r) => r.type !== "group");
-    const want = criteria.get("repo") || "";
-    const repoNames = repos.map((r) => r.name);
-    if (want && !repoNames.includes(want)) repoNames.push(want);
-    let repoField, fmtField;
-    [repoSel, repoField] = select("sc-repo", t("col.repo"), [h("option", { value: "" }, t("search.allRepos")),
-      repoNames.map((n) => h("option", { value: n, selected: n === want }, n))]);
+    let fmtField;
     [fmtSel, fmtField] = select("sc-format", t("col.format"), [h("option", { value: "" }, t("repos.allFormats")),
       FORMATS.map((f) => h("option", { value: f, selected: criteria.get("format") === f }, FORMAT_NAMES[f]))]);
     const open = kind === "custom" || more.some(([key]) => criteria.get(key));
@@ -66,11 +68,12 @@ export async function viewSearch(view, kind, criteria) {
     body = [h("div", { class: "fields" }, field(textFields[0], true, t("search.keywordPh")), repoField, fmtField),
       h("div", { class: "crit-toggle" }, toggle), moreBox];
   } else {
-    body = h("div", { class: "fields" }, k.fields.map((x) => field(x)));
+    body = h("div", { class: "fields" }, repoField, k.fields.map((x) => field(x)));
   }
+  updateRepos(criteria.get("repo") || "");
   const reset = h("button", { type: "button", class: "btn" }, t("search.reset"));
   // The submit button lets Enter search at once; typing searches after a pause.
-  const form = h("form", { class: "card", role: "search", "aria-label": k.title },
+  const form = h("form", { class: "card search-console", role: "search", "aria-label": k.title },
     h("div", { class: "card-body" }, body, h("button", { type: "submit", class: "sr-only", tabindex: "-1" }, t("nav.search"))));
   const out = h("div", { class: "search-out" });
   put(view, pageHead(k.title, h("p", null, t("search.sub")), h("div", { class: "actions" }, reset), { eyebrow: t("search.eyebrow") }), form, out);
@@ -87,9 +90,8 @@ export async function viewSearch(view, kind, criteria) {
     return p;
   };
 
-  let saved = null; // the results nodes, restored by "Search results"
   let lastCriteria = criteria; // what the shown results were produced from
-  let seq = 0; // shared by searches and drilldowns: only the latest may render
+  let seq = 0; // only the latest search may render
   const fmtOf = (f) => (FORMATS.includes(f) ? f : "");
   const live = () => view.isConnected;
 
@@ -104,18 +106,55 @@ export async function viewSearch(view, kind, criteria) {
     if (k.fmt) q.set("format", k.fmt);
     else {
       if (fmtOf(c.get("format"))) q.set("format", fmtOf(c.get("format")));
-      if (c.get("repo")) q.set("repo", c.get("repo"));
     }
-    saved = null;
     const n = ++seq;
     if (!texts.length || !texts.some((v) => v.length >= 2)) {
       put(out, h("section", { class: "card" }, h("div", { class: "empty" }, texts.length ? t("search.min") : t("search.prompt"))));
       return;
     }
     put(out, loading());
-    let data;
+    let data, fetchPage, scope;
     try {
-      data = await api("search/components?" + q.toString());
+      const selected = c.get("repo");
+      const format = q.get("format");
+      scope = repos.filter((r) => r.type !== "group" && (!format || r.format === format));
+      let sources = [""];
+      if (selected) {
+        // Expand nested groups through the readable repository list. Deduplicate
+        // shared members and never fall back to all repositories for an empty group.
+        const visible = new Map(repos.map((r) => [r.name, r]));
+        const seen = new Set(), names = new Set();
+        const expand = async (name, root = false) => {
+          if (seen.has(name) || (!root && !visible.has(name))) return;
+          seen.add(name);
+          const r = await api(apiRepo(name));
+          if (!live() || n !== seq) return;
+          if (r.type === "group") {
+            for (const member of r.members || []) await expand(member);
+          } else names.add(r.name);
+        };
+        await expand(selected, true);
+        scope = scope.filter((x) => names.has(x.name));
+        sources = scope.map((x) => x.name);
+      }
+      let index = 0, continuation = "", truncated = false;
+      fetchPage = async () => {
+        while (index < sources.length) {
+          if (!live() || n !== seq) return { components: [] };
+          const params = new URLSearchParams(q);
+          if (sources[index]) params.set("repo", sources[index]);
+          if (continuation) params.set("continuationToken", continuation);
+          const d = await api("search/components?" + params);
+          truncated ||= !!d.truncated;
+          continuation = d.continuationToken || "";
+          if (!continuation) index++;
+          if ((d.components || []).length || index === sources.length) {
+            return { ...d, truncated, continuationToken: index < sources.length ? "more" : "" };
+          }
+        }
+        return { components: [], truncated, continuationToken: "" };
+      };
+      data = await fetchPage();
     } catch (e) {
       if (!live() || n !== seq) return;
       if (e.status === 400) { put(out, h("section", { class: "card" }, h("div", { class: "empty" }, e.message))); return; }
@@ -126,15 +165,17 @@ export async function viewSearch(view, kind, criteria) {
     if (!live() || n !== seq) return;
     const comps = data.components || [];
     const rowOf = (comp) => {
-      const nameBtn = h("button", { type: "button", class: "link-btn" }, h("strong", null, comp.name));
-      nameBtn.addEventListener("click", () => drill(comp));
+      const href = componentLink(comp, searchLink(kind, lastCriteria));
+      const nameBtn = h("a", { href }, h("strong", null, comp.name));
       const tr = h("tr", { class: "clickable" },
         h("td", { class: "name" }, nameCell(comp.format, nameBtn, comp.group || null)),
         h("td", null, h("span", { class: "badge blue" }, comp.version)),
-        h("td", null, h("a", { href: browseLink(comp.repo) }, comp.repo)),
+        h("td", null, h("a", { href: browseLink(comp.repo) }, comp.repo),
+          repos.some((r) => r.name === comp.repo && r.type === "proxy")
+            ? h("small", { class: "muted" }, " · " + t("search.cachedOnly")) : null),
         h("td", { class: "nowrap" }, fmtDate(comp.lastUpdated)),
         h("td", { class: "act muted", "aria-hidden": "true" }, "→"));
-      tr.addEventListener("click", (ev) => { if (!ev.target.closest("a, button")) drill(comp); });
+      tr.addEventListener("click", (ev) => { if (!ev.target.closest("a, button")) location.hash = href; });
       return tr;
     };
     const table = tbl([t("comp.component"), t("col.version"), t("col.repo"), t("col.updated"), { t: h("span", { class: "sr-only" }, t("col.open")), cls: "act" }],
@@ -155,7 +196,8 @@ export async function viewSearch(view, kind, criteria) {
       more.disabled = true;
       let d;
       try {
-        d = await api("search/components?" + q.toString() + "&continuationToken=" + enc(token));
+        d = await fetchPage();
+        if (!live() || n !== seq) return;
       } catch (e) {
         more.disabled = false;
         if (more.isConnected) handleError(e);
@@ -167,30 +209,61 @@ export async function viewSearch(view, kind, criteria) {
       more.disabled = false;
       tail(d);
       // The last page removes the focused button: keep focus in the results.
-      if (!token && rows.length) rows[0].querySelector("button").focus();
+      if (!token && rows.length) rows[0].querySelector("a").focus();
     });
     tail(data);
-    saved = [
+    const results = [
+      scope.some((r) => r.type === "proxy") ? h("p", { class: "notice" }, t("search.cachedOnly")) : null,
       h("section", { class: "card" },
         h("div", { class: "toolbar" }, count, h("span", { class: "end" }, t("search.pick"))), table),
       foot,
     ];
-    put(out, saved);
+    put(out, results);
   }
 
+  // Live filtering: the hash follows the criteria (replaceState, so typing
+  // does not fill the history or re-render the screen).
+  const go = () => {
+    later.cancel();
+    const c = current();
+    const to = searchLink(kind, c.toString() ? c : null);
+    if (location.hash !== to) history.replaceState(null, "", to);
+    run(c);
+  };
+  const later = debounce(go, 350);
+  state.leaving.push(later.cancel);
+  for (const [key] of textFields) inputs[key].addEventListener("input", later);
+  if (fmtSel) fmtSel.addEventListener("change", () => { updateRepos(); go(); });
+  repoSel.addEventListener("change", go);
+  form.addEventListener("submit", (ev) => { ev.preventDefault(); go(); });
+  reset.addEventListener("click", () => {
+    for (const [key] of textFields) inputs[key].value = "";
+    for (const el of [fmtSel, repoSel]) if (el) el.value = "";
+    updateRepos("");
+    go();
+    inputs[textFields[0][0]].focus();
+  });
+
+  const first = textFields.find(([key]) => criteria.get(key));
+  if (!first) inputs[textFields[0][0]].focus();
+  await run(criteria);
+}
+
+// A component URL carries its identity, so reload, sharing and history can
+// reconstruct the detail without retaining search-result objects in memory.
+export async function viewComponent(view, name, criteria) {
+  const r = await api(apiRepo(name));
+  const from = criteria.get("from") || "";
+  const returnTo = from.startsWith("#browse/search/") ? from : searchLink("generic", { repo: name });
+  const out = view;
+  let seq = 0;
+  const live = () => view.isConnected;
   const backBtn = () => {
-    const b = h("button", { type: "button", class: "link-btn" }, "← " + t("search.results"));
-    b.addEventListener("click", () => { if (saved) put(out, saved); else run(current()); });
-    return b;
+    return h("a", { href: returnTo, class: "link-btn" }, "← " + t("search.results"));
   };
   const sep = () => h("span", { class: "sep" }, "/");
   const label = (comp) => comp.name + " " + comp.version;
   const focusHead = () => { const x = out.querySelector(".componenthero h2"); if (x) x.focus(); };
-
-  async function repoOf(comp) {
-    const r = (await loadRepos()).find((x) => x.name === comp.repo);
-    return r || { name: comp.repo, format: comp.format, type: "hosted", canWrite: false, url: "" };
-  }
 
   // folderOf maps a component to the folder that holds all of its files, or
   // "" when the format has no such folder. Maven deletes file by file, and a
@@ -218,12 +291,12 @@ export async function viewSearch(view, kind, criteria) {
   const optsFor = (r, comp) => ({
     assetHref: (p) => browseLink(comp.repo, p),
     onAsset: (p) => drillAsset(r, comp, p),
-    onDeleted: () => run(lastCriteria),
+    onDeleted: () => { location.hash = returnTo; },
   });
 
   async function drill(comp) {
     const n = ++seq;
-    const r = await repoOf(comp);
+
     if (!live() || n !== seq) return;
     if (comp.format === "docker") {
       put(out, loading());
@@ -267,28 +340,23 @@ export async function viewSearch(view, kind, criteria) {
     }
   }
 
-  // Live filtering: the hash follows the criteria (replaceState, so typing
-  // does not fill the history or re-render the screen).
-  const go = () => {
-    later.cancel();
-    const c = current();
-    const to = searchLink(kind, c.toString() ? c : null);
-    if (location.hash !== to) history.replaceState(null, "", to);
-    run(c);
-  };
-  const later = debounce(go, 350);
-  state.leaving.push(later.cancel);
-  for (const [key] of textFields) inputs[key].addEventListener("input", later);
-  for (const el of [fmtSel, repoSel]) if (el) el.addEventListener("change", go);
-  form.addEventListener("submit", (ev) => { ev.preventDefault(); go(); });
-  reset.addEventListener("click", () => {
-    for (const [key] of textFields) inputs[key].value = "";
-    for (const el of [fmtSel, repoSel]) if (el) el.value = "";
-    go();
-    inputs[textFields[0][0]].focus();
-  });
 
-  const first = textFields.find(([key]) => criteria.get(key));
-  if (!first) inputs[textFields[0][0]].focus();
-  await run(criteria);
+  const identity = { repo: name, group: criteria.get("group") || "", name: criteria.get("name"), version: criteria.get("version"), format: r.format };
+  if (r.type === "group") throw new APIError(404, t("route.notFound"));
+  if (r.format === "docker") { await drill(identity); return; }
+  // The API requires a two-character criterion. A one-character version uses
+  // a broader glob, then the returned identity is compared exactly below.
+  const q = new URLSearchParams({ repo: name, format: r.format, group: identity.group, name: identity.name,
+    version: identity.version.length < 2 ? identity.version + "*" : identity.version });
+  let token = "", truncated = false;
+  do {
+    if (token) q.set("continuationToken", token);
+    const d = await api("search/components?" + q);
+    if (!live()) return;
+    const comp = (d.components || []).find((c) => c.repo === name && (c.group || "") === identity.group && c.name === identity.name && c.version === identity.version);
+    if (comp) { await drill(comp); return; }
+    truncated ||= !!d.truncated;
+    token = d.continuationToken || "";
+  } while (token);
+  put(out, backBtn(), h("div", { class: "empty" }, t(truncated ? "search.truncated" : "route.notFound")));
 }

@@ -219,6 +219,11 @@ export function parentDir(path) {
 
 // Hash routes for browse and admin screens.
 export const browseLink = (repo, path) => "#browse/browse" + (repo ? ":" + enc(repo) + (path ? ":" + enc(path) : "") : "");
+export const componentLink = (c, from) => {
+  const q = new URLSearchParams({ group: c.group || "", name: c.name, version: c.version });
+  if (from) q.set("from", from);
+  return "#browse/component:" + enc(c.repo) + "?" + q;
+};
 // Upload (plan 9 Decision 8): hosted maven, npm and pypi repositories the user can write.
 export const canUpload = (r) => r.type === "hosted" && ["maven", "npm", "pypi"].includes(r.format) && !!r.canWrite;
 export const uploadLink = (repo) => "#browse/upload" + (repo ? "/" + enc(repo) : "");
