@@ -96,6 +96,15 @@ blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
   tab (summary, license, url, requires and provides) work as for Helm. `repomd.xml` is not signed:
   use `repo_gpgcheck=0` (`gpgcheck=1` still verifies signed packages) ("Yum 설정" in the
   operations guide).
+- `commandcenter import-nexus`: copies the hosted repositories of a Sonatype Nexus Repository 3
+  into Command Center repositories you created first (`-repo <nexus>=<cc>` or `-all`). It reads the
+  Nexus REST API v1 and writes each format through its own upload protocol (Maven PUT, npm publish,
+  PyPI upload, raw PUT, helm PUT, docker blob upload and manifest PUT via `-docker-from`, the
+  connector URL), so every server-side check applies; maven2, npm, pypi, raw, helm and docker are
+  supported, proxies, groups and other formats are listed and skipped. It is resumable: what the
+  target already has is skipped (`-skip-existing`, default), `-dry-run` lists what would be copied,
+  and the credentials come from files or `NEXUS_PASSWORD`/`COMMANDCENTER_TOKEN`, never from the
+  command line or the output ("Nexus에서 이전하기" in the operations guide).
 - The `oidc` realm: browser login through an OpenID Connect provider (Gitea, Keycloak, ...)
   with the authorization code flow and PKCE, configured under Realms (`GET/PUT /-/api/realms/oidc`,
   `POST /-/api/realms/oidc/test` reads the provider's discovery document) and offered on the login

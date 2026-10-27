@@ -63,11 +63,13 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return healthcheck(args[1:])
 	case "migrate-db":
 		return migrateDB(args[1:], stdout)
+	case "import-nexus":
+		return importNexus(args[1:], stdout)
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return nil
 	}
-	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, migrate-db, healthcheck, version)", args[0])
+	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, migrate-db, import-nexus, healthcheck, version)", args[0])
 }
 
 // pickConfigPath returns the config file to load. A -config given explicitly
