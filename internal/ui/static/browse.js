@@ -355,6 +355,7 @@ async function versionList(r, c) {
     return { entries: d.entries || [], truncated: !!d.truncated };
   };
   switch (r.format) {
+    case "docker": return pkgVersions(c.name);
     case "maven": {
       const dir = (c.group ? c.group.split(".").join("/") + "/" : "") + c.name + "/";
       const d = await listDir(dir);
@@ -553,6 +554,7 @@ function setupSnippets(r) {
   const hosted = r.type === "hosted";
   const cred = "<server><id>commandcenter</id><username>ci</username><password>" + t("setup.password") + "</password></server>";
   switch (r.format) {
+    case "docker": return dockerSnippets(r);
     case "maven": {
       // The mirror alone leaves Maven's "central" with snapshots off, so no
       // SNAPSHOT dependency is ever requested; the profile turns them on for
@@ -590,6 +592,102 @@ function setupCard(r) {
   }));
 }
 
+// Docker references use the registry authority (including its port), without
+// a scheme or /v2/. Image names may contain slashes; tags cannot contain ':'.
+function dockerHost(r) {
+  try { return new URL(r.url || location.origin, location.origin).host; }
+  catch (e) { return location.host; }
+}
+const dockerPath = (name, tag) => name + (tag ? ":" + tag : "");
+const dockerSize = (size) => size === undefined || size === null ? "—" : fmtBytes(size);
+const dockerPlatforms = (v) => Array.isArray(v.platforms) && v.platforms.length ? v.platforms.join(", ") : "—";
+
+function dockerSnippets(r, c) {
+  const host = dockerHost(r);
+  const image = c && c.name || "<image>";
+  const tag = c && c.version || "<tag>";
+  const local = image + ":" + tag;
+  const ref = host + "/" + r.name + "/" + local;
+  const list = [["docker login", "docker login " + host], ["docker pull", "docker pull " + ref]];
+  if (r.type === "hosted") list.push(["docker tag / push", "docker tag " + local + " " + ref + "\ndocker push " + ref]);
+  return list;
+}
+
+function dockerUsage(r, c) {
+  return dockerSnippets(r, c).map(([title, text]) => {
+    const pre = h("pre", { class: "code" }, text);
+    return h("div", { class: "snippet" },
+      h("div", { class: "codebar" }, h("span", null, title), copyButton(text, pre, t("usage.copy"))), pre);
+  });
+}
+
+function dockerTagCard(r, c, v) {
+  const pull = dockerSnippets(r, c)[1][1];
+  return h("section", { class: "card" },
+    hero("docker", c.name, blue(c.version), r.name),
+    h("div", { class: "card-body" }, tabs([
+      [t("comp.overview"), () => [
+        kv(t("docker.image"), c.name), kv(t("docker.tag"), c.version),
+        kv(t("docker.digest"), v.digest || "—"), kv(t("col.size"), dockerSize(v.size)),
+        kv(t("docker.platforms"), dockerPlatforms(v)), kv(t("docker.created"), fmtDate(v.created)),
+        copyLine(pull, t("docker.copyPull"))]],
+      [t("usage.title"), () => dockerUsage(r, c)],
+    ])));
+}
+
+// Search and repository browsing share the package versions API and tag view.
+export async function dockerTagView(r, c) {
+  const d = await versionList(r, c);
+  const v = d.list.find((x) => x.version === c.version);
+  return [v ? null : h("div", { class: "notice amber" }, t("docker.tagUnavailable")),
+    dockerTagCard(r, c, v || {}), d.truncated ? truncNote(t("docker.tagsTruncated")) : null];
+}
+
+async function viewDocker(view, r, path, head, isLive) {
+  const out = h("div", null, loading());
+  const colon = (path || "").lastIndexOf(":");
+  const name = colon < 0 ? path : path.slice(0, colon);
+  const tag = colon < 0 ? "" : path.slice(colon + 1);
+  const crumbs = h("nav", { class: "crumbs", "aria-label": t("crumb.aria") },
+    h("a", { href: browseLink(r.name) }, t("docker.images")),
+    name ? [h("span", { class: "sep" }, "/"), h("a", { href: browseLink(r.name, name) }, name)] : null,
+    tag ? [h("span", { class: "sep" }, "/"), h("span", { "aria-current": "page" }, tag)] : null);
+  put(view, head, crumbs, out);
+  try {
+    let nodes;
+    if (tag) {
+      nodes = await dockerTagView(r, { name, version: tag });
+    } else if (name) {
+      const d = await versionList(r, { name });
+      nodes = [card(t("docker.tags"), name, tbl([
+        t("docker.tag"), t("docker.digest"), t("col.size"), t("docker.platforms"), t("docker.created"),
+      ], d.list.map((v) => h("tr", null,
+        h("td", null, h("a", { href: browseLink(r.name, dockerPath(name, v.version)) }, v.version || "—")),
+        h("td", null, v.digest || "—"), h("td", { class: "num" }, dockerSize(v.size)),
+        h("td", null, dockerPlatforms(v)), h("td", null, fmtDate(v.created)))), t("docker.noTags"))),
+        d.truncated ? truncNote(t("docker.tagsTruncated")) : null];
+    } else {
+      const d = await api(apiRepo(r.name, "/packages"));
+      const names = (d.packages || []).map((p) => typeof p === "string" ? p : p && p.name).filter(Boolean);
+      const filter = h("input", { type: "search", "aria-label": t("docker.filter"), placeholder: t("docker.filter") });
+      const rows = h("div");
+      const render = () => put(rows, tbl([t("docker.image")],
+        names.filter((n) => n.toLowerCase().includes(filter.value.trim().toLowerCase())).map((n) =>
+          h("tr", null, h("td", null, h("a", { href: browseLink(r.name, n) }, n)))), t("docker.noImages")));
+      filter.addEventListener("input", render);
+      render();
+      nodes = [card(t("docker.images"), null, [filter, rows]), d.truncated ? truncNote(t("docker.imagesTruncated")) : null];
+    }
+    if (!isLive()) return;
+    put(out, nodes, !tag ? h("section", { class: "card" }, h("div", { class: "card-body" },
+      tabs([[t("usage.title"), () => dockerUsage(r, name ? { name } : null)]]))) : null);
+  } catch (e) {
+    if (!isLive()) return;
+    put(out, h("div", { class: "empty" }, t("detail.loadFailed")));
+    handleError(e);
+  }
+}
+
 // ---- tree browser ------------------------------------------------------------------
 
 // viewTree: #browse/browse:<repo>[:<path>] — a lazy tree (left) and the
@@ -608,6 +706,10 @@ export async function viewTree(view, name, path) {
       state.me.admin ? h("a", { class: "btn", href: adminRepoLink(r.name) }, t("tree.settings")) : null,
       canUpload(r) ? h("a", { class: "btn primary", href: uploadLink(r.name) }, icon("upload"), t("tree.upload")) : null),
     { eyebrow: t("tree.eyebrow") });
+  if (fmt === "docker") {
+    await viewDocker(view, r, path || "", head, () => alive);
+    return;
+  }
   if (r.type === "group") {
     const members = r.members || [];
     put(view, head, h("div", { class: "two" },

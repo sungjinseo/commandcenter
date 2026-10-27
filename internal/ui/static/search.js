@@ -6,7 +6,7 @@ import {
   tbl, pageHead, loading, truncNote, debounce, handleError, icon, loadRepos, state,
 } from "./util.js";
 import { t } from "./i18n.js";
-import { componentView, assetView, deriveComp } from "./browse.js";
+import { componentView, assetView, deriveComp, dockerTagView } from "./browse.js";
 
 // kinds holds the per-format criteria (Decision 4): [hash key, label, API
 // parameter]. Coordinates keep their technical names in both languages.
@@ -23,6 +23,7 @@ function kinds() {
     pypi: { title: of("PyPI"), fmt: "pypi", fields: nv() },
     golang: { title: of("Go"), fmt: "go", fields: nv(t("search.module")) },
     cargo: { title: of("Cargo"), fmt: "cargo", fields: nv(t("search.crate")) },
+    docker: { title: of("Docker"), fmt: "docker", fields: [["name", t("docker.image"), "name"], ["version", t("docker.tag"), "version"]] },
   };
 }
 
@@ -224,6 +225,22 @@ export async function viewSearch(view, kind, criteria) {
     const n = ++seq;
     const r = await repoOf(comp);
     if (!live() || n !== seq) return;
+    if (comp.format === "docker") {
+      put(out, loading());
+      try {
+        const nodes = await dockerTagView(r, comp);
+        if (!live() || n !== seq) return;
+        put(out, h("nav", { class: "crumbs", "aria-label": t("crumb.aria") }, backBtn(), sep(),
+          h("a", { href: browseLink(r.name, comp.name) }, comp.name), sep(),
+          h("span", { "aria-current": "page" }, comp.version)), nodes);
+        focusHead();
+      } catch (e) {
+        if (!live() || n !== seq) return;
+        put(out, backBtn(), h("div", { class: "empty" }, t("detail.loadFailed")));
+        handleError(e);
+      }
+      return;
+    }
     const assets = comp.assets || [];
     // The result holds at most 50 assets per component, so deleting a Maven
     // component re-lists its folder instead of trusting it; the other formats

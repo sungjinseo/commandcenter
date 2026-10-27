@@ -13,7 +13,7 @@ import { viewSearch } from "./search.js";
 import { dropFlash } from "./repoform.js";
 import { viewUploadList, viewUpload } from "./upload.js";
 
-const SEARCH_KINDS = ["generic", "custom", "cargo", "golang", "maven", "npm", "pypi"];
+const SEARCH_KINDS = ["generic", "custom", "cargo", "golang", "maven", "npm", "pypi", "docker"];
 
 const ADMIN_SCREENS = {
   "admin/repository/repositories": true,

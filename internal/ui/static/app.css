@@ -303,6 +303,7 @@ select[multiple] { height: auto; }
 .badge.f-pypi { color: var(--f-pypi); background: var(--f-pypi-bg); }
 .badge.f-go { color: var(--f-go); background: var(--f-go-bg); }
 .badge.f-cargo { color: var(--f-cargo); background: var(--f-cargo-bg); }
+.badge.f-docker { color: var(--f-go); background: var(--f-go-bg); }
 .dot { width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
 .format {
   width: 27px; height: 27px; border-radius: 7px; display: inline-grid; place-items: center; flex: none;
@@ -313,6 +314,7 @@ select[multiple] { height: auto; }
 .format.pypi { background: var(--f-pypi-bg); color: var(--f-pypi); }
 .format.go { background: var(--f-go-bg); color: var(--f-go); }
 .format.cargo { background: var(--f-cargo-bg); color: var(--f-cargo); }
+.format.docker { background: var(--f-go-bg); color: var(--f-go); }
 .namecell { display: flex; align-items: center; gap: 9px; }
 .namecell small { display: block; color: var(--faint); font-size: 9px; margin-top: 2px; }
 

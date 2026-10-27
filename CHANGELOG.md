@@ -68,6 +68,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   operations guide).
 
 ### Added
+- The `docker` format: hosted Docker/OCI registries served at `/v2/<repository>/<image>` on the
+  same host and port (`docker push host/<repo>/<image>:<tag>`), with the Distribution token flow
+  (`/v2/token`; Basic is accepted too), schema2 and OCI manifests and indexes stored verbatim,
+  chunked, monolithic and cross-repository-mount blob uploads that survive a restart, tag and
+  catalog listing, delete by digest, and `writePolicy` as for Maven. `GET /v2/` challenges
+  requests without credentials so clients find the token endpoint; anonymous pull then uses an
+  anonymous token. Role privileges may target `format:docker`. Docker proxy and group
+  repositories and cleanup policies for docker repositories are not supported yet.
 - PostgreSQL as the metadata database: `database.url` / `COMMANDCENTER_DATABASE_URL` and
   `database.maxConns`; SQLite stays the default. Every command that opens the database honours
   it, the schema version guard exists on both, and `COMMANDCENTER_TEST_POSTGRES_URL` runs the

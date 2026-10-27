@@ -18,7 +18,7 @@ const tk = (base, k) => t(base + "." + k);
 const createLink = (recipe) => adminRepoLink("create") + (recipe ? ":" + encodeURIComponent(recipe) : "");
 
 // Recipe names: "maven2" is our "maven" format.
-const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"]];
+const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"]];
 const TYPES = ["hosted", "proxy", "group"];
 const RECIPES = RECIPE_FORMATS.flatMap(([label, format]) => TYPES.map((type) => ({ id: label + "-" + type, format, type })));
 const recipeOf = (format, type) => RECIPES.find((r) => r.format === format && r.type === type);
@@ -32,7 +32,7 @@ const DEPLOY = [["allow", "rf.deployAllow"], ["allow_once", "rf.deployDisable"],
 const VERSION = [["release", "Release"], ["snapshot", "Snapshot"], ["mixed", "Mixed"]];
 const REMOTE_EXAMPLE = {
   maven: "https://repo1.maven.org/maven2/", npm: "https://registry.npmjs.org/", pypi: "https://pypi.org/",
-  go: "https://proxy.golang.org/", cargo: "https://index.crates.io/",
+  go: "https://proxy.golang.org/", cargo: "https://index.crates.io/", docker: "https://registry-1.docker.io",
 };
 const ANON = [["", "rf.anonInherit"], ["true", "rf.anonAllow"], ["false", "rf.anonDeny"]];
 
@@ -241,7 +241,7 @@ export async function viewRepoForm(view, o) {
       return;
     }
     cfg = {
-      name: "", format: r.format, type: r.type, remote: "", remoteAuth: null,
+      name: "", format: r.format, type: r.type, remote: r.format === "docker" && r.type === "proxy" ? REMOTE_EXAMPLE.docker : "", remoteAuth: null,
       metadataMaxAge: "24h", contentMaxAge: "-1", negativeCacheTTL: "10m",
       members: [], writeMember: "", versionPolicy: r.format === "maven" && r.type === "hosted" ? "release" : "",
       writePolicy: r.type === "hosted" ? "allow_once" : "", anonymousRead: null,
@@ -252,6 +252,7 @@ export async function viewRepoForm(view, o) {
   const stores = bsP ? await bsP : null;
   if (!isLive()) return;
   const isProxy = cfg.type === "proxy", isGroup = cfg.type === "group", isHosted = cfg.type === "hosted";
+  const isDocker = cfg.format === "docker";
   const kept = !editing && carry ? carry : null;
   carry = null;
 
@@ -287,7 +288,9 @@ export async function viewRepoForm(view, o) {
   const layout = cfg.format === "maven" ? textInput("Strict", { readonly: true }) : null;
 
   // Hosted
-  const deploy = isHosted ? select(DEPLOY.map(([v, k]) => [v, t(k)]), cfg.writePolicy || "allow_once") : null;
+  const deploy = isHosted ? select(isDocker
+    ? [["allow", t("docker.allowOverwrite")], ["allow_once", t("docker.preventOverwrite")]]
+    : DEPLOY.map(([v, k]) => [v, t(k)]), cfg.writePolicy || "allow_once") : null;
 
   // Proxy
   let remote, mdAge, ctAge, negTTL, hidden, user, pass, bearer, clrPass, clrBearer;
@@ -377,7 +380,7 @@ export async function viewRepoForm(view, o) {
           version ? field(t("rf.version"), version, t("rf.versionHelp")) : null,
           field(t("rf.layout"), layout))) : null,
         isHosted ? card(t("rf.hosted"), t("rf.hostedSub"), fields(
-          field(t("rf.deploy"), deploy, t("rf.deployHelp"), { full: true }))) : null,
+          field(isDocker ? t("docker.writePolicy") : t("rf.deploy"), deploy, isDocker ? t("docker.writePolicyHelp") : t("rf.deployHelp"), { full: true }))) : null,
         isProxy ? card(t("rf.proxy"), t("rf.proxySub"), fields(
           field(t("rf.remote"), remote, t("rf.remoteHelp"), { req: true, full: true }),
           hidden ? h("div", { class: "field full" }, hidden.el, h("small", null, t("rf.hiddenHelp"))) : null,
@@ -387,7 +390,7 @@ export async function viewRepoForm(view, o) {
         authCard,
         isGroup ? card(t("rf.group"), t("rf.groupSub"), fields(
           field(t("rf.memberRepos"), picker.el, t("rf.membersHelp"), { group: true, full: true }),
-          field(t("rf.writable"), writable, t("rf.writableHelp"), { full: true }))) : null,
+          isDocker ? null : field(t("rf.writable"), writable, t("rf.writableHelp"), { full: true }))) : null,
         cleanupCard,
         card(t("rf.access"), t("rf.accessSub"), fields(field(t("rf.anon"), anon, t("rf.anonHelp"), { full: true }))),
         info ? card(t("rf.storage"), t("rf.storageSub"), [

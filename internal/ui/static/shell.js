@@ -313,7 +313,7 @@ export async function signOut() {
 
 // ---- breadcrumb (Decision 7): 커맨드센터 / <page> / <id> --------------------
 
-const FORMAT_LABELS = { maven: "Maven", npm: "npm", pypi: "PyPI", golang: "Go", cargo: "Cargo" };
+const FORMAT_LABELS = { maven: "Maven", npm: "npm", pypi: "PyPI", golang: "Go", cargo: "Cargo", docker: "Docker" };
 
 function pageTitle(key) {
   if (key.startsWith("browse/search/")) return t("nav.search");
@@ -421,7 +421,7 @@ function brandMark() {
   return h("img", { src: "/ui/icon.svg", alt: "", "aria-hidden": "true", width: 24, height: 24 });
 }
 
-const SEARCH_SUB = [["cargo", "cargo"], ["go", "golang"], ["maven", "maven"], ["npm", "npm"], ["pypi", "pypi"]];
+const SEARCH_SUB = [["cargo", "cargo"], ["docker", "docker"], ["go", "golang"], ["maven", "maven"], ["npm", "npm"], ["pypi", "pypi"]];
 
 // navSections lists [title, items]; an item is [href, label, icon, active(key)].
 function navSections() {

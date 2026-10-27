@@ -1084,6 +1084,22 @@ curl -u ci -X DELETE http://localhost:8081/repository/go-hosted/example.com/hell
 - 폐쇄망에서는 공개 모듈에도 `GOSUMDB=off` 또는 `GONOSUMDB`를 설정하세요(sum.golang.org에 접속할 수 없습니다).
 - 업로드 크기 제한: `.zip` 500 MiB, `.mod` 16 MiB, `.info` 1 MiB. 초과하면 413을 반환합니다.
 
+### Docker 설정
+
+Docker/OCI 레지스트리 API는 `/v2/`에서 제공합니다. 이미지 이름은 `<저장소 이름>/<이미지 경로>`입니다(호스트 하나, 경로 접두사. Nexus와 달리 저장소별 포트가 없습니다).
+
+```bash
+docker login <host>                              # 사용자 비밀번호 또는 API 토큰
+docker push <host>/docker-hosted/team/app:1.0
+docker pull <host>/docker-hosted/team/app:1.0
+```
+
+- 지금은 hosted만 지원합니다(proxy·group은 추후). 인증은 Distribution 토큰 방식(`/v2/token`, 5분 유효)이며 Basic 인증도 바로 받습니다. `GET /v2/`는 자격 증명 없는 요청에 익명 읽기가 켜져 있어도 401과 토큰 안내를 돌려줍니다. docker, crane, skopeo가 토큰 주소를 그 응답에서 찾기 때문이며, 익명 읽기가 켜진 저장소는 그 뒤 익명 토큰으로 로그인 없이 pull 됩니다. push에는 add, 매니페스트 삭제(`DELETE /v2/<이름>/manifests/<digest>`)에는 delete 권한이 필요합니다.
+- `writePolicy`: `allow`는 태그 덮어쓰기 허용, `allow_once`는 이미 있는 태그를 다른 이미지로 바꾸지 못합니다(409). `deny`는 읽기 전용입니다.
+- 매니페스트는 받은 바이트 그대로 저장되며(최대 4 MiB. schema2, manifest list, OCI manifest, OCI index를 받고 schema1은 거부), 참조하는 blob이 모두 있어야 저장됩니다. 레이어는 내용 주소 저장소에서 중복 제거되고, 업로드 하나는 `maxUploadMiB`를 넘을 수 없습니다. 중단된 업로드 세션은 24시간 뒤 정리됩니다.
+- 매니페스트를 digest로 삭제하면 태그와 더 이상 참조되지 않는 레이어 행이 함께 지워지고, blob은 compact 작업이 회수합니다. 태그로는 삭제할 수 없습니다(400). Cleanup 정책은 docker 저장소에 적용되지 않습니다.
+- 리버스 프록시 뒤에서는 `baseURL`의 호스트가 토큰의 service 값이 되므로 클라이언트가 접속하는 주소와 같아야 합니다. HTTPS가 아니면 docker 데몬에 insecure-registries 설정이 필요합니다(localhost 제외).
+
 ### Cargo 설정
 
 `~/.cargo/config.toml`에 레지스트리를 추가하고 crates.io를 Command Center로 대체합니다.
@@ -1350,7 +1366,7 @@ docker compose start
 
 ## 제한 사항
 
-- 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML, Go·Cargo 업로드 화면은 없습니다. 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. Docker 포맷, S3 등 원격 blob 저장소, 포맷 고유의 검색(`npm search` 포함)도 없습니다.
+- 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML, Go·Cargo 업로드 화면은 없습니다. 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. Docker proxy·group, S3 등 원격 blob 저장소, 포맷 고유의 검색(`npm search` 포함)도 없습니다.
 - **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
 - HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
 - **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**, 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기, S3 같은 원격 blob store(경로는 로컬 디렉터리만), 이미 만든 저장소의 blob store 이동.
