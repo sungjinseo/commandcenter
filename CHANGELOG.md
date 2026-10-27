@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-10-27
+
+NuGet, APT and Yum repositories, a Nexus Repository 3 migration tool (`import-nexus`), a Nexus REST
+API v1 compatibility layer, the per-repository traffic dashboard, OIDC login and the redesigned web UI.
+The release assets now include the Kubernetes manifest pinned to the release and the chart as a file.
+
 ### Added
 - The `nuget` format: NuGet V3 feeds at `/repository/<repo>/index.json` for `dotnet restore`,
   `nuget.exe` and Visual Studio (service index, flat container, registration with inline pages,
