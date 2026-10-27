@@ -31,12 +31,16 @@ const LOCKOUT = /no admin who can log in/; // pinned to the server text by TestA
 const IN_USE = /in use/;
 const WRONG_PW = /the current password is incorrect/;
 const REENTER = /re-enter the bind password/;
+const REENTER_OIDC = /re-enter the client secret/;
 const ACTIONS = ["browse", "read", "add", "edit", "delete"];
 
 const userLink = (id) => "#admin/security/users" + (id ? ":" + enc(id) : "");
 const roleLink = (id) => "#admin/security/roles" + (id ? ":" + enc(id) : "");
 // dynamic keys go through tables, so every key stays a literal for the i18n test
-const REALM_KEYS = { local: ["realms.name.local", "realms.desc.local"], token: ["realms.name.token", "realms.desc.token"], ldap: ["realms.name.ldap", "realms.desc.ldap"] };
+const REALM_KEYS = { local: ["realms.name.local", "realms.desc.local"], token: ["realms.name.token", "realms.desc.token"], ldap: ["realms.name.ldap", "realms.desc.ldap"], oidc: ["realms.name.oidc", "realms.desc.oidc"] };
+// isDir: users of these sources live in a directory or identity provider; their
+// stored rows are overrides and their owner key is "<source>:<id>".
+const isDir = (src) => src === "ldap" || src === "oidc";
 const realmName = (id) => (REALM_KEYS[id] ? t(REALM_KEYS[id][0]) : id);
 const realmDesc = (id) => (REALM_KEYS[id] ? t(REALM_KEYS[id][1]) : "");
 const roleBadges = (roles) => (roles && roles.length ? roles.map((r) => badge(r, "blue")) : dash);
@@ -77,12 +81,12 @@ const roleItems = (roles) => roles.map((r) => [r.id, r.id]);
 function mergeUsers(list) {
   const stored = new Map(), dir = new Map();
   for (const u of list) (u.directory ? dir : stored).set(u.id, u);
-  const over = (id) => stored.has(id) && stored.get(id).source === "ldap";
+  const over = (id) => stored.has(id) && isDir(stored.get(id).source);
   const out = [...stored.values()].map((u) => Object.assign({}, u, { key: u.id, eff: over(u.id) && dir.has(u.id) ? dir.get(u.id).roles : u.roles }));
-  for (const [id, u] of dir) if (!over(id)) out.push(Object.assign({}, u, { key: stored.has(id) ? "ldap:" + id : id, eff: u.roles }));
+  for (const [id, u] of dir) if (!over(id)) out.push(Object.assign({}, u, { key: stored.has(id) ? (u.source || "ldap") + ":" + id : id, eff: u.roles }));
   return out;
 }
-const realmBadge = (u) => (u.source === "ldap" ? badge(realmName("ldap"), "purple") : badge(realmName("local")));
+const realmBadge = (u) => (isDir(u.source) ? badge(realmName(u.source), "purple") : badge(realmName("local")));
 
 export function viewUsers(view, id) {
   if (id === "create") return userCreate(view);
@@ -115,7 +119,7 @@ async function userCreate(view) {
   const idIn = textIn("", { required: true, maxlength: 64 });
   const nameIn = textIn("", { maxlength: 200 });
   const emailIn = textIn("", { maxlength: 200 });
-  const source = sel([["local", realmName("local")], ["ldap", realmName("ldap")]], "local");
+  const source = sel([["local", realmName("local")], ["ldap", realmName("ldap")], ["oidc", realmName("oidc")]], "local");
   const pw = pwIn(), pw2 = pwIn();
   const status = sel([["active", t("users.active")], ["disabled", t("users.disabled")]], "active");
   const rg = checkGroup(roleItems(roles), []);
@@ -124,7 +128,7 @@ async function userCreate(view) {
   const ldapNote = notice(t("users.ldapNote"), "");
   ldapNote.hidden = true;
   const syncSource = () => {
-    const ldap = source.value === "ldap";
+    const ldap = isDir(source.value);
     pwF.hidden = pw2F.hidden = ldap;
     ldapNote.hidden = !ldap;
   };
@@ -143,7 +147,7 @@ async function userCreate(view) {
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     fs.clear();
-    const ldap = source.value === "ldap";
+    const ldap = isDir(source.value);
     const a = pw.value, b = pw2.value;
     pw.value = pw2.value = ""; // the secret never stays in the page
     const id = idIn.value.trim();
@@ -211,7 +215,7 @@ async function userDetail(view, id) {
     put(view, pageHead(t("nav.users"), null, acts(back), eyebrow()), notFound(t("users.notFound", { id })));
     return;
   }
-  const stored = !u.directory, ldap = u.source === "ldap";
+  const stored = !u.directory, ldap = isDir(u.source);
   const form = h("form", { novalidate: true });
   const fs = formState(form);
   const effective = (u.eff || []);
@@ -249,7 +253,7 @@ async function userDetail(view, id) {
     const rg = checkGroup(roleItems(rl.roles || []), u.roles || []);
     const save = h("button", { type: "submit", class: "btn primary" }, t("users.save"));
     const idIn = textIn(u.id, { disabled: true });
-    const srcIn = textIn(realmName(ldap ? "ldap" : "local"), { disabled: true });
+    const srcIn = textIn(realmName(ldap ? u.source : "local"), { disabled: true });
     put(form, fs.err, fields(
       field(t("users.id"), idIn), field(t("users.source"), srcIn),
       field(t("users.name"), nameIn), field(t("users.email"), emailIn),
@@ -307,7 +311,7 @@ async function userDetail(view, id) {
     });
     head = acts(back, reset, revoke, toggle, del);
   }
-  put(view, pageHead(u.id, sub(t("users.realmSub", { realm: realmName(ldap ? "ldap" : "local") })), head, eyebrow()),
+  put(view, pageHead(u.id, sub(t("users.realmSub", { realm: realmName(ldap ? u.source : "local") })), head, eyebrow()),
     fs.ok, h("div", { class: "two" }, card(t("users.info"), t("users.infoSub"), form), access));
 }
 
@@ -528,7 +532,11 @@ export async function viewRealms(view) {
       if (!isLive()) return [];
       return ldapSettings(ld, rl, isLive);
     },
-    oidc: async () => [card("OIDC", null, notice(t("realms.pending")))],
+    oidc: async () => {
+      const [od, rl] = await Promise.all([api("realms/oidc"), api("roles")]);
+      if (!isLive()) return [];
+      return oidcSettings(od, rl, isLive);
+    },
   };
   const types = avail.filter((id) => editors[id]);
   const panels = new Map();
@@ -696,16 +704,138 @@ function ldapSettings(ld, rl, isLive) {
   return [card(t("ldap.title"), t("ldap.sub"), form), testCard];
 }
 
+// oidcSettings is the OIDC realm form (issuer, client, claims, roles) and a
+// discovery test that uses the form's values without saving them.
+function oidcSettings(od, rl, isLive) {
+  const roleOpts = roleItems(rl.roles || []);
+  const form = h("form", { novalidate: true });
+  const fs = formState(form);
+  const issuer = textIn(od.issuer, { placeholder: "https://idp.example.com/realms/main", maxlength: 300, class: "mono" });
+  const clientId = textIn(od.clientId, { maxlength: 300, class: "mono", autocomplete: "off" });
+  const secret = h("input", { type: "password", autocomplete: "new-password", placeholder: od.clientSecretSet ? t("rf.unchanged") : "" });
+  const clearSecret = od.clientSecretSet ? h("input", { type: "checkbox" }) : null;
+  if (clearSecret) clearSecret.addEventListener("change", () => { secret.disabled = clearSecret.checked; if (clearSecret.checked) secret.value = ""; });
+  const displayName = textIn(od.displayName, { maxlength: 60, placeholder: "SSO" });
+  const scopes = textIn((od.scopes || []).join(" "), { class: "mono", placeholder: "openid profile email groups", maxlength: 300 });
+  const userClaim = textIn(od.usernameClaim, { class: "mono", placeholder: "preferred_username" });
+  const groupsClaim = textIn(od.groupsClaim, { class: "mono", placeholder: "groups" });
+  const caCert = h("textarea", { class: "mono", rows: 5, placeholder: "-----BEGIN CERTIFICATE-----", spellcheck: "false" }, od.caCert || "");
+  const insecure = h("input", { type: "checkbox", checked: !!od.insecureSkipVerify });
+  const insecureWarn = notice(t("ldap.insecureWarn"), "amber");
+  insecureWarn.hidden = !od.insecureSkipVerify;
+  insecure.addEventListener("change", () => { insecureWarn.hidden = !insecure.checked; });
+  const timeout = textIn(od.timeoutSeconds || "", { type: "number", min: 1, max: 60 });
+  const defaults = checkGroup(roleOpts, od.defaultRoles || []);
+  const adminDefWarn = notice(t("ldap.adminDefaultWarn"), "amber");
+  const maps = [], mapBox = h("div");
+  const syncWarn = () => { adminDefWarn.hidden = !defaults.values().includes("admin"); };
+  const addMap = (m) => {
+    const group = textIn(m.group, { class: "mono", placeholder: "platform:admins", "aria-label": t("oidc.mapGroup") });
+    const roles = checkGroup(roleOpts, m.roles || []);
+    const rm = button(t("ldap.mapRemove"), "small danger");
+    const el = h("div", { class: "edit-row" }, h("div", { class: "row" }, h("div", { class: "field grow" }, h("span", { class: "flabel" }, t("oidc.mapGroup")), group), rm), roles.el);
+    const item = { group, roles };
+    rm.addEventListener("click", () => { maps.splice(maps.indexOf(item), 1); el.remove(); fs.dirty(); });
+    maps.push(item);
+    mapBox.appendChild(el);
+  };
+  (od.groupMappings || []).forEach(addMap);
+  const addMapBtn = button(t("ldap.mapAdd"));
+  addMapBtn.addEventListener("click", () => { addMap({ group: "", roles: [] }); fs.dirty(); });
+  form.addEventListener("change", syncWarn);
+  const save = h("button", { type: "submit", class: "btn primary" }, t("oidc.save"));
+  const secretErr = errBox();
+  const setHelp = od.clientSecretSet ? [h("span", { class: "rf-set" }, t("oidc.secretSet")), " — ", t("rf.keepEmpty")] : null;
+  const secretField = field(t("oidc.clientSecret"), secret, setHelp);
+  secretField.append(secretErr);
+  const body = () => ({
+    issuer: issuer.value.trim(), clientId: clientId.value.trim(), clientSecret: secret.value, clearClientSecret: !!(clearSecret && clearSecret.checked),
+    displayName: displayName.value.trim(), scopes: scopes.value.trim().split(/\s+/).filter(Boolean),
+    usernameClaim: userClaim.value.trim(), groupsClaim: groupsClaim.value.trim(), caCert: caCert.value.trim(), insecureSkipVerify: insecure.checked,
+    timeoutSeconds: timeout.value.trim() === "" ? 0 : Number(timeout.value), defaultRoles: defaults.values(),
+    groupMappings: maps.map((m) => ({ group: m.group.value.trim(), roles: m.roles.values() })),
+  });
+  put(form, fs.err, fs.ok, notice(t("oidc.redirectNote", { url: location.origin + "/-/sso/oidc/callback" }), ""),
+    fields(
+      field(t("oidc.issuer"), issuer, t("oidc.issuerHelp"), { full: true }),
+      field(t("oidc.clientId"), clientId), secretField,
+      clearSecret ? h("div", { class: "field" }, h("label", { class: "check" }, clearSecret, t("oidc.clearSecret"))) : null,
+      field(t("oidc.displayName"), displayName, t("oidc.displayNameHelp")),
+      field(t("oidc.scopes"), scopes, t("oidc.scopesHelp"), { full: true }),
+      field(t("oidc.usernameClaim"), userClaim, t("oidc.usernameClaimHelp")),
+      field(t("oidc.groupsClaim"), groupsClaim, t("oidc.groupsClaimHelp")),
+      field(t("oidc.caCert"), caCert, t("oidc.caCertHelp"), { full: true }),
+      h("div", { class: "field" }, h("label", { class: "check" }, insecure, t("ldap.insecure"))),
+      field(t("ldap.timeout"), timeout, t("ldap.timeoutHelp")),
+      groupField(t("ldap.defaults"), defaults.el, t("oidc.defaultsHelp"))),
+    insecureWarn,
+    h("h3", { class: "card-title" }, t("ldap.maps")), h("p", { class: "hint" }, t("oidc.mapsHelp")), mapBox,
+    h("div", { class: "actions" }, addMapBtn), adminDefWarn, h("div", { class: "savebar" }, save));
+  syncWarn();
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    fs.clear();
+    secretErr.hidden = true;
+    fs.ok.hidden = true;
+    const b = body();
+    secret.value = ""; // the secret never stays in the page
+    const errs = [];
+    if (!Number.isInteger(b.timeoutSeconds) || b.timeoutSeconds < 0) errs.push(t("ldap.e.timeout"));
+    maps.forEach((m, i) => { if (!m.group.value.trim()) errs.push(t("ldap.e.group", { n: i + 1 })); });
+    if (errs.length) { fs.show(errs, t("oidc.errOne")); return; }
+    save.disabled = true;
+    try {
+      const out = await api("realms/oidc", { method: "PUT", body: b });
+      if (!isLive()) return;
+      fs.clean();
+      secret.disabled = false;
+      secret.placeholder = out && out.clientSecretSet ? t("rf.unchanged") : "";
+      if (clearSecret) clearSecret.checked = false;
+      put(fs.ok, t("oidc.saved"));
+      fs.ok.hidden = false;
+      save.disabled = false;
+    } catch (e) {
+      save.disabled = false;
+      if (!isLive()) return;
+      if (e.status === 400 && REENTER_OIDC.test(e.message)) { put(secretErr, t("oidc.reenter")); secretErr.hidden = false; secret.focus(); } else failWith(fs, e, t("oidc.errOne"));
+    }
+  });
+
+  // ---- discovery test (the form's values, not saved)
+  const run = button(t("oidc.test"), "primary");
+  const result = h("div", { "aria-live": "polite" });
+  run.addEventListener("click", async () => {
+    run.disabled = true;
+    put(result, loading());
+    try {
+      const d = await api("realms/oidc/test", { method: "POST", body: body() });
+      if (!isLive()) return;
+      put(result, badge(t("ldap.testOk"), "green"),
+        [["oidc.t.issuer", d.issuer], ["oidc.t.auth", d.authorizationEndpoint], ["oidc.t.token", d.tokenEndpoint], ["oidc.t.jwks", d.jwksUri],
+          ["oidc.t.scopes", (d.scopesSupported || []).join(" ")], ["oidc.t.algs", (d.algs || []).join(" ")]].map(([k, v]) =>
+          h("div", { class: "listrow" }, h("span", null, h("strong", null, t(k)), h("small", { class: "mono" }, v || dash)))));
+    } catch (e) {
+      if (!isLive()) return;
+      if (e.status === 401 || e.status === 403) { handleError(e); put(result); } else put(result, badge(t("ldap.testFail"), "red"), notice(e.message, "amber"));
+    } finally {
+      run.disabled = false;
+    }
+  });
+  const testCard = card(t("oidc.testTitle"), t("oidc.testSub"), [h("div", { class: "actions end" }, run), result]);
+  return [card(t("oidc.title"), t("oidc.sub"), form), testCard];
+}
+
 // ---- account ---------------------------------------------------------------------
 
 export async function viewAccount(view) {
   if (state.me.anonymous) return needLogin(view, t("nav.account"));
   const me = state.me;
   const tokens = me.admin ? "#admin/security/usertoken" : "#user/usertoken";
-  const ldap = me.realm === "LDAP";
+  const dirSource = me.realm === "LDAP" ? "ldap" : me.realm === "OIDC" ? "oidc" : "";
+  const ldap = dirSource !== "";
   let pwCard;
   if (ldap) {
-    pwCard = card(t("acct.pwTitle"), null, notice(t("acct.ldap")));
+    pwCard = card(t("acct.pwTitle"), null, notice(t(dirSource === "oidc" ? "acct.oidc" : "acct.ldap")));
   } else {
     const cur = pwIn(), pw = pwIn(), pw2 = pwIn();
     cur.autocomplete = "current-password";
@@ -741,7 +871,7 @@ export async function viewAccount(view) {
     h("div", { class: "two" },
       card(t("users.info"), t("users.infoSub"), [
         kv(t("users.id"), me.user),
-        kv(t("users.realm"), badge(realmName(ldap ? "ldap" : "local"), ldap ? "purple" : null)),
+        kv(t("users.realm"), badge(realmName(ldap ? dirSource : "local"), ldap ? "purple" : null)),
         ldap ? kv(t("acct.owner"), h("code", null, me.owner)) : null,
         kv(t("users.roles"), h("span", null, roleBadges(me.roles))),
         kv(t("users.admin"), adminBadge(me.admin)),

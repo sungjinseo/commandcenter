@@ -13,7 +13,7 @@ export async function viewWelcome(view) {
   const me = state.me;
   const statsBox = h("div", { class: "stats" }, loading());
   const attn = h("div", { hidden: true });
-  const summary = h("p");
+  const summary = h("p", { class: "mono" });
   const act = h("div", { class: "actions" });
   put(view, pageHead(t("dash.title"), summary, act), statsBox, attn,
     me.admin ? repositoryStatsCard(isLive) : null);
