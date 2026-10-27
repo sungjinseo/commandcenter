@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -687,5 +688,48 @@ func TestRegistryBlobStoreLegacyEmptyAcceptsDefault(t *testing.T) {
 	var ve *ValidationError
 	if err := reg.Update(ctx, "old", config.Repository{BlobStore: "fast"}, ClearSecrets{}); !errors.As(err, &ve) {
 		t.Fatalf("a real change must still be refused: %v", err)
+	}
+}
+
+// An apt signingKey follows the remoteAuth rules: an empty one on update
+// keeps the stored key, ClearSecrets.SigningKey drops it, a new one
+// replaces it; and it must parse.
+func TestRegistrySigningKey(t *testing.T) {
+	reg, db := newRegistry(t)
+	ctx := context.Background()
+	key, err := os.ReadFile(filepath.Join("..", "pgp", "testdata", "rsa2048.asc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Create(ctx, config.Repository{Name: "a", Format: "apt", Type: "hosted", SigningKey: "nope"}); err == nil || !strings.Contains(err.Error(), "signingKey") {
+		t.Fatalf("bad key: %v", err)
+	}
+	if err := reg.Create(ctx, config.Repository{Name: "a", Format: "apt", Type: "hosted", SigningKey: string(key), Distribution: "jammy"}); err != nil {
+		t.Fatal(err)
+	}
+	stored := func() string {
+		t.Helper()
+		defs, err := db.ListRepositories(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range defs {
+			if d.Name == "a" && d.SigningKey != reg.Get("a").SigningKey {
+				t.Fatal("snapshot and db differ")
+			}
+		}
+		return reg.Get("a").SigningKey
+	}
+	if stored() != string(key) || reg.Get("a").Distribution != "jammy" || reg.Get("a").Component != "main" {
+		t.Fatalf("after create: %+v", reg.Get("a").Repository)
+	}
+	if err := reg.Update(ctx, "a", config.Repository{Component: "internal"}, ClearSecrets{}); err != nil || stored() != string(key) || reg.Get("a").Component != "internal" || reg.Get("a").Distribution != "stable" {
+		t.Fatalf("empty key keeps: %v %+v", err, reg.Get("a").Repository)
+	}
+	if err := reg.Update(ctx, "a", config.Repository{}, ClearSecrets{SigningKey: true}); err != nil || stored() != "" {
+		t.Fatalf("clear: %v %q", err, stored())
+	}
+	if err := reg.Update(ctx, "a", config.Repository{SigningKey: string(key)}, ClearSecrets{}); err != nil || stored() != string(key) {
+		t.Fatalf("set again: %v", err)
 	}
 }

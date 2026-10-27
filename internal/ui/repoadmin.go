@@ -62,6 +62,13 @@ type repoRequest struct {
 	// BlobStore is set on create (empty defaults to "default"); it is immutable,
 	// so an update must repeat it or leave it empty.
 	BlobStore string `json:"blobStore"`
+	// apt hosted: distribution and component ("" for the defaults), and the
+	// signing key, write-only: an empty one on update keeps the stored key
+	// unless clearSigningKey is set.
+	Distribution    string `json:"distribution"`
+	Component       string `json:"component"`
+	SigningKey      string `json:"signingKey"`
+	ClearSigningKey bool   `json:"clearSigningKey"`
 }
 
 // repoAuthResponse never carries a secret.
@@ -90,6 +97,9 @@ type repoConfigResponse struct {
 	CleanupPolicy        string            `json:"cleanupPolicy"`
 	Online               bool              `json:"online"`
 	BlobStore            string            `json:"blobStore"`
+	Distribution         string            `json:"distribution,omitempty"`
+	Component            string            `json:"component,omitempty"`
+	SigningKeySet        bool              `json:"signingKeySet"`
 }
 
 // publicRemote drops the userinfo, query and fragment of a remote, which may
@@ -124,6 +134,9 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		CleanupPolicy:        d.CleanupPolicy,
 		Online:               d.IsOnline(),
 		BlobStore:            d.BlobStore,
+		Distribution:         d.Distribution,
+		Component:            d.Component,
+		SigningKeySet:        d.SigningKey != "",
 	}
 	if d.AnonymousRead != nil {
 		v := *d.AnonymousRead
@@ -142,9 +155,10 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		Members: b.Members, WriteMember: b.WriteMember,
 		VersionPolicy: b.VersionPolicy, WritePolicy: b.WritePolicy, Depth: b.Depth,
 		AnonymousRead: b.AnonymousRead, Online: b.Online,
-		BlobStore: b.BlobStore,
+		BlobStore:    b.BlobStore,
+		Distribution: b.Distribution, Component: b.Component, SigningKey: b.SigningKey,
 	}
-	var clear repo.ClearSecrets
+	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey}
 	if b.CleanupPolicy != nil {
 		d.CleanupPolicy = *b.CleanupPolicy
 	} else {

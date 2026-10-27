@@ -85,6 +85,7 @@ func (e *ValidationError) Error() string { return strings.Join(e.Errors, "; ") }
 type ClearSecrets struct {
 	Password          bool
 	BearerToken       bool
+	SigningKey        bool // drop a stored apt signingKey; otherwise an empty one keeps it
 	KeepCleanupPolicy bool
 }
 
@@ -250,6 +251,9 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 		return config.Repository{}, err
 	}
 	def.RemoteAuth = ra
+	if def.SigningKey == "" && !clear.SigningKey {
+		def.SigningKey = cur.SigningKey
+	}
 	config.ApplyRepositoryDefaults(&def)
 
 	list := r.definitions()

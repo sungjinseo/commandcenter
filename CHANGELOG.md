@@ -105,6 +105,18 @@ blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
   target already has is skipped (`-skip-existing`, default), `-dry-run` lists what would be copied,
   and the credentials come from files or `NEXUS_PASSWORD`/`COMMANDCENTER_TOKEN`, never from the
   command line or the output ("Nexus에서 이전하기" in the operations guide).
+
+- apt (Debian/Ubuntu) repositories: hosted, proxy and group, under `/repository/<repo>/`. A
+  hosted repository takes `.deb` uploads (`PUT pool/<any>/<file>.deb` or a multipart `POST /`
+  with the file in `file`), reads the control file and keeps `dists/<distribution>/Release`,
+  `<component>/binary-<arch>/Packages` and `Packages.gz` itself, regenerated in the transaction of
+  every upload and delete; with an RSA signing key (repository setting `signingKey`, sealed at rest
+  like the remote credentials) it also writes `Release.gpg` and `InRelease` and serves the public
+  key at `public.key`. The control archive must be a `control.tar.gz` (or an uncompressed tar):
+  xz- and zstd-compressed ones are refused with 400. A proxy caches whatever its remote serves
+  (`dists/` as metadata, `pool/` as content, signatures untouched); a group answers from the
+  first member that has the path. Cleanup policies, component delete and the metadata tab
+  (description, maintainer, homepage, depends) cover apt; `format:apt` is a privilege target.
 - The `oidc` realm: browser login through an OpenID Connect provider (Gitea, Keycloak, ...)
   with the authorization code flow and PKCE, configured under Realms (`GET/PUT /-/api/realms/oidc`,
   `POST /-/api/realms/oidc/test` reads the provider's discovery document) and offered on the login

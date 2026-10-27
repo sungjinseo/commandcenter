@@ -30,6 +30,7 @@ type componentMetadata struct {
 	License       *string        `json:"license"`
 	Homepage      *string        `json:"homepage"`
 	RepositoryURL *string        `json:"repositoryUrl"`
+	Maintainer    *string        `json:"maintainer,omitempty"` // apt only: the control file's Maintainer
 	Collected     bool           `json:"collected"`
 	Dependencies  []dependencyJS `json:"dependencies"`
 	Resolved      bool           `json:"resolved"`
@@ -84,6 +85,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.yumMetadata(r.Context(), rp, name, version, &m)
 	case "nuget":
 		found, err = u.nugetMetadata(r.Context(), rp, name, version, &m)
+	case "apt":
+		found, err = u.aptMetadata(r.Context(), rp, group, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -347,6 +350,51 @@ func (u *UI) yumMetadata(ctx context.Context, rp *repo.Repository, name, version
 				}
 			}
 			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: d.Name, Requirement: req, Optional: false})
+		}
+	}
+	return true, nil
+}
+
+// aptMetadata reads the control fields an apt hosted row holds (the
+// group is the architecture): Description's first line, Maintainer,
+// Homepage, and Depends as "depends" dependencies; Pre-Depends, Recommends
+// and Suggests follow with their own scopes. Debian control has no license
+// field.
+func (u *UI) aptMetadata(ctx context.Context, rp *repo.Repository, arch, name, version string, m *componentMetadata) (bool, error) {
+	if arch == "" {
+		return false, nil
+	}
+	p, ok, err := u.storedPackage(ctx, rp, name, version+"_"+arch)
+	if err != nil || !ok {
+		return ok, err
+	}
+	var row struct {
+		Fields [][2]string `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(p.Attrs), &row); err != nil {
+		return true, nil
+	}
+	m.Collected = true
+	field := func(name string) string {
+		for _, f := range row.Fields {
+			if strings.EqualFold(f[0], name) {
+				return f[1]
+			}
+		}
+		return ""
+	}
+	desc, _, _ := strings.Cut(field("Description"), "\n")
+	m.Description, m.Homepage, m.Maintainer = optStr(desc), optStr(field("Homepage")), optStr(field("Maintainer"))
+	for _, scope := range []string{"depends", "pre-depends", "recommends", "suggests"} {
+		for _, alt := range strings.Split(field(scope), ",") {
+			alt = strings.TrimSpace(alt)
+			if alt == "" {
+				continue
+			}
+			// "a (>= 1.0) | b": the alternatives stay in one entry, the
+			// first package named, the rest as the requirement
+			pkg, req, _ := strings.Cut(alt, " ")
+			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: pkg, Requirement: strings.TrimSpace(req), Optional: scope != "depends" && scope != "pre-depends"})
 		}
 	}
 	return true, nil

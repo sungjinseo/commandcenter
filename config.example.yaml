@@ -18,7 +18,7 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "yum-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "yum-hosted", "apt-hosted"] }
 
 repositories:
   - name: maven-central
@@ -148,6 +148,25 @@ repositories:
     type: group
     members: [yum-hosted, yum-proxy]
     writeMember: yum-hosted
+  - name: apt-hosted                  # curl -u ci:pw -T hello_1.0_amd64.deb <host>/repository/apt-hosted/pool/hello_1.0_amd64.deb
+    format: apt
+    type: hosted
+    writePolicy: allow_once           # allow: 같은 패키지_버전_아키텍처 덮어쓰기 허용(edit 권한)
+    distribution: stable              # dists/<distribution>/ (기본 stable). sources.list의 suite
+    component: main                   # 기본 main. 패키지는 pool/<component>/… 에 저장
+    # signingKey: |                   # 비밀번호 없는 RSA OpenPGP 개인키(ASCII armor). 있으면 Release.gpg·InRelease 서명, 공개키는 …/public.key
+    #   -----BEGIN PGP PRIVATE KEY BLOCK-----
+    #   ...
+  - name: apt-proxy                   # deb http://<host>/repository/apt-proxy bookworm main
+    format: apt
+    type: proxy
+    remote: "https://deb.debian.org/debian/"   # dists/와 pool/이 있는 원격 저장소 URL. 서명은 원격 것을 그대로 전달
+    metadataMaxAge: "1h"              # dists/ 재확인 주기. pool/의 .deb는 영구 캐시
+  - name: apt-all                     # hosted 먼저, 없으면 proxy (경로 단위; Packages를 합치지는 않음)
+    format: apt
+    type: group
+    members: [apt-hosted, apt-proxy]
+    writeMember: apt-hosted
 
 # database:
 #   url: postgres://cc:password@db.example:5432/commandcenter?sslmode=require

@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -539,5 +541,43 @@ func TestValidateDefinitionTypeFields(t *testing.T) {
 	p := Repository{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/", VersionPolicy: "release"}
 	if notes := NormalizeStored(&p); notes != nil || p.Remote == "" || p.VersionPolicy != "release" {
 		t.Fatalf("proxy changed: %v %+v", notes, p)
+	}
+}
+
+func TestAptSettings(t *testing.T) {
+	key, err := os.ReadFile(filepath.Join("..", "pgp", "testdata", "rsa2048.asc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := Repository{Name: "a", Format: "apt", Type: "hosted"}
+	ApplyRepositoryDefaults(&r)
+	if r.Distribution != "stable" || r.Component != "main" || r.WritePolicy != "allow_once" {
+		t.Fatalf("defaults: %+v", r)
+	}
+	p := Repository{Name: "p", Format: "apt", Type: "proxy", Remote: "https://deb.debian.org/debian/"}
+	ApplyRepositoryDefaults(&p)
+	if p.Distribution != "" || p.Component != "" {
+		t.Fatalf("a proxy has no distribution: %+v", p)
+	}
+	ok := Repository{Name: "a", Format: "apt", Type: "hosted", Distribution: "bookworm-updates", Component: "main", SigningKey: string(key)}
+	if err := ValidateDefinition(ok); err != nil {
+		t.Fatalf("valid: %v", err)
+	}
+	for name, c := range map[string]struct {
+		r    Repository
+		want string
+	}{
+		"on maven":     {Repository{Name: "m", Format: "maven", Type: "hosted", Distribution: "stable"}, "only valid for apt hosted"},
+		"on apt proxy": {Repository{Name: "p", Format: "apt", Type: "proxy", Remote: "https://x/", SigningKey: string(key)}, "only valid for apt hosted"},
+		"bad name":     {Repository{Name: "a", Format: "apt", Type: "hosted", Distribution: "../x"}, `distribution "../x"`},
+		"bad key":      {Repository{Name: "a", Format: "apt", Type: "hosted", SigningKey: "nope"}, "signingKey: not an ASCII-armored"},
+	} {
+		if err := ValidateDefinition(c.r); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", name, err, c.want)
+		}
+	}
+	if err := ValidateRepositories([]Repository{{Name: "a", Format: "apt", Type: "hosted"}, {Name: "p", Format: "apt", Type: "proxy", Remote: "https://x/"},
+		{Name: "g", Format: "apt", Type: "group", Members: []string{"a", "p"}, WriteMember: "a"}}); err != nil {
+		t.Fatalf("apt list: %v", err)
 	}
 }

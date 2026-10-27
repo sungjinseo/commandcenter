@@ -9,10 +9,13 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"commandcenter/internal/pgp"
 )
 
 // Duration is a time.Duration that unmarshals from strings like "24h".
@@ -181,6 +184,16 @@ type Repository struct {
 	// RPMs (Nexus "repodata depth").
 	Depth int `yaml:"depth,omitempty" json:"depth,omitempty"` // yum hosted only: 0 | 1
 
+	// apt hosted: the dists/<distribution> and component the generated
+	// Release and Packages files are published under (defaults "stable"
+	// and "main"), and the ASCII-armored, unencrypted RSA OpenPGP private
+	// key that signs them (Release.gpg, InRelease); without one the
+	// repository is unsigned ([trusted=yes]). The key is sealed at rest
+	// like the remote credentials.
+	Distribution string `yaml:"distribution,omitempty" json:"distribution,omitempty"`
+	Component    string `yaml:"component,omitempty" json:"component,omitempty"`
+	SigningKey   string `yaml:"signingKey,omitempty" json:"signingKey,omitempty"`
+
 	AnonymousRead *bool `yaml:"anonymousRead" json:"anonymousRead,omitempty"` // overrides Config.AnonymousRead
 
 	// CleanupPolicy names the cleanup policy applied to this repository
@@ -208,7 +221,10 @@ type Repository struct {
 func (r Repository) IsOnline() bool { return r.Online == nil || *r.Online }
 
 var (
-	knownFormats   = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true}
+	knownFormats = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true}
+	// aptNameRE is a distribution or component name: path segments, as
+	// apt's sources.list takes them ("stable", "bookworm-updates", "main").
+	aptNameRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9][A-Za-z0-9._+-]*)*$`)
 	knownTypes     = map[string]bool{"hosted": true, "proxy": true, "group": true}
 	versionPolicys = map[string]bool{"release": true, "snapshot": true, "mixed": true}
 	writePolicies  = map[string]bool{"allow": true, "allow_once": true, "deny": true}
@@ -353,6 +369,14 @@ func ApplyRepositoryDefaults(r *Repository) {
 		if r.Format == "maven" && r.VersionPolicy == "" {
 			r.VersionPolicy = "release"
 		}
+		if r.Format == "apt" {
+			if r.Distribution == "" {
+				r.Distribution = "stable"
+			}
+			if r.Component == "" {
+				r.Component = "main"
+			}
+		}
 	}
 }
 
@@ -463,6 +487,19 @@ func ValidateDefinition(r Repository) error {
 	}
 	if r.Type == "group" && r.VersionPolicy != "" {
 		errs = append(errs, fmt.Errorf("repository %q: versionPolicy is not valid for group repositories", r.Name))
+	}
+	if (r.Distribution != "" || r.Component != "" || r.SigningKey != "") && (r.Format != "apt" || r.Type != "hosted") {
+		errs = append(errs, fmt.Errorf("repository %q: distribution, component and signingKey are only valid for apt hosted repositories", r.Name))
+	}
+	for _, f := range []struct{ name, v string }{{"distribution", r.Distribution}, {"component", r.Component}} {
+		if f.v != "" && !aptNameRE.MatchString(f.v) {
+			errs = append(errs, fmt.Errorf("repository %q: %s %q: use letters, digits, '.', '_', '+' and '-'", r.Name, f.name, f.v))
+		}
+	}
+	if r.SigningKey != "" {
+		if _, err := pgp.ParsePrivateKey(r.SigningKey); err != nil {
+			errs = append(errs, fmt.Errorf("repository %q: signingKey: %w", r.Name, err))
+		}
 	}
 	for _, f := range durationFields(&r) {
 		if *f.d < 0 && *f.d != Never {

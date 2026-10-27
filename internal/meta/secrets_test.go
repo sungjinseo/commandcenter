@@ -243,3 +243,38 @@ func TestRotateSecretKey(t *testing.T) {
 		t.Fatalf("the old key: %v", err)
 	}
 }
+
+// An apt signingKey is sealed like the remote credentials, opens on read,
+// and SealSecrets seals one stored in plain text.
+func TestSigningKeySealed(t *testing.T) {
+	db, err := Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	plain := config.Repository{Name: "apt", Format: "apt", Type: "hosted", SigningKey: "key-secret"}
+	if err := db.CreateRepository(ctx, plain); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSecretKey(bytes.Repeat([]byte{1}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.SealSecrets(ctx); err != nil || n != 1 {
+		t.Fatalf("SealSecrets: %d %v", n, err)
+	}
+	const q = `SELECT config FROM repositories WHERE name = ?`
+	if raw := rawRow(t, db, q, "apt"); strings.Contains(raw, "key-secret") || !strings.Contains(raw, sealedPrefix) {
+		t.Fatalf("not sealed: %s", raw)
+	}
+	def := config.Repository{Name: "apt", Format: "apt", Type: "hosted", SigningKey: "key-secret-2"}
+	if err := db.UpdateRepository(ctx, def); err != nil || def.SigningKey != "key-secret-2" {
+		t.Fatalf("UpdateRepository: %v %q", err, def.SigningKey)
+	}
+	if raw := rawRow(t, db, q, "apt"); strings.Contains(raw, "key-secret") {
+		t.Fatalf("update not sealed: %s", raw)
+	}
+	defs, err := db.ListRepositories(ctx)
+	if err != nil || len(defs) != 1 || defs[0].SigningKey != "key-secret-2" {
+		t.Fatalf("ListRepositories: %+v %v", defs, err)
+	}
+}

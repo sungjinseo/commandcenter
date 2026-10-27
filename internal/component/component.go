@@ -281,6 +281,8 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "nuget":
 		name, version, ok = SplitNuGet(p)
 		return "", name, version, ok
+	case "apt": // pool/<component>/<prefix>/<package>/<package>_<version>_<arch>.deb: the architecture is the group
+		return SplitDeb(p)
 	}
 	return "", "", "", false
 }
@@ -307,6 +309,23 @@ func SplitRPM(p string) (name, version string, ok bool) {
 		return "", "", false
 	}
 	return stem[:j], stem[j+1:], true
+}
+
+// SplitDeb splits the path of a .deb in the pool as the apt format stores
+// it (and as Debian names them): the file <package>_<version>_<arch>.deb
+// under pool/<component>/<prefix>/<package>/, the version's ":" written
+// "%3a" as dpkg does. The architecture is the component's group.
+func SplitDeb(p string) (arch, name, version string, ok bool) {
+	segs := strings.Split(p, "/")
+	if len(segs) != 5 || segs[0] != "pool" {
+		return "", "", "", false
+	}
+	stem, cut := strings.CutSuffix(segs[4], ".deb")
+	parts := strings.Split(stem, "_")
+	if !cut || len(parts) != 3 || parts[0] != segs[3] || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return "", "", "", false
+	}
+	return parts[2], parts[0], strings.ReplaceAll(parts[1], "%3a", ":"), true
 }
 
 // helmNameRE is a chart name as the helm format stores it: it starts a

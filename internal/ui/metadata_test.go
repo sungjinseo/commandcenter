@@ -205,3 +205,35 @@ func TestFillCoreMetadataBodyAndFolding(t *testing.T) {
 		}
 	}
 }
+
+// apt: the control fields of the hosted row (the architecture is the group).
+func TestComponentMetadataApt(t *testing.T) {
+	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
+		c.Repositories = append(c.Repositories, config.Repository{Name: "apt-hosted", Format: "apt", Type: "hosted"})
+	})
+	ctx := context.Background()
+	attrs := `{"package":"hello","version":"1.0","architecture":"amd64","component":"main","filename":"pool/main/h/hello/hello_1.0_amd64.deb","size":3,"md5":"m","sha1":"s","sha256":"x",` +
+		`"fields":[["Package","hello"],["Version","1.0"],["Architecture","amd64"],["Maintainer","QA <qa@example.test>"],["Depends","libc6 (>= 2.34), curl | wget"],["Recommends","less"],["Homepage","https://example.test/hello"],["Description","Greets you\n long text"]]}`
+	if err := e.db.Tx(ctx, func(tx *meta.Tx) error {
+		return tx.InsertPackage(ctx, meta.Package{Repo: "apt-hosted", Format: "apt", Name: "hello", Version: "1.0_amd64", Attrs: attrs, CreatedAt: t0})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := e.req(t, "GET", "/-/api/repositories/apt-hosted/components/metadata?group=amd64&name=hello&version=1.0", "", "admin", nil, false)
+	var m componentMetadata
+	if r.status != 200 || json.Unmarshal([]byte(r.body), &m) != nil || !m.Collected || *m.Description != "Greets you" || *m.Homepage != "https://example.test/hello" || *m.Maintainer != "QA <qa@example.test>" || m.License != nil {
+		t.Fatalf("apt: %d %s", r.status, r.body)
+	}
+	var parts []string
+	for _, d := range m.Dependencies {
+		parts = append(parts, d.Scope+":"+d.Name+":"+d.Requirement+":"+map[bool]string{false: "req", true: "opt"}[d.Optional])
+	}
+	if got := strings.Join(parts, " "); got != "depends:libc6:(>= 2.34):req depends:curl:| wget:req recommends:less::opt" {
+		t.Fatalf("apt deps: %s", got)
+	}
+	for _, q := range []string{"group=arm64&name=hello&version=1.0", "name=hello&version=1.0"} {
+		if r := e.req(t, "GET", "/-/api/repositories/apt-hosted/components/metadata?"+q, "", "admin", nil, false); r.status != 404 {
+			t.Fatalf("%s: %d", q, r.status)
+		}
+	}
+}

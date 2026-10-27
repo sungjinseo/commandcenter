@@ -170,6 +170,12 @@ func TestDeriveAsset(t *testing.T) {
 		{"nuget", "v3-flatcontainer/demo.pkg/index.json", "", "", "", false},
 		{"nuget", "demo.pkg/1.0.0/other.1.0.0.nupkg", "", "", "", false},
 		{"nuget", "upstream/index.json", "", "", "", false},
+		{"apt", "pool/main/h/hello/hello_1.0_amd64.deb", "amd64", "hello", "1.0", true}, // the architecture is the group
+		{"apt", "pool/main/libf/libfoo1/libfoo1_1%3a0.9-2_arm64.deb", "arm64", "libfoo1", "1:0.9-2", true},
+		{"apt", "pool/main/h/hello/other_1.0_amd64.deb", "", "", "", false}, // not in its package's directory
+		{"apt", "pool/main/h/hello/hello_1.0.deb", "", "", "", false},
+		{"apt", "pool/hello_1.0_amd64.deb", "", "", "", false},
+		{"apt", "dists/stable/Release", "", "", "", false},
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"unknown", "a/b", "", "", "", false},

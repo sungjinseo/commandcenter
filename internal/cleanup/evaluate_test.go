@@ -370,6 +370,9 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 			"v3-flatcontainer/a/1.1.0/a.1.1.0.nupkg", "v3-flatcontainer/a/1.1.0/a.1.1.0.nuspec",
 			"v3-flatcontainer/a/index.json", "v3-flatcontainer/ab/0.1.0/ab.0.1.0.nupkg",
 		}, map[int]string{1: "", 2: "a@1.0.0", 3: "a@1.0.0", 4: "a@1.0.0,a@1.1.0", 5: "a@1.0.0,a@1.1.0", 6: "a@1.0.0,a@1.1.0,ab@0.1.0"}},
+		{"apt", []string{ // one file per package_version_arch; dists/ is not a component
+			"dists/stable/Release", "pool/main/a/a/a_1.0_all.deb", "pool/main/a/a/a_1.0_amd64.deb", "pool/main/a/ab/ab_0.1_amd64.deb",
+		}, map[int]string{2: "all/a@1.0", 3: "all/a@1.0,amd64/a@1.0", 4: "all/a@1.0,amd64/a@1.0,amd64/ab@0.1"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {

@@ -155,14 +155,18 @@ func (s sealer) openSettings(set *Settings) error {
 	return s.openValue(SettingOIDC, &set.OIDC)
 }
 
-// sealRepo returns def with its remoteAuth secrets sealed. def's own
-// RemoteAuth is left as it is: the caller keeps the plain values.
+// sealRepo returns def with its secrets (the remoteAuth password and
+// bearer token, an apt signingKey) sealed. def's own RemoteAuth is left as
+// it is: the caller keeps the plain values.
 func (s sealer) sealRepo(def config.Repository) (config.Repository, error) {
+	var err error
+	if def.SigningKey, err = s.seal(def.SigningKey); err != nil {
+		return def, fmt.Errorf("repository %q: signingKey: %w", def.Name, err)
+	}
 	if def.RemoteAuth == nil {
 		return def, nil
 	}
 	ra := *def.RemoteAuth
-	var err error
 	if ra.Password, err = s.seal(ra.Password); err != nil {
 		return def, fmt.Errorf("repository %q: remoteAuth password: %w", def.Name, err)
 	}
@@ -174,10 +178,13 @@ func (s sealer) sealRepo(def config.Repository) (config.Repository, error) {
 }
 
 func (s sealer) openRepo(def *config.Repository) error {
+	var err error
+	if def.SigningKey, err = s.open(def.SigningKey); err != nil {
+		return fmt.Errorf("repository %q: signingKey: %w", def.Name, err)
+	}
 	if def.RemoteAuth == nil {
 		return nil
 	}
-	var err error
 	if def.RemoteAuth.Password, err = s.open(def.RemoteAuth.Password); err != nil {
 		return fmt.Errorf("repository %q: remoteAuth password: %w", def.Name, err)
 	}
@@ -287,8 +294,8 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 			}
 			n++
 		}
-		rows, err := tx.q.QueryContext(ctx, pg(tx.q, `SELECT name, config FROM repositories WHERE json_extract(config, '$.remoteAuth') IS NOT NULL`,
-			`SELECT name, config FROM repositories WHERE config::json ->> 'remoteAuth' IS NOT NULL`))
+		rows, err := tx.q.QueryContext(ctx, pg(tx.q, `SELECT name, config FROM repositories WHERE json_extract(config, '$.remoteAuth') IS NOT NULL OR json_extract(config, '$.signingKey') IS NOT NULL`,
+			`SELECT name, config FROM repositories WHERE config::json ->> 'remoteAuth' IS NOT NULL OR config::json ->> 'signingKey' IS NOT NULL`))
 		if err != nil {
 			return err
 		}
@@ -304,10 +311,8 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 				rows.Close()
 				return fmt.Errorf("repository %q: decode stored definition: %w", name, err)
 			}
-			if def.RemoteAuth != nil {
-				def.Name = name
-				defs = append(defs, def)
-			}
+			def.Name = name
+			defs = append(defs, def)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -315,11 +320,16 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 		}
 		for _, def := range defs {
 			name, changed := def.Name, false
-			if err := rewrite(&def.RemoteAuth.Password, &changed); err != nil {
-				return fmt.Errorf("repository %q: remoteAuth password: %w", name, err)
+			if err := rewrite(&def.SigningKey, &changed); err != nil {
+				return fmt.Errorf("repository %q: signingKey: %w", name, err)
 			}
-			if err := rewrite(&def.RemoteAuth.BearerToken, &changed); err != nil {
-				return fmt.Errorf("repository %q: remoteAuth bearerToken: %w", name, err)
+			if def.RemoteAuth != nil {
+				if err := rewrite(&def.RemoteAuth.Password, &changed); err != nil {
+					return fmt.Errorf("repository %q: remoteAuth password: %w", name, err)
+				}
+				if err := rewrite(&def.RemoteAuth.BearerToken, &changed); err != nil {
+					return fmt.Errorf("repository %q: remoteAuth bearerToken: %w", name, err)
+				}
 			}
 			if !changed {
 				continue

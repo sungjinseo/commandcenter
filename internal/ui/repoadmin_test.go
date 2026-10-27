@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -440,4 +442,44 @@ func TestRepoLegacyRowsDoNotBlockOtherEdits(t *testing.T) {
 	}
 	// "-1" still means never.
 	wantStatus(t, e.admin(t, "PUT", "/-/api/repositories/fresh", `{"contentMaxAge":"-1"}`), http.StatusOK)
+}
+
+// apt hosted settings: distribution and component are stored and shown,
+// the signing key is write-only (signingKeySet), kept by an update that
+// leaves it empty and dropped by clearSigningKey.
+func TestRepoAptSettings(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	key, err := os.ReadFile(filepath.Join("..", "pgp", "testdata", "rsa2048.asc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{"name": "apt-new", "format": "apt", "type": "hosted", "distribution": "jammy", "component": "internal", "signingKey": string(key)})
+	r := e.admin(t, "POST", "/-/api/repositories", string(body))
+	wantStatus(t, r, http.StatusCreated)
+	m := r.json(t)
+	if m["distribution"] != "jammy" || m["component"] != "internal" || m["signingKeySet"] != true || m["writePolicy"] != "allow_once" {
+		t.Fatalf("create: %s", r.body)
+	}
+	if strings.Contains(r.body, "PRIVATE KEY") {
+		t.Fatalf("key leaked: %s", r.body)
+	}
+	r = e.admin(t, "PUT", "/-/api/repositories/apt-new", `{"distribution":"jammy","component":"main","writePolicy":"allow"}`)
+	wantStatus(t, r, http.StatusOK)
+	if m := r.json(t); m["component"] != "main" || m["signingKeySet"] != true {
+		t.Fatalf("update keeps the key: %s", r.body)
+	}
+	r = e.admin(t, "PUT", "/-/api/repositories/apt-new", `{"clearSigningKey":true}`)
+	wantStatus(t, r, http.StatusOK)
+	if m := r.json(t); m["signingKeySet"] != false || m["distribution"] != "stable" {
+		t.Fatalf("clear: %s", r.body)
+	}
+	r = e.admin(t, "GET", "/-/api/repositories/apt-new/config", "")
+	if m := r.json(t); m["signingKeySet"] != false || strings.Contains(r.body, "PRIVATE KEY") {
+		t.Fatalf("config: %s", r.body)
+	}
+	r = e.admin(t, "POST", "/-/api/repositories", `{"name":"apt-bad","format":"apt","type":"hosted","signingKey":"nope"}`)
+	wantStatus(t, r, http.StatusBadRequest)
+	if !strings.Contains(r.body, "signingKey") {
+		t.Fatalf("bad key: %s", r.body)
+	}
 }
