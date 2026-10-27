@@ -209,7 +209,10 @@ func TestIndexHTMLNoInline(t *testing.T) {
 func TestJSImportsSameOrigin(t *testing.T) {
 	// "import … from 'x'", "export … from 'x'" and a side-effect "import 'x'",
 	// wherever they appear on a line; \x60 is a backtick.
-	staticRe := regexp.MustCompile(`\b(?:from|import)\s*["'\x60]([^"'\x60]*)["'\x60]`)
+	// Only module syntax: a "from" that ends an import or export clause, or an
+	// "import" that starts a statement. A "from" inside an expression (a query
+	// key, a string) is not one.
+	staticRe := regexp.MustCompile(`(?m)(?:^\s*import\s*|\}\s*from\s*|\*\s+as\s+\w+\s+from\s*|^\s*(?:import|export)\s+[\w$]+\s+from\s*)["'\x60]([^"'\x60]*)["'\x60]`)
 	// A dynamic import() must name a single string literal.
 	dynAny := regexp.MustCompile(`\bimport\s*\(`)
 	dynLit := regexp.MustCompile(`\bimport\s*\(\s*["']([^"']*)["']\s*\)`)
