@@ -69,7 +69,7 @@ func TestStaticJSListed(t *testing.T) {
 }
 
 func TestStaticSizeBudget(t *testing.T) {
-	const budget = 512 << 10 // 524288 bytes (190 KiB, raised to 320 KiB in plan 10, to 400 KiB in plan 11 and to 512 KiB in plan 12, by ruling)
+	const budget = 640 << 10 // 655360 bytes (190 KiB, raised to 320 KiB in plan 10, to 400 KiB in plan 11, to 512 KiB in plan 12 and to 640 KiB for the backup and import pages, by ruling)
 	total := 0
 	err := fs.WalkDir(staticFiles, "static", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
