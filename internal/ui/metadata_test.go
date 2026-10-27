@@ -22,6 +22,7 @@ func TestComponentMetadata(t *testing.T) {
 			config.Repository{Name: "cargo-hosted", Format: "cargo", Type: "hosted"},
 			config.Repository{Name: "helm-hosted", Format: "helm", Type: "hosted"},
 			config.Repository{Name: "yum-hosted", Format: "yum", Type: "hosted"},
+			config.Repository{Name: "nuget-hosted", Format: "nuget", Type: "hosted"},
 			config.Repository{Name: "go-hosted", Format: "go", Type: "hosted"})
 	})
 	ctx := context.Background()
@@ -146,6 +147,19 @@ func TestComponentMetadata(t *testing.T) {
 	}
 	if got := deps(m); got != "requires::/bin/sh::req requires::bar:>= 1:2.0:req requires::baz:< 3-1:req provides::demo:= 1.0-1.el9:req" {
 		t.Fatalf("yum deps: %s", got)
+	}
+
+	// nuget: the .nuspec fields the push stored; dependency scope is the target framework
+	pkg("nuget-hosted", "nuget", "demo.pkg", "1.0.0", `{"id":"Demo.Pkg","version":"1.0.0","authors":"Jane","description":"A demo package","license":"MIT","licenseUrl":"https://licenses.nuget.org/MIT","projectUrl":"https://example.org/demo","repositoryUrl":"https://git.example.org/demo","tags":["demo"],"dependencyGroups":[{"targetFramework":"net6.0","dependencies":[{"id":"Newtonsoft.Json","range":"[13.0.1, )"}]},{"dependencies":[{"id":"System.Memory","range":"(, )"}]}],"listed":true,"published":"2026-10-27T12:00:00Z"}`)
+	st, m = get("admin", "nuget-hosted", "name=Demo.Pkg&version=1.0.0")
+	if st != 200 || !m.Collected || *m.Description != "A demo package" || *m.License != "MIT" || *m.Homepage != "https://example.org/demo" || *m.RepositoryURL != "https://git.example.org/demo" {
+		t.Fatalf("nuget: %d %+v", st, m)
+	}
+	if got := deps(m); got != "net6.0::Newtonsoft.Json:[13.0.1, ):req any::System.Memory:(, ):req" {
+		t.Fatalf("nuget deps: %s", got)
+	}
+	if st, _ := get("admin", "nuget-hosted", "name=demo.pkg&version=2.0.0"); st != 404 {
+		t.Fatalf("nuget missing: %d", st)
 	}
 
 	// pypi: the file's PEP 658 sidecar holds the core metadata; a file without one is "not collected"

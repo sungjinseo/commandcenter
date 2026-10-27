@@ -204,12 +204,12 @@ func TestRegistryValidationErrors(t *testing.T) {
 	ctx := context.Background()
 	before := reg.Snapshot()
 
-	err := reg.Create(ctx, config.Repository{Name: "x", Format: "nuget", Type: "virtual"})
+	err := reg.Create(ctx, config.Repository{Name: "x", Format: "conda", Type: "virtual"})
 	var ve *ValidationError
 	if !errors.As(err, &ve) || len(ve.Errors) != 2 || StatusOf(err) != http.StatusBadRequest {
 		t.Fatalf("err = %#v", err)
 	}
-	if !strings.Contains(strings.Join(ve.Errors, "\n"), `repository "x": unknown format "nuget"`) {
+	if !strings.Contains(strings.Join(ve.Errors, "\n"), `repository "x": unknown format "conda"`) {
 		t.Fatalf("errors = %q", ve.Errors)
 	}
 	if err := reg.Create(ctx, config.Repository{Name: "h", Format: "maven", Type: "hosted"}); !errors.As(err, &ve) ||

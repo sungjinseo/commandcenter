@@ -173,6 +173,14 @@ func TestGroupOwnerAnswersAlone(t *testing.T) {
 	if w := e.do("HEAD", "npm-all", "left-pad", "", anon); w.Code != 200 || w.Body.Len() != 0 {
 		t.Fatalf("HEAD: %d %d", w.Code, w.Body.Len())
 	}
+	// HEAD of a version or tag answers what the GET would (clients and the
+	// Nexus importer probe versions this way): 200 when present, else 404.
+	if w := e.do("HEAD", "npm-proxy", "left-pad/1.1.0", "", anon); w.Code != 200 || w.Body.Len() != 0 {
+		t.Fatalf("HEAD version: %d %d", w.Code, w.Body.Len())
+	}
+	if w := e.do("HEAD", "npm-proxy", "left-pad/9.9.9", "", anon); w.Code != 404 {
+		t.Fatalf("HEAD missing version: %d, want 404", w.Code)
+	}
 }
 
 func TestAccountEndpoints(t *testing.T) {

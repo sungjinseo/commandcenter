@@ -285,6 +285,10 @@ const TokenUser = "__token__"
 func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 	h := r.Header.Get("Authorization")
 	if h == "" {
+		// dotnet nuget push sends the API key (an API token here) in its own header.
+		if key := strings.TrimSpace(r.Header.Get("X-NuGet-ApiKey")); key != "" {
+			return a.checkToken(r.Context(), key, "")
+		}
 		return a.cookiePrincipal(r), nil
 	}
 	if user, pass, ok := r.BasicAuth(); ok {

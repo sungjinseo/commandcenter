@@ -329,7 +329,7 @@ func TestRoleValidationAndAdminImmutable(t *testing.T) {
 		{"at in id", `{"id":"a@b","privileges":[]}`, http.StatusBadRequest},
 		{"empty id", `{"id":"","privileges":[]}`, http.StatusBadRequest},
 		{"bad target", `{"id":"r1","privileges":[{"target":"everything","actions":["read"]}]}`, http.StatusBadRequest},
-		{"bad format", `{"id":"r1","privileges":[{"target":"format:nuget","actions":["read"]}]}`, http.StatusBadRequest},
+		{"bad format", `{"id":"r1","privileges":[{"target":"format:conda","actions":["read"]}]}`, http.StatusBadRequest},
 		{"bad repo name", `{"id":"r1","privileges":[{"target":"repo:a/b","actions":["read"]}]}`, http.StatusBadRequest},
 		{"empty repo name", `{"id":"r1","privileges":[{"target":"repo:","actions":["read"]}]}`, http.StatusBadRequest},
 		{"empty actions", `{"id":"r1","privileges":[{"target":"*","actions":[]}]}`, http.StatusBadRequest},

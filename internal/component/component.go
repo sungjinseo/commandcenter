@@ -278,6 +278,9 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "yum":
 		name, version, ok = SplitRPM(p)
 		return "", name, version, ok
+	case "nuget":
+		name, version, ok = SplitNuGet(p)
+		return "", name, version, ok
 	}
 	return "", "", "", false
 }
@@ -349,6 +352,8 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, version, name + "-" + version + ".tgz"
 	case "yum": // the name is directory-qualified (SplitRPM)
 		return "", name, version, name + "-" + version + ".rpm"
+	case "nuget":
+		return "", name, version, name + "/" + version + "/" + name + "." + version + ".nupkg"
 	}
 	return "", name, version, ""
 }
@@ -382,3 +387,23 @@ var pypiSepRE = regexp.MustCompile(`[-_.]+`)
 
 // pypiNormalize is the PEP 503 normalized form of a project name.
 func pypiNormalize(name string) string { return strings.ToLower(pypiSepRE.ReplaceAllString(name, "-")) }
+
+// SplitNuGet maps a NuGet file path, <id>/<version>/<id>.<version>.nupkg
+// or .nuspec (under v3-flatcontainer/ in a proxy), to its component. The
+// id and version are lower-case in paths, so the nuspec and nupkg of one
+// version agree.
+func SplitNuGet(p string) (name, version string, ok bool) {
+	p = strings.TrimPrefix(p, "v3-flatcontainer/")
+	segs := strings.Split(p, "/")
+	if len(segs) != 3 || segs[0] == "" || segs[1] == "" {
+		return "", "", false
+	}
+	stem, cut := strings.CutSuffix(segs[2], ".nupkg")
+	if !cut {
+		stem, cut = strings.CutSuffix(segs[2], ".nuspec")
+	}
+	if !cut || stem != segs[0]+"."+segs[1] {
+		return "", "", false
+	}
+	return segs[0], segs[1], true
+}

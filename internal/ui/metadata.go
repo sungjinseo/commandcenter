@@ -82,6 +82,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.helmMetadata(r.Context(), rp, name, version, &m)
 	case "yum":
 		found, err = u.yumMetadata(r.Context(), rp, name, version, &m)
+	case "nuget":
+		found, err = u.nugetMetadata(r.Context(), rp, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -472,4 +474,48 @@ func goModRequires(mod string) [][2]string {
 		}
 	}
 	return out
+}
+
+// nugetMetadata reads what a nuget hosted row holds of the .nuspec:
+// description, license (expression, else URL), projectUrl, repository and
+// the dependency groups, whose scope is the target framework.
+func (u *UI) nugetMetadata(ctx context.Context, rp *repo.Repository, name, version string, m *componentMetadata) (bool, error) {
+	p, ok, err := u.storedPackage(ctx, rp, strings.ToLower(name), strings.ToLower(version))
+	if err != nil || !ok {
+		return ok, err
+	}
+	var a struct {
+		Description   string `json:"description"`
+		License       string `json:"license"`
+		LicenseURL    string `json:"licenseUrl"`
+		ProjectURL    string `json:"projectUrl"`
+		RepositoryURL string `json:"repositoryUrl"`
+		Groups        []struct {
+			TargetFramework string `json:"targetFramework"`
+			Dependencies    []struct {
+				ID    string `json:"id"`
+				Range string `json:"range"`
+			} `json:"dependencies"`
+		} `json:"dependencyGroups"`
+	}
+	if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
+		return true, nil
+	}
+	m.Collected = true
+	m.Description, m.Homepage, m.RepositoryURL = optStr(a.Description), optStr(a.ProjectURL), optStr(a.RepositoryURL)
+	if a.License != "" {
+		m.License = optStr(a.License)
+	} else {
+		m.License = optStr(a.LicenseURL)
+	}
+	for _, g := range a.Groups {
+		scope := g.TargetFramework
+		if scope == "" {
+			scope = "any"
+		}
+		for _, d := range g.Dependencies {
+			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: d.ID, Requirement: d.Range})
+		}
+	}
+	return true, nil
 }

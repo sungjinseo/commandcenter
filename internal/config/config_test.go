@@ -62,7 +62,7 @@ repositories:
 func TestValidationErrors(t *testing.T) {
 	cases := map[string]struct{ yaml, want string }{
 		"unknown field":   {"bogus: 1\n", "field bogus not found"},
-		"unknown format":  {"repositories: [{name: a, format: nuget, type: hosted}]", `repository "a": unknown format "nuget"`},
+		"unknown format":  {"repositories: [{name: a, format: conda, type: hosted}]", `repository "a": unknown format "conda"`},
 		"unknown type":    {"repositories: [{name: a, format: maven, type: virtual}]", `repository "a": unknown type "virtual"`},
 		"duplicate name":  {"repositories: [{name: a, format: maven, type: hosted}, {name: a, format: maven, type: hosted}]", `duplicate repository name "a"`},
 		"proxy no remote": {"repositories: [{name: a, format: maven, type: proxy}]", `repository "a": proxy needs an http(s) remote`},
@@ -97,7 +97,7 @@ func TestValidationErrors(t *testing.T) {
 
 func TestInvalidRepositoriesSectionDoesNotFailParse(t *testing.T) {
 	for name, tc := range map[string]struct{ yaml, want string }{
-		"invalid":       {"repositories: [{name: a, format: nuget, type: hosted}]", `repository "a": unknown format "nuget"`},
+		"invalid":       {"repositories: [{name: a, format: conda, type: hosted}]", `repository "a": unknown format "conda"`},
 		"unknown field": {"repositories: [{name: a, format: maven, type: hosted, bogus: 1}]", "field bogus not found"},
 		"bad duration":  {"repositories: [{name: a, format: maven, type: proxy, remote: 'https://x/', contentMaxAge: soon}]", `invalid duration "soon"`},
 		"not a list":    {"repositories: 5", "repositories"},
@@ -116,7 +116,7 @@ func TestInvalidRepositoriesSectionDoesNotFailParse(t *testing.T) {
 		})
 	}
 	// The rest of the file is still checked strictly.
-	if _, err := Parse([]byte("repositories: [{name: a, format: nuget, type: hosted}]\nbogus: 1\n")); err == nil ||
+	if _, err := Parse([]byte("repositories: [{name: a, format: conda, type: hosted}]\nbogus: 1\n")); err == nil ||
 		!strings.Contains(err.Error(), "field bogus not found") {
 		t.Fatalf("top-level unknown field: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestValidateRepositoriesCatchesEveryRule(t *testing.T) {
 		"invalid name":    {[]Repository{{Name: "a/b", Format: "maven", Type: "hosted"}}, `invalid repository name "a/b"`},
 		"empty name":      {[]Repository{{Format: "maven", Type: "hosted"}}, `invalid repository name ""`},
 		"duplicate":       {[]Repository{{Name: "a", Format: "maven", Type: "hosted"}, {Name: "a", Format: "maven", Type: "hosted"}}, `duplicate repository name "a"`},
-		"unknown format":  {[]Repository{{Name: "a", Format: "nuget", Type: "hosted"}}, `repository "a": unknown format "nuget"`},
+		"unknown format":  {[]Repository{{Name: "a", Format: "conda", Type: "hosted"}}, `repository "a": unknown format "conda"`},
 		"unknown type":    {[]Repository{{Name: "a", Format: "maven", Type: "virtual"}}, `repository "a": unknown type "virtual"`},
 		"proxy no remote": {[]Repository{{Name: "a", Format: "maven", Type: "proxy", Remote: "ftp://x"}}, `repository "a": proxy needs an http(s) remote`},
 		"group no member": {[]Repository{{Name: "g", Format: "maven", Type: "group"}}, `repository "g": group needs members`},
@@ -302,7 +302,7 @@ func TestValidateRepositoriesCatchesEveryRule(t *testing.T) {
 
 func TestValidateRepositoriesReturnsEveryError(t *testing.T) {
 	err := ValidateRepositories([]Repository{
-		{Name: "a", Format: "nuget", Type: "hosted"},
+		{Name: "a", Format: "conda", Type: "hosted"},
 		{Name: "b", Format: "maven", Type: "virtual"},
 	})
 	u, ok := err.(interface{ Unwrap() []error })

@@ -208,7 +208,7 @@ type Repository struct {
 func (r Repository) IsOnline() bool { return r.Online == nil || *r.Online }
 
 var (
-	knownFormats   = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true}
+	knownFormats   = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true}
 	knownTypes     = map[string]bool{"hosted": true, "proxy": true, "group": true}
 	versionPolicys = map[string]bool{"release": true, "snapshot": true, "mixed": true}
 	writePolicies  = map[string]bool{"allow": true, "allow_once": true, "deny": true}

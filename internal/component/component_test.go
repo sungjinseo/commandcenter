@@ -164,6 +164,12 @@ func TestDeriveAsset(t *testing.T) {
 		{"yum", "repodata/repomd.xml", "", "", "", false}, // metadata
 		{"yum", "repodata/a-1.0-1.noarch.rpm", "", "", "", false},
 		{"yum", "el9/repodata/a-1.0-1.noarch.rpm", "", "", "", false},
+		{"nuget", "demo.pkg/1.0.0-beta/demo.pkg.1.0.0-beta.nupkg", "", "demo.pkg", "1.0.0-beta", true},
+		{"nuget", "demo.pkg/1.0.0/demo.pkg.1.0.0.nuspec", "", "demo.pkg", "1.0.0", true},
+		{"nuget", "v3-flatcontainer/demo.pkg/1.0.0/demo.pkg.1.0.0.nupkg", "", "demo.pkg", "1.0.0", true}, // a proxy's cache
+		{"nuget", "v3-flatcontainer/demo.pkg/index.json", "", "", "", false},
+		{"nuget", "demo.pkg/1.0.0/other.1.0.0.nupkg", "", "", "", false},
+		{"nuget", "upstream/index.json", "", "", "", false},
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"unknown", "a/b", "", "", "", false},

@@ -365,6 +365,11 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 		{"yum", []string{ // repodata/ is not a component; the directory qualifies the name
 			"a-1.0-1.noarch.rpm", "a-1.0-1.x86_64.rpm", "el9/a-1.0-1.el9.x86_64.rpm", "el9/repodata/repomd.xml",
 		}, map[int]string{1: "a@1.0-1.noarch", 2: "a@1.0-1.noarch,a@1.0-1.x86_64", 3: "a@1.0-1.noarch,a@1.0-1.x86_64,el9/a@1.0-1.el9.x86_64", 4: "a@1.0-1.noarch,a@1.0-1.x86_64,el9/a@1.0-1.el9.x86_64"}},
+		{"nuget", []string{ // the .nuspec goes with its .nupkg; the proxy's v3-flatcontainer/ prefix too
+			"v3-flatcontainer/a/1.0.0/a.1.0.0.nupkg", "v3-flatcontainer/a/1.0.0/a.1.0.0.nuspec",
+			"v3-flatcontainer/a/1.1.0/a.1.1.0.nupkg", "v3-flatcontainer/a/1.1.0/a.1.1.0.nuspec",
+			"v3-flatcontainer/a/index.json", "v3-flatcontainer/ab/0.1.0/ab.0.1.0.nupkg",
+		}, map[int]string{1: "", 2: "a@1.0.0", 3: "a@1.0.0", 4: "a@1.0.0,a@1.1.0", 5: "a@1.0.0,a@1.1.0", 6: "a@1.0.0,a@1.1.0,ab@0.1.0"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {

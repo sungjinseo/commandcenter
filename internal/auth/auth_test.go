@@ -119,6 +119,25 @@ func TestTokens(t *testing.T) {
 	}
 }
 
+// dotnet nuget push sends the API key in X-NuGet-ApiKey, without Authorization.
+func TestAuthenticateNuGetAPIKey(t *testing.T) {
+	a, _ := newAuth(t)
+	_, tok, _ := a.CreateToken(context.Background(), "ci")
+	r := req("")
+	r.Header.Set("X-NuGet-ApiKey", tok)
+	if p, err := a.Authenticate(r); err != nil || p.User != "ci" || p.Via != ViaToken {
+		t.Fatalf("p=%+v err=%v", p, err)
+	}
+	r.Header.Set("X-NuGet-ApiKey", "cc_nope")
+	if _, err := a.Authenticate(r); !errors.Is(err, ErrBadCredentials) {
+		t.Fatalf("err = %v", err)
+	}
+	r.SetBasicAuth("ci", "cipw") // Authorization wins over the header
+	if p, err := a.Authenticate(r); err != nil || p.Via != ViaPassword {
+		t.Fatalf("p=%+v err=%v", p, err)
+	}
+}
+
 func TestCan(t *testing.T) {
 	a, _ := newAuth(t)
 	anon := Principal{}

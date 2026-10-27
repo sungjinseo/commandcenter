@@ -256,6 +256,10 @@ func unitPrefix(format, p string) string {
 		}
 	case "npm", "cargo", "helm", "yum":
 		return p
+	case "nuget": // the version directory, <id>/<version>/ (under v3-flatcontainer/ in a proxy)
+		if i := strings.LastIndex(p, "/"); i >= 0 {
+			return p[:i+1]
+		}
 	}
 	return homePrefix(format, p)
 }
@@ -285,6 +289,11 @@ func homePrefix(format, p string) string {
 		if len(segs) == 3 {
 			return segs[0] + "/" + segs[1] + "/"
 		}
+	case "nuget": // <id>/, or v3-flatcontainer/<id>/ in a proxy
+		if segs := strings.SplitN(p, "/", 3); len(segs) == 3 && segs[0] == "v3-flatcontainer" {
+			return segs[0] + "/" + segs[1] + "/"
+		}
+		return cut("/")
 	}
 	return p
 }

@@ -400,10 +400,10 @@ func TestInvalidRepositoriesSectionAfterImport(t *testing.T) {
 		cfg.Database.URL = metatest.URL(t, cfg.DataDir)
 		return cfg
 	}
-	const invalid = "  - { name: x, format: nuget, type: hosted }\n"
+	const invalid = "  - { name: x, format: conda, type: hosted }\n"
 
 	// Before the import, an invalid section still blocks startup.
-	if _, err := New(load(invalid), quiet()); err == nil || !strings.Contains(err.Error(), `unknown format "nuget"`) {
+	if _, err := New(load(invalid), quiet()); err == nil || !strings.Contains(err.Error(), `unknown format "conda"`) {
 		t.Fatalf("fresh start with an invalid section: %v", err)
 	}
 

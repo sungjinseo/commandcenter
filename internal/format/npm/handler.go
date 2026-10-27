@@ -306,6 +306,12 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 		w.Header().Set("Cache-Control", cc)
 	}
 	if r.Method == http.MethodHead {
+		// A HEAD answers what the GET would: a missing version or tag is 404.
+		if rt.Kind == KindVersion {
+			if err := writeVersionDoc(f, rt.Version, h.tarballURL(rp, rt.Package), io.Discard); err != nil {
+				return err
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 		return nil
 	}
