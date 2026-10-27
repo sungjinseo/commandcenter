@@ -474,6 +474,32 @@ func TestRebuildMetadataTask(t *testing.T) {
 	}
 }
 
+// QA L-12: a rebuild of a Maven proxy deletes the files older builds cached
+// there at paths that are not Maven files, which leaves their blobs to
+// blobstore.compact.
+func TestRebuildMetadataTaskPurgesProxy(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.put(t, "mvn-proxy", "org/up/lib/1.0", "<html>Index of /org/up/lib/1.0</html>")
+	h.put(t, "mvn-proxy", ".index/nexus-maven-repository-index.gz", "index")
+	h.put(t, "mvn-proxy", "org/up/lib/1.0/lib-1.0.jar", "jar")
+	listing, err := h.db.GetAsset(ctx, "mvn-proxy", "org/up/lib/1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tk := h.create(t, Def{Name: "Purge", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"mvn-proxy"}`)})
+	out, err := h.s.RunNow(tk.ID, "admin")
+	if err != nil || out.Result != ResultOK || out.Removed != 2 || out.Message != "mvn-proxy: removed 2 cached files that are not Maven files" {
+		t.Fatalf("run: %+v %v", out, err)
+	}
+	if as, err := h.db.ListAssets(ctx, "mvn-proxy", ""); err != nil || len(as) != 1 || as[0].Path != "org/up/lib/1.0/lib-1.0.jar" {
+		t.Fatalf("left: %+v %v", as, err)
+	}
+	if used, err := h.db.BlobInUse(ctx, listing.BlobSHA256); err != nil || used {
+		t.Fatalf("listing blob in use: %v %v", used, err)
+	}
+}
+
 func TestValidation(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -493,7 +519,7 @@ func TestValidation(t *testing.T) {
 		{Def{Name: "x", Type: TypeCleanup, Schedule: "manual", Params: json.RawMessage(`{"repos":"mvn"}`)}, "invalid params"},
 		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual"}, "params.repo is required"},
 		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"missing"}`)}, "does not exist"},
-		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"mvn-proxy"}`)}, "Maven hosted repositories only"},
+		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"mvn-group"}`)}, "Maven hosted or proxy repository"},
 	}
 	for _, c := range cases {
 		_, err := h.s.Create(ctx, c.d)

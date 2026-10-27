@@ -2,12 +2,14 @@ package maven
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
 	"strings"
 
 	"commandcenter/internal/component"
+	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 )
 
@@ -220,4 +222,59 @@ func dirGA(d string) gaKey {
 		return gaKey{}
 	}
 	return gaKey{strings.ReplaceAll(d[:i], "/", "."), d[i+1:]}
+}
+
+// PurgeUnfetchable deletes the assets of Maven proxy rp at paths a proxy no
+// longer fetches (fetchable): the directory listings and IDE indexes that
+// older builds cached, which are not served any more but still show in
+// Browse (QA L-12). An asset at a Maven-file path is kept whatever its
+// content type, as it may be a real artifact an upstream mislabelled. The
+// blobs are left to blobstore.compact. logf (may be nil) receives the first
+// removed paths. It returns how many assets it deleted.
+func (h *Handler) PurgeUnfetchable(ctx context.Context, rp *repo.Repository, logf func(format string, args ...any)) (int, error) {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	if rp.Format != "maven" || rp.Type != "proxy" {
+		return 0, fmt.Errorf("purge %s %s repository %q: %w", rp.Format, rp.Type, rp.Name, component.ErrNotSupported)
+	}
+	removed, after := 0, ""
+	for {
+		page, err := h.Store.DB.ScanAssets(ctx, rp.Name, after, rebuildPage)
+		if err != nil {
+			return removed, err
+		}
+		var gone []string
+		for _, a := range page {
+			if p, err := ParsePath(a.Path); err == nil && !p.fetchable() {
+				gone = append(gone, a.Path)
+			}
+		}
+		if len(gone) > 0 {
+			n := 0
+			err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+				for _, g := range gone {
+					if _, err := tx.DeleteAsset(ctx, rp.Name, g); err == nil {
+						n++
+					} else if !errors.Is(err, meta.ErrNotFound) {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				return removed, err
+			}
+			for i, g := range gone {
+				if removed+i < 20 {
+					logf("removed %q", g)
+				}
+			}
+			removed += n
+		}
+		if len(page) < rebuildPage {
+			return removed, nil
+		}
+		after = page[len(page)-1].Path
+	}
 }

@@ -219,3 +219,42 @@ func TestRebuildMetadataMemoryBounded(t *testing.T) {
 		t.Fatalf("version metadata: %d %s", w.Code, w.Body)
 	}
 }
+
+// QA L-12: a purge deletes what older builds cached in a proxy at paths that
+// are not Maven files, and keeps every Maven file even when it is text/html.
+func TestPurgeUnfetchable(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	defer func(n int) { rebuildPage = n }(rebuildPage)
+	rebuildPage = 2 // several pages, deleted from while they are read
+	gone := []string{".index/nexus-maven-repository-index.gz", ".index/nexus-maven-repository-index.properties",
+		"org/up/lib/", "org/up/lib/1.0", "org/up/lib/1.0/"}
+	kept := []string{".meta/prefixes.txt", "archetype-catalog.xml", "com/eed3si9n/sbt-assembly_2.12_1.0/2.1.1/sbt-assembly-2.1.1.jar",
+		"org/up/lib/1.0/lib-1.0-report.html", "org/up/lib/1.0/lib-1.0.jar", "org/up/lib/1.0/lib-1.0.jar.asc",
+		"org/up/lib/3.0/lib-3.0.jar", "org/up/lib/maven-metadata.xml"}
+	for _, p := range append(gone, kept...) {
+		if _, err := e.h.Store.Put(ctx, "central", p, "text/html", strings.NewReader("<html>"+p+"</html>")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.seed(t, "releases", "org/up/lib/1.0", "not maven")
+	var logged []string
+	n, err := e.h.PurgeUnfetchable(ctx, e.repos["central"], func(f string, a ...any) { logged = append(logged, fmt.Sprintf(f, a...)) })
+	if err != nil || n != len(gone) {
+		t.Fatalf("purge: %d %v", n, err)
+	}
+	if got, want := assetPaths(t, e, "central", ""), strings.Join(kept, ","); got != want {
+		t.Fatalf("left %s\nwant %s", got, want)
+	}
+	if len(logged) != len(gone) || logged[2] != `removed "org/up/lib/"` {
+		t.Fatalf("log: %q", logged)
+	}
+	for _, name := range []string{"releases", "public"} {
+		if _, err := e.h.PurgeUnfetchable(ctx, e.repos[name], nil); !errors.Is(err, component.ErrNotSupported) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if got := assetPaths(t, e, "releases", "org/up/"); got != "org/up/lib/1.0" {
+		t.Fatalf("hosted: %s", got)
+	}
+}

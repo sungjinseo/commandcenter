@@ -505,7 +505,7 @@ function paramsEditor(type, params, repos, policyOf) {
     return { el: field(t("task.repos"), m, t("task.reposHelp"), { full: true }), get: () => ({ repos: [...m.selectedOptions].map((o) => o.value) }) };
   }
   if (type === REBUILD) {
-    const list = repos.filter((r) => r.format === "maven" && r.type === "hosted").map((r) => [r.name, r.name]);
+    const list = repos.filter((r) => r.format === "maven" && (r.type === "hosted" || r.type === "proxy")).map((r) => [r.name, r.name + " · " + r.type]);
     const cur = params.repo || "";
     if (cur && !list.some(([n]) => n === cur)) list.unshift([cur, cur]);
     const one = sel([["", t("task.pickRepo")]].concat(list), cur);
@@ -606,7 +606,9 @@ async function taskForm(view, id) {
   const run = h("button", { type: "button", class: "btn primary" }, t("task.run"));
   const stop = button(t("task.stop"), "danger");
   const msg = h("p", { class: "task-msg", role: "status" });
-  const removedKey = { [CLEANUP]: "task.removedComp", [REBUILD]: "task.removedMeta" }[task.type] || "task.removed";
+  // A rebuild of a Maven proxy removes cached files, not metadata.
+  const purge = task.type === REBUILD && repos.some((r) => r.name === (task.params || {}).repo && r.type === "proxy");
+  const removedKey = purge ? "task.removedFiles" : { [CLEANUP]: "task.removedComp", [REBUILD]: "task.removedMeta" }[task.type] || "task.removed";
   const show = () => {
     put(summary,
       kv(t("col.status"), taskStatus(task)),

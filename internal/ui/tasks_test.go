@@ -44,7 +44,7 @@ func TestTaskCRUD(t *testing.T) {
 
 	// validation
 	for _, body := range []string{
-		`{"name":"x","type":"repository.rebuild-metadata","schedule":"daily:03:00","params":{"repo":"maven-proxy"}}`,
+		`{"name":"x","type":"repository.rebuild-metadata","schedule":"daily:03:00","params":{"repo":"maven-public"}}`,
 		`{"name":"x","type":"repository.cleanup","schedule":"daily:03:00","params":{"repos":["nope"]}}`,
 		`{"name":"x","type":"blobstore.compact","schedule":"every day"}`,
 		`{"name":"","type":"blobstore.compact","schedule":"manual"}`,
