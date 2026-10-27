@@ -1,6 +1,7 @@
 // Package docker implements the Docker/OCI Distribution registry API (v2)
-// for hosted repositories. It is served at /v2/, where a registry name is
-// <repository>/<image path>: `docker push host/<repo>/<image>:<tag>`.
+// for hosted, proxy and group repositories. It is served at /v2/, where a
+// registry name is <repository>/<image path>: `docker push
+// host/<repo>/<image>:<tag>`.
 package docker
 
 import (

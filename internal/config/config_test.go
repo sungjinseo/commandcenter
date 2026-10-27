@@ -288,6 +288,9 @@ func TestValidateRepositoriesCatchesEveryRule(t *testing.T) {
 		{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/", CleanupPolicy: "pol"},
 		{Name: "g", Format: "maven", Type: "group", Members: []string{"h", "p"}, WriteMember: "h"},
 		{Name: "cp", Format: "cargo", Type: "proxy", Remote: "https://x.example/", CleanupPolicy: "pol"},
+		{Name: "dh", Format: "docker", Type: "hosted"},
+		{Name: "dp", Format: "docker", Type: "proxy", Remote: "https://registry-1.docker.io"},
+		{Name: "dg", Format: "docker", Type: "group", Members: []string{"dh", "dp"}},
 	}
 	if err := ValidateRepositories(ok); err != nil {
 		t.Fatalf("valid list: %v", err)

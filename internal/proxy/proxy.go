@@ -35,6 +35,11 @@ const UserAgent = "commandcenter/1"
 
 var ErrRemote error = &repo.Error{Status: http.StatusBadGateway, Msg: "remote repository unavailable"}
 
+// ErrRateLimited is the error for a remote that answered 429 to a fetch of
+// an asset that is not cached (a cached one is served stale instead), so a
+// client sees the remote's limit, not a generic 502.
+var ErrRateLimited error = &repo.Error{Status: http.StatusTooManyRequests, Msg: "remote repository rate limit exceeded"}
+
 // Result is a cached asset; Stale is set when the remote could not be reached
 // and an expired copy is returned instead.
 type Result struct {
@@ -56,6 +61,11 @@ type Target struct {
 	// (an upstream directory listing or error page) is taken as a 404, or as
 	// a failed fetch when the asset is cached, which serves the cached copy.
 	NotHTML bool
+	// DeniedIsNotFound takes an upstream 401 or 403 for an asset that is not
+	// cached as not found (negative-cached like a 404): Docker Hub answers
+	// 401 for an image that does not exist, to not reveal which do. A
+	// cached asset is served stale instead, as for any other failure.
+	DeniedIsNotFound bool
 }
 
 type Fetcher struct {
@@ -258,7 +268,8 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		}
 		return Result{Asset: na}, nil
 
-	case status == http.StatusNotFound || status == http.StatusGone:
+	case status == http.StatusNotFound || status == http.StatusGone,
+		t.DeniedIsNotFound && !cached && (status == http.StatusUnauthorized || status == http.StatusForbidden):
 		// A 404 from a remote that was replaced meanwhile must not outlive the change.
 		if cerr := f.Store.Current(rp); cerr != nil {
 			return Result{}, cerr
@@ -268,6 +279,10 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 			return Result{}, err
 		}
 		return Result{}, repo.ErrNotFound
+	}
+	if status == http.StatusTooManyRequests && !cached {
+		slog.Warn("remote rate limit", "repo", rp.Name, "path", t.Key)
+		return Result{}, ErrRateLimited
 	}
 	return f.stale(rp, t.Key, a, cached, fmt.Errorf("remote status %d", resp.StatusCode))
 }

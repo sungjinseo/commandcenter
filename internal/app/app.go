@@ -305,7 +305,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	cargoH := cargo.New(store, fetcher, authn, baseURL)
 	dockerKey := make([]byte, 32)
 	rand.Read(dockerKey)
-	dockerH := docker.New(store, authn, nil, baseURL, dockerKey) // Repos: the registry, below
+	dockerH := docker.New(store, docker.NewFetcher(store, maxConcurrentFetches), authn, nil, baseURL, dockerKey) // Repos: the registry, below
 	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
 	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH}
 	// Hosted deletes go through the format handlers, which share their locks

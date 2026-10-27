@@ -1,7 +1,6 @@
 package docker
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +11,7 @@ import (
 
 	"commandcenter/internal/auth"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
 )
 
@@ -23,8 +23,12 @@ type Repos interface {
 
 // Handler serves the registry API at /v2/ (ServeHTTP) and, for the web UI's
 // download links, manifests and blobs under /repository/<repo>/ (Serve).
+// Hosted repositories take pushes; proxies cache pulls from an upstream
+// registry (proxy.go, the Fetcher's cache rules) and groups answer from
+// their members in order; both refuse writes.
 type Handler struct {
 	Store   *repo.Store
+	Fetcher *proxy.Fetcher // of proxies: NewFetcher, whose client speaks the upstream token flow
 	Auth    *auth.Authenticator
 	Repos   Repos
 	BaseURL func() string // live: read per request
@@ -36,8 +40,8 @@ type Handler struct {
 	locks     repo.KeyedMutex // per image (manifests) and per upload session
 }
 
-func New(store *repo.Store, authn *auth.Authenticator, repos Repos, baseURL func() string, key []byte) *Handler {
-	return &Handler{Store: store, Auth: authn, Repos: repos, BaseURL: baseURL, Key: key, Now: time.Now}
+func New(store *repo.Store, fetcher *proxy.Fetcher, authn *auth.Authenticator, repos Repos, baseURL func() string, key []byte) *Handler {
+	return &Handler{Store: store, Fetcher: fetcher, Auth: authn, Repos: repos, BaseURL: baseURL, Key: key, Now: time.Now}
 }
 
 func (h *Handler) now() time.Time {
@@ -189,12 +193,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) error {
 	if rp == nil || rp.Format != "docker" {
 		return errUnknownName(rt.Name())
 	}
-	if !rp.IsOnline() {
+	if !rp.IsOnline() || rp.MembersOffline() {
 		return repo.Errorf(http.StatusServiceUnavailable, "repository is offline")
 	}
 	if action != "pull" {
-		if rp.Type != "hosted" {
-			return repo.MethodNotAllowed("GET, HEAD", "repository %q does not accept uploads", rp.Name)
+		if rp.Type != "hosted" { // a proxy or group accepts no method here: an empty Allow, UNSUPPORTED
+			return repo.MethodNotAllowed("", "repository %q is a %s repository and does not accept uploads", rp.Name, rp.Type)
 		}
 		if rp.WritePolicy == "deny" {
 			return Err(http.StatusForbidden, CodeDenied, "repository "+rp.Name+" is read-only")
@@ -257,39 +261,19 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	}
 }
 
-// resolve returns the digest a reference (tag or digest) names.
-func (h *Handler) resolve(ctx context.Context, rp *repo.Repository, image, ref string) (string, error) {
-	if ValidDigest(ref) {
-		return ref, nil
-	}
-	if ValidTag(ref) {
-		tags, err := h.Store.DB.ListDistTags(ctx, rp.Name, image)
-		if err != nil {
-			return "", err
-		}
-		for _, t := range tags {
-			if t.Tag == ref {
-				return t.Version, nil
-			}
-		}
-	}
-	return "", Err(http.StatusNotFound, CodeManifestUnknown, "manifest unknown: "+ref)
-}
-
 func (h *Handler) getManifest(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
-	digest, err := h.resolve(r.Context(), rp, rt.Image, rt.Reference)
+	var res proxy.Result
+	var digest string
+	err := h.walk(r.Context(), rp, rt.Image, func(m *repo.Repository) (err error) {
+		res, digest, err = h.manifest(r.Context(), m, rt.Image, rt.Reference)
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	a, err := h.Store.DB.GetAsset(r.Context(), rp.Name, manifestKey(rt.Image, digest))
-	if errors.Is(err, meta.ErrNotFound) {
-		return Err(http.StatusNotFound, CodeManifestUnknown, "manifest unknown: "+rt.Reference)
-	}
-	if err != nil {
-		return err
-	}
+	proxy.SetStaleHeader(w, res)
 	w.Header().Set("Docker-Content-Digest", digest)
-	repo.ServeAsset(w, r, h.Store, a)
+	repo.ServeAsset(w, r, h.Store, res.Asset)
 	return nil
 }
 
@@ -297,16 +281,17 @@ func (h *Handler) getBlob(w http.ResponseWriter, r *http.Request, rp *repo.Repos
 	if !ValidDigest(rt.Digest) {
 		return Err(http.StatusBadRequest, CodeDigestInvalid, "invalid digest: "+rt.Digest)
 	}
-	a, err := h.Store.DB.GetAsset(r.Context(), rp.Name, blobKey(rt.Image, rt.Digest))
-	if errors.Is(err, meta.ErrNotFound) {
-		return Err(http.StatusNotFound, CodeBlobUnknown, "blob unknown to registry: "+rt.Digest)
-	}
+	var res proxy.Result
+	err := h.walk(r.Context(), rp, rt.Image, func(m *repo.Repository) (err error) {
+		res, err = h.blob(r.Context(), m, rt.Image, rt.Digest)
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	a.ContentType = "application/octet-stream"
+	res.Asset.ContentType = "application/octet-stream"
 	w.Header().Set("Docker-Content-Digest", rt.Digest)
-	repo.ServeAsset(w, r, h.Store, a)
+	repo.ServeAsset(w, r, h.Store, res.Asset)
 	return nil
 }
 
@@ -337,24 +322,17 @@ func page(w http.ResponseWriter, r *http.Request, list []string) ([]string, erro
 	return list, nil
 }
 
+// tags lists an image's tags: a group's come from the member that owns
+// the image (walk), so every tag listed can be pulled.
 func (h *Handler) tags(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
-	ctx := r.Context()
-	st, err := h.Store.DB.PackageStamp(ctx, rp.Name, rt.Image)
+	var tags []string
+	err := h.walk(r.Context(), rp, rt.Image, func(m *repo.Repository) (err error) {
+		tags, err = h.imageTags(r.Context(), m, rt.Image)
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	if st.Count == 0 {
-		return errUnknownName(rt.Name())
-	}
-	dt, err := h.Store.DB.ListDistTags(ctx, rp.Name, rt.Image)
-	if err != nil {
-		return err
-	}
-	tags := make([]string, 0, len(dt))
-	for _, t := range dt {
-		tags = append(tags, t.Tag)
-	}
-	sort.Strings(tags)
 	if tags, err = page(w, r, tags); err != nil {
 		return err
 	}
@@ -362,14 +340,15 @@ func (h *Handler) tags(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 	return nil
 }
 
-// catalog lists the images of the docker repositories p may read.
+// catalog lists the images of the docker repositories p may read: a
+// hosted repository's images, what a proxy has cached, a group's union.
 func (h *Handler) catalog(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 	var names []string
 	for _, rp := range h.Repos.Snapshot().Sorted {
-		if rp.Format != "docker" || !h.Auth.Can(p, rp.Name, auth.Read) {
+		if rp.Format != "docker" || !rp.IsOnline() || !h.Auth.Can(p, rp.Name, auth.Read) {
 			continue
 		}
-		images, err := h.Store.DB.ListPackageNames(r.Context(), rp.Name)
+		images, err := h.images(r.Context(), rp)
 		if err != nil {
 			return err
 		}

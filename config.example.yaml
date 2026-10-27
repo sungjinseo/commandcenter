@@ -94,3 +94,12 @@ repositories:
     format: docker
     type: hosted
     writePolicy: allow                # allow_once: 이미 있는 태그를 다른 이미지로 덮어쓰지 못함
+  - name: docker-proxy                # docker pull <host>/docker-proxy/nginx:1.27 (Docker Hub의 library/nginx)
+    format: docker
+    type: proxy
+    remote: "https://registry-1.docker.io"   # 레지스트리 주소(/v2 없이). 비공개 이미지나 Hub 한도 완화: remoteAuth 사용자/비밀번호(액세스 토큰)
+    metadataMaxAge: "24h"             # 태그 → 매니페스트 재검증 주기. digest로 받은 매니페스트와 blob은 영구 캐시
+  - name: docker-all                  # docker pull <host>/docker-all/<image>:<tag> — hosted 먼저, 없으면 proxy
+    format: docker
+    type: group
+    members: [docker-hosted, docker-proxy]

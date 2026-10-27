@@ -549,9 +549,6 @@ func ValidateRepositories(list []Repository) error {
 		if r.Type == "group" && len(r.Members) == 0 {
 			add("repository %q: group needs members", r.Name)
 		}
-		if r.Format == "docker" && r.Type != "hosted" && knownTypes[r.Type] {
-			add("repository %q: docker %s repositories are not supported yet (hosted only)", r.Name, r.Type)
-		}
 		if r.Type != "group" && (len(r.Members) > 0 || r.WriteMember != "") {
 			add("repository %q: members/writeMember are only valid for groups", r.Name)
 		}

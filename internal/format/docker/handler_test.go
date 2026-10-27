@@ -25,6 +25,7 @@ import (
 	"commandcenter/internal/component"
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/repo/repotest"
 	"commandcenter/internal/server"
@@ -38,6 +39,7 @@ type env struct {
 	sink  *repotest.Sink
 	now   time.Time
 	repos []config.Repository
+	extra []config.Repository // added to the hosted ones; ci may write them too
 }
 
 // newEnv serves the registry through the real server (its Basic
@@ -64,7 +66,7 @@ func (e *env) open() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(filepath.Join(e.dir, "meta.db"))
+	db, err := meta.Open(metatest.Target(t, filepath.Join(e.dir, "meta.db")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +88,13 @@ func (e *env) open() {
 			{Name: "npm", Format: "npm", Type: "hosted", AnonymousRead: &tr},
 		},
 	}
+	for _, x := range e.extra {
+		cfg.Repositories = append(cfg.Repositories, x)
+		cfg.Roles["deployer"] = config.Role{Write: append(cfg.Roles["deployer"].Write, x.Name)}
+	}
+	for i := range cfg.Repositories {
+		config.ApplyRepositoryDefaults(&cfg.Repositories[i])
+	}
 	e.repos = cfg.Repositories
 	sink := &repotest.Sink{}
 	store := &repo.Store{Blobs: map[string]*blob.Store{repo.DefaultStore: bs}, DB: db, Now: func() time.Time { return e.now }, Events: sink}
@@ -93,7 +102,9 @@ func (e *env) open() {
 	authn := auth.New(cfg, db)
 	registry := repo.NewRegistry(nil, cfg.Repositories)
 	var base string
-	h := New(store, authn, registry, func() string { return base }, []byte("test-key"))
+	fetcher := NewFetcher(store, 4)
+	fetcher.Now = func() time.Time { return e.now }
+	h := New(store, fetcher, authn, registry, func() string { return base }, []byte("test-key"))
 	h.Now = func() time.Time { return e.now }
 	srv := &server.Server{Registry: registry, Handlers: map[string]repo.Handler{"docker": h}, Auth: authn, Docker: h,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
