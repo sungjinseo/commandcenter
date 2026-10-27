@@ -1,0 +1,55 @@
+{
+  "items" : [ {
+    "downloadUrl" : "http://localhost:18093/repository/cargo-h/crates/democrate/0.1.0/download",
+    "path" : "/crates/democrate/0.1.0/download",
+    "id" : "Y2FyZ28taDo0ZjFiYmNkZA",
+    "repository" : "cargo-h",
+    "format" : "cargo",
+    "checksum" : {
+      "sha1" : "b870ed0781485e2b118dfc158cc2204116b2b897",
+      "md5" : "dbf0d263c4678de12f605e704c922126",
+      "sha256" : "c503c661d104afea98e87ba3c8688f4d83b8693d91aef04f839126a873751274"
+    },
+    "contentType" : "application/gzip",
+    "lastModified" : "2026-10-26T23:55:25.053+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 150,
+    "blobCreated" : "2026-10-26T23:55:25.054+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:25.053+00:00",
+    "blobRef" : "default@81c5b449-2647-452c-830f-7c10b97ce9be@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "cargo" : {
+      "name" : "democrate",
+      "version" : "0.1.0"
+    }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/cargo-h/de/mo/democrate",
+    "path" : "/de/mo/democrate",
+    "id" : "Y2FyZ28taDo5ZTM3NzliYQ",
+    "repository" : "cargo-h",
+    "format" : "cargo",
+    "checksum" : {
+      "sha1" : "238e3aa1d6e1a89f0a6c68dc45031d31d5bef545",
+      "md5" : "f582d2531eb253b05828b22576174759",
+      "sha256" : "9c2d35720c2cd4d95be750ae1fbf7c34b23c9213fef3e94f2e603aeb33eaed0d"
+    },
+    "contentType" : "text/plain",
+    "lastModified" : "2026-10-26T23:55:25.070+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 251,
+    "blobCreated" : "2026-10-26T23:55:25.072+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:25.070+00:00",
+    "blobRef" : "default@d029292a-95a8-4c36-8556-eb10941927c5@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "cargo" : { }
+  } ],
+  "continuationToken" : null
+}

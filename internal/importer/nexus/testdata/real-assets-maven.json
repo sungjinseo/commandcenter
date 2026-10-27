@@ -1,0 +1,64 @@
+{
+  "items" : [ {
+    "downloadUrl" : "http://localhost:18093/repository/mvn-h/com/ex/app/1.0/app-1.0.jar",
+    "path" : "/com/ex/app/1.0/app-1.0.jar",
+    "id" : "bXZuLWg6NGYxYmJjZGQ",
+    "repository" : "mvn-h",
+    "format" : "maven2",
+    "checksum" : {
+      "sha1" : "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+      "sha512" : "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+      "sha256" : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "md5" : "d41d8cd98f00b204e9800998ecf8427e"
+    },
+    "contentType" : "application/java-archive",
+    "lastModified" : "2026-10-26T23:52:31.906+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 0,
+    "blobCreated" : "2026-10-26T23:52:31.921+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:52:31.906+00:00",
+    "blobRef" : "default@30bb5fcd-6bcd-47a9-ab45-d76be0761026@2026-10-26T23:52",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "maven2" : {
+      "extension" : "jar",
+      "groupId" : "com.ex",
+      "artifactId" : "app",
+      "version" : "1.0"
+    }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/mvn-h/com/ex/app/1.0/app-1.0.pom",
+    "path" : "/com/ex/app/1.0/app-1.0.pom",
+    "id" : "bXZuLWg6OWUzNzc5YmE",
+    "repository" : "mvn-h",
+    "format" : "maven2",
+    "checksum" : {
+      "sha1" : "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+      "sha512" : "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+      "sha256" : "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "md5" : "d41d8cd98f00b204e9800998ecf8427e"
+    },
+    "contentType" : "application/xml",
+    "lastModified" : "2026-10-26T23:52:32.126+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 0,
+    "blobCreated" : "2026-10-26T23:52:32.143+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:52:32.126+00:00",
+    "blobRef" : "default@f447ce8b-8aee-449c-8916-ceb2f1c3e1e3@2026-10-26T23:52",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "maven2" : {
+      "extension" : "pom",
+      "groupId" : "com.ex",
+      "artifactId" : "app",
+      "version" : "1.0"
+    }
+  } ],
+  "continuationToken" : null
+}

@@ -1,0 +1,117 @@
+[ {
+  "name" : "maven-releases",
+  "format" : "maven2",
+  "type" : "hosted",
+  "url" : "http://localhost:18093/repository/maven-releases",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "maven-snapshots",
+  "format" : "maven2",
+  "type" : "hosted",
+  "url" : "http://localhost:18093/repository/maven-snapshots",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "maven-central",
+  "format" : "maven2",
+  "type" : "proxy",
+  "url" : "http://localhost:18093/repository/maven-central",
+  "online" : true,
+  "size" : 0,
+  "attributes" : {
+    "proxy" : {
+      "remoteUrl" : "https://repo1.maven.org/maven2/"
+    }
+  }
+}, {
+  "name" : "maven-public",
+  "format" : "maven2",
+  "type" : "group",
+  "url" : "http://localhost:18093/repository/maven-public",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "nuget-hosted",
+  "format" : "nuget",
+  "type" : "hosted",
+  "url" : "http://localhost:18093/repository/nuget-hosted",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "nuget.org-proxy",
+  "format" : "nuget",
+  "type" : "proxy",
+  "url" : "http://localhost:18093/repository/nuget.org-proxy",
+  "online" : true,
+  "size" : 0,
+  "attributes" : {
+    "proxy" : {
+      "remoteUrl" : "https://api.nuget.org/v3/index.json"
+    }
+  }
+}, {
+  "name" : "nuget-group",
+  "format" : "nuget",
+  "type" : "group",
+  "url" : "http://localhost:18093/repository/nuget-group",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "mvn-h",
+  "format" : "maven2",
+  "type" : "hosted",
+  "url" : "http://localhost:18093/repository/mvn-h",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "npm-h",
+  "format" : "npm",
+  "type" : "hosted",
+  "url" : "http://localhost:18093/repository/npm-h",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "pypi-h",
+  "format" : "pypi",
+  "type" : "hosted",
+  "url" : "http://localhost:18093/repository/pypi-h",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "cargo-h",
+  "format" : "cargo",
+  "type" : "hosted",
+  "url" : "http://localhost:18093/repository/cargo-h",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+}, {
+  "name" : "npm-p",
+  "format" : "npm",
+  "type" : "proxy",
+  "url" : "http://localhost:18093/repository/npm-p",
+  "online" : true,
+  "size" : 0,
+  "attributes" : {
+    "proxy" : {
+      "remoteUrl" : "https://registry.npmjs.org"
+    }
+  }
+}, {
+  "name" : "npm-g",
+  "format" : "npm",
+  "type" : "group",
+  "url" : "http://localhost:18093/repository/npm-g",
+  "online" : true,
+  "size" : 0,
+  "attributes" : { }
+} ]

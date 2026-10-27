@@ -1,2 +1,6 @@
 * text=auto eol=lf
 *.ps1 text eol=crlf
+
+# Recorded artifacts: their checksums must match byte for byte.
+/internal/importer/nexus/testdata/files/** -text
+/internal/importer/nexus/testdata/real-cargo-index-* -text

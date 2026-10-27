@@ -156,7 +156,29 @@ func stripBuild(v string) string {
 // `-`/`_` is taken, versions equal apart from build metadata collide, and a
 // reserved name cannot start a new crate (one that already exists keeps it).
 func (h *Handler) checkDuplicate(ctx context.Context, rp *repo.Repository, m publishMeta) error {
+	if err := h.checkName(ctx, rp, m.Name); err != nil {
+		return err
+	}
 	name := strings.ToLower(m.Name)
+	pkgs, err := h.Store.DB.ListPackages(ctx, rp.Name, name)
+	if err != nil {
+		return err
+	}
+	if len(pkgs) == 0 && reservedName(m.Name) {
+		return badPublish("crate name %q is reserved", m.Name)
+	}
+	for _, p := range pkgs {
+		if stripBuild(p.Version) == stripBuild(m.Vers) {
+			return repo.Errorf(http.StatusConflict, "crate version `%s@%s` is already uploaded", m.Name, m.Vers)
+		}
+	}
+	return nil
+}
+
+// checkName refuses a crate name that differs only by case or `-`/`_` from an
+// existing crate stored under another spelling.
+func (h *Handler) checkName(ctx context.Context, rp *repo.Repository, crate string) error {
+	name := strings.ToLower(crate)
 	names, err := h.Store.DB.ListPackageNamesCanonical(ctx, rp.Name, canonicalName(name))
 	if err != nil {
 		return err
@@ -175,22 +197,10 @@ func (h *Handler) checkDuplicate(ctx context.Context, rp *repo.Repository, m pub
 			if json.Unmarshal([]byte(p.Attrs), &line) != nil || line.Name == "" {
 				line.Name = n
 			}
-			if line.Name != m.Name {
-				return repo.Errorf(http.StatusConflict, "crate name %q conflicts with existing crate %q", m.Name, line.Name)
+			if line.Name != crate {
+				return repo.Errorf(http.StatusConflict, "crate name %q conflicts with existing crate %q", crate, line.Name)
 			}
 			break
-		}
-	}
-	pkgs, err := h.Store.DB.ListPackages(ctx, rp.Name, name)
-	if err != nil {
-		return err
-	}
-	if len(pkgs) == 0 && reservedName(m.Name) {
-		return badPublish("crate name %q is reserved", m.Name)
-	}
-	for _, p := range pkgs {
-		if stripBuild(p.Version) == stripBuild(m.Vers) {
-			return repo.Errorf(http.StatusConflict, "crate version `%s@%s` is already uploaded", m.Name, m.Vers)
 		}
 	}
 	return nil

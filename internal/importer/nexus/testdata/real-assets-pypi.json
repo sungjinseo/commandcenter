@@ -1,0 +1,108 @@
+{
+  "items" : [ {
+    "downloadUrl" : "http://localhost:18093/repository/pypi-h/packages/demo-pkg/1.0.0/demo_pkg-1.0.0-py3-none-any.whl",
+    "path" : "/packages/demo-pkg/1.0.0/demo_pkg-1.0.0-py3-none-any.whl",
+    "id" : "cHlwaS1oOjRmMWJiY2Rk",
+    "repository" : "pypi-h",
+    "format" : "pypi",
+    "checksum" : {
+      "sha1" : "428b14383cdccd6d37f2233b5116a307280f3229",
+      "sha512" : "97dfa4f154cf98a9bd3364e3b7c973fd146de60f95296a9c3e52cbd9482bdb77611c5fb14026881f4d5c19eadb4a5d43c28e2b3ebac00d441c1c0a6f219d3ffc",
+      "sha256" : "46ba78b394957515251431e7eb09b363f0766706b2c849dbe144d7335af98235",
+      "md5" : "f6bc235de026bfcd3ec875d41a8c56b8"
+    },
+    "contentType" : "application/zip",
+    "lastModified" : "2026-10-26T23:55:24.808+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 381,
+    "blobCreated" : "2026-10-26T23:55:24.810+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:24.808+00:00",
+    "blobRef" : "default@d15a0147-613c-4120-b9b4-9b3bc785f8da@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "pypi" : {
+      "name" : "demo-pkg",
+      "version" : "1.0.0"
+    }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/pypi-h/packages/demo-pkg/1.0.0/demo_pkg-1.0.0-py3-none-any.whl.metadata",
+    "path" : "/packages/demo-pkg/1.0.0/demo_pkg-1.0.0-py3-none-any.whl.metadata",
+    "id" : "cHlwaS1oOjllMzc3OWJh",
+    "repository" : "pypi-h",
+    "format" : "pypi",
+    "checksum" : {
+      "md5" : "14afa8944e00af346a345d4c30ca73c5",
+      "sha1" : "4abae1f3e3b8edc37f0426d247b2b47f904b74a8",
+      "sha256" : "43d77f17cd5004f5cb5a5dc3ffa013c1645b8a37458ae68258448645cb521f6f"
+    },
+    "contentType" : "application/octet-stream",
+    "lastModified" : "2026-10-26T23:55:24.815+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 67,
+    "blobCreated" : "2026-10-26T23:55:24.816+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:24.815+00:00",
+    "blobRef" : "default@1a254318-b3d1-422b-b053-54aa5ad9bc02@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "pypi" : { }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/pypi-h/packages/demo-pkg/1.0.0/demo_pkg-1.0.0.tar.gz",
+    "path" : "/packages/demo-pkg/1.0.0/demo_pkg-1.0.0.tar.gz",
+    "id" : "cHlwaS1oOmVkNTMzNjk3",
+    "repository" : "pypi-h",
+    "format" : "pypi",
+    "checksum" : {
+      "sha1" : "577b2c4772071e101cb209b63d307048a75db0c4",
+      "sha512" : "45c2eae586dbc618cb1b202eaba761a91c039ca27a17345263d023b8ab4ce4fa015574cc1fa98f82153f543282f04406416f50e2f3e5745e58b505140b627d87",
+      "sha256" : "7833e51f5e2b77cb657414605d5c98e1f8c3c80f133fb2020de5b0534b5bb46d",
+      "md5" : "e3e3467045b09cb122e59dcf14460ab4"
+    },
+    "contentType" : "application/x-gzip",
+    "lastModified" : "2026-10-26T23:55:24.924+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 152,
+    "blobCreated" : "2026-10-26T23:55:24.927+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:24.924+00:00",
+    "blobRef" : "default@7dda84c0-98b1-473f-9c43-05a37721d19a@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "pypi" : {
+      "name" : "demo-pkg",
+      "version" : "1.0.0"
+    }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/pypi-h/packages/demo-pkg/1.0.0/demo_pkg-1.0.0.tar.gz.metadata",
+    "path" : "/packages/demo-pkg/1.0.0/demo_pkg-1.0.0.tar.gz.metadata",
+    "id" : "cHlwaS1oOjNjNmVmMzc0",
+    "repository" : "pypi-h",
+    "format" : "pypi",
+    "checksum" : {
+      "md5" : "b648c947390a7abc8ad6a9238d702aff",
+      "sha1" : "905446c22f6b5e8a933f6656c9233c7cc87204e2",
+      "sha256" : "39b1ba207f3b19149f0524bb1c69c854bdae307fc8ee24f1bf55da1bad671b6c"
+    },
+    "contentType" : "application/octet-stream",
+    "lastModified" : "2026-10-26T23:55:24.931+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 53,
+    "blobCreated" : "2026-10-26T23:55:24.932+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:24.931+00:00",
+    "blobRef" : "default@d3eddf1c-688c-4634-aa70-c9ba0ec403ed@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "pypi" : { }
+  } ],
+  "continuationToken" : null
+}

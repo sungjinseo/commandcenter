@@ -1,0 +1,134 @@
+{
+  "items" : [ {
+    "downloadUrl" : "http://localhost:18093/repository/npm-h/demo",
+    "path" : "/demo",
+    "id" : "bnBtLWg6NGYxYmJjZGQ",
+    "repository" : "npm-h",
+    "format" : "npm",
+    "checksum" : {
+      "sha1" : "1208a653f0c019e166202a46eec9eee7079d6775",
+      "md5" : "f65cc9985a5161ccd0c5e8dc81b02187"
+    },
+    "contentType" : "application/json",
+    "lastModified" : "2026-10-26T23:55:45.224+00:00",
+    "lastDownloaded" : "2026-10-26T23:55:45.148+00:00",
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 749,
+    "blobCreated" : "2026-10-26T23:55:24.438+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:45.224+00:00",
+    "blobRef" : "default@62816fd6-a27d-4b99-af29-294b4889408f@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "npm" : { }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/npm-h/demo/-/demo-1.0.0.tgz",
+    "path" : "/demo/-/demo-1.0.0.tgz",
+    "id" : "bnBtLWg6OWUzNzc5YmE",
+    "repository" : "npm-h",
+    "format" : "npm",
+    "checksum" : {
+      "sha1" : "013f5c200cefd97b6f83095191648fbd48e9c791",
+      "sha512" : "16fb4f0843279ff77df71010c344507ccb3fd1d5f10269595d74fe6b882fb3065562a2fd0325fd2e91f3606738b1985468c8ed6ee290ef50fc7b11fac45c6e51",
+      "sha256" : "e578ed7b05bec883a1971e4ed4137098f336f7ed2abe5632688b6182789054ba",
+      "md5" : "1cbe778d5ee2b54a62435f7588e69db9"
+    },
+    "contentType" : "application/octet-stream",
+    "lastModified" : "2026-10-26T23:55:24.456+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 147,
+    "blobCreated" : "2026-10-26T23:55:24.460+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:24.456+00:00",
+    "blobRef" : "default@e468d240-afeb-4d6f-8f3a-e47c68489be1@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "npm" : {
+      "name" : "demo",
+      "version" : "1.0.0"
+    }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/npm-h/demo/-/demo-1.1.0-beta.1.tgz",
+    "path" : "/demo/-/demo-1.1.0-beta.1.tgz",
+    "id" : "bnBtLWg6ZWQ1MzM2OTc",
+    "repository" : "npm-h",
+    "format" : "npm",
+    "checksum" : {
+      "sha1" : "4b33093bc732fe2d3cd0db8f446137107bbd96d3",
+      "sha512" : "33793bc2bc1ad28dbb6ed018d0bd31e48fb5d355af954c89c17d63946f240d77f25c711b90fbf72b65b5a152a197062ab799405be057be337e1d9e34d5510432",
+      "sha256" : "9e9c9b94fd66bf05abaff609e43f08697ae460b7509a806186f103e9854d1bc5",
+      "md5" : "01e9b9db98d2bd5ad3a76f6bff00db55"
+    },
+    "contentType" : "application/octet-stream",
+    "lastModified" : "2026-10-26T23:55:24.549+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 141,
+    "blobCreated" : "2026-10-26T23:55:24.550+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:24.549+00:00",
+    "blobRef" : "default@6c352ff8-2de6-40ea-8f27-a66582f27764@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "npm" : {
+      "name" : "demo",
+      "version" : "1.1.0-beta.1"
+    }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/npm-h/@acme/scoped",
+    "path" : "/@acme/scoped",
+    "id" : "bnBtLWg6M2M2ZWYzNzQ",
+    "repository" : "npm-h",
+    "format" : "npm",
+    "checksum" : {
+      "sha1" : "99198e933a6d6a077251a9e2109b918c0b01d64d",
+      "md5" : "f872973ade6a40eb8b6a561e72e2dba3"
+    },
+    "contentType" : "application/json",
+    "lastModified" : "2026-10-26T23:55:24.624+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 430,
+    "blobCreated" : "2026-10-26T23:55:24.625+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:24.624+00:00",
+    "blobRef" : "default@0eac8225-8576-4478-aba7-10c3628b1873@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "npm" : { }
+  }, {
+    "downloadUrl" : "http://localhost:18093/repository/npm-h/@acme/scoped/-/scoped-2.0.0.tgz",
+    "path" : "/@acme/scoped/-/scoped-2.0.0.tgz",
+    "id" : "bnBtLWg6OGI4YWIwNTE",
+    "repository" : "npm-h",
+    "format" : "npm",
+    "checksum" : {
+      "sha1" : "d1272dd824effa084626ca505643335be7c9fceb",
+      "sha512" : "99ca20992400e6b0196b4cab382aec4ff5fd0187662106901b7f8e4a56993bd9222898073dd646d18735bd72085544aa05dd7b540633856ea44c6f489869b941",
+      "sha256" : "568db7308ff8d37b70a269470ec392b1b62b319503755a82973a138e947f9bcd",
+      "md5" : "68c12b748d23be527c9473caaba1ef0c"
+    },
+    "contentType" : "application/octet-stream",
+    "lastModified" : "2026-10-26T23:55:24.633+00:00",
+    "lastDownloaded" : null,
+    "uploader" : "admin",
+    "uploaderIp" : "192.0.2.1",
+    "fileSize" : 143,
+    "blobCreated" : "2026-10-26T23:55:24.635+00:00",
+    "blobStoreName" : "default",
+    "blobUpdated" : "2026-10-26T23:55:24.633+00:00",
+    "blobRef" : "default@b204dc8c-0484-4dd9-b020-e3908682bc33@2026-10-26T23:55",
+    "lastVerified" : null,
+    "registryUrl" : null,
+    "npm" : {
+      "name" : "@acme/scoped",
+      "version" : "2.0.0"
+    }
+  } ],
+  "continuationToken" : null
+}
