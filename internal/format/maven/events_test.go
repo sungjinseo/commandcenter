@@ -16,7 +16,7 @@ func TestEventsMaven(t *testing.T) {
 	if w := e.do("PUT", "public", jar, "jar"); w.Code != 201 {
 		t.Fatalf("PUT: %d", w.Code)
 	}
-	if w := e.do("PUT", "releases", "org/example/app/1.0/app-1.0.pom", "<project/>"); w.Code != 201 {
+	if w := e.do("PUT", "releases", "org/example/app/1.0/app-1.0.pom", fileBody("org/example/app/1.0/app-1.0.pom")); w.Code != 201 {
 		t.Fatalf("PUT pom: %d", w.Code)
 	}
 	got := sink.Events()

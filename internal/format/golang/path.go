@@ -192,11 +192,13 @@ func assetKey(module, file string) string { return module + "/@v/" + file }
 var (
 	gopkgSuffixRE = regexp.MustCompile(`\.v(0|[1-9][0-9]*)$`)
 	slashMajorRE  = regexp.MustCompile(`^v([2-9]|[1-9][0-9]+)$`)
+	badMajorRE    = regexp.MustCompile(`^v[0-9.]+$`)
 )
 
 // checkPathMajor ports golang.org/x/mod module.CheckPathMajor: the major
-// version of version must agree with the major-version suffix of module. Both
-// are unescaped and version is already a canonical semantic version.
+// version of version must agree with the major-version suffix of module,
+// which must be valid as SplitPathVersion sees it. Both are unescaped and
+// version is already a canonical semantic version.
 func checkPathMajor(module, version string) error {
 	bad := func(format string, a ...any) error {
 		return repo.Errorf(http.StatusBadRequest, format, a...)
@@ -221,6 +223,11 @@ func checkPathMajor(module, version string) error {
 				return bad("version %s does not match the /v%s suffix of %q", version, m[1], module)
 			}
 			return nil
+		}
+		// SplitPathVersion: any other /v<digits and dots> (/v0, /v1, /v01,
+		// /v1.2) makes the path invalid.
+		if badMajorRE.MatchString(last) {
+			return bad("module path %q has an invalid major version suffix /%s", module, last)
 		}
 	}
 	if major == "0" || major == "1" || incompatible {

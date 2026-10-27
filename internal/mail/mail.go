@@ -5,6 +5,7 @@ package mail
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -229,7 +230,9 @@ func (s *Sender) SendNow(ctx context.Context, cfg meta.SMTP, to []string, subjec
 
 // buildMessage composes an RFC 5322 text/plain message. The subject is one
 // encoded line (no header injection) and the body is base64, so any text,
-// dot-lines included, survives.
+// dot-lines included, survives. The Message-ID is random at the From domain:
+// without one the receiving server adds its own, which spam filters count
+// against the message (QA N-28).
 func buildMessage(from *mail.Address, to []*mail.Address, subject, body string, now time.Time) []byte {
 	var b strings.Builder
 	h := func(k, v string) { b.WriteString(k + ": " + v + "\r\n") }
@@ -241,6 +244,8 @@ func buildMessage(from *mail.Address, to []*mail.Address, subject, body string, 
 	h("To", strings.Join(list, ", "))
 	h("Subject", mime.QEncoding.Encode("utf-8", oneLine(subject)))
 	h("Date", now.Format(time.RFC1123Z))
+	// ParseAddress guarantees the '@'.
+	h("Message-ID", "<"+rand.Text()+"@"+from.Address[strings.LastIndexByte(from.Address, '@')+1:]+">")
 	h("MIME-Version", "1.0")
 	h("Content-Type", "text/plain; charset=utf-8")
 	h("Content-Transfer-Encoding", "base64")

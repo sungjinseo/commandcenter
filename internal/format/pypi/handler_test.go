@@ -123,7 +123,7 @@ func TestProxyProjectPageAndDownload(t *testing.T) {
 	e := newEnv(t)
 	w := e.do("GET", "py-proxy", "simple/six/", "")
 	body := w.Body.String()
-	want := baseURL + "/repository/py-proxy/packages/six/six-1.16.0-py2.py3-none-any.whl#sha256=" + sha("six-wheel")
+	want := "/repository/py-proxy/packages/six/six-1.16.0-py2.py3-none-any.whl#sha256=" + sha("six-wheel")
 	if w.Code != 200 || w.Header().Get("Content-Type") != htmlType || !strings.Contains(body, `href="`+want+`"`) {
 		t.Fatalf("%d %s", w.Code, body)
 	}
@@ -172,21 +172,35 @@ func TestHostedAndGroup(t *testing.T) {
 	e.seedHosted(t, "internal-pkg", "internal_pkg-1.0.tar.gz", "internal")
 
 	w := e.do("GET", "py-hosted", "simple/six/", "")
-	if !strings.Contains(w.Body.String(), baseURL+"/repository/py-hosted/packages/six/six-2.0.0.tar.gz#sha256="+sha("internal six")) ||
+	if !strings.Contains(w.Body.String(), `href="/repository/py-hosted/packages/six/six-2.0.0.tar.gz#sha256=`+sha("internal six")) ||
 		!strings.Contains(w.Body.String(), `data-requires-python="&gt;=3.9"`) {
 		t.Fatalf("hosted page: %s", w.Body.String())
 	}
+	// py-hosted owns six: its files answer alone and the proxy's never mix in,
+	// in either page format or by direct URL (dependency confusion, QA N-1).
 	w = e.do("GET", "py-all", "simple/six/", "")
 	body := w.Body.String()
-	if strings.Count(body, "<a ") != 3 || !strings.Contains(body, "/repository/py-all/packages/six/six-2.0.0.tar.gz") ||
-		!strings.Contains(body, "/repository/py-all/packages/six/six-1.16.0-py2.py3-none-any.whl") {
+	if strings.Count(body, "<a ") != 1 || !strings.Contains(body, "/repository/py-all/packages/six/six-2.0.0.tar.gz") {
 		t.Fatalf("group page: %s", body)
+	}
+	w = e.do("GET", "py-all", "simple/six/", pipAccept)
+	var doc struct{ Files []map[string]any }
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil || len(doc.Files) != 1 || doc.Files[0]["filename"] != "six-2.0.0.tar.gz" {
+		t.Fatalf("group json page: %s", w.Body.String())
 	}
 	if w := e.do("GET", "py-all", "packages/six/six-2.0.0.tar.gz", ""); w.Body.String() != "internal six" {
 		t.Fatalf("group hosted file: %q", w.Body.String())
 	}
-	if w := e.do("GET", "py-all", "packages/six/six-1.16.0-py2.py3-none-any.whl", ""); w.Body.String() != "six-wheel" {
-		t.Fatalf("group proxy file: %q", w.Body.String())
+	cacheProxyWheel(t, e) // cached in the proxy, still not served by the group
+	if w := e.do("GET", "py-all", "packages/six/six-1.16.0-py2.py3-none-any.whl", ""); w.Code != http.StatusNotFound {
+		t.Fatalf("proxy-only file through the group: %d %q", w.Code, w.Body.String())
+	}
+	// A project only the proxy has still comes from the proxy.
+	if w := e.do("GET", "py-all", "simple/legacy/", ""); !strings.Contains(w.Body.String(), "/repository/py-all/packages/legacy/legacy-1.0.tar.gz") {
+		t.Fatalf("proxy-only project page: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("GET", "py-all", "packages/legacy/legacy-1.0.tar.gz", ""); w.Body.String() != "legacy" {
+		t.Fatalf("proxy-only project file: %d %q", w.Code, w.Body.String())
 	}
 
 	w = e.do("GET", "py-all", "simple/", "")
@@ -222,34 +236,153 @@ func TestMethodsAndHead(t *testing.T) {
 	}
 }
 
+// QA L-5: file links are host-relative, so pip fetches files from the host
+// (with the credentials) it used for the index, whatever baseURL's host is;
+// the path of the live baseURL is kept. This replaces the absolute URLs
+// built from baseURL that the test used to pin.
 func TestFileURLUsesLiveBaseURL(t *testing.T) {
 	e := newEnv(t)
 	cur := "https://one.example/"
 	e.h.BaseURL = func() string { return cur }
 	rp := e.repos["py-hosted"]
-	if got := e.h.fileURL(rp, "p", "f.whl"); got != "https://one.example/repository/py-hosted/packages/p/f.whl" {
+	if got := e.h.fileURL(rp, "p", "f.whl"); got != "/repository/py-hosted/packages/p/f.whl" {
 		t.Fatalf("first: %s", got)
 	}
-	cur = "https://two.example"
-	if got := e.h.fileURL(rp, "p", "f.whl"); got != "https://two.example/repository/py-hosted/packages/p/f.whl" {
+	cur = "https://two.example/cc/my%20repo/"
+	if got := e.h.fileURL(rp, "p", "f.whl"); got != "/cc/my%20repo/repository/py-hosted/packages/p/f.whl" {
 		t.Fatalf("after change: %s", got)
+	}
+	e.seedHosted(t, "six", "six-2.0.0.tar.gz", "internal six")
+	html := e.do("GET", "py-all", "simple/six/", "").Body.String()
+	var doc struct{ Files []struct{ URL string } }
+	if err := json.Unmarshal(e.do("GET", "py-all", "simple/six/", pipAccept).Body.Bytes(), &doc); err != nil || len(doc.Files) != 1 {
+		t.Fatalf("json page: %v %+v", err, doc)
+	}
+	want := "/cc/my%20repo/repository/py-all/packages/six/six-2.0.0.tar.gz"
+	if !strings.Contains(html, `href="`+want+`#sha256=`) || doc.Files[0].URL != want || strings.Contains(html, "two.example") {
+		t.Fatalf("pages: %s %+v", html, doc)
 	}
 }
 
-func TestGroupSkipsOfflineMember(t *testing.T) {
+// QA N-1: an offline member ahead of the one that has the project fails the
+// request (503) instead of letting the proxy's same-named project through;
+// one behind the owner is not consulted.
+func TestGroupFailsClosedOnOfflineMember(t *testing.T) {
 	e := newEnv(t)
+	cacheProxyWheel(t, e)
 	e.seedHosted(t, "six", "six-2.0.0.tar.gz", "internal six")
-	off := false
-	e.repos["py-proxy"].Online = &off // the group holds the same pointer
-	w := e.do("GET", "py-all", "simple/six/", "")
-	body := w.Body.String()
-	if strings.Count(body, "<a ") != 1 || !strings.Contains(body, "six-2.0.0.tar.gz") {
-		t.Fatalf("group page must hold only the hosted member: %s", body)
+	off, on := false, true
+	e.repos["py-hosted"].Online = &off // the group holds the same pointer
+	for _, p := range []string{"simple/six/", "packages/six/six-1.16.0-py2.py3-none-any.whl"} {
+		if w := e.do("GET", "py-all", p, ""); w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s with the hosted member offline: %d %q, want 503", p, w.Code, w.Body.String())
+		}
 	}
-	if w := e.do("GET", "py-all", "packages/six/six-1.16.0-py2.py3-none-any.whl", ""); w.Code != http.StatusNotFound {
-		t.Fatalf("offline member's file: %d", w.Code)
+
+	e.repos["py-hosted"].Online = &on
+	e.repos["py-proxy"].Online = &off
+	w := e.do("GET", "py-all", "simple/six/", "")
+	if body := w.Body.String(); strings.Count(body, "<a ") != 1 || !strings.Contains(body, "six-2.0.0.tar.gz") {
+		t.Fatalf("owner ahead of the offline member: %d %s", w.Code, body)
+	}
+	// No online member has legacy and the offline one might: not a 404.
+	for _, p := range []string{"simple/legacy/", "packages/legacy/legacy-1.0.tar.gz"} {
+		if w := e.do("GET", "py-all", p, ""); w.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s with the proxy offline: %d %q, want 503", p, w.Code, w.Body.String())
+		}
 	}
 	if n := len(e.repos["py-all"].MemberRepos); n != 2 {
 		t.Fatalf("MemberRepos must keep the offline member: %d", n)
+	}
+}
+
+// A member ahead of the owner that fails, here a hosted row that cannot be
+// read, is a 5xx, not a reason to serve the proxy's same-named project.
+func TestGroupFailsClosedOnMemberError(t *testing.T) {
+	e := newEnv(t)
+	cacheProxyWheel(t, e)
+	ctx := context.Background()
+	err := e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
+		return tx.InsertPackage(ctx, meta.Package{Repo: "py-hosted", Format: "pypi", Name: "six", Version: "x", Attrs: "not json"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"simple/six/", "packages/six/six-1.16.0-py2.py3-none-any.whl"} {
+		if w := e.do("GET", "py-all", p, ""); w.Code < 500 || strings.Contains(w.Body.String(), "six-wheel") || strings.Contains(w.Body.String(), "six-1.16.0") {
+			t.Errorf("%s: %d %q, want 5xx", p, w.Code, w.Body.String())
+		}
+	}
+}
+
+const wheel = "packages/six/six-1.16.0-py2.py3-none-any.whl"
+
+// cacheProxyWheel has py-proxy fetch and cache the six wheel, so a group test
+// shows that the later member's cached file does not get through.
+func cacheProxyWheel(t *testing.T, e *env) {
+	t.Helper()
+	if w := e.do("GET", "py-proxy", wheel, ""); w.Code != 200 {
+		t.Fatalf("caching the proxy's wheel: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// withUpstream adds py-up, a proxy with py-proxy's settings on an upstream
+// that serves fakeIndex while *status is 0 and otherwise answers everything
+// with *status (503: down, 404: the project was removed), and the group
+// py-up-all = py-hosted, py-up. reqs counts the upstream's requests.
+func withUpstream(t *testing.T, e *env) (status, reqs *atomic.Int32) {
+	t.Helper()
+	status, reqs = &atomic.Int32{}, &atomic.Int32{}
+	index := fakeIndex(&atomic.Int32{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs.Add(1)
+		if s := int(status.Load()); s != 0 {
+			http.Error(w, "switched off", s)
+			return
+		}
+		index(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	def := e.repos["py-proxy"].Repository
+	def.Name, def.Remote = "py-up", srv.URL+"/"
+	e.repos["py-up"] = repo.Build(&config.Config{Repositories: []config.Repository{def}})["py-up"]
+	g := *e.repos["py-all"]
+	g.Name, g.MemberRepos = "py-up-all", []*repo.Repository{e.repos["py-hosted"], e.repos["py-up"]}
+	e.repos[g.Name] = &g
+	return status, reqs
+}
+
+// Format review F2: a group serves a cached file without the project index,
+// so after the upstream removed the project, as the proxy URL does, and
+// without asking the upstream.
+func TestGroupServesCachedFileAfterUpstreamRemovedProject(t *testing.T) {
+	e := newEnv(t)
+	status, reqs := withUpstream(t, e)
+	for _, p := range []string{"simple/six/", wheel} {
+		if w := e.do("GET", "py-up-all", p, ""); w.Code != 200 {
+			t.Fatalf("caching %s: %d %s", p, w.Code, w.Body.String())
+		}
+	}
+	status.Store(http.StatusNotFound)
+	e.h.Fetcher.Now = func() time.Time { return time.Now().Add(2 * time.Hour) } // past metadataMaxAge
+	n := reqs.Load()
+	if w := e.do("GET", "py-up-all", wheel, ""); w.Code != 200 || w.Body.String() != "six-wheel" {
+		t.Fatalf("project removed upstream: %d %q", w.Code, w.Body.String())
+	}
+	if d := reqs.Load() - n; d != 0 {
+		t.Fatalf("the upstream was asked %d times for a cached file", d)
+	}
+}
+
+// ... and while the upstream is down, also with no index cached.
+func TestGroupServesCachedFileWhileUpstreamDown(t *testing.T) {
+	e := newEnv(t)
+	status, _ := withUpstream(t, e)
+	if _, err := e.h.Store.Put(context.Background(), "py-up", fileKey("six", "six-1.16.0-py2.py3-none-any.whl"), "", strings.NewReader("six-wheel")); err != nil {
+		t.Fatal(err)
+	}
+	status.Store(http.StatusServiceUnavailable)
+	if w := e.do("GET", "py-up-all", wheel, ""); w.Code != 200 || w.Body.String() != "six-wheel" {
+		t.Fatalf("upstream down: %d %q", w.Code, w.Body.String())
 	}
 }

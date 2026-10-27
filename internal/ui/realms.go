@@ -335,7 +335,12 @@ func (u *UI) testLDAP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), ldapTestCap)
 	defer cancel()
-	steps := (&ldap.Client{}).Diagnose(ctx, set.LDAP, strings.TrimSpace(body.User), body.Password)
+	var steps []ldap.Step
+	if body.User != "" && !auth.PlainLoginName(body.User) { // as sent: sign-in does not trim it
+		steps = append(steps, ldap.Step{Step: "name",
+			Detail: "sign-in refuses this name: it must be printable ASCII without leading, trailing or double spaces"})
+	}
+	steps = append(steps, (&ldap.Client{}).Diagnose(ctx, set.LDAP, strings.TrimSpace(body.User), body.Password)...)
 	ok := len(steps) > 0
 	for _, s := range steps {
 		ok = ok && s.OK

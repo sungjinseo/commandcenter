@@ -178,6 +178,33 @@ func TestListPackageNamesCanonical(t *testing.T) {
 	}
 }
 
+func TestPublishedName(t *testing.T) {
+	db := openTest(t)
+	err := db.Tx(ctx, func(tx *Tx) error {
+		for _, p := range []Package{
+			{Repo: "r", Format: "cargo", Name: "foo-bar", Version: "1.0.0", Attrs: `{"name":"Foo-Bar","vers":"1.0.0"}`},
+			{Repo: "r", Format: "cargo", Name: "plain", Version: "1.0.0", Attrs: "{}"},
+			{Repo: "r", Format: "cargo", Name: "broken", Version: "1.0.0", Attrs: "not json"},
+		} {
+			if err := tx.InsertPackage(ctx, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"foo-bar": "Foo-Bar", "plain": "", "missing": ""} {
+		if got, err := db.PublishedName(ctx, "r", name); err != nil || got != want {
+			t.Errorf("%s: %q %v, want %q", name, got, err, want)
+		}
+	}
+	if _, err := db.PublishedName(ctx, "r", "broken"); err == nil {
+		t.Error("malformed attrs: want an error")
+	}
+}
+
 func TestTxDeletes(t *testing.T) {
 	db := openTest(t)
 	err := db.Tx(ctx, func(tx *Tx) error {

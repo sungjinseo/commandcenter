@@ -10,8 +10,10 @@ import (
 func TestMethodNotAllowedListsTrueMethods(t *testing.T) {
 	e := newEnv(t)
 	for _, c := range []struct{ method, repo, path, allow string }{
-		{"POST", "go-hosted", "example.com/m/@v/v1.0.0.mod", "GET, HEAD, PUT"},
-		{"DELETE", "go-all", "example.com/m/@v/v1.0.0.zip", "GET, HEAD, PUT"},
+		{"POST", "go-hosted", "example.com/m/@v/v1.0.0.mod", "GET, HEAD, PUT, DELETE"},
+		{"POST", "go-all", "example.com/m/@v/v1.0.0.zip", "GET, HEAD, PUT, DELETE"},
+		{"DELETE", "go-proxy", "example.com/m/@v/v1.0.0.zip", "GET, HEAD"},
+		{"DELETE", "go-hosted", "example.com/m/@v/list", "GET, HEAD"},
 		{"POST", "go-proxy", "example.com/m/@v/v1.0.0.mod", "GET, HEAD"},
 		{"POST", "go-hosted", "example.com/m/@v/list", "GET, HEAD"},
 		{"PUT", "go-hosted", "example.com/m/@v/list", "GET, HEAD"},

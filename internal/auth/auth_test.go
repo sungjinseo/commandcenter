@@ -181,6 +181,21 @@ func TestUnknownUserCostsABcryptCompare(t *testing.T) {
 	}
 }
 
+// QA L-2: only a bcrypt hash is a password; a placeholder is not.
+func TestHashUsable(t *testing.T) {
+	h := hash(t, "pw")
+	for _, ok := range []string{h, "$2y$" + strings.TrimPrefix(h, "$2a$")} { // $2y$: htpasswd -B
+		if !HashUsable(ok) {
+			t.Errorf("%q: not usable", ok)
+		}
+	}
+	for _, bad := range []string{"", "x", "<commandcenter hash-password 출력값>", "$2a$10$tooshort", "$2a$99$" + strings.Repeat("a", 53)} {
+		if HashUsable(bad) {
+			t.Errorf("%q: usable", bad)
+		}
+	}
+}
+
 func TestCheckPasswordHonorsContextWhileQueued(t *testing.T) {
 	a, _ := newAuth(t)
 	for i := 0; i < cap(bcryptSlots); i++ {

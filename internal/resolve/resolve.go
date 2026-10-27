@@ -33,34 +33,9 @@ func (r *Resolver) Lookup(ctx context.Context, rp *repo.Repository, path string,
 }
 
 // LookupTarget is Lookup for a target whose cache key and remote path differ.
+// Groups skip offline members, and failing ones while a later member has the
+// asset; Owner is the lookup that fails closed instead.
 func (r *Resolver) LookupTarget(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind) (proxy.Result, error) {
-	return r.lookupTarget(ctx, rp, t, kind, false)
-}
-
-// LookupTargetStrict is LookupTarget for a group that fails closed: a member
-// error (anything but not-found) ends the lookup with a 5xx instead of trying
-// the next member, so a transient error of an internal member never serves a
-// later member's same-named package (QA M-4, final review I1).
-func (r *Resolver) LookupTargetStrict(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind) (proxy.Result, error) {
-	return r.lookupTarget(ctx, rp, t, kind, true)
-}
-
-// LookupStrict is LookupTargetStrict for a path.
-func (r *Resolver) LookupStrict(ctx context.Context, rp *repo.Repository, path string, kind proxy.Kind) (proxy.Result, error) {
-	return r.LookupTargetStrict(ctx, rp, pathTarget(path), kind)
-}
-
-// memberFailure is the error a strict group returns for a failed member: the
-// member's own status when it is a 5xx, otherwise 502.
-func memberFailure(group, member string, err error) error {
-	slog.Warn("group member lookup failed", "group", group, "member", member, "err", logsafe.Err(err))
-	if repo.StatusOf(err) >= 500 {
-		return err
-	}
-	return repo.Errorf(http.StatusBadGateway, "group member %q failed", member)
-}
-
-func (r *Resolver) lookupTarget(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind, strict bool) (proxy.Result, error) {
 	switch rp.Type {
 	case "hosted":
 		a, err := r.Store.Get(ctx, rp.Name, t.Key)
@@ -70,17 +45,12 @@ func (r *Resolver) lookupTarget(ctx context.Context, rp *repo.Repository, t prox
 	case "group":
 		var firstErr error
 		for _, m := range rp.OnlineMembers() {
-			res, err := r.lookupTarget(ctx, m, t, kind, strict)
+			res, err := r.LookupTarget(ctx, m, t, kind)
 			if err == nil {
 				return res, nil
 			}
-			if repo.StatusOf(err) != http.StatusNotFound {
-				if strict {
-					return proxy.Result{}, memberFailure(rp.Name, m.Name, err)
-				}
-				if firstErr == nil {
-					firstErr = err
-				}
+			if repo.StatusOf(err) != http.StatusNotFound && firstErr == nil {
+				firstErr = err
 			}
 		}
 		if firstErr != nil {
@@ -91,20 +61,87 @@ func (r *Resolver) lookupTarget(ctx context.Context, rp *repo.Repository, t prox
 	return proxy.Result{}, fmt.Errorf("unknown repository type %q", rp.Type)
 }
 
+// Owner returns the repository that answers for t in rp, and t from it: rp
+// itself unless rp is a group, otherwise the first member in order (nested
+// groups searched in place) that has t. A group that serves one member's
+// package alone looks up the package document here. Unlike LookupTarget it
+// fails closed: a member ahead of that one that is offline (503) or fails
+// with anything but not found (5xx, see memberFailure) ends the search, so a
+// later (public) member's same-named package never stands in for an earlier
+// (internal) one (dependency confusion, QA M-4 and N-1).
+func (r *Resolver) Owner(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind) (*repo.Repository, proxy.Result, error) {
+	if rp.Type != "group" {
+		res, err := r.LookupTarget(ctx, rp, t, kind)
+		return rp, res, err
+	}
+	for _, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return nil, proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+		}
+		owner, res, err := r.Owner(ctx, m, t, kind)
+		if err == nil {
+			return owner, res, nil
+		}
+		if repo.StatusOf(err) != http.StatusNotFound {
+			return nil, proxy.Result{}, memberFailure(rp.Name, m.Name, err)
+		}
+	}
+	return nil, proxy.Result{}, repo.ErrNotFound
+}
+
+// OwnerFile looks up file, a file of the package whose document is doc (an
+// npm tarball and its packument), under Owner's rule while reading doc as
+// little as it can. A group asks its members in order for file, and the
+// first that has it answers, from its cache or its upstream: a member with a
+// file of the package has the package. A member without file is asked for
+// doc (a nested group through Owner), and if it has the package it owns it:
+// the answer is not found, never a later member's file (QA N-1). The last
+// member is not asked, as no member follows it. So a cached file is served
+// while its upstream is down or after the upstream dropped the package, and
+// a lockfile install fetches no packuments. An offline member reached is a
+// 503 and a failing one a 5xx, as in Owner.
+func (r *Resolver) OwnerFile(ctx context.Context, rp *repo.Repository, file, doc proxy.Target) (proxy.Result, error) {
+	if rp.Type != "group" {
+		return r.LookupTarget(ctx, rp, file, proxy.Content)
+	}
+	for i, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+		}
+		res, err := r.OwnerFile(ctx, m, file, doc)
+		if err == nil {
+			return res, nil
+		}
+		if repo.StatusOf(err) == http.StatusNotFound && i < len(rp.MemberRepos)-1 {
+			if _, _, err = r.Owner(ctx, m, doc, proxy.Metadata); err == nil {
+				return proxy.Result{}, repo.ErrNotFound // m owns the package, without this file
+			}
+		}
+		if repo.StatusOf(err) != http.StatusNotFound {
+			return proxy.Result{}, memberFailure(rp.Name, m.Name, err)
+		}
+	}
+	return proxy.Result{}, repo.ErrNotFound
+}
+
+// memberFailure is the error Owner and OwnerFile return for a failed
+// member: the member's own status when it is a 5xx, otherwise 502.
+func memberFailure(group, member string, err error) error {
+	slog.Warn("group member lookup failed", "group", group, "member", member, "err", logsafe.Err(err))
+	if repo.StatusOf(err) >= 500 {
+		return err
+	}
+	return repo.Errorf(http.StatusBadGateway, "group member %q failed", member)
+}
+
 // All returns the asset at path from every leaf member of rp that has it.
 func (r *Resolver) All(ctx context.Context, rp *repo.Repository, path string, kind proxy.Kind) ([]proxy.Result, error) {
 	return r.AllTarget(ctx, rp, pathTarget(path), kind)
 }
 
-// AllTarget is All for a target whose cache key and remote path differ.
+// AllTarget is All for a target whose cache key and remote path differ. A
+// failing member is logged and skipped while another member has the asset.
 func (r *Resolver) AllTarget(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind) ([]proxy.Result, error) {
-	return r.allTarget(ctx, rp, t, kind, false)
-}
-
-// allTarget is AllTarget; strict fails closed when a member ordered before
-// the first member that answered errors (see LookupTargetStrict). A member
-// failing after one that answered is logged and skipped in both modes.
-func (r *Resolver) allTarget(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind, strict bool) ([]proxy.Result, error) {
 	var out []proxy.Result
 	var firstErr error
 	for _, m := range leaves(rp) {
@@ -114,9 +151,6 @@ func (r *Resolver) allTarget(ctx context.Context, rp *repo.Repository, t proxy.T
 			continue
 		}
 		if repo.StatusOf(err) != http.StatusNotFound {
-			if strict && len(out) == 0 {
-				return nil, memberFailure(rp.Name, m.Name, err)
-			}
 			slog.Warn("group member lookup failed", "group", rp.Name, "member", m.Name, "key", t.Key, "err", logsafe.Err(err))
 			if firstErr == nil {
 				firstErr = err
@@ -145,19 +179,7 @@ func (r *Resolver) MergedTarget(ctx context.Context, rp *repo.Repository, t prox
 // every merged copy stored by an older build re-merge once on its next read;
 // the empty salt keeps the fingerprint MergedTarget has always stored.
 func (r *Resolver) MergedTargetSalted(ctx context.Context, rp *repo.Repository, t proxy.Target, contentType, salt string, merge MergeFunc) (meta.Asset, error) {
-	return r.mergedTarget(ctx, rp, t, contentType, salt, merge, false)
-}
-
-// MergedTargetSaltedStrict is MergedTargetSalted for a group that fails
-// closed: when a member ordered before the first member that has the document
-// errors, the result is that error (5xx; see LookupTargetStrict) instead of a
-// merge of the later members. npm uses it (QA M-4, final review I1).
-func (r *Resolver) MergedTargetSaltedStrict(ctx context.Context, rp *repo.Repository, t proxy.Target, contentType, salt string, merge MergeFunc) (meta.Asset, error) {
-	return r.mergedTarget(ctx, rp, t, contentType, salt, merge, true)
-}
-
-func (r *Resolver) mergedTarget(ctx context.Context, rp *repo.Repository, t proxy.Target, contentType, salt string, merge MergeFunc, strict bool) (meta.Asset, error) {
-	results, err := r.allTarget(ctx, rp, t, proxy.Metadata, strict)
+	results, err := r.AllTarget(ctx, rp, t, proxy.Metadata)
 	if err != nil {
 		return meta.Asset{}, err
 	}

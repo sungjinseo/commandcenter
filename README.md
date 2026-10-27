@@ -86,7 +86,7 @@ docker compose build
 docker run --rm -i commandcenter:latest hash-password
 ```
 
-`config.example.yaml`을 `config.yaml`로 복사하고, 위 명령이 출력한 해시를 `passwordHash` 자리에 넣습니다.
+비밀번호(8자 이상, 72바이트 이하)를 입력하고 Enter를 누르면 해시가 나옵니다. `config.example.yaml`을 `config.yaml`로 복사하고, 그 해시를 `passwordHash` 자리에 넣습니다.
 
 ```bash
 cp config.example.yaml config.yaml
@@ -99,6 +99,19 @@ docker compose up -d
 `http://localhost:8081/`을 열면 끝입니다. 라이선스 키를 묻는 화면은 나오지 않습니다. 원래 없으니까요.
 
 포맷별 클라이언트 설정(Maven `settings.xml`, `.npmrc`, `pip.conf`, `GOPROXY`, Cargo `config.toml`)은 웹 UI의 저장소 화면과 [운영 가이드](docs/guide.md#포맷별-클라이언트-설정)에 복사해서 쓸 수 있는 형태로 있습니다.
+
+## 프로덕션 체크리스트
+
+빠른 시작은 시험용 구성입니다. 팀이 매일 쓰는 저장소로 올리기 전에 운영 가이드의 [프로덕션 배포](docs/guide.md#프로덕션-배포)를 읽어 주세요. 요약하면 이렇습니다.
+
+- TLS는 리버스 프록시에서 끝내고 `baseURL`을 `https://` 주소로 둡니다.
+- 사내 전용이면 익명 읽기(`anonymousRead`)를 끕니다.
+- 프록시에서 업로드 크기, 본문 수신·응답 전송 타임아웃, 연결 수를 제한합니다.
+- `meta.db`는 로컬 디스크나 블록 스토리지에 둡니다. NFS·SMB는 안 됩니다. 인스턴스는 하나만 띄웁니다.
+- 중지 대기 시간을 60초로 둡니다. 들어 있는 compose 파일은 이미 `stop_grace_period: 60s`이고, `docker run`(`--stop-timeout 60`)이나 Kubernetes에서는 직접 정합니다.
+- 정기적으로, 그리고 업그레이드 전에 백업합니다. 다운그레이드는 지원하지 않습니다.
+- 저장된 비밀값(SMTP·LDAP·프록시 비밀번호)을 암호화하려면 `COMMANDCENTER_SECRET_KEY`나 `secretKeyFile`로 키를 주고, 키는 백업과 따로 보관합니다.
+- Kubernetes용 참조 매니페스트는 [deploy/kubernetes](deploy/kubernetes/commandcenter.yaml)에 있습니다.
 
 ## 얼마나 가볍나요
 
@@ -113,11 +126,12 @@ Go 단일 바이너리이고 CGO를 쓰지 않습니다. 128 MiB 컨테이너에
 
 ## 정직한 현황
 
-Human Edition은 인간이 만들었습니다. 그래서 버그가 있습니다.
+Human Edition은 인간이 만들었습니다. 그래서 버그가 있습니다. "모든 문제가 해결되었습니다" 같은 홀로그램은 띄우지 않겠습니다.
 
-- 블랙박스 QA에서 나온 High·Medium 항목은 모두 고쳤고, 고친 내용마다 회귀 테스트가 붙어 있습니다.
-- 아직 지원하지 않는 기능은 [운영 가이드](docs/guide.md#제한-사항)의 제한 사항 절에 그대로 적어 두었습니다.
-- npm unpublish는 아직 지원하지 않습니다. npm은 이를 성공이 아니라 오류로 표시합니다.
+- 블랙박스 QA에서 나온 문제를 차례로 고치고 있고, 고친 문제에는 회귀 테스트를 붙입니다. 아직 고치지 못한 문제도 있습니다.
+- 알려진 제한과 아직 지원하지 않는 기능은 [운영 가이드의 제한 사항](docs/guide.md#제한-사항)에, 릴리스마다 고친 것과 바뀐 것은 [CHANGELOG](CHANGELOG.md)에 적습니다.
+- 서버는 한 대로 돌도록 만들었습니다. 이중화나 여러 대로 늘리는 구성은 지원하지 않습니다.
+- 버그는 이슈로, 보안 문제는 [보안 정책](SECURITY.md)대로 비공개로 알려 주세요.
 
 ## 자주 묻는 질문
 
@@ -141,7 +155,10 @@ MIT 또는 Apache-2.0 중 원하는 쪽으로 쓰시면 됩니다. 상업적 사
 
 ## 문서
 
-- [운영 가이드](docs/guide.md): 설치, 설정 레퍼런스, 인증·권한, LDAP, blob store, 포맷별 클라이언트 설정, 백업과 업그레이드
+- [운영 가이드](docs/guide.md): 설치, 프로덕션 배포, 설정 레퍼런스, 인증·권한, LDAP, blob store, 포맷별 클라이언트 설정, 백업과 업그레이드
+- [Kubernetes 참조 매니페스트](deploy/kubernetes/commandcenter.yaml)
+- [변경 기록](CHANGELOG.md): 릴리스마다 고친 것과 바뀐 것
+- [기여 안내](CONTRIBUTING.md)와 [행동 강령](CODE_OF_CONDUCT.md)
 - [보안 정책](SECURITY.md): 취약점 신고 방법
 - [출처 표기](ATTRIBUTION.md): 함께 배포되는 서드파티 코드의 저자와 라이선스
 
@@ -160,6 +177,8 @@ bash test/e2e.sh
 ```
 
 `test/e2e.sh`는 실제 클라이언트(mvn, npm, pip, go, cargo)로 모든 포맷을 돌려 보는 스모크 테스트와 128 MiB 부하 테스트를 함께 실행합니다. 20분쯤 걸리니 커피를 한 잔 준비하세요. 커피는 Human Edition에 포함되어 있지 않습니다.
+
+이슈와 PR을 보내기 전에 [기여 안내](CONTRIBUTING.md)를 읽어 주세요. 코드 규칙과 PR에 기대하는 것을 적어 두었습니다.
 
 ## 라이선스
 

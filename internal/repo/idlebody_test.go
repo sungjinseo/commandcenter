@@ -63,19 +63,32 @@ func (d *deadlineRec) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-func TestIdleBodyCloseClearsDeadline(t *testing.T) {
-	w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
-	r := httptest.NewRequest("PUT", "/x", strings.NewReader("abc"))
-	b := IdleBody(w, r, time.Minute)
-	for _, d := range w.deadlines {
-		if !d.IsZero() {
-			t.Fatalf("deadline armed at create (final review M1): %v", w.deadlines)
+// QA N-5: closed before its end, the body leaves a short deadline (idle, at
+// most maxDrain) for net/http's read of the rest; read to its end, also
+// through a nested IdleBody (npm publish), Close clears the deadline.
+func TestIdleBodyCloseDeadline(t *testing.T) {
+	for _, idle := range []time.Duration{time.Minute, 50 * time.Millisecond} {
+		w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
+		r := httptest.NewRequest("PUT", "/x", strings.NewReader("abc"))
+		b := IdleBody(w, r, idle)
+		for _, d := range w.deadlines {
+			if !d.IsZero() {
+				t.Fatalf("deadline armed at create (final review M1): %v", w.deadlines)
+			}
+		}
+		b.Read(make([]byte, 1))
+		b.Close()
+		if last := w.deadlines[len(w.deadlines)-1]; last.IsZero() || time.Until(last) > min(idle, maxDrain) {
+			t.Fatalf("idle %v: deadlines after an early Close = %v, want a trailing one within %v", idle, w.deadlines, min(idle, maxDrain))
 		}
 	}
-	b.Read(make([]byte, 1))
-	b.Close()
+	w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
+	r := httptest.NewRequest("PUT", "/x", strings.NewReader("abc"))
+	r.Body = IdleBody(w, r, time.Minute)
+	io.ReadAll(IdleBody(w, r, time.Hour))
+	r.Body.Close()
 	if n := len(w.deadlines); n < 2 || !w.deadlines[n-1].IsZero() {
-		t.Fatalf("deadlines after Close = %v, want a trailing zero", w.deadlines)
+		t.Fatalf("deadlines after Close at the end = %v, want a trailing zero", w.deadlines)
 	}
 }
 
@@ -121,6 +134,25 @@ func TestIdleBodyArmsOnReadAndNestedOuterWins(t *testing.T) {
 	}
 }
 
+// WithDeadline: each read's deadline is the earlier of the idle limit and
+// the end, so sending steadily does not extend the end; bodies IdleBody did
+// not wrap pass through.
+func TestWithDeadlineUsesEarlierOfIdleAndEnd(t *testing.T) {
+	w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
+	r := httptest.NewRequest("PUT", "/x", strings.NewReader("abc"))
+	r.Body = IdleBody(w, r, time.Minute)
+	w.deadlines = nil
+	soon, late := time.Now().Add(time.Second), time.Now().Add(time.Hour)
+	WithDeadline(r.Body, soon).Read(make([]byte, 1))
+	WithDeadline(r.Body, late).Read(make([]byte, 1))
+	if len(w.deadlines) != 4 || !w.deadlines[0].Equal(soon) || !w.deadlines[2].Before(late) || time.Until(w.deadlines[2]) > time.Minute {
+		t.Fatalf("read deadlines %v, want %v then the idle minute", w.deadlines, soon)
+	}
+	if b := io.NopCloser(strings.NewReader("x")); WithDeadline(b, soon) != b {
+		t.Fatal("a body IdleBody did not wrap was wrapped")
+	}
+}
+
 func TestIdleBodySkipsEmptyBodies(t *testing.T) {
 	w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
 	r := httptest.NewRequest("DELETE", "/x", nil)
@@ -136,5 +168,32 @@ func TestIdleBodySkipsEmptyBodies(t *testing.T) {
 		if !d.IsZero() {
 			t.Fatalf("deadline armed for an empty body: %v", w.deadlines)
 		}
+	}
+}
+
+// WithDeadline bounds every read by its time, also through a nested IdleBody
+// with a longer idle value (QA N-5: an anonymous body has a total deadline).
+func TestWithDeadlineBoundsEveryRead(t *testing.T) {
+	w := &deadlineRec{ResponseRecorder: httptest.NewRecorder()}
+	r := httptest.NewRequest("PUT", "/x", strings.NewReader("abc"))
+	by := time.Now().Add(time.Second)
+	r.Body = WithDeadline(IdleBody(w, r, time.Minute), by)
+	if b, err := io.ReadAll(IdleBody(w, r, time.Hour)); err != nil || string(b) != "abc" {
+		t.Fatalf("read %q, %v", b, err)
+	}
+	armed := 0
+	for _, d := range w.deadlines {
+		if !d.IsZero() {
+			armed++
+			if !d.Equal(by) {
+				t.Fatalf("deadlines %v, want each read to end by %v", w.deadlines, by)
+			}
+		}
+	}
+	if armed == 0 {
+		t.Fatal("no deadline armed")
+	}
+	if b := WithDeadline(http.NoBody, by); b != http.NoBody {
+		t.Fatalf("NoBody wrapped: %T", b)
 	}
 }

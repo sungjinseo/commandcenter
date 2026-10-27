@@ -236,7 +236,12 @@ function mavenForm(r, ui) {
 
 // ---- npm ------------------------------------------------------------------------
 
-const NPM_NAME = /^(?:@[a-zA-Z0-9~-][a-zA-Z0-9._~-]*\/)?[a-zA-Z0-9~-][a-zA-Z0-9._~-]*$/;
+// npmName mirrors the server's npm.ValidName (without the 214-character cap):
+// the parts of a scoped name may start with "_" but not ".", an unscoped name
+// may start with neither, and no name may contain "..".
+function npmName(n) {
+  return /^(?:@[a-zA-Z0-9_~-][a-zA-Z0-9._~-]*\/[a-zA-Z0-9_~-][a-zA-Z0-9._~-]*|[a-zA-Z0-9~-][a-zA-Z0-9._~-]*)$/.test(n) && !n.includes("..");
+}
 const MAX_MANIFEST = 10 << 20; // the server's npm manifest limit
 
 // tarPackageJson gunzips the tarball as a stream and scans the tar headers
@@ -324,7 +329,7 @@ function npmForm(r, ui) {
         if (typeof DecompressionStream !== "function") throw new Error(t("up.e.gzipApi"));
         const j = await tarPackageJson(f);
         if (file.files[0] !== f) return;
-        if (!j || typeof j.name !== "string" || !NPM_NAME.test(j.name) || j.name.length > 214) throw new Error(t("up.e.npmName"));
+        if (!j || typeof j.name !== "string" || !npmName(j.name) || j.name.length > 214) throw new Error(t("up.e.npmName"));
         if (typeof j.version !== "string" || !/^[^\s/\\]+$/.test(j.version)) throw new Error(t("up.e.npmVer"));
         pkg = j;
         put(info, kv(t("col.name"), j.name), kv(t("col.version"), j.version), kv(t("col.bytes"), fmtBytes(f.size)),

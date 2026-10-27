@@ -32,10 +32,21 @@ func mavenComp(version string) component.Component {
 func (e *env) putAll(t *testing.T, repoName string, paths ...string) {
 	t.Helper()
 	for _, p := range paths {
-		if w := e.do("PUT", repoName, p, p); w.Code != 201 {
+		if w := e.do("PUT", repoName, p, fileBody(p)); w.Code != 201 {
 			t.Fatalf("PUT %s: %d %s", p, w.Code, w.Body)
 		}
 	}
+}
+
+// fileBody is what putAll uploads to p: the path itself, or for a POM one
+// that names p's coordinates (QA N-6).
+func fileBody(p string) string {
+	pp, _ := ParsePath(p)
+	if c := pp.Coords; c != nil && c.Extension == "pom" && c.Classifier == "" {
+		return "<project><groupId>" + c.GroupID + "</groupId><artifactId>" + c.ArtifactID +
+			"</artifactId><version>" + c.BaseVersion + "</version></project>"
+	}
+	return p
 }
 
 func TestDeleteComponentRelease(t *testing.T) {
@@ -58,7 +69,7 @@ func TestDeleteComponentRelease(t *testing.T) {
 	}
 	var bytes int64
 	for _, p := range deleted {
-		bytes += int64(len(p)) // each file holds its own path
+		bytes += int64(len(fileBody(p)))
 	}
 	if res != (component.Result{Assets: 4, Bytes: bytes}) {
 		t.Fatalf("result = %+v, want 4 assets %d bytes", res, bytes)

@@ -17,15 +17,20 @@ import (
 
 func TestHashPassword(t *testing.T) {
 	var out bytes.Buffer
-	if err := run([]string{"hash-password"}, strings.NewReader("s3cret\n"), &out); err != nil {
+	if err := run([]string{"hash-password"}, strings.NewReader("s3cret-pw\n"), &out); err != nil {
 		t.Fatal(err)
 	}
 	hash := strings.TrimSpace(out.String())
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte("s3cret")) != nil {
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte("s3cret-pw")) != nil {
 		t.Fatalf("hash %q does not match", hash)
 	}
-	if err := run([]string{"hash-password"}, strings.NewReader("\n"), &out); err == nil {
-		t.Fatal("empty password must fail")
+	// The API's password rules apply, as for user reset-password (the old
+	// "s3cret" is too short now).
+	for _, bad := range []string{"\n", "s3cret\n", "seven77\n", strings.Repeat("x", 73) + "\n", "        \n", " \t \t    \n"} {
+		out.Reset()
+		if err := run([]string{"hash-password"}, strings.NewReader(bad), &out); err == nil || out.Len() != 0 {
+			t.Fatalf("password %q accepted: %v %q", bad, err, out.String())
+		}
 	}
 }
 
@@ -106,7 +111,9 @@ func TestUserResetPassword(t *testing.T) {
 	if err := run(args, strings.NewReader("longenough\n"), &out); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`created local user "boss"`, `added the admin role to user "boss"`} {
+	// A running server reloads users every few seconds (QA N-2), so the
+	// message no longer asks for a (re)start.
+	for _, want := range []string{`created local user "boss"`, `added the admin role to user "boss"`, "a running server applies the change within a few seconds"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("output %q lacks %q", out.String(), want)
 		}

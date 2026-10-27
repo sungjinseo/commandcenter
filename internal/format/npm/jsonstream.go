@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -162,7 +163,9 @@ func copyValue(dec *json.Decoder, tw *tokenWriter, path []string, rewrite func(p
 	return tw.err
 }
 
-// skipValue consumes the next value from dec.
+// skipValue consumes the next value from dec. Nesting deeper than maxDepth is
+// an error: the decoder keeps a stack entry per level, so a body of brackets
+// must not grow it.
 func skipValue(dec *json.Decoder) error {
 	depth := 0
 	for {
@@ -172,7 +175,9 @@ func skipValue(dec *json.Decoder) error {
 		}
 		if d, ok := tok.(json.Delim); ok {
 			if d == '{' || d == '[' {
-				depth++
+				if depth++; depth > maxDepth {
+					return fmt.Errorf("npm: JSON nesting depth exceeds %d", maxDepth)
+				}
 			} else {
 				depth--
 			}

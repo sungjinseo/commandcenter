@@ -3,11 +3,17 @@ package maven
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
+	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"commandcenter/internal/blob"
 	"commandcenter/internal/component"
+	"commandcenter/internal/meta"
 )
 
 func TestRebuildMetadata(t *testing.T) {
@@ -138,5 +144,78 @@ func TestSnapshotMetadataUnchangedIsKept(t *testing.T) {
 	changed, _ := e.h.Store.Get(ctx, "snapshots", verDir+"/maven-metadata.xml")
 	if !changed.LastModified.After(before.LastModified) {
 		t.Fatalf("changed document not re-stored: %v", changed.LastModified)
+	}
+}
+
+// The metadata rebuilds after an artifact PUT (GA and SNAPSHOT version) and
+// after the GA maven-metadata.xml upload that ends mvn deploy stream the
+// paths: a SNAPSHOT that CI has deployed to for years with no cleanup policy
+// holds 10^5 files, whose asset rows held some 94 MiB at the shipped
+// GOMEMLIMIT. The 30000 here (28 MiB that way, 3 MiB streamed) keep the test
+// quick under -race.
+func TestRebuildMetadataMemoryBounded(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	sums, err := e.h.Store.WriteBlob("snapshots", strings.NewReader("x"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const builds = 6000 // x 5 files, all in 1.0-SNAPSHOT
+	err = e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
+		for b := range builds {
+			base := fmt.Sprintf("org/example/app/1.0-SNAPSHOT/app-1.0-20260101.%06d-%d", b, b+1)
+			for _, f := range []string{".pom", ".jar", "-sources.jar", "-javadoc.jar", ".module"} {
+				if err := tx.PutAsset(ctx, e.h.Store.NewAsset("snapshots", base+f, "application/octet-stream", blob.Sums(sums))); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(80 << 20)) // the shipped GOMEMLIMIT
+	for _, put := range [][2]string{
+		{"org/example/app/maven-metadata.xml", `<metadata><groupId>org.example</groupId><artifactId>app</artifactId></metadata>`},
+		{"org/example/app/1.0-SNAPSHOT/app-1.0-20260102.000000-1.jar", "jar"},
+	} {
+		runtime.GC()
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+		var peak atomic.Uint64
+		stop, sampled := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(sampled)
+			for {
+				var ms runtime.MemStats
+				runtime.ReadMemStats(&ms)
+				if ms.HeapInuse > peak.Load() {
+					peak.Store(ms.HeapInuse)
+				}
+				select {
+				case <-stop:
+					return
+				case <-time.After(time.Millisecond):
+				}
+			}
+		}()
+		start := time.Now()
+		w := e.do("PUT", "snapshots", put[0], put[1])
+		took := time.Since(start)
+		close(stop)
+		<-sampled
+		grew := (max(peak.Load(), before.HeapInuse) - before.HeapInuse) >> 20
+		t.Logf("PUT %s: %d in %v, heap in use grew by %d MiB", put[0], w.Code, took, grew)
+		if w.Code != 201 || grew > 16 {
+			t.Fatalf("PUT %s: %d %s, held %d MiB of heap", put[0], w.Code, w.Body, grew)
+		}
+	}
+	if got := versionsOf(t, e, "snapshots"); got != "1.0-SNAPSHOT release=" {
+		t.Fatalf("versions: %s", got)
+	}
+	if w := e.do("GET", "snapshots", "org/example/app/1.0-SNAPSHOT/maven-metadata.xml", ""); !strings.Contains(w.Body.String(), "<buildNumber>6000</buildNumber>") {
+		t.Fatalf("version metadata: %d %s", w.Code, w.Body)
 	}
 }

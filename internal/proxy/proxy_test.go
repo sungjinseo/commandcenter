@@ -33,6 +33,7 @@ type remote struct {
 	delay    time.Duration
 	inflight atomic.Int32 // requests currently being served
 	peak     atomic.Int32 // highest value inflight has reached
+	ctype    string       // Content-Type of the bodies, if set
 }
 
 func (rm *remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +60,9 @@ func (rm *remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("ETag", `"v1"`)
+	if rm.ctype != "" {
+		w.Header().Set("Content-Type", rm.ctype)
+	}
 	io.WriteString(w, "body of "+r.URL.Path)
 }
 
@@ -182,6 +186,41 @@ func TestFetchNegativeCache(t *testing.T) {
 	}
 }
 
+// QA L-12: for a NotHTML target a text/html answer (an upstream directory
+// listing or error page) is a 404, negative-cached and not stored. Other
+// targets still store web pages (a PyPI simple page is one).
+func TestFetchTargetNotHTML(t *testing.T) {
+	rm := &remote{ctype: "Text/HTML; charset=utf-8"}
+	f, rp, c := setup(t, rm)
+	tg := Target{Key: "g/a.jar", Remote: "g/a.jar", NotHTML: true}
+	for i := 0; i < 2; i++ {
+		if _, err := f.FetchTarget(ctx, rp, tg, Content); repo.StatusOf(err) != 404 {
+			t.Fatalf("fetch %d: %v", i, err)
+		}
+	}
+	if rm.hits.Load() != 1 {
+		t.Fatalf("hits = %d, want 1 (negative-cached)", rm.hits.Load())
+	}
+	if _, err := f.Store.Get(ctx, "p", "g/a.jar"); !errors.Is(err, repo.ErrNotFound) {
+		t.Fatalf("web page cached: %v", err)
+	}
+	res, err := f.Fetch(ctx, rp, "simple/a/", Metadata)
+	if err != nil || read(t, f, res.Asset) != "body of /maven2/simple/a/" {
+		t.Fatalf("page without NotHTML: %+v %v", res, err)
+	}
+	// A cached asset whose revalidation gets a web page (a maintenance or
+	// sign-in page) is served stale, as after any other failed fetch.
+	md := Target{Key: "g/maven-metadata.xml", Remote: "g/maven-metadata.xml", NotHTML: true}
+	if _, err := f.Store.Put(ctx, "p", md.Key, "application/xml", strings.NewReader("cached")); err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(2 * time.Hour)
+	res, err = f.FetchTarget(ctx, rp, md, Metadata)
+	if err != nil || !res.Stale || read(t, f, res.Asset) != "cached" {
+		t.Fatalf("cached, revalidated with a web page: %+v %v", res, err)
+	}
+}
+
 func TestFetchSingleflight(t *testing.T) {
 	rm := &remote{delay: 100 * time.Millisecond}
 	f, rp, _ := setup(t, rm)
@@ -275,6 +314,66 @@ func TestNewClampsConcurrency(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("fetch deadlocked with maxConcurrent=0")
+	}
+}
+
+// A remote that sends its headers and then stalls the body used to hold a
+// fetch slot until the 30-minute fetch timeout; bodyIdle without progress now
+// ends the fetch, while a slow body that keeps arriving is not cut.
+func TestFetchAbortsStalledBody(t *testing.T) {
+	defer func(d time.Duration) { bodyIdle = d }(bodyIdle)
+	bodyIdle = 500 * time.Millisecond
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "8")
+		for i := 0; i < 8; i++ {
+			if r.URL.Path == "/stall" && i == 1 {
+				<-r.Context().Done() // until the fetch gives up
+				return
+			}
+			io.WriteString(w, "x")
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	defer ts.Close()
+	f, _, _ := setup(t, &remote{})
+	cfg := &config.Config{Repositories: []config.Repository{{Name: "s", Type: "proxy", Remote: ts.URL, ContentMaxAge: config.Never}}}
+	rp := repo.Build(cfg)["s"]
+
+	start := time.Now()
+	if _, err := f.Fetch(ctx, rp, "stall", Content); !errors.Is(err, ErrRemote) {
+		t.Fatalf("stalled body: err = %v, want ErrRemote", err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Fatalf("stalled body held the fetch for %v", d)
+	}
+	if inUse, _ := f.Slots(); inUse != 0 {
+		t.Fatalf("fetch slots in use after the stall = %d", inUse)
+	}
+	if _, err := f.Store.Get(ctx, "s", "stall"); !errors.Is(err, repo.ErrNotFound) {
+		t.Fatalf("partial body was cached: %v", err)
+	}
+	res, err := f.Fetch(ctx, rp, "slow", Content) // 0.7 s in all, never 0.5 s without a byte
+	if err != nil || read(t, f, res.Asset) != "xxxxxxxx" {
+		t.Fatalf("slow body: res=%+v err=%v", res, err)
+	}
+}
+
+// The stall timer runs only while a read waits for the remote: the time the
+// fetch spends before its first read and between reads (writing what came to
+// a blob store that has stalled) is not the remote's.
+func TestStallTimerCountsOnlyReads(t *testing.T) {
+	defer func(d time.Duration) { bodyIdle = d }(bodyIdle)
+	bodyIdle = 50 * time.Millisecond
+	var cancelled atomic.Bool
+	s := newStallReader(strings.NewReader("ab"), func() { cancelled.Store(true) })
+	p := make([]byte, 1)
+	for range 3 { // "a", "b", EOF
+		time.Sleep(4 * bodyIdle)
+		s.Read(p)
+	}
+	if cancelled.Load() {
+		t.Fatal("time outside Read cancelled the fetch")
 	}
 }
 

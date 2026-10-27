@@ -52,7 +52,7 @@ export async function viewBlobStores(view, name) {
 
 function storeCreate(view) {
   const back = h("a", { class: "btn", href: storeLink() }, t("blob.back"));
-  const nameIn = textIn("", { required: true, maxlength: 100 });
+  const nameIn = textIn("", { required: true, maxlength: 64 });
   const pathIn = textIn("", { class: "mono", placeholder: "/data/blobstores/archive" });
   const save = h("button", { type: "submit", class: "btn primary" }, t("blob.createBtn"));
   const form = h("form", { novalidate: true });
@@ -126,7 +126,8 @@ async function storeDetail(view, name) {
     kv(t("blob.name"), s.name),
     kv(t("blob.type"), t("blob.file")),
     kv(t("blob.path"), h("span", { class: "mono" }, s.path)),
-    h("p", { class: "hint" }, t("blob.pathFixed"))]);
+    h("p", { class: "hint" }, t("blob.pathFixed")),
+    s.warning ? notice(t("blob.outside"), "amber") : null]);
   const usage = card(t("blob.usage"), t("blob.usageSub"), [
     kv(t("blob.used"), fmtBytes(s.usedBytes || 0)),
     kv(t("blob.count"), fmtNum(s.blobCount || 0)),

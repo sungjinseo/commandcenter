@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call: # release.yml runs the same checks before publishing
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0" # as the shipped binary is built
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.10" # the golang tag in the Dockerfile, checked by the next step
+      - name: Go version matches the Dockerfile
+        # Dependabot bumps the Dockerfile's golang image but not go-version above.
+        run: |
+          have="$(go env GOVERSION)"
+          want="go$(sed -n 's/^FROM .*golang:\([0-9.]*\).*/\1/p' Dockerfile)"
+          [ "$have" = "$want" ] || { echo "::error::CI runs $have but the Dockerfile builds with $want: set go-version in ci.yml to its golang tag"; exit 1; }
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - run: go vet ./...
+      - run: go test ./...
+      - name: go test -race
+        env:
+          CGO_ENABLED: "1" # the race detector needs cgo
+        run: go test -race ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: node --check
+        # The UI scripts are ES modules, and "node --check file.js" lets a module
+        # with a syntax error pass, so each file goes in on stdin as a module.
+        run: for f in internal/ui/static/*.js; do echo "$f"; node --input-type=module --check < "$f"; done
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: THIRD_PARTY_LICENSES.txt is current
+        # The image and the release tarballs ship it, and Dependabot's Go module and
+        # golang image updates change what it must say.
+        run: bash scripts/third-party-licenses.sh --check
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64

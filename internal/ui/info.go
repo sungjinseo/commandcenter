@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -105,7 +106,7 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 		users = append(users, map[string]any{
 			"userId": su.ID, "realm": realm, "roles": su.Roles,
 			"admin": isAdmin, "status": su.Status, "writeRepositories": wl, "privileges": privs,
-			"id": su.ID, "name": st.Name, "email": st.Email, "source": su.Source, "hasPassword": st.PasswordHash != "",
+			"id": su.ID, "name": st.Name, "email": st.Email, "source": su.Source, "hasPassword": auth.HashUsable(st.PasswordHash),
 			"createdAt": rfc3339(st.CreatedAt), "updatedAt": rfc3339(st.UpdatedAt),
 		})
 	}

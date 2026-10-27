@@ -102,6 +102,7 @@ type Config struct {
 	MemoryLimitMiB      int             `yaml:"memoryLimitMiB"`
 	MaxUploadMiB        int             `yaml:"maxUploadMiB"`
 	MetricsFlushSeconds int             `yaml:"metricsFlushSeconds"` // hidden: how often download/request counters are written (default 30)
+	SecretKeyFile       string          `yaml:"secretKeyFile"`       // file holding the key that encrypts stored secrets (or COMMANDCENTER_SECRET_KEY)
 	AnonymousRead       bool            `yaml:"anonymousRead"`
 	Users               []User          `yaml:"users"`
 	Roles               map[string]Role `yaml:"roles"`
@@ -177,7 +178,9 @@ type Repository struct {
 
 	// Online is a pointer so that a definition stored before plan 12 (no
 	// "online" key) reads as online; ApplyRepositoryDefaults sets nil to
-	// true. An offline repository answers 503 and groups skip it.
+	// true. An offline repository answers 503 and groups skip it; npm and
+	// PyPI groups answer 503 instead unless a member before it has the
+	// requested package.
 	Online *bool `yaml:"online,omitempty" json:"online,omitempty"`
 
 	// BlobStore names the file store this repository's blobs live in
@@ -352,8 +355,8 @@ func (c *Config) validate() error {
 	if c.MaxUploadMiB < 0 || c.MaxUploadMiB > 1<<20 {
 		serrs = append(serrs, errors.New("maxUploadMiB must be between 1 and 1048576"))
 	}
-	if u, err := url.Parse(c.BaseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		serrs = append(serrs, fmt.Errorf("baseURL must be an http(s) URL, got %q", c.BaseURL))
+	if err := ValidateBaseURL(c.BaseURL); err != nil {
+		serrs = append(serrs, err)
 	}
 	c.SettingsErr = errors.Join(serrs...)
 
@@ -373,6 +376,19 @@ func (c *Config) validate() error {
 	// repositories, and the app decides whether they matter.
 	c.AccessErr = ValidateAccess(c.Users, c.Roles)
 	return errors.Join(errs...)
+}
+
+// ValidateBaseURL checks a baseURL: an absolute http(s) URL without user
+// info, query or fragment. Clients get it as the prefix of every npm, PyPI
+// and Cargo URL, so user info would hand its credentials to all of them, and
+// a '?' or '#' (even with nothing after it) would cut every URL built on it
+// (QA N-24). The error does not repeat the value: it may hold a password.
+func ValidateBaseURL(v string) error {
+	if u, err := url.Parse(v); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || strings.ContainsAny(v, "?#") {
+		return errors.New("baseURL must be an absolute http(s) URL without user info, query or fragment")
+	}
+	return nil
 }
 
 // ValidateAccess checks the users and roles sections. A role's write entries
@@ -416,11 +432,22 @@ type namedDuration struct {
 
 // ValidateDefinition checks the rules that apply only to a definition being
 // created or updated (API/UI, or the one-time import of the config file): no
-// negative duration other than "-1" (never) and no group member listed twice
-// (QA L-9). Rows that older builds stored are not held to them; the app
-// loads those through NormalizeStored instead (final review C1).
+// negative duration other than "-1" (never), no group member listed twice,
+// no remote (or remoteAuth) except on a proxy and no versionPolicy on a
+// group (QA L-9), and no remote host that is not ASCII, which remote fetches
+// refuse. Rows that older builds stored are not held to them; the app loads
+// those through NormalizeStored instead (final review C1).
 func ValidateDefinition(r Repository) error {
 	var errs []error
+	if r.Type != "proxy" && (r.Remote != "" || r.RemoteAuth != nil) {
+		errs = append(errs, fmt.Errorf("repository %q: remote and remoteAuth are only valid for proxy repositories", r.Name))
+	}
+	if u, err := url.Parse(r.Remote); r.Type == "proxy" && err == nil && strings.ContainsFunc(u.Hostname(), func(c rune) bool { return c >= 0x80 }) {
+		errs = append(errs, fmt.Errorf("repository %q: remote host %q is not ASCII; use its punycode form (xn--...)", r.Name, u.Hostname()))
+	}
+	if r.Type == "group" && r.VersionPolicy != "" {
+		errs = append(errs, fmt.Errorf("repository %q: versionPolicy is not valid for group repositories", r.Name))
+	}
 	for _, f := range durationFields(&r) {
 		if *f.d < 0 && *f.d != Never {
 			errs = append(errs, fmt.Errorf("repository %q: %s %q must not be negative (use \"-1\" for never)", r.Name, f.name, f.d.Text()))
@@ -439,11 +466,20 @@ func ValidateDefinition(r Repository) error {
 
 // NormalizeStored makes a stored definition that an older build accepted
 // usable: a negative duration other than "-1" becomes 0, which the proxy
-// treats as never fresh / expiring at once (as those builds behaved), and a
-// group member listed twice is kept once. It returns one note per change for
-// the caller's warning; the stored row is not rewritten.
+// treats as never fresh / expiring at once (as those builds behaved), a
+// group member listed twice is kept once, and a remote outside a proxy or a
+// group's versionPolicy (both unused) is dropped. It returns one note per
+// change for the caller's warning; the stored row is not rewritten.
 func NormalizeStored(r *Repository) []string {
 	var notes []string
+	if r.Type != "proxy" && (r.Remote != "" || r.RemoteAuth != nil) {
+		notes = append(notes, "remote ignored: only proxy repositories have one")
+		r.Remote, r.RemoteAuth = "", nil
+	}
+	if r.Type == "group" && r.VersionPolicy != "" {
+		notes = append(notes, fmt.Sprintf("versionPolicy %q ignored: groups have none", r.VersionPolicy))
+		r.VersionPolicy = ""
+	}
 	for _, f := range durationFields(r) {
 		if *f.d < 0 && *f.d != Never {
 			notes = append(notes, fmt.Sprintf("%s %q is negative, treated as 0 (no caching)", f.name, f.d.Text()))
@@ -522,7 +558,7 @@ func ValidateRepositories(list []Repository) error {
 			case r.Type != "hosted" && r.Type != "proxy":
 				add("repository %q: cleanupPolicy is only valid for hosted and proxy repositories", r.Name)
 			case r.Format == "cargo" && r.Type == "hosted":
-				add("repository %q: cleanup is not supported for cargo hosted repositories (crates are immutable; yank them instead)", r.Name)
+				add("repository %q: cleanup is not supported for cargo hosted repositories (yank crates, or delete versions in the web UI)", r.Name)
 			}
 		}
 	}

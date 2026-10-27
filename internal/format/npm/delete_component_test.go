@@ -56,7 +56,7 @@ func TestDeleteComponentNpm(t *testing.T) {
 	e.h.Store.Events = sink
 
 	res, err := e.h.DeleteComponent(ctx, rp, npmComp("1.1.0"), "system")
-	if err != nil || res != (component.Result{Assets: 1, Bytes: int64(len("tgz-1.1.0"))}) {
+	if err != nil || res != (component.Result{Assets: 1, Bytes: int64(len(testTarball("@s/hello", "1.1.0", []byte("tgz-1.1.0"))))}) {
 		t.Fatalf("result = %+v %v", res, err)
 	}
 	if e.hasAsset(t, "npm-hosted", "@s/hello/-/hello-1.1.0.tgz") {

@@ -4,8 +4,10 @@
 package main
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -175,28 +177,55 @@ func upstream() {
 	log.Fatal(http.ListenAndServe(":8000", nil))
 }
 
+// writeTarball writes an npm tarball for name@version, as npm pack does:
+// package/package.json and package/data holding size bytes of r.
+func writeTarball(w io.Writer, name, version string, r io.Reader, size int64) {
+	gz := gzip.NewWriter(w)
+	tw := tar.NewWriter(gz)
+	pj := fmt.Sprintf(`{"name":%q,"version":%q}`, name, version)
+	tw.WriteHeader(&tar.Header{Name: "package/package.json", Mode: 0o644, Size: int64(len(pj))})
+	io.WriteString(tw, pj)
+	tw.WriteHeader(&tar.Header{Name: "package/data", Mode: 0o644, Size: size})
+	io.Copy(tw, io.LimitReader(r, size))
+	tw.Close()
+	gz.Close()
+}
+
+// byteCount is an io.Writer that counts what is written to it.
+type byteCount int64
+
+func (c *byteCount) Write(p []byte) (int, error) { *c += byteCount(len(p)); return len(p), nil }
+
 func npmPublishSmall() {
-	tgz := []byte("small tarball")
+	var buf bytes.Buffer
+	writeTarball(&buf, "huge", "0.0.1", strings.NewReader("small tarball"), 13)
+	tgz := buf.Bytes()
 	sum := sha1.Sum(tgz)
 	doc := fmt.Sprintf(`{"name":"huge","versions":{"0.0.1":{"name":"huge","version":"0.0.1","dist":{"shasum":"%s"}}},"dist-tags":{"beta":"0.0.1"},"_attachments":{"huge-0.0.1.tgz":{"data":"%s"}}}`,
 		hex.EncodeToString(sum[:]), base64.StdEncoding.EncodeToString(tgz))
 	expect("npm small publish", "PUT", "/repository/npm-hosted/huge", strings.NewReader(doc), nil, 201)
 }
 
-// npmPublishBig streams a publish document whose attachment is size bytes of
-// noise; the attachment comes first so its sha1 is known when the manifest is written.
-func npmPublishBig(size int64) {
+// npmPublishBig streams a publish document whose attachment is a tarball
+// holding size bytes of noise, and returns the tarball's length. The
+// attachment comes first so its sha1 is known when the manifest is written.
+func npmPublishBig(size int64) int64 {
 	pr, pw := io.Pipe()
+	length := make(chan int64, 1)
 	go func() {
 		h := sha1.New()
+		var n byteCount
 		io.WriteString(pw, `{"name":"bigpkg","_attachments":{"bigpkg-1.0.0.tgz":{"data":"`)
 		enc := base64.NewEncoder(base64.StdEncoding, pw)
-		io.Copy(enc, io.TeeReader(io.LimitReader(newNoise(7), size), h))
+		writeTarball(io.MultiWriter(enc, h, &n), "bigpkg", "1.0.0", newNoise(7), size)
 		enc.Close()
+		length <- int64(n)
 		fmt.Fprintf(pw, `"}},"versions":{"1.0.0":{"name":"bigpkg","version":"1.0.0","dist":{"shasum":"%x"}}},"dist-tags":{"latest":"1.0.0"}}`, h.Sum(nil))
 		pw.Close()
 	}()
 	expect("npm 50 MiB publish", "PUT", "/repository/npm-hosted/bigpkg", pr, nil, 201)
+	pr.Close() // a refused publish must not leave the writer blocked
+	return <-length
 }
 
 func goZipBomb() {
@@ -307,8 +336,8 @@ func main() {
 		wg.Wait()
 	})
 	phase("npm 50 MiB publish", func() {
-		npmPublishBig(50 << 20)
-		expectLength("npm big tarball", "/repository/npm-hosted/bigpkg/-/bigpkg-1.0.0.tgz", 50<<20)
+		n := npmPublishBig(50 << 20)
+		expectLength("npm big tarball", "/repository/npm-hosted/bigpkg/-/bigpkg-1.0.0.tgz", n)
 	})
 	phase("go 60k-entry zip", goZipBomb)
 	phase("cargo 20 stalled publishes", func() { cargoStalled(20) })

@@ -6,11 +6,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"net/http"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"commandcenter/internal/repo"
 )
 
 func wheelBytes(t *testing.T, files map[string]string) []byte {
@@ -39,39 +42,101 @@ func sdistBytes(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-func TestReadRequiresPython(t *testing.T) {
-	meta := "Metadata-Version: 2.1\nName: x\nRequires-Python: >=3.99\n\nRequires-Python: >=1\n"
-	whl := wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": meta})
-	got, err := readRequiresPython(bytes.NewReader(whl), int64(len(whl)), "x-1.0-py3-none-any.whl")
-	if err != nil || got != ">=3.99" {
-		t.Fatalf("wheel: %q %v", got, err)
+// readMeta runs readMetadata for a distribution of project x at version 1.0.
+func readMeta(b []byte, filename string) (distMeta, error) {
+	return readMetadata(bytes.NewReader(b), int64(len(b)), filename, "x", "1.0")
+}
+
+func TestReadMetadata(t *testing.T) {
+	meta := "Metadata-Version: 2.1\nName: x\nVersion: 1.0\nRequires-Python: >=3.99\n\nRequires-Python: >=1\n"
+	want := distMeta{Name: "x", Version: "1.0", RequiresPython: ">=3.99"}
+	whl := wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": meta, "x/__init__.py": ""})
+	if got, err := readMeta(whl, "x-1.0-py3-none-any.whl"); err != nil || got != want {
+		t.Fatalf("wheel: %+v %v", got, err)
 	}
 	sd := sdistBytes(t, map[string]string{"x-1.0/PKG-INFO": meta, "x-1.0/sub/PKG-INFO": "Requires-Python: >=2\n"})
-	got, err = readRequiresPython(bytes.NewReader(sd), int64(len(sd)), "x-1.0.tar.gz")
-	if err != nil || got != ">=3.99" {
-		t.Fatalf("sdist: %q %v", got, err)
+	if got, err := readMeta(sd, "x-1.0.tar.gz"); err != nil || got != want {
+		t.Fatalf("sdist: %+v %v", got, err)
 	}
 	zs := wheelBytes(t, map[string]string{"x-1.0/PKG-INFO": meta})
-	if got, _ := readRequiresPython(bytes.NewReader(zs), int64(len(zs)), "x-1.0.zip"); got != ">=3.99" {
-		t.Fatalf("zip sdist: %q", got)
+	if got, err := readMeta(zs, "x-1.0.zip"); err != nil || got != want {
+		t.Fatalf("zip sdist: %+v %v", got, err)
 	}
-	// absent, not an archive
-	none := wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": "Name: x\n"})
-	if got, err := readRequiresPython(bytes.NewReader(none), int64(len(none)), "x-1.0.whl"); got != "" || err != nil {
-		t.Fatalf("absent: %q %v", got, err)
+	// Requires-Python absent; a folded line (here of an old-style Description) is no header.
+	none := wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": "Name: x\nVersion: 1.0\nDescription: a\n        Requires-Python: banana\n"})
+	if got, err := readMeta(none, "x-1.0-py3-none-any.whl"); err != nil || got.RequiresPython != "" {
+		t.Fatalf("absent: %+v %v", got, err)
 	}
-	if got, err := readRequiresPython(strings.NewReader("junk"), 4, "x-1.0.tar.gz"); got != "" || err != nil {
-		t.Fatalf("junk: %q %v", got, err)
+	// The release directory may be spelled differently from the file name.
+	sd = sdistBytes(t, map[string]string{"./X-1.0.0/PKG-INFO": meta})
+	if got, err := readMeta(sd, "x-1.0.tar.gz"); err != nil || got != want {
+		t.Fatalf("respelled release directory: %+v %v", got, err)
 	}
 }
 
+// QA M-9: a file that is not a distribution of the release is a 400.
+func TestReadMetadataRejects(t *testing.T) {
+	meta := "Metadata-Version: 2.1\nName: x\nVersion: 1.0\n"
+	for name, c := range map[string]struct {
+		data []byte
+		file string
+	}{
+		"text as wheel":               {[]byte("x"), "x-1.0-py3-none-any.whl"},
+		"text as sdist":               {[]byte("x"), "x-1.0.tar.gz"},
+		"text as zip sdist":           {[]byte("x"), "x-1.0.zip"},
+		"sdist as wheel":              {sdistBytes(t, map[string]string{"x-1.0/PKG-INFO": meta}), "x-1.0-py3-none-any.whl"},
+		"gzip but not tar":            {gzipBytes(t, "x"), "x-1.0.tar.gz"},
+		"wheel without METADATA":      {wheelBytes(t, map[string]string{"x-1.0.dist-info/RECORD": ""}), "x-1.0-py3-none-any.whl"},
+		"wheel without dist-info":     {wheelBytes(t, map[string]string{"x/__init__.py": ""}), "x-1.0-py3-none-any.whl"},
+		"nested METADATA only":        {wheelBytes(t, map[string]string{"a/x-1.0.dist-info/METADATA": meta}), "x-1.0-py3-none-any.whl"},
+		"two dist-info directories":   {wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": meta, "y-1.0.dist-info/RECORD": ""}), "x-1.0-py3-none-any.whl"},
+		"METADATA without Version":    {wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": "Name: x\n"}), "x-1.0-py3-none-any.whl"},
+		"Version only after the body": {wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": "Name: x\n\nVersion: 1.0\n"}), "x-1.0-py3-none-any.whl"},
+		"sdist without PKG-INFO":      {sdistBytes(t, map[string]string{"x-1.0/setup.py": ""}), "x-1.0.tar.gz"},
+		"PKG-INFO of another project": {sdistBytes(t, map[string]string{"y-1.0/PKG-INFO": meta}), "x-1.0.tar.gz"},
+		"PKG-INFO of another version": {wheelBytes(t, map[string]string{"x-2.0/PKG-INFO": meta}), "x-1.0.zip"},
+		"PKG-INFO at the top":         {sdistBytes(t, map[string]string{"PKG-INFO": meta}), "x-1.0.tar.gz"},
+	} {
+		if _, err := readMeta(c.data, c.file); repo.StatusOf(err) != http.StatusBadRequest {
+			t.Errorf("%s: %v, want a 400", name, err)
+		}
+	}
+	two := zipWithDuplicate(t, "x-1.0.dist-info/METADATA", meta)
+	if _, err := readMeta(two, "x-1.0-py3-none-any.whl"); repo.StatusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "more than one") {
+		t.Errorf("two METADATA entries: %v", err)
+	}
+}
+
+func gzipBytes(t *testing.T, s string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	gz.Write([]byte(s))
+	gz.Close()
+	return buf.Bytes()
+}
+
+// zipWithDuplicate is a zip holding the entry name twice.
+func zipWithDuplicate(t *testing.T, name, content string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for i := 0; i < 2; i++ {
+		w, _ := zw.Create(name)
+		w.Write([]byte(content))
+	}
+	zw.Close()
+	return buf.Bytes()
+}
+
 func TestValidVersionAndSpecifier(t *testing.T) {
-	for _, v := range []string{"1.0", "1.0.0", "2.0.0rc1", "1!2.0", "1.0.post1", "1.0.dev3", "1.0+Local.1", "1.0A1"} {
+	// QA N-7: the PEP 440 grammar, so "1.0-1" and "01.0" are valid now.
+	for _, v := range []string{"1.0", "1.0.0", "2.0.0rc1", "1!2.0", "1.0.post1", "1.0.dev3", "1.0+Local.1", "1.0A1", "1.0-1", "01.0"} {
 		if !validVersion(v) {
 			t.Errorf("want valid %q", v)
 		}
 	}
-	for _, v := range []string{"", "1.0ü", "3.0.0 ", "v1", "1.0-1", "a", "01.0"} {
+	for _, v := range []string{"", "1.0ü", "3.0.0 ", "v1", "V1.3", "a", "1.0+", "1..0", "1.0.", "1.0-", "1.0+a..b", "1.0-1-1", "1.0+\u212a", "1!", strings.Repeat("1", 101)} {
 		if validVersion(v) {
 			t.Errorf("want invalid %q", v)
 		}
@@ -88,6 +153,30 @@ func TestValidVersionAndSpecifier(t *testing.T) {
 	}
 }
 
+// QA N-7: versions are stored and compared in PEP 440 normal form.
+func TestNormalizeVersion(t *testing.T) {
+	for in, want := range map[string]string{
+		"1.0-1": "1.0.post1", "01.2": "1.2", "2.0a": "2.0a0", "1.0post2": "1.0.post2", "1.0.dev": "1.0.dev0",
+		"1.0RC2": "1.0rc2", "1.0.0": "1.0.0", "0!1.0": "1.0", "007!1.0": "7!1.0", "1.0alpha1": "1.0a1",
+		"1.0-beta.2": "1.0b2", "1.0c1": "1.0rc1", "1.0pre": "1.0rc0", "1.0preview_3": "1.0rc3",
+		"1.0-r4": "1.0.post4", "1.0rev": "1.0.post0", "1.0_post_5": "1.0.post5", "1.0-0": "1.0.post0",
+		"1.0a1-1.dev_2": "1.0a1.post1.dev2", "1.0+Ubuntu-01_x.007": "1.0+ubuntu.1.x.7", "1.0+01a": "1.0+01a",
+		"99999999999999999999.0": "99999999999999999999.0",
+	} {
+		if got, ok := normalizeVersion(in); !ok || got != want {
+			t.Errorf("normalizeVersion(%q) = %q %v, want %q", in, got, ok, want)
+		}
+	}
+	for in, want := range map[string]string{
+		"1.0": "1", "1.0.0": "1", "1.0-1": "1.post1", "1.0.0.post1": "1.post1", "0.0": "0", "10.0": "10",
+		"2!1.0a": "2!1a0", "1.0+local": "1+local", "1.10": "1.10", "1.0.dev": "1.dev0", "x": "x", // invalid: unchanged
+	} {
+		if got := canonicalVersion(in); got != want {
+			t.Errorf("canonicalVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestCanonicalFile(t *testing.T) {
 	if canonicalFile("qa_sec_shadow-1.0.tar.gz") != canonicalFile("QA.SEC.SHADOW-1.0.TAR.GZ") {
 		t.Fatal("spellings must collapse")
@@ -97,30 +186,30 @@ func TestCanonicalFile(t *testing.T) {
 	}
 }
 
-func TestReadRequiresPythonSkipsHugeZipDirectory(t *testing.T) {
+func TestReadMetadataRefusesHugeZipDirectory(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for i := 0; i < maxEntries+1; i++ {
 		zw.Create("d/" + strconv.Itoa(i))
 	}
 	w, _ := zw.Create("x-1.0.dist-info/METADATA")
-	w.Write([]byte("Requires-Python: >=3.1\n"))
+	w.Write([]byte("Name: x\nVersion: 1.0\nRequires-Python: >=3.1\n"))
 	zw.Close()
 	data := buf.Bytes()
 	var before, after runtime.MemStats
 	runtime.GC()
 	runtime.ReadMemStats(&before)
-	got, err := readRequiresPython(bytes.NewReader(data), int64(len(data)), "x-1.0.whl")
+	_, err := readMeta(data, "x-1.0-py3-none-any.whl")
 	runtime.ReadMemStats(&after)
-	if got != "" || err != nil {
-		t.Fatalf("got %q %v", got, err)
+	if repo.StatusOf(err) != http.StatusBadRequest { // it cannot be checked, so it is refused
+		t.Fatalf("got %v, want a 400", err)
 	}
 	if d := after.TotalAlloc - before.TotalAlloc; d > 1<<20 {
 		t.Fatalf("allocated %d bytes: zip directory must not be parsed", d)
 	}
 }
 
-func TestReadRequiresPythonCapsDecompression(t *testing.T) {
+func TestReadMetadataCapsDecompression(t *testing.T) {
 	old := maxDecompressed
 	maxDecompressed = 1 << 20
 	defer func() { maxDecompressed = old }()
@@ -129,14 +218,15 @@ func TestReadRequiresPythonCapsDecompression(t *testing.T) {
 	tw := tar.NewWriter(gz)
 	tw.WriteHeader(&tar.Header{Name: "x-1.0/big", Size: 8 << 20, Mode: 0o644, Typeflag: tar.TypeReg})
 	tw.Write(make([]byte, 8<<20))
-	tw.WriteHeader(&tar.Header{Name: "x-1.0/PKG-INFO", Size: 22, Mode: 0o644, Typeflag: tar.TypeReg})
-	tw.Write([]byte("Requires-Python: >=3.1\n"[:22]))
+	meta := "Name: x\nVersion: 1.0\n"
+	tw.WriteHeader(&tar.Header{Name: "x-1.0/PKG-INFO", Size: int64(len(meta)), Mode: 0o644, Typeflag: tar.TypeReg})
+	tw.Write([]byte(meta))
 	tw.Close()
 	gz.Close()
 	start := time.Now()
-	got, err := readRequiresPython(bytes.NewReader(buf.Bytes()), int64(buf.Len()), "x-1.0.tar.gz")
-	if got != "" || err != nil || time.Since(start) > 2*time.Second {
-		t.Fatalf("got %q %v in %v", got, err, time.Since(start))
+	_, err := readMeta(buf.Bytes(), "x-1.0.tar.gz")
+	if repo.StatusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "first 1 MiB") || time.Since(start) > 2*time.Second {
+		t.Fatalf("got %v in %v", err, time.Since(start))
 	}
 }
 
@@ -144,6 +234,10 @@ func TestCanonicalFileDistinctAndEqual(t *testing.T) {
 	distinct := [][2]string{
 		{"x-1.0-1-py3-none-any.whl", "x-1.0.1-py3-none-any.whl"},
 		{"x-1.0-py2.py3-none-any.whl", "x-1.0-py2-py3-none-any.whl"},
+		{"x-1.0-1-py3-none-any.whl", "x-1.0-py3-none-any.whl"}, // a build tag sorts after none
+		{"x-1.0-1a-py3-none-any.whl", "x-1.0-1-py3-none-any.whl"},
+		{"x-1.0-py2.py3-none-any.whl", "x-1.0-py3-none-any.whl"},
+		{"x-1.0.tar.gz", "x-1.0-py3-none-any.whl"},
 	}
 	for _, p := range distinct {
 		if canonicalFile(p[0]) == canonicalFile(p[1]) {
@@ -154,6 +248,17 @@ func TestCanonicalFileDistinctAndEqual(t *testing.T) {
 		{"pkg-1.0.tar.gz", "pkg-1.0.0.tar.gz"},
 		{"qa_sec_shadow-1.0.tar.gz", "QA.SEC.SHADOW-1.0.tar.gz"},
 		{"Pkg-1.0.TAR.GZ", "pkg-1.0.0.0.tar.gz"},
+		// QA M-8: the same wheel tag set or build number spelled differently,
+		// and a second sdist of a release.
+		{"x-1.0-py3.py3-none-any.whl", "x-1.0-py3-none-any.whl"},
+		{"x-1.0-py3.py2-none-any.whl", "x-1.0-py2.py3-none-any.whl"},
+		{"x-1.0-PY3-none-ANY.whl", "x-1.0-py3-none-any.whl"},
+		{"x-1.0-cp39-abi3.abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", "x-1.0-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"},
+		{"x-1.0-01-py3-none-any.whl", "x-1.0-1-py3-none-any.whl"},
+		{"x-1.0-0-py3-none-any.whl", "x-1.0-000-py3-none-any.whl"},
+		{"x-1.0.zip", "x-1.0.tar.gz"},
+		{"x-1.0-1.tar.gz", "x-1.0.post1.zip"},
+		{"x-01.2.tar.gz", "x-1.2.tar.gz"},
 	}
 	for _, p := range same {
 		if canonicalFile(p[0]) != canonicalFile(p[1]) {
@@ -170,7 +275,7 @@ func TestCanonicalFileDistinctAndEqual(t *testing.T) {
 // count entries. noLocator drops the locator and record.
 func zip64Wheel(t *testing.T, trigger string, count uint64, noLocator bool) []byte {
 	t.Helper()
-	base := wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": "Requires-Python: >=3.7\n"})
+	base := wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": "Name: x\nVersion: 1.0\nRequires-Python: >=3.7\n"})
 	eocd := append([]byte(nil), base[len(base)-22:]...)
 	body := append([]byte(nil), base[:len(base)-22]...)
 	dirSize := uint64(binary.LittleEndian.Uint32(eocd[12:]))
@@ -201,11 +306,11 @@ func zip64Wheel(t *testing.T, trigger string, count uint64, noLocator bool) []by
 
 func TestZip64TriggersAreChecked(t *testing.T) {
 	read := func(b []byte) string {
-		got, err := readRequiresPython(bytes.NewReader(b), int64(len(b)), "x-1.0.whl")
-		if err != nil {
+		md, err := readMeta(b, "x-1.0-py3-none-any.whl")
+		if err != nil && repo.StatusOf(err) != http.StatusBadRequest {
 			t.Fatal(err)
 		}
-		return got
+		return md.RequiresPython // "" when refused
 	}
 	if got := read(zip64Wheel(t, "count", 1, false)); got != ">=3.7" {
 		t.Fatalf("honest zip64 wheel: %q", got)
@@ -226,6 +331,107 @@ func TestZip64TriggersAreChecked(t *testing.T) {
 	}
 }
 
+// zip64Chain builds a zip whose zip64 end-of-central-directory record sits
+// inside the comment of the first central directory header, so that header
+// straddles the record and archive/zip keeps parsing the n-1 headers after
+// it. The records declare r entries (n % 65536 == r) and a 46-byte directory
+// ending at the record.
+func zip64Chain(n, r int) []byte {
+	var b bytes.Buffer
+	le := binary.LittleEndian
+	hdr := func(commentLen uint16) {
+		h := make([]byte, 46)
+		copy(h, "PK\x01\x02")
+		le.PutUint16(h[32:], commentLen)
+		b.Write(h)
+	}
+	hdr(56) // its comment is the zip64 EOCD record below, at offset 46
+	rec := make([]byte, 56)
+	copy(rec, "PK\x06\x06")
+	le.PutUint64(rec[4:], 44)
+	le.PutUint64(rec[24:], uint64(r)) // entries on this disk
+	le.PutUint64(rec[32:], uint64(r)) // entries
+	le.PutUint64(rec[40:], 46)        // directory size
+	le.PutUint64(rec[48:], 0)         // directory offset
+	b.Write(rec)
+	for i := 1; i < n; i++ {
+		hdr(0)
+	}
+	loc := make([]byte, 20)
+	copy(loc, "PK\x06\x07")
+	le.PutUint64(loc[8:], 46) // offset of the zip64 EOCD record
+	le.PutUint32(loc[16:], 1)
+	b.Write(loc)
+	eocd := make([]byte, 22)
+	copy(eocd, "PK\x05\x06")
+	le.PutUint16(eocd[8:], 0xffff)
+	le.PutUint16(eocd[10:], 0xffff)
+	le.PutUint32(eocd[12:], 0xffffffff)
+	le.PutUint32(eocd[16:], 0xffffffff)
+	b.Write(eocd)
+	return b.Bytes()
+}
+
+// The end records bound nothing by themselves: zip.NewReader reads headers
+// until one is not valid and compares the count only modulo 65536. A 30 MB
+// zip64 wheel or zip sdist whose records declare one entry holds 655,361
+// headers and is refused before zip.NewReader allocates a File for each.
+func TestReadMetadataRefusesZip64HeaderChain(t *testing.T) {
+	data := zip64Chain(10*65536+1, 1)
+	for _, name := range []string{"x-1.0-py3-none-any.whl", "x-1.0.zip"} {
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		_, err := readMeta(data, name)
+		runtime.ReadMemStats(&after)
+		if repo.StatusOf(err) != http.StatusBadRequest || !strings.Contains(err.Error(), "entries") {
+			t.Fatalf("%s: got %v, want a 400 for the directory", name, err)
+		}
+		if d := after.TotalAlloc - before.TotalAlloc; d > 1<<20 {
+			t.Fatalf("%s: allocated %d bytes: zip directory must not be parsed", name, d)
+		}
+	}
+}
+
+// The same archive uploaded as a wheel is refused without the heap growing by
+// what zip.NewReader would allocate for its headers (some 140 MiB, more than
+// the default 128 MiB container). The peak is sampled while the request runs.
+func TestUploadZip64HeaderChainHeap(t *testing.T) {
+	e := newEnv(t)
+	data := string(zip64Chain(10*65536+1, 1))
+	f := map[string]string{":action": "file_upload", "protocol_version": "1", "name": "x", "version": "1.0", "filetype": "bdist_wheel"}
+	ct, body := uploadBody(t, f, "x-1.0-py3-none-any.whl", data)
+	runtime.GC()
+	var base runtime.MemStats
+	runtime.ReadMemStats(&base)
+	stop := make(chan struct{})
+	peak := make(chan uint64)
+	go func() {
+		var m runtime.MemStats
+		var top uint64
+		for {
+			runtime.ReadMemStats(&m)
+			top = max(top, m.HeapInuse)
+			select {
+			case <-stop:
+				peak <- top
+				return
+			case <-time.After(200 * time.Microsecond):
+			}
+		}
+	}()
+	w := e.upload("py-hosted", ct, body)
+	close(stop)
+	grew := (int64(<-peak) - int64(base.HeapInuse)) >> 20
+	t.Logf("upload answered %d %q; peak heap grew by %d MiB for a %d MiB upload", w.Code, w.Body.String(), grew, len(data)>>20)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "entries") {
+		t.Fatalf("got %d %q, want a 400 for the directory", w.Code, w.Body.String())
+	}
+	if grew > 16 {
+		t.Fatalf("one wheel upload grew the heap by %d MiB", grew)
+	}
+}
+
 func TestCanonicalVersionSpellings(t *testing.T) {
 	for _, p := range [][2]string{
 		{"x-1.0.post1.tar.gz", "x-1.0.0.post1.tar.gz"},
@@ -243,13 +449,19 @@ func TestCanonicalVersionSpellings(t *testing.T) {
 // Final review I2: the header block is read up to the first blank line only.
 func TestRequiresPythonIgnoresLargeBody(t *testing.T) {
 	body := strings.Repeat("long description\n", (3<<20)/17)
-	sd := sdistBytes(t, map[string]string{"x-1.0/PKG-INFO": "Metadata-Version: 2.1\nName: x\nRequires-Python: >=3.10\n\n" + body})
-	if got, err := readRequiresPython(bytes.NewReader(sd), int64(len(sd)), "x-1.0.tar.gz"); got != ">=3.10" || err != nil {
-		t.Fatalf("sdist: %q %v", got, err)
+	sd := sdistBytes(t, map[string]string{"x-1.0/PKG-INFO": "Metadata-Version: 2.1\nName: x\nVersion: 1.0\nRequires-Python: >=3.10\n\n" + body})
+	if md, err := readMeta(sd, "x-1.0.tar.gz"); md.RequiresPython != ">=3.10" || err != nil {
+		t.Fatalf("sdist: %+v %v", md, err)
 	}
-	huge := "Metadata-Version: 2.1\nSummary: " + strings.Repeat("a", maxMetadata) + "\nRequires-Python: >=3.10\n\n"
+	huge := "Metadata-Version: 2.1\nName: x\nVersion: 1.0\nSummary: " + strings.Repeat("a", maxMetadata) + "\nRequires-Python: >=3.10\n\n"
 	whl := wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": huge})
-	if got, err := readRequiresPython(bytes.NewReader(whl), int64(len(whl)), "x-1.0.whl"); got != "" || err != nil {
-		t.Fatalf("oversized header block: %q %v", got, err)
+	if md, err := readMeta(whl, "x-1.0-py3-none-any.whl"); md.Name != "x" || md.RequiresPython != "" || err != nil {
+		t.Fatalf("oversized header block: %+v %v", md, err)
+	}
+	// Name and Version past the cap are not seen: refused.
+	late := "Metadata-Version: 2.1\nSummary: " + strings.Repeat("a", maxMetadata) + "\nName: x\nVersion: 1.0\n\n"
+	whl = wheelBytes(t, map[string]string{"x-1.0.dist-info/METADATA": late})
+	if _, err := readMeta(whl, "x-1.0-py3-none-any.whl"); repo.StatusOf(err) != http.StatusBadRequest {
+		t.Fatalf("Name past the cap: %v", err)
 	}
 }

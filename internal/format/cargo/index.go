@@ -8,9 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"commandcenter/internal/repo"
+	"commandcenter/internal/semver"
 )
 
 // maxMeta bounds publish metadata and maxLine an index line; both are 1 MiB
@@ -50,22 +52,145 @@ func (l indexLine) marshal() ([]byte, error) { return json.Marshal(l) }
 
 // publishMeta is the JSON part of a `cargo publish` request.
 type publishMeta struct {
-	Name string `json:"name"`
-	Vers string `json:"vers"`
-	Deps []struct {
-		Name               string   `json:"name"`
-		VersionReq         string   `json:"version_req"`
-		Features           []string `json:"features"`
-		Optional           bool     `json:"optional"`
-		DefaultFeatures    bool     `json:"default_features"`
-		Target             *string  `json:"target"`
-		Kind               string   `json:"kind"`
-		Registry           *string  `json:"registry"`
-		ExplicitNameInToml *string  `json:"explicit_name_in_toml"`
-	} `json:"deps"`
+	Name        string              `json:"name"`
+	Vers        string              `json:"vers"`
+	Deps        []publishDep        `json:"deps"`
 	Features    map[string][]string `json:"features"`
 	Links       *string             `json:"links"`
 	RustVersion *string             `json:"rust_version"`
+}
+
+type publishDep struct {
+	Name               string   `json:"name"`
+	VersionReq         string   `json:"version_req"`
+	Features           []string `json:"features"`
+	Optional           bool     `json:"optional"`
+	DefaultFeatures    bool     `json:"default_features"`
+	Target             *string  `json:"target"`
+	Kind               string   `json:"kind"`
+	Registry           *string  `json:"registry"`
+	ExplicitNameInToml *string  `json:"explicit_name_in_toml"`
+}
+
+var (
+	depNameRE    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,63}$`)
+	targetNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+	cfgIdentRE   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*`)
+	// reqPartialRE is a requirement's version short of major.minor.patch:
+	// 1, 1.2, 1.*, 1.*.* or 1.2.* (x and X are wildcards too).
+	reqPartialRE = regexp.MustCompile(`^(0|[1-9][0-9]{0,18})(\.[*xX](\.[*xX])?|\.(0|[1-9][0-9]{0,18})(\.[*xX])?)?$`)
+)
+
+// checkDeps applies crates.io's and cargo's checks to the dependency fields
+// that are copied into the index, so every published line is one cargo can
+// read back. Unlike crates.io it allows "*" and other registries.
+func (m publishMeta) checkDeps() error {
+	for _, d := range m.Deps {
+		switch {
+		case !depNameRE.MatchString(d.Name):
+			return badPublish("invalid dependency name %q", d.Name)
+		case d.ExplicitNameInToml != nil && *d.ExplicitNameInToml != "" && !depNameRE.MatchString(*d.ExplicitNameInToml):
+			return badPublish("invalid dependency name %q", *d.ExplicitNameInToml)
+		case !validReq(d.VersionReq):
+			return badPublish("dependency %s has an invalid version requirement %q", d.Name, d.VersionReq)
+		case d.Kind != "" && d.Kind != "normal" && d.Kind != "dev" && d.Kind != "build":
+			return badPublish("dependency %s has an invalid kind %q (normal, dev or build)", d.Name, d.Kind)
+		case d.Target != nil && !validTarget(*d.Target):
+			return badPublish("dependency %s has an invalid target %q", d.Name, *d.Target)
+		case d.Registry != nil && !validRegistry(*d.Registry):
+			return badPublish("dependency %s has an invalid registry %q", d.Name, *d.Registry)
+		}
+	}
+	return nil
+}
+
+// validReq reports whether req is a version requirement cargo's semver
+// parser accepts: "*", or up to 32 comma-separated comparators such as ^1.2,
+// ~1, >=1.0.0, <2, =1.2.3-rc.1 or 1.*.
+func validReq(req string) bool {
+	if w := strings.Trim(req, " "); w == "*" || w == "x" || w == "X" {
+		return true
+	}
+	parts := strings.Split(req, ",")
+	if len(parts) > 32 {
+		return false
+	}
+	for _, c := range parts {
+		c = strings.Trim(c, " ")
+		for _, op := range []string{">=", "<=", "=", ">", "<", "~", "^"} {
+			if rest, ok := strings.CutPrefix(c, op); ok {
+				c = strings.TrimLeft(rest, " ")
+				break
+			}
+		}
+		if !semver.Valid(c) && !reqPartialRE.MatchString(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// validTarget reports whether t is a platform cargo reads from the index: a
+// target name such as x86_64-unknown-linux-gnu, or cfg(...) around one cfg
+// expression.
+func validTarget(t string) bool {
+	e, ok := strings.CutPrefix(t, "cfg(")
+	if !ok {
+		return targetNameRE.MatchString(t)
+	}
+	if e, ok = strings.CutSuffix(e, ")"); !ok {
+		return false
+	}
+	rest, ok := cfgExpr(e, 0)
+	return ok && strings.Trim(rest, cfgSpace) == ""
+}
+
+const cfgSpace = " \t\r\n"
+
+// cfgExpr parses the cfg expression at the start of s (name, name = "value",
+// all(...), any(...) or not(...)) and returns what follows it.
+func cfgExpr(s string, depth int) (string, bool) {
+	s = strings.TrimLeft(s, cfgSpace)
+	id := cfgIdentRE.FindString(s)
+	if id == "" || depth > 32 {
+		return "", false
+	}
+	s = strings.TrimLeft(s[len(id):], cfgSpace)
+	switch {
+	case id == "all" || id == "any" || id == "not":
+		s, ok := strings.CutPrefix(s, "(")
+		for n := 0; ok; {
+			s = strings.TrimLeft(s, cfgSpace)
+			if rest, end := strings.CutPrefix(s, ")"); end {
+				return rest, id != "not" || n == 1
+			}
+			if s, ok = cfgExpr(s, depth+1); ok {
+				n++
+				s = strings.TrimLeft(s, cfgSpace)
+				if rest, comma := strings.CutPrefix(s, ","); comma && id != "not" {
+					s = rest
+				} else {
+					ok = strings.HasPrefix(s, ")")
+				}
+			}
+		}
+		return "", false
+	case strings.HasPrefix(s, "="):
+		v, ok := strings.CutPrefix(strings.TrimLeft(s[1:], cfgSpace), `"`)
+		end := strings.IndexByte(v, '"')
+		if !ok || end < 0 {
+			return "", false
+		}
+		return v[end+1:], true
+	}
+	return s, true
+}
+
+// validRegistry: the index URL of another registry, which must be absolute
+// (cargo sends https://github.com/rust-lang/crates.io-index for crates.io).
+func validRegistry(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && u.IsAbs()
 }
 
 func badPublish(format string, args ...any) error {
@@ -102,6 +227,9 @@ func readPublish(r io.Reader) (publishMeta, io.Reader, int64, error) {
 	}
 	if !validVersion(m.Vers) {
 		return publishMeta{}, nil, 0, badPublish("invalid version %q", m.Vers)
+	}
+	if err := m.checkDeps(); err != nil {
+		return publishMeta{}, nil, 0, err
 	}
 	var size uint32
 	if err := binary.Read(r, binary.LittleEndian, &size); err != nil {

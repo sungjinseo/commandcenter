@@ -1,7 +1,6 @@
 package golang
 
 import (
-	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -24,6 +23,12 @@ var (
 	maxModUpload  int64 = 16 << 20
 	maxInfoUpload int64 = 1 << 20
 )
+
+// checkSem bounds how many stored uploads are checked at once (validate, and
+// deriveMod for a zip): a zip at the 50000-entry limit takes some 20 MiB of
+// heap to check, and six at once grew the live heap by 126 MiB. The check
+// reads the stored file, not the client, so a slot is held briefly.
+var checkSem = make(chan struct{}, 2)
 
 func uploadLimit(k Kind) int64 {
 	switch k {
@@ -99,6 +104,12 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if err != nil {
 		return uploadReadErr(err)
 	}
+	select {
+	case checkSem <- struct{}{}:
+		defer func() { <-checkSem }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	if err := h.validate(rp, rt.Kind, sums, module, version); err != nil {
 		return err
 	}
@@ -119,15 +130,26 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 
 	var mod *blob.Sums
 	if rt.Kind == KindZip {
+		// The .mod must be the one the zip implies. An uploaded .mod that
+		// differs is a conflict, or under writePolicy allow an edit (QA L-22).
 		modKey := assetKey(rt.Module, rt.Version+".mod")
-		if _, err := h.Store.Get(ctx, rp.Name, modKey); errors.Is(err, repo.ErrNotFound) {
-			s, err := h.deriveMod(rp, sums, module, version)
-			if err != nil {
-				return err
-			}
-			mod = &s
-		} else if err != nil {
+		s, err := h.deriveMod(rp, sums, module, version)
+		if err != nil {
 			return err
+		}
+		old, err := h.Store.Get(ctx, rp.Name, modKey)
+		switch {
+		case errors.Is(err, repo.ErrNotFound):
+			mod = &s
+		case err != nil:
+			return err
+		case old.BlobSHA256 == s.SHA256: // already in place
+		case rp.WritePolicy != "allow":
+			return repo.Errorf(http.StatusConflict, "%s in %s differs from the zip's go.mod (a zip without one implies \"module %s\")", modKey, rp.Name, module)
+		case !h.Auth.Permits(ctx, rp.Name, auth.Edit):
+			return repo.Errorf(http.StatusForbidden, "user %q may not overwrite %s", auth.FromContext(ctx).User, modKey)
+		default:
+			mod = &s
 		}
 	}
 
@@ -193,9 +215,9 @@ func (h *Handler) validate(rp *repo.Repository, k Kind, sums blob.Sums, module, 
 	return nil
 }
 
-// deriveMod stores a .mod for a zip uploaded without one: the zip's root go.mod
-// (bounded by maxModUpload and streamed to the blob store) or a module stub when
-// the zip has none. The zip was already validated by checkZip.
+// deriveMod stores the .mod a zip implies: the zip's root go.mod (bounded by
+// maxModUpload and streamed to the blob store) or a module stub when the zip
+// has none. The zip was already validated by checkZip.
 func (h *Handler) deriveMod(rp *repo.Repository, zipSums blob.Sums, module, version string) (blob.Sums, error) {
 	bs, err := h.Store.BlobStore(rp.Name)
 	if err != nil {
@@ -206,9 +228,9 @@ func (h *Handler) deriveMod(rp *repo.Repository, zipSums blob.Sums, module, vers
 		return blob.Sums{}, err
 	}
 	defer f.Close()
-	zr, err := zip.NewReader(f, zipSums.Size)
+	zr, err := openZip(f, zipSums.Size)
 	if err != nil {
-		return blob.Sums{}, repo.Errorf(http.StatusBadRequest, "not a valid zip file: %v", err)
+		return blob.Sums{}, err
 	}
 	want := module + "@" + version + "/go.mod"
 	for _, zf := range zr.File {

@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"regexp"
+	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"commandcenter/internal/auth"
@@ -25,6 +28,7 @@ func (u *UI) accessRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /-/api/users/{id}", u.updateUser)
 	mux.HandleFunc("DELETE /-/api/users/{id}", u.deleteUser)
 	mux.HandleFunc("PUT /-/api/users/{id}/password", u.resetPassword)
+	mux.HandleFunc("DELETE /-/api/users/{id}/tokens", u.revokeUserTokens)
 	mux.HandleFunc("GET /-/api/roles", u.listRoles)
 	mux.HandleFunc("POST /-/api/roles", u.createRole)
 	mux.HandleFunc("GET /-/api/roles/{id}", u.getRole)
@@ -75,7 +79,7 @@ func (u *UI) writeAccessError(w http.ResponseWriter, r *http.Request, err error)
 	case errors.Is(err, meta.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, meta.ErrExists):
-		writeError(w, http.StatusConflict, "already exists")
+		writeError(w, http.StatusConflict, err.Error()) // names an id that differs only in case
 	case errors.Is(err, meta.ErrInUse):
 		writeError(w, http.StatusConflict, roleInUseMessage)
 	case errors.Is(err, auth.ErrLockout):
@@ -105,7 +109,7 @@ func userJSON(x meta.User) userDTO {
 		roles = []string{}
 	}
 	return userDTO{ID: x.ID, Name: x.Name, Email: x.Email, Source: x.Source, Status: x.Status, Roles: roles,
-		HasPassword: x.PasswordHash != "", CreatedAt: rfc3339(x.CreatedAt), UpdatedAt: rfc3339(x.UpdatedAt)}
+		HasPassword: auth.HashUsable(x.PasswordHash), CreatedAt: rfc3339(x.CreatedAt), UpdatedAt: rfc3339(x.UpdatedAt)}
 }
 
 type privilegeDTO struct {
@@ -158,8 +162,22 @@ func checkPassword(pw string) error {
 }
 
 func checkText(v *validation, what, s string) {
-	if utf8.RuneCountInString(s) > maxTextLen {
+	switch {
+	case utf8.RuneCountInString(s) > maxTextLen:
 		v.add("%s is longer than %d characters", what, maxTextLen)
+	case strings.ContainsFunc(s, unicode.IsControl): // as task names (QA N-17)
+		v.add("%s must not contain control characters", what)
+	}
+}
+
+// checkEmail accepts an empty value or one bare address that net/mail
+// parses: no display name, list or surrounding space (QA N-17).
+func checkEmail(v *validation, s string) {
+	if s == "" {
+		return
+	}
+	if a, err := mail.ParseAddress(s); err != nil || a.Address != s {
+		v.add("email is not a valid e-mail address")
 	}
 }
 
@@ -188,11 +206,16 @@ func (u *UI) checkRoleRefs(ctx context.Context, v *validation, ids []string) err
 	return nil
 }
 
-func validatePrivileges(v *validation, privs []privilegeDTO) {
+// validatePrivileges checks a role's privileges. A "repo:" target must name
+// an existing repository (QA N-25) unless the stored role (kept) already
+// has it: a privilege left from a deleted repository may stay while the
+// role is edited.
+func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta.Privilege) {
 	valid := map[string]bool{}
 	for _, a := range meta.Actions {
 		valid[a] = true
 	}
+	targets := map[string]bool{}
 	for i, p := range privs {
 		at := fmt.Sprintf("privilege %d", i+1)
 		switch {
@@ -202,12 +225,19 @@ func validatePrivileges(v *validation, privs []privilegeDTO) {
 				v.add("%s: unknown format %q", at, f)
 			}
 		case strings.HasPrefix(p.Target, "repo:"):
-			if err := repo.CheckName("repository", strings.TrimPrefix(p.Target, "repo:")); err != nil {
+			name := strings.TrimPrefix(p.Target, "repo:")
+			if err := repo.CheckName("repository", name); err != nil {
 				v.add("%s: invalid repository name in %q", at, p.Target)
+			} else if u.Repos.Get(name) == nil && !slices.ContainsFunc(kept, func(k meta.Privilege) bool { return k.Target == p.Target }) {
+				v.add("%s: unknown repository %q", at, name)
 			}
 		default:
 			v.add(`%s: target %q must be "*", "format:<format>" or "repo:<name>"`, at, p.Target)
 		}
+		if targets[p.Target] {
+			v.add("%s: duplicate target %q", at, p.Target)
+		}
+		targets[p.Target] = true
 		if len(p.Actions) == 0 {
 			v.add("%s: at least one action is required", at)
 		}
@@ -331,6 +361,7 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	checkText(&v, "name", body.Name)
 	checkText(&v, "email", body.Email)
+	checkEmail(&v, body.Email)
 	hash := ""
 	switch {
 	case body.Source == meta.SourceLDAP && body.Password != "":
@@ -402,8 +433,15 @@ func (u *UI) updateUser(w http.ResponseWriter, r *http.Request) {
 	if body.Status != meta.StatusActive && body.Status != meta.StatusDisabled {
 		v.add("status must be %q or %q", meta.StatusActive, meta.StatusDisabled)
 	}
-	checkText(&v, "name", body.Name)
-	checkText(&v, "email", body.Email)
+	// Values stored by an older version are not re-checked unless they
+	// change, so such a user can still be disabled from the UI.
+	if body.Name != cur.Name {
+		checkText(&v, "name", body.Name)
+	}
+	if body.Email != cur.Email {
+		checkText(&v, "email", body.Email)
+		checkEmail(&v, body.Email)
+	}
 	if err := u.checkRoleRefs(r.Context(), &v, body.Roles); err != nil {
 		u.fail(w, r, err)
 		return
@@ -453,11 +491,18 @@ func (u *UI) deleteUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
 	defer u.accessMu.Unlock()
-	if _, err := u.DB.GetUser(r.Context(), id); err != nil {
+	cur, err := u.DB.GetUser(r.Context(), id)
+	if err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	err := u.checkLockout(r.Context(), func(users []meta.User) []meta.User {
+	if cur.Source == meta.SourceLDAP && cur.Status == meta.StatusDisabled {
+		// The disabled override row is what keeps the directory user out
+		// (QA N-20): deleting it would let them sign in again unannounced.
+		writeError(w, http.StatusConflict, "this disabled record blocks LDAP user "+cur.ID+"; deleting it lets them sign in again (set it active first)")
+		return
+	}
+	err = u.checkLockout(r.Context(), func(users []meta.User) []meta.User {
 		out := users[:0]
 		for _, x := range users {
 			if x.ID != id {
@@ -523,6 +568,23 @@ func (u *UI) resetPassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// revokeUserTokens deletes every API token of the user, local or LDAP
+// (QA N-16). A password change or reset leaves tokens valid; after a
+// suspected leak this ends them all. It answers how many it deleted.
+func (u *UI) revokeUserTokens(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	n, err := u.Auth.RevokeUserTokens(r.Context(), id)
+	if err != nil {
+		u.fail(w, r, err)
+		return
+	}
+	u.emit(r, "token.revoke", "", id, fmt.Sprintf("all %d", n))
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": n})
+}
+
 // changeOwnPassword lets any signed-in user (password or session, not a
 // token) change their own local password after proving the current one.
 func (u *UI) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
@@ -542,12 +604,21 @@ func (u *UI) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The local realm only: a same-named LDAP user's password must not do.
-	if _, err := u.Auth.CheckLocalPassword(r.Context(), p.User, body.CurrentPassword); err != nil {
+	_, err := u.Auth.CheckLocalPassword(r.Context(), p.User, body.CurrentPassword)
+	if wait := auth.RetryAfter(w.Header(), err); wait > 0 {
+		writeThrottled(w, wait)
+		return
+	}
+	if err != nil {
 		writeError(w, http.StatusForbidden, wrongPasswordMessage)
 		return
 	}
 	if err := checkPassword(body.NewPassword); err != nil {
 		u.writeAccessError(w, r, err)
+		return
+	}
+	if body.NewPassword == body.CurrentPassword { // QA N-21
+		u.writeAccessError(w, r, &repo.ValidationError{Errors: []string{"the new password must differ from the current one"}})
 		return
 	}
 	u.accessMu.Lock() // every access write is serialised (final review I3)
@@ -637,11 +708,11 @@ func (u *UI) createRole(w http.ResponseWriter, r *http.Request) {
 	var v validation
 	if err := repo.CheckName("role", body.ID); err != nil {
 		v = append(v, err.(*repo.ValidationError).Errors...)
-	} else if body.ID == meta.AdminRole {
+	} else if strings.EqualFold(body.ID, meta.AdminRole) {
 		v.add("role id %q is reserved for the built-in administrator role", body.ID)
 	}
 	checkText(&v, "description", body.Description)
-	validatePrivileges(&v, body.Privileges)
+	u.validatePrivileges(&v, body.Privileges, nil)
 	if err := v.err(); err != nil {
 		u.writeAccessError(w, r, err)
 		return
@@ -681,13 +752,16 @@ func (u *UI) updateRole(w http.ResponseWriter, r *http.Request) {
 	}
 	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
 	defer u.accessMu.Unlock()
-	if _, err := u.DB.GetRole(r.Context(), id); err != nil {
+	cur, err := u.DB.GetRole(r.Context(), id)
+	if err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
 	var v validation
-	checkText(&v, "description", body.Description)
-	validatePrivileges(&v, body.Privileges)
+	if body.Description != cur.Description { // a stored value is not re-checked
+		checkText(&v, "description", body.Description)
+	}
+	u.validatePrivileges(&v, body.Privileges, cur.Privileges)
 	if err := v.err(); err != nil {
 		u.writeAccessError(w, r, err)
 		return

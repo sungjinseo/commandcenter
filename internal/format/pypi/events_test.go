@@ -10,7 +10,8 @@ func TestEventsPypiUpload(t *testing.T) {
 	e := newEnv(t)
 	sink := &repotest.Sink{}
 	e.h.Store.Events = sink
-	ct, body := uploadBody(t, goodFields("sdist"), "smoke_hello-1.0.0.tar.gz", "sdist")
+	sd := smoke(t)
+	ct, body := uploadBody(t, goodFields(sd), "smoke_hello-1.0.0.tar.gz", sd)
 	if w := e.upload("py-all", ct, body); w.Code != 200 {
 		t.Fatalf("upload: %d %s", w.Code, w.Body.String())
 	}
@@ -19,7 +20,7 @@ func TestEventsPypiUpload(t *testing.T) {
 		t.Fatalf("events: %v", got)
 	}
 	sink.Reset()
-	ct, body = uploadBody(t, goodFields("sdist"), "smoke_hello-1.0.0.tar.gz", "sdist")
+	ct, body = uploadBody(t, goodFields(sd), "smoke_hello-1.0.0.tar.gz", sd)
 	if w := e.upload("py-hosted", ct, body); w.Code != 400 {
 		t.Fatalf("duplicate: %d", w.Code)
 	}

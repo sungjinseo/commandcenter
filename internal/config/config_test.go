@@ -153,6 +153,22 @@ func TestMaxUploadDefault(t *testing.T) {
 	}
 }
 
+// QA N-24: user info in baseURL would reach every client in the URLs built
+// on it, and a '?' or '#' would cut them; the error never repeats a password.
+func TestBaseURLNoUserInfoQueryOrFragment(t *testing.T) {
+	for _, v := range []string{"http://ci:s3cret@repo.example", "http://repo.example/path?q=1", "http://repo.example/path#f", "http://repo.example?", "http://repo.example/#"} {
+		c, err := Parse([]byte("baseURL: \"" + v + "\"\n"))
+		if err != nil || c.SettingsErr == nil || strings.Contains(c.SettingsErr.Error(), "s3cret") {
+			t.Fatalf("%q: err=%v SettingsErr=%v", v, err, c.SettingsErr)
+		}
+	}
+	for _, v := range []string{"https://repo.example", "http://repo.example:8081/nexus", "http://[::1]:8081"} {
+		if c, err := Parse([]byte("baseURL: \"" + v + "\"\n")); err != nil || c.SettingsErr != nil {
+			t.Fatalf("%q: err=%v SettingsErr=%v", v, err, c.SettingsErr)
+		}
+	}
+}
+
 func TestRepositoryOnlineDefault(t *testing.T) {
 	var r Repository
 	if !r.IsOnline() {
@@ -365,6 +381,13 @@ func TestValidateRepositoriesAcceptsNameCreate(t *testing.T) {
 	}
 }
 
+// QA N-29: the key file for stored secrets is a regular, always-read key.
+func TestSecretKeyFile(t *testing.T) {
+	if c, err := Parse([]byte("secretKeyFile: /run/secrets/key\n")); err != nil || c.SecretKeyFile != "/run/secrets/key" {
+		t.Fatalf("secretKeyFile = %q, %v", c.SecretKeyFile, err)
+	}
+}
+
 func TestMetricsFlushSeconds(t *testing.T) {
 	c, err := Parse([]byte("{}"))
 	if err != nil || c.MetricsFlushSeconds != 30 {
@@ -441,5 +464,59 @@ func TestStoredLegacyDefinitionDecodesAndNormalizes(t *testing.T) {
 	}
 	if notes := NormalizeStored(&r); notes != nil {
 		t.Fatalf("second pass: %v", notes)
+	}
+}
+
+// Remote fetches refuse a host that is not ASCII (net/http would map
+// fullwidth digits and dots to an address the egress checks never saw), so a
+// new definition must use the punycode form; a stored row still loads.
+func TestValidateDefinitionRejectsNonASCIIRemoteHost(t *testing.T) {
+	for remote, ok := range map[string]bool{
+		"https://bücher.example/":             false,
+		"https://１０．１/":                       false,
+		"https://%EF%BC%91%EF%BC%90.example/": false, // the host is decoded
+		"https://xn--bcher-kva.example/":      true,
+		"https://repo.example/bücher/":        true, // only the host counts
+	} {
+		r := Repository{Name: "p", Format: "maven", Type: "proxy", Remote: remote}
+		if err := ValidateDefinition(r); ok && err != nil || !ok && (err == nil || !strings.Contains(err.Error(), "punycode")) {
+			t.Errorf("%s: err = %v", remote, err)
+		}
+		if err := ValidateRepositories([]Repository{r}); err != nil {
+			t.Errorf("%s: stored row refused: %v", remote, err)
+		}
+	}
+}
+
+// QA L-9: a remote belongs to a proxy and a versionPolicy never to a group.
+// New definitions are refused; stored ones load with the fields dropped.
+func TestValidateDefinitionTypeFields(t *testing.T) {
+	for _, c := range []struct {
+		r    Repository
+		want string
+	}{
+		{Repository{Name: "h", Format: "maven", Type: "hosted", Remote: "https://repo1.example.org/"}, "only valid for proxy"},
+		{Repository{Name: "h", Format: "npm", Type: "hosted", RemoteAuth: &RemoteAuth{Username: "u"}}, "only valid for proxy"},
+		{Repository{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, Remote: "https://x.example/"}, "only valid for proxy"},
+		{Repository{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, VersionPolicy: "release"}, "versionPolicy is not valid for group"},
+		{Repository{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/", VersionPolicy: "release"}, ""},
+		{Repository{Name: "h", Format: "maven", Type: "hosted", VersionPolicy: "snapshot"}, ""},
+	} {
+		err := ValidateDefinition(c.r)
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%+v: err = %v, want %q", c.r, err, c.want)
+		}
+	}
+	r := Repository{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, VersionPolicy: "mixed",
+		Remote: "https://x.example/", RemoteAuth: &RemoteAuth{Username: "u"}}
+	if notes := NormalizeStored(&r); len(notes) != 2 || r.Remote != "" || r.RemoteAuth != nil || r.VersionPolicy != "" {
+		t.Fatalf("notes=%v r=%+v", notes, r)
+	}
+	if err := ValidateDefinition(r); err != nil {
+		t.Fatalf("normalized row: %v", err)
+	}
+	p := Repository{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/", VersionPolicy: "release"}
+	if notes := NormalizeStored(&p); notes != nil || p.Remote == "" || p.VersionPolicy != "release" {
+		t.Fatalf("proxy changed: %v %+v", notes, p)
 	}
 }

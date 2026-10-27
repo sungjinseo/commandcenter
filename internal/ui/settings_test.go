@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/repo/repotest"
 )
@@ -75,6 +76,10 @@ func TestSettingsValidation(t *testing.T) {
 		"empty baseURL":    `{"baseURL":""}`,
 		"ftp baseURL":      `{"baseURL":"ftp://x"}`,
 		"relative baseURL": `{"baseURL":"repo.example"}`,
+		"baseURL userinfo": `{"baseURL":"https://u:secret@repo.example"}`, // QA N-24
+		"baseURL query":    `{"baseURL":"https://repo.example/?q=1"}`,
+		"baseURL fragment": `{"baseURL":"https://repo.example/#f"}`,
+		"baseURL bare #":   `{"baseURL":"https://repo.example/#"}`,
 		"idle too small":   `{"sessionIdleMinutes":4}`,
 		"idle too large":   `{"sessionIdleMinutes":10081}`,
 		"upload zero":      `{"maxUploadMiB":0}`,
@@ -146,19 +151,20 @@ func TestLiveBaseURL(t *testing.T) {
 	if got := url(); got != "http://repo.example/repository/maven-releases/" {
 		t.Fatalf("before: %s", got)
 	}
+	old := login(t, e, "reader")
 	wantStatus(t, e.admin(t, "PUT", "/-/api/settings", `{"baseURL":"https://secure.example"}`), http.StatusOK)
 	if got := url(); got != "https://secure.example/repository/maven-releases/" {
 		t.Fatalf("after: %s", got)
 	}
-	// The session cookie's Secure flag follows the new scheme.
+	// The session cookie's name and Secure flag follow the new scheme; the
+	// cc_session cookie of the http scheme no longer signs in.
+	if me := e.req(t, "GET", "/-/api/me", "", "", old, false).json(t); me["anonymous"] != true {
+		t.Fatalf("http cookie under an https baseURL: %v", me)
+	}
 	r := e.req(t, "POST", "/-/api/login", `{"user":"admin","password":"pw"}`, "", nil, true)
 	wantStatus(t, r, http.StatusOK)
-	secure := false
-	for _, c := range r.cookie {
-		secure = secure || c.Secure
-	}
-	if !secure {
-		t.Fatal("cookie is not Secure under an https baseURL")
+	if c := r.cookie[0]; c.Name != auth.HostSessionCookie || !c.Secure {
+		t.Fatalf("cookie under an https baseURL: %v", r.header.Values("Set-Cookie"))
 	}
 }
 

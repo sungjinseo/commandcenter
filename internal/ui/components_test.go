@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -9,8 +10,15 @@ import (
 	"testing"
 	"time"
 
+	"commandcenter/internal/blob"
+	"commandcenter/internal/cleanup"
 	"commandcenter/internal/config"
+	"commandcenter/internal/format/cargo"
+	"commandcenter/internal/format/npm"
+	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/repo"
+	"commandcenter/internal/repo/repotest"
 )
 
 type compResp struct {
@@ -21,7 +29,8 @@ type compResp struct {
 			Size int64
 		}
 	}
-	Truncated bool
+	Truncated         bool
+	ContinuationToken string
 }
 
 func searchComponents(t *testing.T, e *env, query, user string, want int) compResp {
@@ -200,7 +209,8 @@ func TestComponentsHiddenAndGroupRepos(t *testing.T) {
 
 func TestComponentsValidation(t *testing.T) {
 	e := newEnv(t, "http://x")
-	for _, q := range []string{"", "format=maven", "name=a", "keyword=x&repo=maven-releases", "name=" + strings.Repeat("a", 201)} {
+	for _, q := range []string{"", "format=maven", "name=a", "keyword=x&repo=maven-releases", "name=" + strings.Repeat("a", 201),
+		"name=app&continuationToken=!!", "name=app&continuationToken=" + base64.RawURLEncoding.EncodeToString([]byte(`["a","b"]`))} {
 		searchComponents(t, e, q, "admin", 400)
 	}
 	r := e.req(t, "POST", "/-/api/search/components?name=app", "", "admin", nil, true)
@@ -215,8 +225,8 @@ func TestComponentsCaps(t *testing.T) {
 		putAsset(t, e.db, "maven-releases", fmt.Sprintf("big/many/lib%03d/1.0/lib%03d-1.0.jar", i, i), 1)
 	}
 	c := searchComponents(t, e, "group=big.many", "admin", 200)
-	if len(c.Components) != 100 || !c.Truncated {
-		t.Fatalf("component cap: %d truncated=%v", len(c.Components), c.Truncated)
+	if len(c.Components) != 100 || !c.Truncated || c.ContinuationToken == "" {
+		t.Fatalf("component cap: %d truncated=%v token=%q", len(c.Components), c.Truncated, c.ContinuationToken)
 	}
 	for i := 0; i < 51; i++ {
 		putAsset(t, e.db, "maven-releases", fmt.Sprintf("fat/jar/one/1.0/one-1.0-c%02d.jar", i), 1)
@@ -224,6 +234,94 @@ func TestComponentsCaps(t *testing.T) {
 	c = searchComponents(t, e, "group=fat.jar", "admin", 200)
 	if len(c.Components) != 1 || len(c.Components[0].Assets) != 50 || !c.Truncated {
 		t.Fatalf("asset cap: %d comps, %d assets, truncated=%v", len(c.Components), len(c.Components[0].Assets), c.Truncated)
+	}
+}
+
+// QA L-23: continuationToken pages through every component, 100 at a time
+// in key order, without overlap or gaps, also when the scan meets them in
+// another order (formats are scanned go before maven, but "zz-go" sorts last).
+func TestComponentsPaging(t *testing.T) {
+	e := newEnvWith(t, "http://x", func(c *config.Config) {
+		c.Repositories = append(c.Repositories, config.Repository{Name: "zz-go", Format: "go", Type: "hosted"})
+	})
+	var want []string
+	for i := 0; i < 150; i++ {
+		putAsset(t, e.db, "maven-releases", fmt.Sprintf("page/many/lib%03d/1.0/lib%03d-1.0.jar", i, i), 1)
+		want = append(want, fmt.Sprintf("maven-releases:page.many:lib%03d:1.0", i))
+	}
+	for i := 0; i < 60; i++ {
+		putAsset(t, e.db, "zz-go", fmt.Sprintf("page/many/m%02d/@v/v1.0.0.zip", i), 1)
+		want = append(want, fmt.Sprintf("zz-go::page/many/m%02d:v1.0.0", i))
+	}
+	var got []string
+	tok, pages := "", 0
+	for {
+		q := "keyword=many"
+		if tok != "" {
+			q += "&continuationToken=" + url.QueryEscape(tok)
+		}
+		c := searchComponents(t, e, q, "admin", 200)
+		pages++
+		if n := names(c); n != "" {
+			got = append(got, strings.Split(n, ",")...)
+		}
+		if c.ContinuationToken == "" {
+			if c.Truncated {
+				t.Fatalf("last page %d: truncated without a scan limit", pages)
+			}
+			break
+		}
+		if len(c.Components) != 100 || !c.Truncated {
+			t.Fatalf("page %d: %d components truncated=%v, want a full page", pages, len(c.Components), c.Truncated)
+		}
+		if pages > 3 {
+			t.Fatal("more pages than components")
+		}
+		tok = c.ContinuationToken
+	}
+	if pages != 3 || strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("%d pages:\n got  %v\n want %v", pages, got, want)
+	}
+}
+
+// QA L-23 review: a page whose last key is not valid UTF-8 (a Maven name
+// stored with a raw Latin-1 byte) resumes right after that key. With the key
+// in JSON strings the byte became U+FFFD, and the next page skipped "b한",
+// which sorts between the two.
+func TestComponentsPagingInvalidUTF8(t *testing.T) {
+	e := newEnv(t, "http://x")
+	type comp struct{ name, ver string }
+	var all []comp
+	for i := 0; i < 99; i++ {
+		all = append(all, comp{fmt.Sprintf("a%03d", i), fmt.Sprintf("1.%d", i)})
+	}
+	all = append(all,
+		comp{"b\xe9", "2.0"},         // 100th in key order: Latin-1 e-acute, not UTF-8
+		comp{"b\xed\x95\x9c", "3.0"}, // "b한": valid UTF-8, sorts after "b\xe9" and before "b" + U+FFFD
+		comp{"c", "4.0"})
+	for _, c := range all {
+		putAsset(t, e.db, "maven-releases", "page/utf/"+c.name+"/"+c.ver+"/"+c.name+"-"+c.ver+".jar", 1)
+	}
+	seen := map[string]int{}
+	tok := ""
+	for pages := 1; ; pages++ {
+		q := "group=page.utf"
+		if tok != "" {
+			q += "&continuationToken=" + url.QueryEscape(tok)
+		}
+		c := searchComponents(t, e, q, "admin", 200)
+		for _, x := range c.Components {
+			seen[x.Version]++
+		}
+		if c.ContinuationToken == "" || pages > 5 {
+			break
+		}
+		tok = c.ContinuationToken
+	}
+	for _, c := range all {
+		if n := seen[c.ver]; n != 1 {
+			t.Errorf("component %q %s listed %d times across the pages, want once", c.name, c.ver, n)
+		}
 	}
 }
 
@@ -392,6 +490,134 @@ func TestHostedPypiComponentListsAllFiles(t *testing.T) {
 		c := searchComponents(t, e, q, "admin", 200)
 		if len(c.Components) != 1 || len(c.Components[0].Assets) != 2 {
 			t.Fatalf("%s: want one component with 2 assets, got %+v", q, c.Components)
+		}
+	}
+}
+
+// TestDeleteComponentAPI: DELETE /-/api/repositories/{name}/components deletes
+// a component version of a hosted repository with the format's deleter, for a
+// caller with the delete privilege (npm, PyPI and Cargo had no delete means;
+// QA H-2, M-11), and the repository list says where the UI may offer it.
+func TestDeleteComponentAPI(t *testing.T) {
+	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
+		c.Repositories = append(c.Repositories,
+			config.Repository{Name: "cargo-hosted", Format: "cargo", Type: "hosted"},
+			config.Repository{Name: "pypi-ro", Format: "pypi", Type: "hosted", WritePolicy: "deny"})
+		c.Roles["pydel"] = config.Role{Write: []string{"pypi-hosted", "cargo-hosted"}}
+		c.Users = append(c.Users, config.User{Name: "deleter", PasswordHash: c.Users[0].PasswordHash, Roles: []string{"pydel"}})
+	})
+	ctx := context.Background()
+	if r := e.req(t, "DELETE", "/-/api/repositories/pypi-hosted/components?name=my-pkg&version=1.0", "", "admin", nil, true); r.status != 501 {
+		t.Fatalf("without deleters: %d %s", r.status, r.body)
+	}
+	bs, err := blob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &repo.Store{Blobs: map[string]*blob.Store{repo.DefaultStore: bs}, DB: e.db, Now: time.Now}
+	sink := &repotest.Sink{}
+	store.Events = sink
+	baseURL := func() string { return "http://repo.example" }
+	reg := cleanup.NewRegistry(store)
+	reg.Register("npm", "hosted", npm.New(store, nil, e.srv.Auth, baseURL))
+	reg.Register("pypi", "hosted", pypi.New(store, nil, baseURL))
+	reg.Register("cargo", "hosted", cargo.New(store, nil, e.srv.Auth, baseURL))
+	e.ui.Deleters = reg
+	if _, err := store.Put(ctx, "pypi-hosted", "packages/my-pkg/my_pkg-1.0.tar.gz", "", strings.NewReader("sdist")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.Tx(ctx, func(tx *meta.Tx) error {
+		return tx.InsertPackage(ctx, meta.Package{Repo: "cargo-hosted", Format: "cargo", Name: "qa-crate", Version: "0.1.0", Attrs: "{}", CreatedAt: t0})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, "cargo-hosted", "crates/qa-crate/0.1.0.crate", "", strings.NewReader("crate")); err != nil {
+		t.Fatal(err)
+	}
+
+	del := func(user, repoName, query string, ui bool) resp {
+		t.Helper()
+		r := e.req(t, "DELETE", "/-/api/repositories/"+repoName+"/components?"+query, "", user, nil, ui)
+		checkAPIHeaders(t, r)
+		return r
+	}
+	for _, c := range []struct {
+		user, repo, query string
+		ui                bool
+		want              int
+	}{
+		{"", "pypi-hosted", "name=my-pkg&version=1.0", true, 401},
+		{"deleter", "pypi-hosted", "name=my-pkg&version=1.0", false, 403}, // no UI header
+		{"reader", "pypi-hosted", "name=my-pkg&version=1.0", true, 403},
+		{"ci", "pypi-hosted", "name=my-pkg&version=1.0", true, 403},
+		{"deleter", "npm-hosted", "name=left-pad&version=1.0.0", true, 403},
+		{"deleter", "ghost", "name=x&version=1", true, 404},
+		{"admin", "npm-public", "name=left-pad&version=1.0.0", true, 400},
+		{"admin", "maven-proxy", "group=org.example&name=app&version=1.0", true, 400},
+		{"admin", "pypi-ro", "name=my-pkg&version=1.0", true, 400},
+		{"admin", "maven-releases", "name=app&version=1.0", true, 400}, // no group
+		{"deleter", "pypi-hosted", "name=my-pkg", true, 400},
+		{"deleter", "pypi-hosted", "name=my-pkg&version=9.9", true, 404},
+	} {
+		if r := del(c.user, c.repo, c.query, c.ui); r.status != c.want {
+			t.Errorf("%q %s %s: %d %s, want %d", c.user, c.repo, c.query, r.status, r.body, c.want)
+		}
+	}
+	if len(sink.Events()) != 0 {
+		t.Fatalf("refused deletes recorded events: %v", sink.Events())
+	}
+
+	files := func() float64 {
+		return e.get(t, "/-/api/repositories/pypi-hosted", "deleter").json(t)["assets"].(float64)
+	}
+	if n := files(); n != 1 { // also caches the repository stats
+		t.Fatalf("files before: %v", n)
+	}
+	r := del("deleter", "pypi-hosted", "name=My.Pkg&version=1.0", true)
+	if m := r.json(t); r.status != 200 || m["assets"] != float64(1) || m["bytes"] != float64(len("sdist")) {
+		t.Fatalf("pypi delete: %d %s", r.status, r.body)
+	}
+	if n := files(); n != 0 {
+		t.Fatalf("files after the delete (stale stats): %v", n)
+	}
+	if pkgs, _ := e.db.ListPackages(ctx, "pypi-hosted", "my-pkg"); len(pkgs) != 0 {
+		t.Fatalf("pypi rows left: %+v", pkgs)
+	}
+	if r := del("deleter", "cargo-hosted", "name=qa-crate&version=0.1.0", true); r.status != 200 {
+		t.Fatalf("cargo delete: %d %s", r.status, r.body)
+	}
+	if _, err := e.db.GetAsset(ctx, "cargo-hosted", "crates/qa-crate/0.1.0.crate"); err == nil {
+		t.Fatal("crate left")
+	}
+	if r := del("admin", "npm-hosted", "group=&name=left-pad&version=1.0.0", true); r.status != 200 {
+		t.Fatalf("npm delete: %d %s", r.status, r.body)
+	}
+	got := sink.Events()
+	if len(got) != 3 || got[0] != (repotest.Event{Kind: "delete", Actor: "deleter", Repo: "pypi-hosted", Subject: "My.Pkg@1.0", Detail: "assets=1"}) ||
+		got[1].Subject != "qa-crate@0.1.0" || got[2] != (repotest.Event{Kind: "delete", Actor: "admin", Repo: "npm-hosted", Subject: "left-pad@1.0.0", Detail: "assets=1"}) {
+		t.Fatalf("events: %v", got)
+	}
+
+	// canDelete: the delete privilege on an online, writable hosted repository.
+	for user, want := range map[string]map[string]bool{
+		"deleter": {"pypi-hosted": true, "cargo-hosted": true, "npm-hosted": false, "maven-releases": false},
+		"admin":   {"npm-hosted": true, "maven-releases": true, "pypi-ro": false, "npm-public": false, "maven-proxy": false},
+		"reader":  {"npm-hosted": false, "pypi-hosted": false},
+	} {
+		r := e.get(t, "/-/api/repositories", user)
+		var body struct {
+			Repositories []struct {
+				Name      string
+				CanDelete bool
+			}
+		}
+		if err := json.Unmarshal([]byte(r.body), &body); err != nil {
+			t.Fatal(err)
+		}
+		for _, rp := range body.Repositories {
+			if w, ok := want[rp.Name]; ok && rp.CanDelete != w {
+				t.Errorf("%s: %s canDelete = %v", user, rp.Name, rp.CanDelete)
+			}
 		}
 	}
 }

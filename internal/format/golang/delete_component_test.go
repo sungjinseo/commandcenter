@@ -1,12 +1,15 @@
 package golang
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -148,5 +151,69 @@ func TestDeleteComponentGoSkipsChanged(t *testing.T) {
 	c.Evaluated.LastDownloaded = future
 	if res, err := e.h.DeleteComponent(context.Background(), e.repos["go-hosted"], c, "system"); err != nil || res.Assets != 3 {
 		t.Fatalf("unchanged: %+v %v", res, err)
+	}
+}
+
+// TestDeleteVersionHTTP: DELETE of any file of a version removes the whole
+// version, through the group's writeMember too (QA M-11): no half version is
+// left, list and @latest move on, and the event names the caller.
+func TestDeleteVersionHTTP(t *testing.T) {
+	e := newEnv(t)
+	mod := "module example.com/Hello\n"
+	for _, v := range []string{"v1.0.0", "v1.1.0"} {
+		if w := e.do("PUT", "go-hosted", "example.com/!hello/@v/"+v+".zip", bytes.NewReader(moduleZip(t, "example.com/Hello", v, mod))); w.Code != 201 {
+			t.Fatalf("upload %s: %d %s", v, w.Code, w.Body.String())
+		}
+	}
+	e.seed(t, "go-hosted", "example.com/!hello/@v/v2.0.0-pre.mod", "module example.com/Hello\n") // a .mod-only version
+	sink := &repotest.Sink{}
+	e.h.Store.Events = sink
+	del := func(repoName, file string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("DELETE", "/repository/"+repoName+"/x", nil)
+		r = r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{User: "ci"}))
+		e.h.Serve(w, r, e.repos[repoName], "example.com/!hello/@v/"+file)
+		return w
+	}
+	if w := del("go-all", "v1.1.0.info"); w.Code != 204 {
+		t.Fatalf("DELETE via group: %d %s", w.Code, w.Body.String())
+	}
+	for _, ext := range []string{".info", ".mod", ".zip"} {
+		if w := e.do("GET", "go-all", "example.com/!hello/@v/v1.1.0"+ext, nil); w.Code != 404 {
+			t.Fatalf("deleted %s: %d", ext, w.Code)
+		}
+	}
+	for _, repoName := range []string{"go-hosted", "go-all"} {
+		if w := e.do("GET", repoName, "example.com/!hello/@v/list", nil); w.Body.String() != "v1.0.0\n" {
+			t.Fatalf("%s list: %q", repoName, w.Body.String())
+		}
+		if w := e.do("GET", repoName, "example.com/!hello/@latest", nil); !strings.Contains(w.Body.String(), `"v1.0.0"`) {
+			t.Fatalf("%s @latest: %s", repoName, w.Body.String())
+		}
+	}
+	want := repotest.Event{Kind: "delete", Actor: "ci", Repo: "go-hosted", Subject: "example.com/Hello@v1.1.0", Detail: "assets=3"}
+	if got := sink.Events(); len(got) != 1 || got[0] != want {
+		t.Fatalf("events: %v", got)
+	}
+	if w := del("go-hosted", "v1.1.0.zip"); w.Code != 404 {
+		t.Fatalf("second DELETE: %d", w.Code)
+	}
+	// An incomplete version can be removed too.
+	if w := del("go-hosted", "v2.0.0-pre.mod"); w.Code != 204 {
+		t.Fatalf("DELETE of a .mod-only version: %d %s", w.Code, w.Body.String())
+	}
+	if got := goAssets(t, e); strings.Contains(got, "v2.0.0-pre") || !strings.Contains(got, "v1.0.0.zip") {
+		t.Fatalf("assets = %s", got)
+	}
+	// A version query is not a version, and a read-only repository refuses.
+	if w := del("go-hosted", "master.info"); w.Code != 400 {
+		t.Fatalf("DELETE of a query: %d", w.Code)
+	}
+	e.repos["go-hosted"].WritePolicy = "deny"
+	if w := del("go-hosted", "v1.0.0.zip"); w.Code != 400 {
+		t.Fatalf("read-only repository: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("GET", "go-hosted", "example.com/!hello/@v/v1.0.0.zip", nil); w.Code != 200 {
+		t.Fatalf("v1.0.0 must survive: %d", w.Code)
 	}
 }

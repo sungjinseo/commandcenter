@@ -54,12 +54,13 @@ export async function viewTokens(view, admin) {
   const load = async () => {
     const data = await api("tokens");
     if (!isLive()) return;
-    // The API gives an admin every token; the user page keeps only theirs.
-    const toks = (data.tokens || []).filter((x) => admin || x.user === me.user);
+    // The API gives an admin every token; the user page keeps only theirs. Token owners are
+    // owner keys ("ldap:<id>" for an LDAP user), so they are matched against me.owner, not me.user.
+    const toks = (data.tokens || []).filter((x) => admin || x.user === me.owner);
     const revoke = (x) => {
       const b = h("button", { type: "button", class: "btn small danger" }, t("tok.revoke"));
       b.addEventListener("click", async () => {
-        const text = x.user === me.user ? t("tok.revokeText", { id: x.id }) : t("tok.revokeOther", { id: x.id, user: x.user });
+        const text = x.user === me.owner ? t("tok.revokeText", { id: x.id }) : t("tok.revokeOther", { id: x.id, user: x.user });
         if (!(await confirmDelete(text, t("tok.revokeTitle"), t("tok.revoke")))) return;
         b.disabled = true;
         try {

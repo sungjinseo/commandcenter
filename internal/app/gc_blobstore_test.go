@@ -156,6 +156,56 @@ func TestGCRemovesUnreferencedBlob(t *testing.T) {
 	}
 }
 
+// QA N-30: a build without named stores (a downgrade) writes the blobs of a
+// named-store repository to the default store. A GC of the default store
+// keeps such a blob, the only copy, until it is moved into its store.
+func TestGCDefaultKeepsBlobOfNamedStoreRepo(t *testing.T) {
+	a, _ := twoStoreApp(t)
+	ctx := context.Background()
+	sums, err := a.Store.StoreByName("default").Write(strings.NewReader("written-by-an-older-build"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.DB.PutAsset(ctx, meta.Asset{Repo: "maven-b", Path: "org/o/1.0/o-1.0.jar", BlobSHA256: sums.SHA256, Size: sums.Size}); err != nil {
+		t.Fatal(err)
+	}
+	ageBlob(t, a.Config.DataDir, sums.SHA256)
+	if n, err := a.GC(ctx, time.Hour); err != nil || n != 0 {
+		t.Fatalf("GC removed %d (err %v); a blob a repository references must survive in the default store", n, err)
+	}
+	if !present(t, a.Store.StoreByName("default"), sums.SHA256) {
+		t.Fatal("the default store lost a blob that maven-b references")
+	}
+}
+
+// TestGCSweepsStaleTempFiles: a write killed mid-way leaves a partial temp
+// file; the compact pass removes it once stale, in the store it collects.
+func TestGCSweepsStaleTempFiles(t *testing.T) {
+	a, rootB := twoStoreApp(t)
+	old := time.Now().Add(-2 * time.Hour)
+	tmpFile := func(root string) string {
+		p := filepath.Join(root, "tmp", "up-killed")
+		if err := os.WriteFile(p, []byte("partial"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	inB, inDefault := tmpFile(rootB), tmpFile(a.Config.DataDir)
+
+	if _, err := a.GCStore(context.Background(), "b", time.Hour); err != nil {
+		t.Fatalf("GCStore(b): %v", err)
+	}
+	if _, err := os.Stat(inB); !os.IsNotExist(err) {
+		t.Fatalf("stale temp file in store b survived its GC: %v", err)
+	}
+	if _, err := os.Stat(inDefault); err != nil {
+		t.Fatalf("GC of store b touched the default store's tmp: %v", err)
+	}
+}
+
 // TestGCStoreIsolation proves collecting store A never touches store B: an
 // unreferenced blob in B survives a GC of A, and a referenced blob in B is
 // safe too.

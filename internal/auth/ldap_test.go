@@ -337,6 +337,111 @@ func TestLDAPRecheckSerialized(t *testing.T) {
 	}
 }
 
+// findFunc is a Directory whose Find runs the function; it serves no logins.
+type findFunc func(ctx context.Context, cfg meta.LDAP, id string) (ldap.User, error)
+
+func (findFunc) Authenticate(context.Context, meta.LDAP, string, string) (ldap.User, error) {
+	return ldap.User{}, ldap.ErrInvalidCredentials
+}
+
+func (fn findFunc) Find(ctx context.Context, cfg meta.LDAP, id string) (ldap.User, error) {
+	return fn(ctx, cfg, id)
+}
+
+// The re-check back-off runs from the end of the failed attempt: after a
+// directory that hung past ldapRetry, the next lookup is still denied
+// without dialling.
+func TestLDAPRecheckBackoffAfterSlowFailure(t *testing.T) {
+	f := newLDAPFixture(t)
+	if _, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); err != nil {
+		t.Fatal(err)
+	}
+	f.a.LDAP = findFunc(func(ctx context.Context, cfg meta.LDAP, id string) (ldap.User, error) {
+		f.advance(ldapRetry + time.Second) // the directory hangs, then fails
+		return defaultDirectory.Find(ctx, cfg, id)
+	})
+	f.srv.SetDown(true)
+	f.advance(ldapRecheck)
+	lookup := func() bool { _, ok := f.a.Lookup("ldap:alice"); return ok }
+	if n := f.dialsDuring(func() {
+		if lookup() {
+			t.Fatal("outage: re-check failed open")
+		}
+	}); n != 1 {
+		t.Fatalf("re-check made %d connections", n)
+	}
+	if n := f.dialsDuring(func() {
+		if lookup() {
+			t.Fatal("allowed right after the failed re-check")
+		}
+	}); n != 0 {
+		t.Fatalf("dialled %d times right after the failed re-check", n)
+	}
+	f.srv.SetDown(false)
+	f.advance(ldapRetry)
+	if !lookup() {
+		t.Fatal("not restored after the back-off")
+	}
+}
+
+// A caller that left during the re-check is not a directory failure: the
+// next caller re-checks at once instead of being denied for ldapRetry.
+func TestLDAPRecheckCancelledCallerStartsNoBackoff(t *testing.T) {
+	f := newLDAPFixture(t)
+	if _, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	f.a.LDAP = findFunc(func(ctx context.Context, _ meta.LDAP, _ string) (ldap.User, error) {
+		cancel() // the client hangs up mid-check
+		return ldap.User{}, &ldap.DialError{Phase: "connect", Err: ctx.Err()}
+	})
+	f.advance(ldapRecheck)
+	if _, ok := f.a.ldapLookup(ctx, "alice"); ok {
+		t.Fatal("a cancelled re-check allowed the user")
+	}
+	f.a.LDAP = nil
+	if _, ok := f.a.Lookup("ldap:alice"); !ok {
+		t.Fatal("the next caller was denied: a cancelled re-check started the back-off")
+	}
+}
+
+// Waiting for another request's re-check of the same id ends with the
+// caller's context.
+func TestLDAPRecheckWaitHonoursContext(t *testing.T) {
+	f := newLDAPFixture(t)
+	if _, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	f.a.LDAP = findFunc(func(_ context.Context, _ meta.LDAP, id string) (ldap.User, error) {
+		close(entered)
+		<-release
+		return ldap.User{ID: id}, nil
+	})
+	f.advance(ldapRecheck)
+	first := make(chan bool)
+	go func() { _, ok := f.a.Lookup("ldap:alice"); first <- ok }()
+	<-entered
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	waited := make(chan bool)
+	go func() { _, ok := f.a.ldapLookup(ctx, "alice"); waited <- ok }()
+	select {
+	case ok := <-waited:
+		if ok {
+			t.Error("a cancelled waiter was allowed")
+		}
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("the wait for the entry ignored the context")
+	}
+	close(release)
+	if !<-first {
+		t.Fatal("the re-check failed")
+	}
+}
+
 func TestLDAPTokens(t *testing.T) {
 	f := newLDAPFixture(t)
 	ctx := context.Background()
@@ -452,6 +557,37 @@ func TestLDAPOnUserChangedAndReload(t *testing.T) {
 	}
 }
 
+type sourceFunc func(context.Context) (meta.AccessData, error)
+
+func (f sourceFunc) LoadAccess(ctx context.Context) (meta.AccessData, error) { return f(ctx) }
+
+// The app reloads every few seconds (QA N-2): a reload that changes nothing
+// keeps the LDAP and password caches, so it costs no directory round trips
+// or bcrypt compares.
+func TestReloadWithoutChangeKeepsCaches(t *testing.T) {
+	f := newLDAPFixture(t)
+	f.a.Source = sourceFunc(func(context.Context) (meta.AccessData, error) {
+		return meta.AccessData{Users: f.users, Roles: f.roles, Settings: f.settings}, nil
+	})
+	ctx := context.Background()
+	for user, pw := range map[string]string{"alice": "alice-pw", "admin": "pw"} {
+		if _, err := f.a.CheckPassword(ctx, user, pw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := f.a.Reload(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.a.ldapMu.Lock()
+	n, m := len(f.a.ldapUsers), len(f.a.ldapPass)
+	f.a.ldapMu.Unlock()
+	if n != 1 || m != 1 || f.a.cachedCount("admin") != 1 {
+		t.Fatalf("after reloads: %d LDAP users, %d LDAP passwords, %d local passwords cached", n, m, f.a.cachedCount("admin"))
+	}
+}
+
 func TestCheckLockoutLDAP(t *testing.T) {
 	f := newLDAPFixture(t)
 	snap := func() *Snapshot { return NewSnapshot(f.users, f.roles, f.settings) }
@@ -494,9 +630,11 @@ func TestRestorableAdmins(t *testing.T) {
 	if n := RestorableAdmins(NewSnapshot(f.users, f.roles, f.settings)); n != 1 {
 		t.Fatalf("restorable %d, want 1 (realm state ignored; the disabled admin does not count)", n)
 	}
-	f.users[0].PasswordHash = ""
-	if n := RestorableAdmins(NewSnapshot(f.users, f.roles, f.settings)); n != 0 {
-		t.Fatalf("restorable %d", n)
+	for _, h := range []string{"", "<commandcenter hash-password 출력값>"} {
+		f.users[0].PasswordHash = h
+		if n := RestorableAdmins(NewSnapshot(f.users, f.roles, f.settings)); n != 0 {
+			t.Fatalf("hash %q: restorable %d", h, n)
+		}
 	}
 }
 
@@ -510,6 +648,7 @@ func TestLDAPLoginOutageBackoff(t *testing.T) {
 	f.srv.SetDown(true)
 	d0 := f.srv.Dials()
 	for i := 0; i < ldapDialFailures; i++ { // three consecutive dial failures start it
+		f.a.clearPassCacheForTest()
 		if _, err := f.a.CheckPassword(ctx, "admin", "pw"); err != nil {
 			t.Fatal(err)
 		}
@@ -518,6 +657,7 @@ func TestLDAPLoginOutageBackoff(t *testing.T) {
 		t.Fatalf("first logins: %d dials", n)
 	}
 	for i := 0; i < 3; i++ {
+		f.a.clearPassCacheForTest()
 		if _, err := f.a.CheckPassword(ctx, "admin", "pw"); err != nil {
 			t.Fatal(err)
 		}
@@ -631,7 +771,9 @@ func TestLDAPOversizedCredentialsNeverReachTheDirectory(t *testing.T) {
 func TestLDAPNoticeAfterServiceBindIsNotAnOutage(t *testing.T) {
 	f := ldapFirst(t)
 	f.srv.SetNoticeOnSearch(true)
-	for i := 0; i < 5; i++ {
+	// More than ldapDialFailures, fewer than accountLimit: the sign-in
+	// throttle must not be what refuses alice afterwards.
+	for i := 0; i < accountLimit-1; i++ {
 		if _, err := f.a.CheckPassword(context.Background(), "alice", "alice-pw"); !errors.Is(err, ErrBadCredentials) {
 			t.Fatal(err)
 		}
@@ -660,6 +802,7 @@ func TestLDAPBackoffNeedsThreeDialFailures(t *testing.T) {
 	f := ldapFirst(t)
 	ctx := context.Background()
 	login := func() {
+		f.a.clearPassCacheForTest()
 		if _, err := f.a.CheckPassword(ctx, "admin", "pw"); err != nil {
 			t.Fatal(err)
 		}
@@ -683,8 +826,13 @@ func TestLDAPBackoffNeedsThreeDialFailures(t *testing.T) {
 	}
 }
 
+// clearPassCacheForTest drops the cached password successes of both
+// realms, so the next check asks the realms (a cached one asks none).
 func (a *Authenticator) clearPassCacheForTest() {
 	a.ldapMu.Lock()
 	a.ldapPass = map[string]ldapPassHit{}
 	a.ldapMu.Unlock()
+	a.mu.Lock()
+	a.cache = map[string]time.Time{}
+	a.mu.Unlock()
 }

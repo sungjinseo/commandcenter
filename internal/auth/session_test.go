@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"commandcenter/internal/config"
 )
 
 type fakeClock struct {
@@ -109,23 +111,38 @@ func TestSessionDeleteUser(t *testing.T) {
 	}
 }
 
-func TestSessionEvictsOldest(t *testing.T) {
+// At capacity a new session replaces an expired one first, then a session
+// of the creating user's own, and only for a user holding none the least
+// recently used session of anyone: never by creation time, so one user's
+// logins do not push out other users' sessions in use. (It replaces
+// TestSessionEvictsOldest, which pinned eviction by creation time.)
+func TestSessionEvictsLeastRecentlyUsed(t *testing.T) {
 	s, c := newTestSessions()
 	s.max = 3
-	ids := make([]string, 4)
-	for i := 0; i < 3; i++ {
-		ids[i] = s.Create("u")
-		c.advance(time.Minute)
+	has := func(id string) bool { _, ok := s.m[sessionKey(id)]; return ok } // no idle refresh
+	a1 := s.Create("a")
+	c.advance(time.Minute)
+	b1 := s.Create("b")
+	c.advance(time.Minute)
+	a2 := s.Create("a")
+	c.advance(time.Minute)
+	s.User(a1) // the oldest session, but now the most recently used
+	a3 := s.Create("a")
+	if has(a2) || !has(a1) || !has(b1) || !has(a3) {
+		t.Fatal("a holds sessions: its least recently used one must go, not b's or its oldest")
 	}
-	s.User(ids[0]) // use must not change eviction order (by creation)
-	ids[3] = s.Create("u")
-	if _, ok := s.User(ids[0]); ok {
-		t.Fatal("oldest session not evicted")
+	c.advance(time.Minute)
+	c1 := s.Create("c")
+	if has(b1) || !has(a1) || !has(a3) || !has(c1) {
+		t.Fatal("c holds none: the least recently used session (b's) must go, not the oldest (a1)")
 	}
-	for _, id := range ids[1:] {
-		if _, ok := s.User(id); !ok {
-			t.Fatal("newer session evicted")
-		}
+	c.advance(11 * time.Hour)
+	s.User(a1)
+	s.User(a3)
+	c.advance(2 * time.Hour) // c1 idle for 13h: expired
+	d1 := s.Create("d")
+	if has(c1) || !has(a1) || !has(a3) || !has(d1) {
+		t.Fatal("an expired session must make the room before any live one")
 	}
 	if len(s.m) != 3 {
 		t.Fatalf("store size = %d, want 3", len(s.m))
@@ -219,6 +236,60 @@ func TestAuthenticateHeaderBeatsCookie(t *testing.T) {
 	}
 }
 
+// The session cookie is __Host-cc_session under an https baseURL, which
+// another host under the same domain cannot set, and cc_session under http;
+// only the live scheme's name authenticates.
+func TestAuthenticateCookieName(t *testing.T) {
+	for _, tc := range []struct{ baseURL, name, other string }{
+		{"http://repo.example", SessionCookie, HostSessionCookie},
+		{"https://repo.example", HostSessionCookie, SessionCookie},
+	} {
+		a := New(&config.Config{BaseURL: tc.baseURL, Users: []config.User{{Name: "ci", PasswordHash: hash(t, "cipw")}}}, memTokens{})
+		a.Sessions = NewSessions()
+		id := a.Sessions.Create("ci")
+		if got := a.SessionCookieName(); got != tc.name {
+			t.Fatalf("%s: cookie name %q, want %q", tc.baseURL, got, tc.name)
+		}
+		for name, want := range map[string]string{tc.name: "ci", tc.other: ""} {
+			r := httptest.NewRequest(http.MethodGet, "/x", nil)
+			r.AddCookie(&http.Cookie{Name: name, Value: id})
+			if p, err := a.Authenticate(r); err != nil || p.User != want {
+				t.Errorf("%s, cookie %s: %+v %v, want user %q", tc.baseURL, name, p, err, want)
+			}
+		}
+	}
+}
+
+// A request may carry several cookies of the session name (on http another
+// host under the same domain can add some): unknown ids are skipped, so a
+// planted value neither shadows the user's session nor locks the user out,
+// and live sessions of two users are refused rather than one picked.
+func TestAuthenticateSeveralCookies(t *testing.T) {
+	a, _ := newAuth(t)
+	a.Sessions = NewSessions()
+	ci, ci2, other := a.Sessions.Create("ci"), a.Sessions.Create("ci"), a.Sessions.Create("reader")
+	for _, tc := range []struct {
+		ids  []string
+		want string
+	}{
+		{[]string{"planted", ci}, "ci"},
+		{[]string{ci, "planted"}, "ci"},
+		{[]string{ci, ci}, "ci"},
+		{[]string{ci, ci2}, "ci"},
+		{[]string{other, ci}, ""},
+		{[]string{ci, other}, ""},
+		{[]string{"planted", "junk"}, ""},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/x", nil)
+		for _, id := range tc.ids {
+			r.AddCookie(&http.Cookie{Name: SessionCookie, Value: id})
+		}
+		if p, err := a.Authenticate(r); err != nil || p.User != tc.want {
+			t.Errorf("%d cookies: %+v %v, want user %q", len(tc.ids), p, err, tc.want)
+		}
+	}
+}
+
 func TestAuthenticateNilSessionsIgnoresCookie(t *testing.T) {
 	a, _ := newAuth(t)
 	if p, err := a.Authenticate(cookieReq(http.MethodGet, "x")); err != nil || !p.Anonymous() {
@@ -250,13 +321,14 @@ func TestSessionPerUserCap(t *testing.T) {
 	}
 	b := s.Create("b")
 	c.advance(time.Minute)
-	a = append(a, s.Create("a")) // a already has 3: its oldest goes
-	if _, ok := s.User(a[0]); ok {
-		t.Fatal("a's oldest session not evicted")
+	s.User(a[0])                 // the oldest, but now the most recently used
+	a = append(a, s.Create("a")) // a already has 3: its least recently used (a[1]) goes
+	if _, ok := s.User(a[1]); ok {
+		t.Fatal("a's least recently used session not evicted")
 	}
-	for _, id := range a[1:] {
+	for _, id := range []string{a[0], a[2], a[3]} {
 		if _, ok := s.User(id); !ok {
-			t.Fatal("a's newer session evicted")
+			t.Fatal("a's more recently used session evicted")
 		}
 	}
 	if _, ok := s.User(b); !ok {

@@ -3,11 +3,14 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -56,6 +59,18 @@ var Version = "dev"
 // maxConcurrentFetches bounds simultaneous remote downloads (spec §7).
 const maxConcurrentFetches = 32
 
+// maxConns bounds the connections served at once. When it is reached,
+// server.LimitConns closes an idle or slow-header one to make room; only
+// while all serve requests do new ones wait in the listen backlog. Measured,
+// a connection costs 14-25 KiB (idle, sending headers, or stalled in a body)
+// plus about 1.6 times the header bytes it sent, at most ~40 KiB with
+// maxHeaderBytes: 1024 stay within ~40 MiB of the 80 MiB GOMEMLIMIT.
+const maxConns = 1024
+
+// maxHeaderBytes bounds a request's headers (431 above it). Go's default of
+// 1 MiB lets one connection cost ~1.5 MiB while it sends them.
+const maxHeaderBytes = 16 << 10
+
 // Option adjusts how New builds the App.
 type Option func(*options)
 
@@ -74,6 +89,10 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open metadata db: %w", err)
 	}
+	if err := useSecretKey(cfg, log, db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	blobs, err := openBlobStores(cfg, db)
 	if err != nil {
 		db.Close()
@@ -85,6 +104,52 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 		return nil, err
 	}
 	return a, nil
+}
+
+// secretKeyEnv holds the key that encrypts the stored secrets; secretKeyFile
+// in the config file names a file holding it instead (QA N-29).
+const secretKeyEnv = "COMMANDCENTER_SECRET_KEY"
+
+// useSecretKey gives db the secret key, if one is configured, and seals the
+// secrets still stored in plain text. Without a key secrets stay plain text,
+// as before, and one warning says so. The key is never logged.
+func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
+	val, src := os.Getenv(secretKeyEnv), secretKeyEnv
+	switch {
+	case val != "" && cfg.SecretKeyFile != "":
+		return fmt.Errorf("set %s or secretKeyFile, not both", secretKeyEnv)
+	case cfg.SecretKeyFile != "":
+		b, err := os.ReadFile(cfg.SecretKeyFile)
+		if err != nil {
+			// Without the path: it is the key itself when that was given
+			// here by mistake instead of the file holding it.
+			var pe *os.PathError
+			if errors.As(err, &pe) {
+				err = pe.Err
+			}
+			return fmt.Errorf("secretKeyFile: cannot read the file it names: %w", err)
+		}
+		val, src = string(b), "secretKeyFile "+cfg.SecretKeyFile
+	case val == "":
+		log.Warn("no secret key is configured: the SMTP password, the LDAP bind password and proxy remoteAuth " +
+			"credentials are stored in meta.db in plain text; set " + secretKeyEnv + " or secretKeyFile to encrypt them")
+		return nil
+	}
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(val))
+	if err == nil {
+		err = db.SetSecretKey(key)
+	}
+	if err != nil {
+		return fmt.Errorf("%s must hold 32 random bytes in base64 (make them with: head -c 32 /dev/urandom | base64)", src)
+	}
+	n, err := db.SealSecrets(context.Background())
+	if err != nil {
+		return fmt.Errorf("stored secrets: %w", err)
+	}
+	if n > 0 {
+		log.Info("encrypted the stored secrets that were plain text", "rows", n)
+	}
+	return nil
 }
 
 // openBlobStores seeds the default blob store (its tree stays at
@@ -129,7 +194,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	store := &repo.Store{Blobs: blobs, DB: db, Now: time.Now}
 	recorder := metrics.New(db)
 	store.Downloads = recorder.Download
-	fetcher := proxy.New(store, newHTTPClient(), maxConcurrentFetches)
+	fetcher := proxy.New(store, proxy.NewClient(), maxConcurrentFetches)
 	resolver := &resolve.Resolver{Store: store, Fetcher: fetcher}
 
 	authn, err := loadAccess(cfg, log, db)
@@ -151,7 +216,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("maven", "hosted", mavenH)
 	deleters.Register("npm", "hosted", npmH)
 	deleters.Register("pypi", "hosted", pypiH)
-	deleters.Register("cargo", "hosted", cargoH) // refuses: crates are immutable
+	deleters.Register("cargo", "hosted", cargoH) // the UI's delete only: cleanup skips Cargo hosted
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)
@@ -201,7 +266,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot(), "")
 	registry.OnDelete = func(name string) { warnUnknownRoleRepos(log, authn.Snapshot(), registry.Snapshot(), name) }
 
-	authn.Log = log // redacted LDAP failures
+	authn.Log = log // redacted LDAP failures, sign-in throttling
 	authn.Sessions = auth.NewSessions()
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, log: log}
@@ -230,6 +295,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Config:     cfg,
 		DataDir:    cfg.DataDir,
 		FetchSlots: fetcher.Slots,
+		Deleters:   deleters,
 	}
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
@@ -285,6 +351,7 @@ func loadRepositories(cfg *config.Config, log *slog.Logger, db *meta.DB, hasStor
 	if err != nil {
 		return nil, fmt.Errorf("load repositories: %w", err)
 	}
+	var plain []string // proxies whose remote URL holds credentials the secret key does not seal
 	// Older builds stored negative durations and groups listing a member
 	// twice; serve them (0-length cache, members once) instead of refusing
 	// to start. Only a create or update is held to the new rules (C1).
@@ -294,6 +361,14 @@ func loadRepositories(cfg *config.Config, log *slog.Logger, db *meta.DB, hasStor
 				"they are used as noted until the repository is edited",
 				"repo", defs[i].Name, "notes", strings.Join(notes, "; "))
 		}
+		if u, err := url.Parse(defs[i].Remote); err == nil && (u.User != nil || u.RawQuery != "") {
+			plain = append(plain, defs[i].Name)
+		}
+	}
+	if len(plain) > 0 && db.HasSecretKey() { // names only: the URL holds the secret
+		log.Warn("the remote URL of these proxies holds a user name, password or query, which the secret key does "+
+			"not encrypt: it is stored in meta.db in plain text; give a user name and password in remoteAuth instead",
+			"repos", strings.Join(plain, ", "))
 	}
 	if err := config.ValidateRepositories(defs); err != nil {
 		return nil, fmt.Errorf("stored repositories are invalid: %w", err)
@@ -345,6 +420,24 @@ func loadAccess(cfg *config.Config, log *slog.Logger, db *meta.DB) (*auth.Authen
 	if err != nil {
 		return nil, fmt.Errorf("load users, roles and settings: %w", err)
 	}
+	// A placeholder hash (the config example's) fails every login of its
+	// user without a word; say so on every start until it is reset (QA L-2).
+	users, err := db.ListUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load users: %w", err)
+	}
+	for _, u := range users {
+		if u.Source == meta.SourceLocal && u.Status == meta.StatusActive && !auth.HashUsable(u.PasswordHash) {
+			log.Warn("local user cannot sign in with a password: its stored password hash is not a bcrypt hash; "+
+				"set a new password in the web UI or with \"commandcenter user reset-password\"", "user", u.ID)
+		}
+	}
+	// Older builds stored a baseURL with user info, query or fragment (QA
+	// N-24); it is served as is until changed. The value is not logged: it
+	// may hold a password.
+	if err := meta.ValidateBaseURL(authn.Snapshot().Settings().BaseURL); err != nil {
+		log.Warn("the stored baseURL is no longer accepted; change it in the general settings", "err", err.Error())
+	}
 	return authn, nil
 }
 
@@ -363,26 +456,14 @@ func warnUnknownRoleRepos(log *slog.Logger, a *auth.Snapshot, s *repo.Snapshot, 
 	}
 }
 
-func newHTTPClient() *http.Client {
-	return &http.Client{Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConnsPerHost:   8,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
-		ForceAttemptHTTP2:     true,
-	}}
-}
+// shutdownTimeout bounds how long Serve drains requests once ctx is cancelled.
+// docker-compose.yml's stop_grace_period must be longer, or Docker kills the
+// process mid-drain (TestComposeStopGracePeriod).
+const shutdownTimeout = 30 * time.Second
 
-// Serve runs the HTTP server until ctx is cancelled, then drains requests for up to 30 s.
+// Serve runs the HTTP server until ctx is cancelled, then drains requests for up to shutdownTimeout.
 func (a *App) Serve(ctx context.Context) error {
-	srv := &http.Server{
-		Addr:              a.Config.Listen,
-		Handler:           a.Handler,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	srv := newHTTPServer(a.Handler)
 	// The counters are flushed periodically; the final flush runs on every way
 	// out, after the server stopped taking requests.
 	mctx, stopMetrics := context.WithCancel(ctx)
@@ -404,14 +485,31 @@ func (a *App) Serve(ctx context.Context) error {
 			a.log.Warn("could not flush metrics on shutdown", "err", logsafe.Err(err))
 		}
 	}()
+	// Users, roles and settings that another process changed apply within
+	// accessReloadEvery; the loop ends before Close closes the database.
+	rctx, stopReload := context.WithCancel(ctx)
+	reloadDone := make(chan struct{})
+	go func() {
+		defer close(reloadDone)
+		a.reloadAccess(rctx)
+	}()
+	defer func() {
+		stopReload()
+		<-reloadDone
+	}()
 	// The scheduler stops (cancelling a run in progress) before the final
 	// metrics flush and before Close closes the database.
 	a.Tasks.Start(ctx)
 	defer a.Tasks.Stop()
+	ln, err := net.Listen("tcp", a.Config.Listen)
+	if err != nil {
+		return err
+	}
+	ln = server.LimitConns(srv, ln, maxConns)
 	errc := make(chan error, 1)
 	go func() {
 		a.log.Info("listening", "addr", a.Config.Listen)
-		errc <- srv.ListenAndServe()
+		errc <- srv.Serve(ln)
 	}()
 	select {
 	case err := <-errc:
@@ -419,7 +517,7 @@ func (a *App) Serve(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 	a.log.Info("shutting down")
-	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {
 		srv.Close()
@@ -429,6 +527,44 @@ func (a *App) Serve(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// newHTTPServer is the HTTP server Serve runs h on.
+func newHTTPServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    maxHeaderBytes,
+	}
+}
+
+// accessReloadEvery is how often Serve reloads users, roles and settings, so
+// a change another process wrote ("commandcenter user reset-password" next
+// to a running server, QA N-2) applies without a restart. A reload reads
+// three small tables; polling SQLite's data_version would need a connection
+// of its own and changes on every write the server itself makes anyway.
+var accessReloadEvery = 5 * time.Second
+
+// reloadAccess reloads the auth snapshot every accessReloadEvery until ctx
+// ends. A failed reload keeps the current snapshot and is logged once per
+// run of failures.
+func (a *App) reloadAccess(ctx context.Context) {
+	tick := time.NewTicker(accessReloadEvery)
+	defer tick.Stop()
+	failing := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		err := a.Auth.Reload(ctx)
+		if err != nil && !failing && ctx.Err() == nil {
+			a.log.Warn("could not reload users, roles and settings; the loaded ones stay in force", "err", logsafe.Err(err))
+		}
+		failing = err != nil
+	}
 }
 
 // GC runs garbage collection over every blob store and returns the total
@@ -451,10 +587,10 @@ func (a *App) GC(ctx context.Context, minAge time.Duration) (int, error) {
 	return total, errors.Join(errs...)
 }
 
-// gcScope returns the repositories whose assets keep blobs of the named store
-// alive: those repo.StoreOf assigns to it, plus every repository whose store
-// cannot be resolved (defense in depth: GC never deletes for such a
-// repository, whichever store its blobs ended up in).
+// gcScope returns the repositories whose assets keep blobs of a named store
+// (not the default one, see GCStore) alive: those repo.StoreOf assigns to it,
+// plus every repository whose store cannot be resolved (defense in depth: GC
+// never deletes for such a repository, whichever store its blobs ended up in).
 func (a *App) gcScope(storeName string) []string {
 	snap := a.Registry.Snapshot()
 	return append(repo.ReposForStore(snap, storeName), repo.OrphanRepos(snap, a.Store.HasStore)...)
@@ -464,6 +600,9 @@ func (a *App) gcScope(storeName string) []string {
 // references and that are older than minAge, deleting only from that store's
 // *blob.Store. "In use" is scoped to the store's repositories (gcScope) so that a blob
 // shared by name across stores (dedup is per store) is never wrongly removed.
+// The default store keeps every blob any asset references: a build without
+// named stores (an unsupported downgrade) writes all repositories' blobs
+// there, and those may be the only copies (QA N-30).
 // The age guard protects uploads written but not yet recorded; the ModTime and
 // in-use re-check immediately before removal protects uploads that raced the
 // walk.
@@ -475,14 +614,24 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 	if bs == nil {
 		return 0, fmt.Errorf("unknown blob store %q", storeName)
 	}
-	repos := a.gcScope(storeName)
+	// The walk below sees only blobs; temp files a killed process left are swept here.
+	if n, err := bs.SweepTmp(); err != nil {
+		a.log.Warn("could not sweep stale temp files", "blobStore", storeName, "removed", n, "err", logsafe.Err(err))
+	} else if n > 0 {
+		a.log.Info("removed stale temp files", "blobStore", storeName, "removed", n)
+	}
+	inUse := func(sha string) (bool, error) { return a.DB.BlobInUse(ctx, sha) }
+	if storeName != repo.DefaultStore {
+		repos := a.gcScope(storeName)
+		inUse = func(sha string) (bool, error) { return a.DB.BlobInUseInRepos(ctx, sha, repos) }
+	}
 	cutoff := time.Now().Add(-minAge)
 	removed := 0
 	err := bs.Walk(func(sha string, mod time.Time) error {
 		if mod.After(cutoff) {
 			return nil
 		}
-		used, err := a.DB.BlobInUseInRepos(ctx, sha, repos)
+		used, err := inUse(sha)
 		if err != nil || used {
 			return err
 		}
@@ -498,7 +647,7 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		if mod.After(cutoff) {
 			return nil
 		}
-		used, err = a.DB.BlobInUseInRepos(ctx, sha, repos)
+		used, err = inUse(sha)
 		if err != nil || used {
 			return err
 		}

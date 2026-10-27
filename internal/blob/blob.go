@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -36,14 +37,56 @@ type Store struct {
 
 var bufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
 
-// Open prepares the blob directories under root.
+// tmpPrefix names Write's temp files; SweepTmp removes nothing else, since a
+// store may be created in a directory that holds other files.
+const tmpPrefix = "up-"
+
+// tmpMaxAge is how long a temp file may go unmodified before SweepTmp treats
+// it as the leftover of a process killed mid-write. A live write touches its
+// file at least once per upload or fetch idle timeout (minutes), so a CLI
+// command started next to a running server never removes a write in progress.
+const tmpMaxAge = time.Hour
+
+// Open prepares the blob directories under root and sweeps stale temp files.
 func Open(root string) (*Store, error) {
 	for _, d := range []string{"blobs/sha256", "tmp"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
 			return nil, err
 		}
 	}
-	return &Store{root: root}, nil
+	s := &Store{root: root}
+	s.SweepTmp() // best effort: what it cannot remove now, the next sweep retries
+	return s, nil
+}
+
+// SweepTmp removes Write's temp files that have not been modified for
+// tmpMaxAge and returns how many it removed. Write removes its temp file on
+// every return, so only a killed process (SIGKILL, OOM, a stop timeout)
+// leaves one behind.
+func (s *Store) SweepTmp() (int, error) {
+	dir := filepath.Join(s.root, "tmp")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	cutoff := time.Now().Add(-tmpMaxAge)
+	n := 0
+	var errs []error
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), tmpPrefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+			n++
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return n, errors.Join(errs...)
 }
 
 func (s *Store) path(sha string) string {
@@ -53,7 +96,7 @@ func (s *Store) path(sha string) string {
 // Write streams r to a temp file while hashing it, then commits the file
 // under its SHA-256. Identical content is stored once.
 func (s *Store) Write(r io.Reader) (Sums, error) {
-	f, err := os.CreateTemp(filepath.Join(s.root, "tmp"), "up-*")
+	f, err := os.CreateTemp(filepath.Join(s.root, "tmp"), tmpPrefix+"*")
 	if err != nil {
 		return Sums{}, mapErr(err)
 	}

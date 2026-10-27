@@ -16,6 +16,7 @@ import (
 	"mime"
 	"net"
 	"net/mail"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -184,6 +185,16 @@ func TestSendNowPlain(t *testing.T) {
 		msg.Header.Get("Date") == "" || !strings.HasPrefix(msg.Header.Get("Content-Type"), "text/plain; charset=utf-8") ||
 		msg.Header.Get("MIME-Version") != "1.0" {
 		t.Fatalf("headers: %v", msg.Header)
+	}
+	// QA N-28: our own Message-ID, unique per message, at the From domain.
+	id := msg.Header.Get("Message-ID")
+	if !regexp.MustCompile(`^<[A-Z2-7]{26}@example\.com>$`).MatchString(id) {
+		t.Fatalf("Message-ID %q", id)
+	}
+	from, _ := mail.ParseAddress("cc@example.com")
+	again, err := mail.ReadMessage(strings.NewReader(string(buildMessage(from, []*mail.Address{from}, "s", "b", time.Now()))))
+	if err != nil || again.Header.Get("Message-ID") == id {
+		t.Fatalf("second Message-ID %q (err %v) repeats %q", again.Header.Get("Message-ID"), err, id)
 	}
 	raw, _ := io.ReadAll(msg.Body)
 	dec, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(string(raw)), ""))

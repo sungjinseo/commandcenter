@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/repo"
@@ -154,6 +155,104 @@ func TestServeShutsDownOnCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not return after cancel")
+	}
+}
+
+// Docker sends SIGKILL 10 s after SIGTERM unless the compose file says
+// otherwise, which cuts the drain short: uploads fail and leave temp files.
+func TestComposeStopGracePeriod(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Services map[string]struct {
+			StopGracePeriod string `yaml:"stop_grace_period"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(b, &f); err != nil {
+		t.Fatal(err)
+	}
+	grace, err := time.ParseDuration(f.Services["commandcenter"].StopGracePeriod)
+	if err != nil {
+		t.Fatalf("stop_grace_period: %v", err)
+	}
+	if grace <= shutdownTimeout {
+		t.Fatalf("stop_grace_period %v, want more than the %v drain", grace, shutdownTimeout)
+	}
+}
+
+// Go's default MaxHeaderBytes (1 MiB) lets one connection that is still
+// sending headers cost ~1.5 MiB, so maxConns of them would not fit the
+// container: headers above maxHeaderBytes are refused with 431.
+func TestHTTPServerBoundsHeaders(t *testing.T) {
+	ts := httptest.NewUnstartedServer(nil)
+	ts.Config = newHTTPServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	ts.Start()
+	defer ts.Close()
+	for size, want := range map[int]int{8 << 10: http.StatusOK, 32 << 10: http.StatusRequestHeaderFieldsTooLarge} {
+		req, _ := http.NewRequest("GET", ts.URL, nil)
+		req.Header.Set("X-Pad", strings.Repeat("a", size))
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("%d KiB of headers: %d, want %d", size>>10, resp.StatusCode, want)
+		}
+	}
+}
+
+// While all maxConns slots are busy, an HTTP probe waits like any client: a
+// failing liveness probe would restart the pod and cut every transfer. The
+// kernel completes a TCP probe without the server accepting it; readiness
+// and startup still ask the HTTP server.
+func TestKubernetesLivenessBypassesConnCap(t *testing.T) {
+	f, err := os.Open(filepath.Join("..", "..", "deploy", "kubernetes", "commandcenter.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	type probe struct {
+		HTTPGet   *struct{ Path string } `yaml:"httpGet"`
+		TCPSocket *struct{ Port string } `yaml:"tcpSocket"`
+	}
+	type container struct {
+		Startup   probe `yaml:"startupProbe"`
+		Readiness probe `yaml:"readinessProbe"`
+		Liveness  probe `yaml:"livenessProbe"`
+	}
+	var cs []container
+	for dec := yaml.NewDecoder(f); ; {
+		var doc struct {
+			Kind string
+			Spec struct {
+				Template struct {
+					Spec struct{ Containers []container }
+				}
+			}
+		}
+		if err := dec.Decode(&doc); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if doc.Kind == "StatefulSet" {
+			cs = append(cs, doc.Spec.Template.Spec.Containers...)
+		}
+	}
+	if len(cs) != 1 {
+		t.Fatalf("%d StatefulSet containers, want 1", len(cs))
+	}
+	c := cs[0]
+	if c.Liveness.TCPSocket == nil || c.Liveness.TCPSocket.Port != "http" || c.Liveness.HTTPGet != nil {
+		t.Errorf("livenessProbe %+v, want only tcpSocket on port http", c.Liveness)
+	}
+	for name, p := range map[string]probe{"startupProbe": c.Startup, "readinessProbe": c.Readiness} {
+		if p.HTTPGet == nil || p.HTTPGet.Path != "/service/rest/v1/status" {
+			t.Errorf("%s %+v, want httpGet /service/rest/v1/status", name, p)
+		}
 	}
 }
 

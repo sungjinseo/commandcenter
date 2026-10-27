@@ -1,8 +1,10 @@
 package npm
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/hex"
@@ -11,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -235,6 +238,101 @@ func verifyTarball(shasum, integrity string, sums blob.Sums) error {
 		}
 	}
 	return nil
+}
+
+// Bounds on the walk of checkTarball; tests may lower them. The byte cap bounds
+// the work for any archive (every entry costs a 512-byte header) and neither
+// depends on a size the archive claims.
+var (
+	maxTarballBytes int64 = 1 << 30 // uncompressed, all new tarballs of one publish together
+	maxPackageJSON  int64 = 1 << 20
+)
+
+// checkTarball verifies that r is a gzip+tar npm tarball for name@version.
+// npm extracts with the first path component stripped (npm pack writes
+// package/), so exactly one entry must land on package.json: a regular file of
+// at most maxPackageJSON bytes with that name and version. It reads at most
+// *left bytes uncompressed and subtracts what it read, and it stops between
+// entries once ctx is done. Errors other than ctx's are 400s.
+func checkTarball(ctx context.Context, r io.Reader, name, version string, left *int64) error {
+	bad := func(format string, a ...any) error {
+		return repo.Errorf(http.StatusBadRequest, "invalid tarball for %s@%s: %s", name, version, fmt.Sprintf(format, a...))
+	}
+	gz, err := gzip.NewReader(r)
+	if err == io.EOF {
+		return bad("the file is empty")
+	}
+	if err != nil {
+		return bad("not a gzip archive")
+	}
+	defer gz.Close()
+	lr := &io.LimitedReader{R: gz, N: *left + 1}
+	defer func() { *left = lr.N - 1 }()
+	broken := func(err error) error {
+		if lr.N <= 0 {
+			return bad("more than %d bytes uncompressed in this publish", maxTarballBytes)
+		}
+		return bad("not a tar archive: %v", err)
+	}
+	tr := tar.NewReader(lr)
+	found := false
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return broken(err)
+		}
+		if _, rest, ok := strings.Cut(h.Name, "/"); !ok || path.Clean("/"+rest) != "/package.json" {
+			continue
+		}
+		if found {
+			return bad("more than one package.json in the top directory")
+		}
+		found = true
+		if h.Typeflag != tar.TypeReg {
+			return bad("%q is not a regular file", h.Name)
+		}
+		if h.Size > maxPackageJSON {
+			return bad("%q is larger than %d bytes", h.Name, maxPackageJSON)
+		}
+		data := make([]byte, h.Size)
+		if _, err := io.ReadFull(tr, data); err != nil {
+			return broken(err)
+		}
+		var pj struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(bytes.TrimPrefix(data, []byte("\uFEFF")), &pj); err != nil {
+			return bad("%q: %v", h.Name, err)
+		}
+		if pj.Name != name {
+			return bad("%q has name %q", h.Name, pj.Name)
+		}
+		if pj.Version != version && cleanVersion(pj.Version) != version {
+			return bad("%q has version %q", h.Name, pj.Version)
+		}
+	}
+	if lr.N <= 0 {
+		return broken(nil)
+	}
+	if !found {
+		return bad("no package.json in its top directory (npm packs files under package/)")
+	}
+	return nil
+}
+
+// cleanVersion is the version npm publishes for a package.json version
+// (semver.clean): surrounding spaces, a leading "v" or "=" and build metadata
+// are dropped.
+func cleanVersion(v string) string {
+	v, _, _ = strings.Cut(strings.TrimLeft(strings.TrimSpace(v), "=v"), "+")
+	return v
 }
 
 // deprecationOf returns the deprecated message of stored version attrs ("" if

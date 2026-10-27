@@ -238,6 +238,40 @@ func TestLDAPTestEndpoint(t *testing.T) {
 	}
 }
 
+// Re-review rr-auth-1: sign-in refuses a name that is not plain printable
+// ASCII (auth.PlainLoginName) with the generic 401, before any realm. The
+// LDAP test, the admin's tool for "why can't this user sign in", applies
+// the same rule to the name as sent: it never reports such a name as
+// working, and its first step says why sign-in refuses it.
+func TestLDAPTestAgreesWithSignIn(t *testing.T) {
+	e, s := ldapEnv(t)
+	s.Add(ldaptest.Entry{DN: "uid=juergen,ou=people,dc=example,dc=org", Password: "j-pw", Attrs: map[string][]string{
+		"uid": {"juergen"}, "cn": {"Jürgen"}, "mail": {"jürgen@example.org"}}})
+	wantStatus(t, e.admin(t, "PUT", "/-/api/realms/ldap", ldapBody(s.URL("ldap"), `,"userFilter":"(mail={user})"`)), http.StatusOK)
+	wantStatus(t, e.admin(t, "PUT", "/-/api/realms", `{"realms":[{"id":"local","enabled":true},{"id":"token","enabled":true},{"id":"ldap","enabled":true}]}`), http.StatusOK)
+	for _, c := range []struct{ user, pw string }{
+		{"jürgen@example.org", "j-pw"},     // the filter matches a non-ASCII value
+		{" alice@example.org", "alice-pw"}, // outer spaces, as an API client sends them (the UI trims)
+		{"alice@example.org ", "alice-pw"},
+		{"alice@example.org", "alice-pw"}, // a plain name works in both
+	} {
+		body := fmt.Sprintf(`{"user":%q,"password":%q}`, c.user, c.pw)
+		r := e.admin(t, "POST", "/-/api/realms/ldap/test", body)
+		wantStatus(t, r, http.StatusOK)
+		m := r.json(t)
+		login := e.req(t, "POST", "/-/api/login", body, "", nil, true)
+		refused := login.status != http.StatusOK
+		if (m["ok"] == true) == refused {
+			t.Errorf("%q: the LDAP test answers %s, but signing in answers %d %s", c.user, r.body, login.status, login.body)
+			continue
+		}
+		first := m["steps"].([]any)[0].(map[string]any)
+		if refused != (first["step"] == "name") || refused && (first["ok"] != false || !strings.Contains(r.body, "sign-in refuses this name")) {
+			t.Errorf("%q: %s", c.user, r.body)
+		}
+	}
+}
+
 func TestLDAPLoginThroughAPI(t *testing.T) {
 	e, s := ldapEnv(t)
 	configureLDAP(t, e, s)
@@ -247,7 +281,7 @@ func TestLDAPLoginThroughAPI(t *testing.T) {
 	alice := e.loginCookie(t, "alice", "alice-pw")
 	r := e.req(t, "GET", "/-/api/me", "", "", alice, false)
 	m := r.json(t)
-	if m["user"] != "alice" || m["admin"] != true || m["realm"] != "LDAP" || fmt.Sprint(m["roles"]) != "[admin]" {
+	if m["user"] != "alice" || m["owner"] != "ldap:alice" || m["admin"] != true || m["realm"] != "LDAP" || fmt.Sprint(m["roles"]) != "[admin]" {
 		t.Fatalf("me: %s", r.body)
 	}
 	// Basic auth with the LDAP password.
@@ -286,6 +320,10 @@ func TestLDAPLoginThroughAPI(t *testing.T) {
 	r = e.req(t, "GET", "/-/api/tokens", "", "", bobCookie, false)
 	if !strings.Contains(r.body, bobID) || strings.Contains(r.body, id) || !strings.Contains(r.body, `"user":"ldap:bob"`) {
 		t.Fatalf("bob's list: %s", r.body)
+	}
+	// The token page keeps the tokens whose user is /me's owner, not its user.
+	if me := e.req(t, "GET", "/-/api/me", "", "", bobCookie, false).json(t); me["owner"] != "ldap:bob" || me["user"] != "bob" {
+		t.Fatalf("bob's me: %v", me)
 	}
 	wantStatus(t, e.req(t, "DELETE", "/-/api/tokens/"+id, "", "", bobCookie, true), http.StatusNotFound)
 	wantStatus(t, e.req(t, "DELETE", "/-/api/tokens/"+bobID, "", "", bobCookie, true), http.StatusNoContent)
@@ -383,6 +421,7 @@ func TestLockoutRestorableAdmins(t *testing.T) {
 	if err := e.ui.Auth.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	admin = e.cookieFor("admin") // the reload ended the sessions of admin, whose password changed (QA N-2)
 	wantStatus(t, as("PUT", "/-/api/users/ci", `{"roles":["deployer","admin"],"status":"active"}`), http.StatusOK)
 	wantStatus(t, as("POST", "/-/api/users", `{"id":"rescue","password":"longenough","roles":["admin"]}`), http.StatusCreated)
 	// ci and rescue are restorable now: removing one is fine, both is not.

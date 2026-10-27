@@ -2,7 +2,7 @@
 // LDAP settings, and the account page with the password change. The server
 // enforces every rule; these screens only collect input and show its answers.
 // Passwords are cleared from their inputs as soon as they are read.
-//   #admin/security/users[:create|:<id>]
+//   #admin/security/users[:create|:<id>|:ldap%3A<id>]
 //   #admin/security/roles[:create|:<id>]
 //   #admin/security/realms
 //   #user/account
@@ -70,13 +70,16 @@ const roleItems = (roles) => roles.map((r) => [r.id, r.id]);
 // ---- users -----------------------------------------------------------------------
 
 // mergeUsers joins the stored rows and the directory rows of /-/api/users:
-// a user with both keeps the stored record and the directory's roles as the
-// effective ones.
+// a directory user with an override row (stored, source "ldap") keeps that
+// record and the directory's roles as the effective ones. A local user with
+// the same id is another principal, so the directory user keeps its own row,
+// keyed (in its link) by its owner key "ldap:<id>".
 function mergeUsers(list) {
   const stored = new Map(), dir = new Map();
   for (const u of list) (u.directory ? dir : stored).set(u.id, u);
-  const out = [...stored.values()].map((u) => Object.assign({}, u, { eff: dir.has(u.id) ? dir.get(u.id).roles : u.roles }));
-  for (const [id, u] of dir) if (!stored.has(id)) out.push(Object.assign({}, u, { eff: u.roles }));
+  const over = (id) => stored.has(id) && stored.get(id).source === "ldap";
+  const out = [...stored.values()].map((u) => Object.assign({}, u, { key: u.id, eff: over(u.id) && dir.has(u.id) ? dir.get(u.id).roles : u.roles }));
+  for (const [id, u] of dir) if (!over(id)) out.push(Object.assign({}, u, { key: stored.has(id) ? "ldap:" + id : id, eff: u.roles }));
   return out;
 }
 const realmBadge = (u) => (u.source === "ldap" ? badge(realmName("ldap"), "purple") : badge(realmName("local")));
@@ -91,12 +94,12 @@ async function userList(view) {
   const users = mergeUsers((await api("users")).users || []);
   if (!isLive()) return;
   const rows = users.map((u) => row([
-    [h("a", { href: userLink(u.id) }, h("strong", null, u.id)), "name"],
+    [h("a", { href: userLink(u.key) }, h("strong", null, u.id)), "name"],
     [u.email || dash],
     [realmBadge(u)],
     [roleBadges(u.eff)],
     [userState(u)],
-    [h("a", { class: "btn small", href: userLink(u.id) }, t("common.details")), "act"],
+    [h("a", { class: "btn small", href: userLink(u.key) }, t("common.details")), "act"],
   ], [u.id, u.name, u.email].join(" ")));
   const f = filterBar(rows, t("users.filter"), "users.count");
   put(view,
@@ -202,7 +205,7 @@ async function userDetail(view, id) {
   const isLive = alive();
   const [ul, rl] = await Promise.all([api("users"), api("roles")]);
   if (!isLive()) return;
-  const u = mergeUsers(ul.users || []).find((x) => x.id === id);
+  const u = mergeUsers(ul.users || []).find((x) => x.key === id);
   const back = h("a", { class: "btn", href: userLink() }, t("users.back"));
   if (!u) {
     put(view, pageHead(t("nav.users"), null, acts(back), eyebrow()), notFound(t("users.notFound", { id })));
@@ -216,11 +219,29 @@ async function userDetail(view, id) {
     effective.length ? effective.map((r) => h("div", { class: "listrow" }, h("a", { href: roleLink(r) }, h("strong", null, r)), r === "admin" ? badge(t("users.isAdmin"), "amber") : null))
       : h("div", { class: "empty" }, t("users.noRoles")),
     notice(t("users.tokenNote"))]);
+  // revoke ends every API token of the user (local and LDAP); a password
+  // reset leaves them valid.
+  const revoke = button(t("users.revoke"), "danger");
+  revoke.addEventListener("click", async () => {
+    if (!(await confirmDelete(t("users.revokeText", { id: u.id }), t("users.revokeTitle"), t("users.revoke")))) return;
+    fs.clear();
+    revoke.disabled = true;
+    try {
+      const out = await api("users/" + enc(u.id) + "/tokens", { method: "DELETE" });
+      if (!isLive()) return;
+      put(fs.ok, t("users.revoked", { n: out.revoked }));
+      fs.ok.hidden = false;
+    } catch (e) {
+      if (isLive()) failWith(fs, e, t("users.revokeErr"));
+    } finally {
+      revoke.disabled = false;
+    }
+  });
   let head;
   if (!stored) {
     put(form, kv(t("users.id"), u.id), kv(t("users.name"), u.name), kv(t("users.email"), u.email), kv(t("users.realm"), realmBadge(u)),
       kv(t("users.roles"), h("span", null, roleBadges(u.eff))), notice(t("users.dirNote")));
-    head = acts(back);
+    head = acts(back, revoke);
   } else {
     const nameIn = textIn(u.name, { disabled: ldap, maxlength: 200 });
     const emailIn = textIn(u.email, { disabled: ldap, maxlength: 200 });
@@ -284,7 +305,7 @@ async function userDetail(view, id) {
       }
       if (isLive()) location.hash = userLink();
     });
-    head = acts(back, reset, toggle, del);
+    head = acts(back, reset, revoke, toggle, del);
   }
   put(view, pageHead(u.id, sub(t("users.realmSub", { realm: realmName(ldap ? "ldap" : "local") })), head, eyebrow()),
     fs.ok, h("div", { class: "two" }, card(t("users.info"), t("users.infoSub"), form), access));
@@ -396,7 +417,7 @@ export async function viewRoles(view, id) {
     put(main, fs.err, fs.ok,
       card(creating ? t("roles.createTitle") : cur.id, t("roles.infoSub"), fields(
         field(t("roles.id"), idIn, creating ? t("roles.idHelp") : null, { req: creating }), field(t("roles.desc"), descIn))),
-      card(t("roles.privs"), t("roles.privsEditSub"), [rowsBox, h("div", { class: "actions" }, addBtn)]),
+      card(t("roles.privs"), t("roles.privsEditSub"), [rowsBox, h("div", { class: "actions" }, addBtn), notice(t("roles.overwriteNote"))]),
       h("div", { class: "actions end" }, cancel, save));
     main.onsubmit = async (ev) => {
       ev.preventDefault();
@@ -431,7 +452,7 @@ export async function viewRoles(view, id) {
 
 // ---- realms and LDAP -------------------------------------------------------------
 
-const STEPS = { connect: "ldap.step.connect", starttls: "ldap.step.starttls", bind: "ldap.step.bind", search: "ldap.step.search", userBind: "ldap.step.userBind", groups: "ldap.step.groups" };
+const STEPS = { name: "ldap.step.name", connect: "ldap.step.connect", starttls: "ldap.step.starttls", bind: "ldap.step.bind", search: "ldap.step.search", userBind: "ldap.step.userBind", groups: "ldap.step.groups" };
 
 export async function viewRealms(view) {
   const isLive = alive();
@@ -502,7 +523,7 @@ export async function viewRealms(view) {
   const bindPw = h("input", { type: "password", autocomplete: "new-password", placeholder: ld.bindPasswordSet ? t("rf.unchanged") : "" });
   const clearPw = ld.bindPasswordSet ? h("input", { type: "checkbox" }) : null;
   if (clearPw) clearPw.addEventListener("change", () => { bindPw.disabled = clearPw.checked; if (clearPw.checked) bindPw.value = ""; });
-  const timeout = textIn(ld.timeoutSeconds || "", { type: "number", min: 1, max: 300 });
+  const timeout = textIn(ld.timeoutSeconds || "", { type: "number", min: 1, max: 60 });
   const baseDN = textIn(ld.userBaseDN, { maxlength: 300 });
   const filter = textIn(ld.userFilter, { placeholder: "(uid={user})", class: "mono", maxlength: 300 });
   const idAttr = textIn(ld.userIdAttr, { placeholder: "uid" });
@@ -657,7 +678,7 @@ export async function viewAccount(view) {
       fs.ok.hidden = true;
       const c = cur.value, a = pw.value, b = pw2.value;
       cur.value = pw.value = pw2.value = ""; // the secrets never stay in the page
-      const msg = !c ? t("acct.e.current") : runes(a) < 8 ? t("access.e.pwShort") : a !== b ? t("access.e.pwMatch") : "";
+      const msg = !c ? t("acct.e.current") : runes(a) < 8 ? t("access.e.pwShort") : a !== b ? t("access.e.pwMatch") : a === c ? t("acct.e.same") : "";
       if (msg) { fs.show([msg], t("acct.errOne")); return; }
       save.disabled = true;
       try {
@@ -667,7 +688,7 @@ export async function viewAccount(view) {
         fs.ok.hidden = false;
       } catch (e) {
         if (e.status === 401 || (e.status === 403 && !WRONG_PW.test(e.message))) handleError(e);
-        else fs.show(e.status === 403 ? [t("acct.wrong")] : errList(e), t("acct.errOne"));
+        else fs.show(e.status === 403 ? [t("acct.wrong")] : e.status === 429 ? [t("login.wait", { s: (e.data && e.data.retryAfter) || 60 })] : errList(e), t("acct.errOne"));
       } finally {
         save.disabled = false;
       }
@@ -679,6 +700,7 @@ export async function viewAccount(view) {
       card(t("users.info"), t("users.infoSub"), [
         kv(t("users.id"), me.user),
         kv(t("users.realm"), badge(realmName(ldap ? "ldap" : "local"), ldap ? "purple" : null)),
+        ldap ? kv(t("acct.owner"), h("code", null, me.owner)) : null,
         kv(t("users.roles"), h("span", null, roleBadges(me.roles))),
         kv(t("users.admin"), adminBadge(me.admin)),
       ]), pwCard));

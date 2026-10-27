@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -169,11 +171,16 @@ func (h *jsonErrHandler) WriteError(w http.ResponseWriter, r *http.Request, err 
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+// TestDenyUsesHandlerErrorWriter: a caller who may read the repository (here
+// anonymously) gets a denied write in its format; one who may not read it
+// gets the plain answer of a missing repository
+// (TestMissingRepositoryAnswersLikeUnreadable).
 func TestDenyUsesHandlerErrorWriter(t *testing.T) {
 	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
 	cfg := &config.Config{
-		Users:        []config.User{{Name: "reader", PasswordHash: string(h)}},
-		Repositories: []config.Repository{{Name: "n", Format: "npm", Type: "hosted"}},
+		AnonymousRead: true,
+		Users:         []config.User{{Name: "reader", PasswordHash: string(h)}},
+		Repositories:  []config.Repository{{Name: "n", Format: "npm", Type: "hosted"}},
 	}
 	s := &Server{
 		Registry: repo.NewRegistry(nil, cfg.Repositories),
@@ -737,5 +744,257 @@ func TestHandlerIdleBodyOverridesServerIdle(t *testing.T) {
 	io.WriteString(c, "def")
 	if b := <-got; b != "abcdef" {
 		t.Fatalf("handler got %q", b)
+	}
+}
+
+// stall sends head with "Content-Length: 1000" and only 3 body bytes, then
+// waits: the server must answer want and close the connection.
+func stall(addr, head string, want int) error {
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	io.WriteString(c, head+"Content-Length: 1000\r\n\r\nabc")
+	c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	br := bufio.NewReader(c)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		return fmt.Errorf("%q: %v", head, err)
+	}
+	_, err = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != want || err != nil {
+		return fmt.Errorf("%q: status %d (body err %v), want %d", head, resp.StatusCode, err, want)
+	}
+	if _, err := br.ReadByte(); err != io.EOF {
+		return fmt.Errorf("%q: connection not closed: %v", head, err)
+	}
+	return nil
+}
+
+// QA N-5: unauthenticated requests that stall their body cannot pile up:
+// at most the cap are served at once, and each is answered and closed.
+func TestStalledBodiesAreCappedAndReleased(t *testing.T) {
+	const limit, clients = 4, 20
+	cfg := &config.Config{AnonymousRead: true, Repositories: []config.Repository{{Name: "r", Format: "maven", Type: "hosted"}}}
+	s := &Server{Registry: repo.NewRegistry(nil, cfg.Repositories), Handlers: map[string]repo.Handler{"maven": readAllHandler{}}, Auth: auth.New(cfg, noTokens{}),
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil)), UploadIdle: 200 * time.Millisecond}
+	ts := httptest.NewUnstartedServer(s.Handler())
+	ts.Listener = LimitConns(ts.Config, ts.Listener, limit)
+	var mu sync.Mutex
+	open, peak := 0, 0
+	free := ts.Config.ConnState
+	ts.Config.ConnState = func(c net.Conn, st http.ConnState) {
+		mu.Lock()
+		switch st {
+		case http.StateNew:
+			open++
+			peak = max(peak, open)
+		case http.StateClosed:
+			open--
+		}
+		mu.Unlock()
+		free(c, st)
+	}
+	ts.Start()
+	defer ts.Close()
+	errs := make(chan error, clients)
+	for range clients {
+		go func() { errs <- stall(ts.Listener.Addr().String(), "PUT /repository/r/x HTTP/1.1\r\nHost: x\r\n", 401) }()
+	}
+	for range clients {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > limit {
+		t.Fatalf("%d connections served at once, want at most %d", peak, limit)
+	}
+}
+
+// QA N-8: a body that stalls for the idle timeout is answered 408, not 500,
+// and the connection is closed.
+func TestUploadIdleTimeoutAnswers408(t *testing.T) {
+	srv := idleServer(t, 200*time.Millisecond)
+	// "admin:pw"
+	if err := stall(srv.Listener.Addr().String(), "PUT /repository/r/x HTTP/1.1\r\nHost: x\r\nAuthorization: Basic YWRtaW46cHc=\r\n", 408); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// QA N-5: a GET whose body stalls does not hold the connection either, also
+// when its response is long enough to be sent while the handler runs.
+func TestStalledBodyOnGetIsReleased(t *testing.T) {
+	srv := slowServer(t, handlerFunc(func(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) {
+		io.WriteString(w, strings.Repeat("x", 64<<10))
+	}))
+	if err := stall(srv.Listener.Addr().String(), "GET /repository/r/x HTTP/1.1\r\nHost: x\r\n", 200); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// capServer serves repository r with handler under a cap of n connections and
+// without net/http's header and idle timeouts: only the cap frees a slot.
+func capServer(t *testing.T, n int, handler repo.Handler) *httptest.Server {
+	t.Helper()
+	cfg := &config.Config{AnonymousRead: true, Repositories: []config.Repository{{Name: "r", Format: "maven", Type: "hosted"}}}
+	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	cfg.Users = []config.User{{Name: "admin", PasswordHash: string(h), Roles: []string{"admin"}}}
+	s := &Server{Registry: repo.NewRegistry(nil, cfg.Repositories), Handlers: map[string]repo.Handler{"maven": handler}, Auth: auth.New(cfg, noTokens{}),
+		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ts := httptest.NewUnstartedServer(s.Handler())
+	ts.Listener = LimitConns(ts.Config, ts.Listener, n)
+	ts.Start()
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// getStatus asks for the status page on a new connection, which it returns
+// open, idle between requests, once the 200 came within a second.
+func getStatus(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	io.WriteString(c, "GET /service/rest/v1/status HTTP/1.1\r\nHost: x\r\n\r\n")
+	c.SetReadDeadline(time.Now().Add(time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		t.Fatalf("status not answered within 1 s: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status answered %d", resp.StatusCode)
+	}
+	return c
+}
+
+// closedByServer reports whether the server closed c within a second.
+func closedByServer(c net.Conn) bool {
+	c.SetReadDeadline(time.Now().Add(time.Second))
+	_, err := c.Read(make([]byte, 1))
+	var ne net.Error
+	return err != nil && !(errors.As(err, &ne) && ne.Timeout())
+}
+
+// QA N-5: once the cap is reached by connections that cost their clients
+// nothing to hold, idle between requests or never finishing their headers, a
+// new client is still served at once: the one idle or waiting the longest is
+// closed to make room. An upload in progress is never closed for it.
+func TestConnCapShedsIdleAndSlowHeaderConns(t *testing.T) {
+	reading := make(chan struct{})
+	got := make(chan int64, 1)
+	ts := capServer(t, 3, handlerFunc(func(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) {
+		close(reading)
+		n, err := io.Copy(io.Discard, r.Body)
+		got <- n
+		if err != nil {
+			repo.WriteError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	addr := ts.Listener.Addr().String()
+
+	// A signed-in upload that keeps coming: 32 KiB every 20 ms until stop.
+	pr, pw := io.Pipe()
+	stop := make(chan struct{})
+	end := sync.OnceFunc(func() { close(stop) })
+	defer end() // also on t.Fatal: ts.Close waits for the upload
+	go func() {
+		defer pw.Close()
+		chunk := make([]byte, 32<<10)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			if _, err := pw.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	upload := make(chan int, 1)
+	go func() {
+		req, _ := http.NewRequest("PUT", ts.URL+"/repository/r/big.jar", pr)
+		req.SetBasicAuth("admin", "pw")
+		resp, err := ts.Client().Do(req)
+		if err != nil {
+			upload <- 0
+			return
+		}
+		resp.Body.Close()
+		upload <- resp.StatusCode
+	}()
+	<-reading
+	idle := getStatus(t, addr)
+	slow, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer slow.Close()
+	io.WriteString(slow, "GET /service/rest/v1/status HTTP/1.1\r\nHost: x\r\n") // headers never finished
+	time.Sleep(shedAfter + 100*time.Millisecond)
+
+	// The cap of 3 is reached: each new client takes the place of the oldest
+	// cheap connection, the idle one first, then the slow one.
+	getStatus(t, addr)
+	getStatus(t, addr)
+	if !closedByServer(idle) || !closedByServer(slow) {
+		t.Fatal("the idle and the slow-header connection were not both closed")
+	}
+	end()
+	if code, n := <-upload, <-got; code != http.StatusCreated || n < 32<<10 {
+		t.Fatalf("upload answered %d after %d bytes, want 201", code, n)
+	}
+}
+
+// Shutdown honours its context while every slot is busy and one more client
+// waits inside Accept: Server.Shutdown and Close wait for Serve to return
+// before they close any connection, so closing the listener must end that
+// wait (App.Serve's drain timeout and its Close fallback depend on it).
+func TestConnCapShutdownReturnsWhileAcceptWaits(t *testing.T) {
+	started, release := make(chan struct{}), make(chan struct{})
+	free := sync.OnceFunc(func() { close(release) })
+	srv := &http.Server{Handler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(started)
+		<-release // a long download
+	})}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go srv.Serve(LimitConns(srv, ln, 1))
+	t.Cleanup(func() { free(); srv.Close() })
+
+	busy, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	io.WriteString(busy, "GET /big HTTP/1.1\r\nHost: x\r\n\r\n")
+	<-started
+	waiting, err := net.Dial("tcp", ln.Addr().String()) // taken by Accept, which then waits for a slot
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer waiting.Close()
+	time.Sleep(200 * time.Millisecond)
+
+	defer time.AfterFunc(5*time.Second, free).Stop() // a regression fails instead of hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = srv.Shutdown(ctx)
+	if took := time.Since(start); took > 2*time.Second || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown with a 500 ms context returned after %v (err %v), want its deadline: it waited for the busy request", took.Round(100*time.Millisecond), err)
+	}
+	if !closedByServer(waiting) {
+		t.Fatal("the connection waiting for a slot was not closed")
 	}
 }

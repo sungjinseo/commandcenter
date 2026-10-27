@@ -79,6 +79,21 @@ func TestRepoValidationErrors(t *testing.T) {
 	if !strings.Contains(r.body, "duplicate") {
 		t.Fatalf("duplicate: %s", r.body)
 	}
+	// QA L-9: fields of another repository type are refused, on create and update.
+	for _, c := range []struct{ method, path, body, want string }{
+		{"POST", "/-/api/repositories", `{"name":"h2","format":"maven","type":"hosted","remote":"https://repo1.example.org/"}`, "only valid for proxy"},
+		{"POST", "/-/api/repositories", `{"name":"g2","format":"maven","type":"group","members":["maven-releases"],"versionPolicy":"release"}`, "versionPolicy is not valid for group"},
+		{"PUT", "/-/api/repositories/maven-releases", `{"remote":"https://repo1.example.org/"}`, "only valid for proxy"},
+		{"PUT", "/-/api/repositories/maven-public", `{"members":["maven-releases","maven-proxy"],"writeMember":"maven-releases","versionPolicy":"mixed"}`, "versionPolicy is not valid for group"},
+		// A remote host that is not ASCII: remote fetches refuse it.
+		{"POST", "/-/api/repositories", `{"name":"p2","format":"maven","type":"proxy","remote":"https://bücher.example/"}`, "punycode"},
+		{"PUT", "/-/api/repositories/maven-proxy", `{"remote":"https://１０．１/maven2/"}`, "punycode"},
+	} {
+		r := e.admin(t, c.method, c.path, c.body)
+		if r.status != http.StatusBadRequest || !strings.Contains(r.body, c.want) {
+			t.Errorf("%s %s %s: %d %s", c.method, c.path, c.body, r.status, r.body)
+		}
+	}
 }
 
 func TestRepoUpdateKeepsSecretAndClears(t *testing.T) {

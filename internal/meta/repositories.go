@@ -40,6 +40,10 @@ func (d *DB) ImportRepositories(ctx context.Context, defs []config.Repository) (
 			return err
 		}
 		for _, def := range defs {
+			def, err := d.box.sealRepo(def)
+			if err != nil {
+				return err
+			}
 			if err := insertRepository(ctx, tx.q, def); err != nil {
 				return err
 			}
@@ -71,6 +75,9 @@ func (d *DB) ListRepositories(ctx context.Context) ([]config.Repository, error) 
 		if err := json.Unmarshal([]byte(js), &def); err != nil {
 			return nil, fmt.Errorf("repository %q: decode stored definition: %w", name, err)
 		}
+		if err := d.box.openRepo(&def); err != nil {
+			return nil, err
+		}
 		out = append(out, def)
 	}
 	return out, rows.Err()
@@ -78,6 +85,10 @@ func (d *DB) ListRepositories(ctx context.Context) ([]config.Repository, error) 
 
 // CreateRepository stores a new definition; ErrExists if the name is taken.
 func (d *DB) CreateRepository(ctx context.Context, def config.Repository) error {
+	def, err := d.box.sealRepo(def)
+	if err != nil {
+		return err
+	}
 	return d.Tx(ctx, func(tx *Tx) error {
 		var one int
 		err := tx.q.QueryRowContext(ctx, `SELECT 1 FROM repositories WHERE name = ?`, def.Name).Scan(&one)
@@ -103,7 +114,11 @@ func (d *DB) CreateRepository(ctx context.Context, def config.Repository) error 
 // if there is none. Format and type are stored as given; callers enforce
 // that they do not change.
 func (d *DB) UpdateRepository(ctx context.Context, def config.Repository) error {
-	js, err := json.Marshal(def)
+	sealed, err := d.box.sealRepo(def)
+	if err != nil {
+		return err
+	}
+	js, err := json.Marshal(sealed)
 	if err != nil {
 		return err
 	}

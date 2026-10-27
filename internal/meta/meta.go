@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -31,6 +32,7 @@ type Asset struct {
 
 type DB struct {
 	sql *sql.DB
+	box sealer // seals the stored secrets; see SetSecretKey
 }
 
 // querier is implemented by *sql.DB and *sql.Tx.
@@ -96,6 +98,17 @@ CREATE TABLE IF NOT EXISTS tasks(
   last_removed INTEGER NOT NULL DEFAULT 0, last_bytes INTEGER NOT NULL DEFAULT 0);
 `
 
+// schemaVersion is the database layout this build reads and writes, kept in
+// SQLite's PRAGMA user_version. Open refuses a database with a higher
+// version: an older build must never run on data a newer one wrote (QA
+// N-30). Bump it with every change an older build would mishandle (a table
+// or column it would not maintain, a stored value it would misread). Builds
+// before version 1 left it at 0 and do not check it.
+//
+//	1: users, roles and settings in the database, named blob stores,
+//	   secrets sealed with the secret key (secrets.go).
+const schemaVersion = 1
+
 // Open opens (and creates if needed) the database at path.
 func Open(path string) (*DB, error) {
 	dsn := "file:" + path +
@@ -105,6 +118,17 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if version > schemaVersion {
+		db.Close()
+		return nil, fmt.Errorf("%s was written by a newer version of Command Center (database schema %d; this version supports up to %d) "+
+			"and this version would misread it: run the newer version again, or restore the backup taken before the upgrade "+
+			"together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", path, version, schemaVersion)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, err
@@ -112,6 +136,12 @@ func Open(path string) (*DB, error) {
 	if err := migrate(context.Background(), db); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if version < schemaVersion { // PRAGMA takes no bind parameters
+		if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	return &DB{sql: db}, nil
 }
@@ -229,6 +259,32 @@ func listAssets(ctx context.Context, qr querier, repo, prefix string) ([]Asset, 
 	return out, rows.Err()
 }
 
+// WalkAssetPaths calls fn with the path of each asset of repo whose path
+// starts with prefix, in path order. Unlike ListAssets it holds one row at a
+// time, so memory does not grow with the number of assets; fn runs while the
+// query holds a connection.
+func (d *DB) WalkAssetPaths(ctx context.Context, repo, prefix string, fn func(path string)) error {
+	q := `SELECT path FROM assets WHERE repo = ? AND path >= ?`
+	args := []any{repo, prefix}
+	if upper, ok := prefixUpper(prefix); ok {
+		q += ` AND path < ?`
+		args = append(args, upper)
+	}
+	rows, err := d.sql.QueryContext(ctx, q+` ORDER BY path`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return err
+		}
+		fn(p)
+	}
+	return rows.Err()
+}
+
 func (d *DB) MarkChecked(ctx context.Context, repo, path string, t time.Time) error {
 	_, err := d.sql.ExecContext(ctx, `UPDATE assets SET checked_at = ? WHERE repo = ? AND path = ?`, toMs(t), repo, path)
 	return err
@@ -255,6 +311,16 @@ ON CONFLICT(repo, path) DO UPDATE SET expires_at = excluded.expires_at`, repo, p
 func (d *DB) ClearNegative(ctx context.Context, repo, path string) error {
 	_, err := d.sql.ExecContext(ctx, `DELETE FROM negative_cache WHERE repo = ? AND path = ?`, repo, path)
 	return err
+}
+
+// PruneNegative deletes the negative-cache entries that can no longer be a
+// hit at now (see NegativeHit) and returns how many rows went.
+func (d *DB) PruneNegative(ctx context.Context, now time.Time) (int64, error) {
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM negative_cache WHERE expires_at <= ?`, toMs(now))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (d *DB) BlobInUse(ctx context.Context, sha string) (bool, error) {

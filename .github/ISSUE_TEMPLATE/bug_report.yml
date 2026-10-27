@@ -1,0 +1,79 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Korean or English is fine. / 한국어나 영어로 써 주세요.
+
+        **Security problems do not go here.** Report them privately as SECURITY.md describes.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: >-
+        Output of `commandcenter version`, for example
+        `docker compose exec commandcenter commandcenter version` or
+        `kubectl exec <pod> -- commandcenter version`. If it prints `dev`, add the commit you built
+        from (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How do you run it?
+      options:
+        - Docker Compose (docker-compose.yml from this repository)
+        - Docker (docker run)
+        - Kubernetes (deploy/kubernetes from this repository)
+        - Kubernetes (own manifests or chart)
+        - Binary without a container
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: deployment-details
+    attributes:
+      label: Deployment details
+      description: >-
+        Memory limit and GOMEMLIMIT, reverse proxy and TLS, where /data and any blob stores live
+        (local disk, block volume, NFS, ...), OS and architecture, and roughly how many repositories
+        and packages. Remove passwords, tokens and private host names.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Maven
+        - npm
+        - PyPI
+        - Go
+        - Cargo
+        - Web UI
+        - Users, roles, tokens or LDAP
+        - E-mail (SMTP)
+        - Blob stores or storage
+        - Cleanup policies or tasks
+        - Installation or upgrade
+        - Other
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: >-
+        Exact steps to reproduce (commands, the client and its version), what you expected, and what
+        happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Server logs
+      description: >-
+        The relevant lines of `docker compose logs commandcenter` or `kubectl logs <pod>`. A 500 error
+        names a request id you can search the log for. Remove passwords, tokens and private host names.
+      render: text

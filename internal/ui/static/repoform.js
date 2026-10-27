@@ -254,7 +254,7 @@ export async function viewRepoForm(view, o) {
   const okBox = h("div", { class: "notice ok", role: "status", hidden: !okText }, okText);
 
   // Basic settings
-  const name = textInput(editing ? cfg.name : kept ? kept.name : "", { disabled: editing, required: true, maxlength: 200 });
+  const name = textInput(editing ? cfg.name : kept ? kept.name : "", { disabled: editing, required: true, maxlength: 64 });
   const online = checkbox(t("rf.upText"), editing ? cfg.online !== false : true);
   // The blob store is chosen on create (hosted and proxy) and immutable after.
   let bstore = null;
@@ -276,7 +276,7 @@ export async function viewRepoForm(view, o) {
 
   // Maven
   const versionOpts = isHosted ? VERSION : [["", t("rf.notSet")]].concat(VERSION);
-  const version = cfg.format === "maven" ? select(versionOpts, cfg.versionPolicy || (isHosted ? "release" : "")) : null;
+  const version = cfg.format === "maven" && !isGroup ? select(versionOpts, cfg.versionPolicy || (isHosted ? "release" : "")) : null; // groups have none
   const layout = cfg.format === "maven" ? textInput("Strict", { readonly: true }) : null;
 
   // Hosted
@@ -367,7 +367,7 @@ export async function viewRepoForm(view, o) {
           editing && !isGroup ? field(t("rf.blobStore"), textInput(cfg.blobStore || "default", { readonly: true }), t("rf.blobStoreFixed")) : null,
           info ? field(t("rf.url"), copyLine(info.url, t("rf.copyUrl")), null, { group: true, full: true }) : null)),
         cfg.format === "maven" ? card(t("rf.maven"), t("rf.mavenSub"), fields(
-          field(t("rf.version"), version, t("rf.versionHelp")),
+          version ? field(t("rf.version"), version, t("rf.versionHelp")) : null,
           field(t("rf.layout"), layout))) : null,
         isHosted ? card(t("rf.hosted"), t("rf.hostedSub"), fields(
           field(t("rf.deploy"), deploy, t("rf.deployHelp"), { full: true }))) : null,

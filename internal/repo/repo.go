@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"commandcenter/internal/auth"
@@ -57,7 +58,9 @@ func buildMap(defs []config.Repository) map[string]*Repository {
 
 // OnlineMembers returns the group members that serve requests, in lookup
 // order. A group answers as if its offline members did not exist; MemberRepos
-// still lists them for the UI and the health check.
+// still lists them for the UI and the health check. npm and PyPI groups walk
+// MemberRepos instead: an offline member ahead of the one that has the
+// package is a 503 (resolve.Owner).
 func (r *Repository) OnlineMembers() []*Repository {
 	out := make([]*Repository, 0, len(r.MemberRepos))
 	for _, m := range r.MemberRepos {
@@ -66,6 +69,20 @@ func (r *Repository) OnlineMembers() []*Repository {
 		}
 	}
 	return out
+}
+
+// MembersOffline reports whether r is a group with members none of which can
+// serve: each is offline or, a group itself, MembersOffline.
+func (r *Repository) MembersOffline() bool {
+	if len(r.MemberRepos) == 0 {
+		return false
+	}
+	for _, m := range r.MemberRepos {
+		if m.IsOnline() && !m.MembersOffline() {
+			return false
+		}
+	}
+	return true
 }
 
 // Handler serves requests for every repository of one format.
@@ -146,6 +163,8 @@ func StatusOf(err error) int {
 		return http.StatusNotFound
 	case errors.As(err, &tooBig):
 		return http.StatusRequestEntityTooLarge
+	case errors.Is(err, os.ErrDeadlineExceeded): // the request body stalled (IdleBody)
+		return http.StatusRequestTimeout
 	case errors.Is(err, blob.ErrDiskFull):
 		return http.StatusInsufficientStorage
 	}

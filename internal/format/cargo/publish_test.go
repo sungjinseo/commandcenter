@@ -56,6 +56,10 @@ func TestPublishRejects(t *testing.T) {
 		"truncated crate": full[:len(full)-3],
 		"bad json":        publishCrate(t, "nope", []byte("x")),
 		"empty crate":     publishCrate(t, helloMeta, nil),
+		// QA L-19: reserved names and dependencies cargo cannot read back.
+		"reserved name": publishCrate(t, `{"name":"con","vers":"1.0.0","deps":[],"features":{}}`, []byte("x")),
+		"bad dependency": publishCrate(t, strings.Replace(helloMeta, `"version_req":"^1"`, `"version_req":"not a req"`, 1),
+			[]byte("hello crate")),
 	}
 	for name, body := range cases {
 		if w := e.do("PUT", "cargo-hosted", "api/v1/crates/new", bytes.NewReader(body)); w.Code != 400 {
@@ -118,6 +122,29 @@ func TestPublishCratesIODuplicateRules(t *testing.T) {
 	pkgs, _ := e.h.Store.DB.ListPackages(context.Background(), "cargo-hosted", "foo-bar")
 	if len(pkgs) != 2 || !pkgs[0].Yanked {
 		t.Fatalf("yanked column not synced: %+v", pkgs)
+	}
+}
+
+// TestPublishReservedNames: Windows device names and the standard library's
+// crate names cannot start a new crate (QA L-19); a crate that already exists
+// under one keeps publishing, as on crates.io.
+func TestPublishReservedNames(t *testing.T) {
+	e := newEnv(t)
+	rp, ctx := e.repos["cargo-hosted"], context.Background()
+	for _, name := range []string{"con", "NUL", "Aux", "prn", "com1", "LPT9", "std", "core", "alloc", "proc_macro", "Proc-Macro", "test"} {
+		if err := e.h.checkDuplicate(ctx, rp, publishMeta{Name: name, Vers: "1.0.0"}); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("%s: %v, want 400 reserved", name, err)
+		}
+	}
+	for _, name := range []string{"com0", "com10", "lpt", "cons", "standard", "test-utils"} {
+		if err := e.h.checkDuplicate(ctx, rp, publishMeta{Name: name, Vers: "1.0.0"}); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	e.seedHosted(t, "core", "1.0.0", "old core")
+	body := publishCrate(t, `{"name":"core","vers":"1.1.0","deps":[],"features":{}}`, []byte("x"))
+	if w := e.do("PUT", "cargo-hosted", "api/v1/crates/new", bytes.NewReader(body)); w.Code != 200 {
+		t.Fatalf("existing crate with a reserved name: %d %s", w.Code, w.Body.String())
 	}
 }
 

@@ -98,8 +98,9 @@ func (d *DB) GetUser(ctx context.Context, id string) (User, error) {
 	return scanUser(d.sql.QueryRowContext(ctx, `SELECT `+userCols+` FROM users WHERE id = ?`, id))
 }
 
-// CreateUser stores a new user; ErrExists if the id is taken. Empty source
-// and status default to local and active; zero times to now.
+// CreateUser stores a new user; ErrExists if the id is taken, also by an id
+// that differs only in case (QA N-18). Empty source and status default to
+// local and active; zero times to now.
 func (d *DB) CreateUser(ctx context.Context, u User) error { return insertUser(ctx, d.sql, u) }
 
 // UpdateUser replaces the stored user u.ID (created_at is kept); ErrNotFound
@@ -156,12 +157,7 @@ func insertUser(ctx context.Context, q querier, u User) error {
 	if err != nil {
 		return err
 	}
-	var one int
-	err = q.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id = ?`, u.ID).Scan(&one)
-	if err == nil {
-		return ErrExists
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if err := checkFreeID(ctx, q, "users", u.ID); err != nil {
 		return err
 	}
 	now := time.Now()
@@ -174,6 +170,24 @@ func insertUser(ctx context.Context, q querier, u User) error {
 	_, err = q.ExecContext(ctx, `INSERT INTO users(`+userCols+`) VALUES(?,?,?,?,?,?,?,?,?)`,
 		u.ID, u.Name, u.Email, u.PasswordHash, u.Source, u.Status, string(roles), toMs(u.CreatedAt), toMs(u.UpdatedAt))
 	return err
+}
+
+// checkFreeID returns ErrExists when table (users or roles) has id, compared
+// case-insensitively: login and role lookups are exact, so "Admin" next to
+// "admin" would be a look-alike. Ids are ASCII, so NOCASE folds them fully.
+// Rows that already differ only in case are left alone.
+func checkFreeID(ctx context.Context, q querier, table, id string) error {
+	var got string
+	err := q.QueryRowContext(ctx, `SELECT id FROM `+table+` WHERE id = ? COLLATE NOCASE LIMIT 1`, id).Scan(&got)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return err
+	case got != id:
+		return fmt.Errorf("%w as %q", ErrExists, got)
+	}
+	return ErrExists
 }
 
 func scanUser(row scanner) (User, error) {
@@ -224,7 +238,8 @@ func (d *DB) GetRole(ctx context.Context, id string) (Role, error) {
 	return scanRole(d.sql.QueryRowContext(ctx, `SELECT `+roleCols+` FROM roles WHERE id = ?`, id))
 }
 
-// CreateRole stores a new role; ErrExists if the id is taken.
+// CreateRole stores a new role; ErrExists if the id is taken, also by an id
+// that differs only in case (QA N-18).
 func (d *DB) CreateRole(ctx context.Context, r Role) error { return insertRole(ctx, d.sql, r) }
 
 // UpdateRole replaces the description and privileges of role r.ID;
@@ -279,12 +294,7 @@ func insertRole(ctx context.Context, q querier, r Role) error {
 	if err != nil {
 		return err
 	}
-	var one int
-	err = q.QueryRowContext(ctx, `SELECT 1 FROM roles WHERE id = ?`, r.ID).Scan(&one)
-	if err == nil {
-		return ErrExists
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+	if err := checkFreeID(ctx, q, "roles", r.ID); err != nil {
 		return err
 	}
 	now := time.Now()

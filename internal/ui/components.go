@@ -1,17 +1,22 @@
 package ui
 
 import (
+	"cmp"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/component"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
@@ -26,7 +31,7 @@ var scanLimit = defaultScanLimit
 var componentsTimeout = 10 * time.Second
 
 const (
-	componentsLimit     = 100  // components per response
+	componentsLimit     = 100  // components per page
 	componentAssetLimit = 50   // assets listed per component
 	defaultScanLimit    = 2000 // candidate assets or versions examined
 )
@@ -192,22 +197,48 @@ func (c criteria) nameQuery(format string) string {
 	return ""
 }
 
+// compKey identifies a component; results are ordered and paged by it.
 type compKey struct{ repo, group, name, version string }
 
-// builder accumulates components, enforcing both caps.
+func keyOf(c *Component) compKey { return compKey{c.Repo, c.Group, c.Name, c.Version} }
+
+// compare orders keys by repo, group, name and version.
+func (k compKey) compare(o compKey) int {
+	return cmp.Or(strings.Compare(k.repo, o.repo), strings.Compare(k.group, o.group),
+		strings.Compare(k.name, o.name), strings.Compare(k.version, o.version))
+}
+
+// pageToken is the continuationToken that resumes after k: opaque to clients.
+// The fields are []byte (base64 in JSON), so a key that is not valid UTF-8
+// comes back unchanged instead of with U+FFFD, which would skip or repeat
+// components.
+func pageToken(k compKey) string {
+	b, _ := json.Marshal([][]byte{[]byte(k.repo), []byte(k.group), []byte(k.name), []byte(k.version)})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func parsePageToken(s string) (compKey, bool) {
+	var f [][]byte
+	b, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil || json.Unmarshal(b, &f) != nil || len(f) != 4 {
+		return compKey{}, false
+	}
+	return compKey{string(f[0]), string(f[1]), string(f[2]), string(f[3])}, true
+}
+
+// builder accumulates every component the scan finds, capping each one's
+// assets. A page is cut only after sorting (deriveComponents), so the count
+// is bounded by the scan budget: scanLimit hits per asset format plus
+// scanLimit package versions.
 type builder struct {
 	byKey     map[compKey]*Component
 	truncated bool
 }
 
-func (b *builder) add(rp *repo.Repository, group, name, version string, a *ComponentAsset, lm time.Time) bool {
+func (b *builder) add(rp *repo.Repository, group, name, version string, a *ComponentAsset, lm time.Time) {
 	k := compKey{rp.Name, group, name, version}
 	c := b.byKey[k]
 	if c == nil {
-		if len(b.byKey) >= componentsLimit {
-			b.truncated = true
-			return false
-		}
 		c = &Component{Repo: rp.Name, Format: rp.Format, Group: group, Name: name, Version: version, Assets: []ComponentAsset{}}
 		b.byKey[k] = c
 	}
@@ -221,7 +252,6 @@ func (b *builder) add(rp *repo.Repository, group, name, version string, a *Compo
 			c.Assets = append(c.Assets, *a)
 		}
 	}
-	return true
 }
 
 type componentJSON struct {
@@ -241,7 +271,9 @@ type componentAssetJSON struct {
 	LastDownloaded string `json:"lastDownloaded"`
 }
 
-// searchComponents answers GET /-/api/search/components (Decision 4).
+// searchComponents answers GET /-/api/search/components (Decision 4). A page
+// holds at most componentsLimit components; continuationToken, from the
+// previous page, resumes after its last one (QA L-23).
 func (u *UI) searchComponents(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	q := r.URL.Query()
@@ -268,6 +300,15 @@ func (u *UI) searchComponents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("give at least one of keyword, group, name, version, baseVersion, classifier or extension with %d or more characters", minQuery))
 		return
 	}
+	var after *compKey
+	if tok := q.Get("continuationToken"); tok != "" {
+		k, ok := parsePageToken(tok)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "invalid continuationToken")
+			return
+		}
+		after = &k
+	}
 	var repos []*repo.Repository
 	if c.repo != "" {
 		rp := u.visible(p, c.repo)
@@ -286,22 +327,22 @@ func (u *UI) searchComponents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out := []componentJSON{}
-	truncated := false
+	truncated, next := false, ""
 	if len(searched) > 0 {
 		release, err := u.acquireHeavy(r.Context())
 		if err != nil {
 			u.fail(w, r, err)
 			return
 		}
-		comps, tr, err := func() ([]*Component, bool, error) {
+		comps, nx, tr, err := func() ([]*Component, string, bool, error) {
 			defer release()
-			return u.deriveComponents(r, searched, c)
+			return u.deriveComponents(r, searched, c, after)
 		}()
 		if err != nil {
 			u.fail(w, r, err)
 			return
 		}
-		truncated = tr
+		truncated, next = tr, nx
 		for _, comp := range comps {
 			j := componentJSON{Repo: comp.Repo, Format: comp.Format, Group: comp.Group, Name: comp.Name,
 				Version: comp.Version, LastUpdated: rfc3339(comp.LastUpdated), Assets: make([]componentAssetJSON, 0, len(comp.Assets))}
@@ -311,13 +352,70 @@ func (u *UI) searchComponents(w http.ResponseWriter, r *http.Request) {
 			out = append(out, j)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"components": out, "truncated": truncated})
+	res := map[string]any{"components": out, "truncated": truncated}
+	if next != "" {
+		res["continuationToken"] = next
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+// deleteComponent answers DELETE /-/api/repositories/{name}/components with
+// group, name and version parameters: it deletes that component version of a
+// hosted repository, all of its files, with the format's deleter (the one
+// cleanup uses), for a caller with the delete privilege on the repository.
+// The deleter records the delete event. 200 with what was deleted, or 404
+// when the component has no file.
+func (u *UI) deleteComponent(w http.ResponseWriter, r *http.Request) {
+	p, ok := requireUser(w, r)
+	if !ok || !requireUIHeader(w, r) {
+		return
+	}
+	rp, ok := u.lookup(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	c := Component{Repo: rp.Name, Format: rp.Format, Group: q.Get("group"), Name: q.Get("name"), Version: q.Get("version")}
+	switch {
+	case !u.Auth.Can(p, rp.Name, auth.Delete):
+		writeError(w, http.StatusForbidden, fmt.Sprintf("user %q may not delete in %q", p.User, rp.Name))
+	case u.Deleters == nil:
+		writeError(w, http.StatusNotImplemented, "component deletion is not available")
+	case rp.Type != "hosted":
+		writeError(w, http.StatusBadRequest, "components can be deleted only in hosted repositories")
+	case !rp.IsOnline():
+		writeError(w, http.StatusServiceUnavailable, "repository is offline")
+	case rp.WritePolicy == "deny":
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("repository %q is read-only", rp.Name))
+	case c.Name == "" || c.Version == "" || (rp.Format == "maven" && c.Group == ""):
+		writeError(w, http.StatusBadRequest, "give name and version (and group for maven)")
+	default:
+		res, err := u.Deleters.Delete(r.Context(), rp, c, p.Owner())
+		var he *repo.Error
+		switch {
+		case errors.As(err, &he):
+			writeError(w, he.Status, he.Msg)
+		case errors.Is(err, component.ErrNotSupported):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case err != nil:
+			u.fail(w, r, err)
+		case res.Assets == 0:
+			writeError(w, http.StatusNotFound, "component "+c.Label()+" not found")
+		default:
+			u.repoCache.reset() // the UI reloads the repository's file counts next
+			writeJSON(w, http.StatusOK, map[string]any{"assets": res.Assets, "bytes": res.Bytes})
+		}
+	}
 }
 
 // deriveComponents gathers candidates for repos, derives and filters them,
-// and returns at most componentsLimit components sorted by repo, group,
-// name and version.
-func (u *UI) deriveComponents(r *http.Request, repos []*repo.Repository, c criteria) ([]*Component, bool, error) {
+// and returns one page: at most componentsLimit components after the key
+// after (nil: the first page), sorted by repo, group, name and version, and
+// the token of the next page ("" on the last). Every page scans the same
+// candidates (the budget does not depend on the page), so while the data
+// stays the same the pages neither overlap nor skip, unless the time limit
+// cut a scan short. truncated also reports a next page.
+func (u *UI) deriveComponents(r *http.Request, repos []*repo.Repository, c criteria, after *compKey) ([]*Component, string, bool, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), componentsTimeout)
 	defer cancel()
 	b := &builder{byKey: map[compKey]*Component{}}
@@ -325,11 +423,27 @@ func (u *UI) deriveComponents(r *http.Request, repos []*repo.Repository, c crite
 		// A deadline of our own keeps what was found; a cancelled request
 		// or any other failure is an error.
 		if !errors.Is(err, context.DeadlineExceeded) || r.Context().Err() != nil {
-			return nil, false, err
+			return nil, "", false, err
 		}
 		b.truncated = true
 	}
-	return b.sorted(), b.truncated, nil
+	comps := b.sorted()
+	if after != nil {
+		comps = comps[sort.Search(len(comps), func(i int) bool { return keyOf(comps[i]).compare(*after) > 0 }):]
+	}
+	next := ""
+	if len(comps) > componentsLimit {
+		comps = comps[:componentsLimit]
+		next = pageToken(keyOf(comps[len(comps)-1]))
+	}
+	// The published spelling of a crate is for display only: pages are cut
+	// and tokens made on the stored (lower-case) key, so it changes neither.
+	for _, comp := range comps {
+		if comp.Format == "cargo" {
+			comp.Name = u.cargoName(r.Context(), comp.Repo, comp.Name)
+		}
+	}
+	return comps, next, b.truncated || next != "", nil
 }
 
 // scanComponents fills b from the assets table and the packages table.
@@ -377,9 +491,9 @@ func (u *UI) scanComponents(ctx context.Context, b *builder, repos []*repo.Repos
 			return err
 		}
 		// A bare keyword also matches versions: after the name-narrowed pass,
-		// look through the unfiltered scan, if the caps still allow. Components
+		// look through the unfiltered scan, if the budget still allows. Components
 		// found by the first pass are complete and skipped here.
-		if q != "" && c.name == "" && c.group == "" && !b.full() && scanned < scanLimit {
+		if q != "" && c.name == "" && c.group == "" && scanned < scanLimit {
 			if err := u.scanPackages(ctx, b, rp, c, "", &scanned, done, nil); err != nil {
 				return err
 			}
@@ -437,9 +551,7 @@ func (u *UI) scanPackages(ctx context.Context, b *builder, rp *repo.Repository, 
 			if asset == nil && (c.classifier != "" || c.extension != "") {
 				continue
 			}
-			if !b.add(rp, group, name, version, asset, lm) {
-				return nil
-			}
+			b.add(rp, group, name, version, asset, lm)
 			if seen != nil {
 				seen[key] = true
 			}
@@ -448,29 +560,14 @@ func (u *UI) scanPackages(ctx context.Context, b *builder, rp *repo.Repository, 
 	return nil
 }
 
-// full reports whether the component cap was hit.
-func (b *builder) full() bool { return len(b.byKey) >= componentsLimit }
-
-// sorted returns the components ordered by repo, group, name and version,
-// with each component's assets ordered by path.
+// sorted returns the components in key order (compKey.compare), with each
+// component's assets ordered by path.
 func (b *builder) sorted() []*Component {
 	comps := make([]*Component, 0, len(b.byKey))
 	for _, comp := range b.byKey {
 		comps = append(comps, comp)
 	}
-	sort.Slice(comps, func(i, j int) bool {
-		a, z := comps[i], comps[j]
-		if a.Repo != z.Repo {
-			return a.Repo < z.Repo
-		}
-		if a.Group != z.Group {
-			return a.Group < z.Group
-		}
-		if a.Name != z.Name {
-			return a.Name < z.Name
-		}
-		return a.Version < z.Version
-	})
+	slices.SortFunc(comps, func(a, z *Component) int { return keyOf(a).compare(keyOf(z)) })
 	for _, comp := range comps {
 		sort.Slice(comp.Assets, func(i, j int) bool { return comp.Assets[i].Path < comp.Assets[j].Path })
 	}

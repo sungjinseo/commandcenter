@@ -239,8 +239,10 @@ function usageBlock(format, c) {
     h("div", { class: "codebar" }, h("span", null, t("usage.title"), sel ? null : " · " + tools[0][0]), h("span", { class: "actions" }, sel, slot)), code);
 }
 
-// Decision 5 / plan 7 Decision 7: deletion only for Maven hosted with write.
-const canDelete = (r) => r.format === "maven" && r.type === "hosted" && !!r.canWrite;
+// Deleting needs the delete privilege on a hosted repository (canDelete).
+// Maven deletes file by file through the repository; the other formats delete
+// a whole version on the server (versionDelete), as their clients cannot.
+const canDelete = (r) => r.type === "hosted" && !!r.canDelete;
 
 async function deletePaths(r, paths) {
   for (const p of paths) {
@@ -257,6 +259,13 @@ async function deletePaths(r, paths) {
     }
   }
 }
+
+// versionDelete is the "Delete component" button of a format whose versions
+// are deleted whole: every file of c goes, also those a listing left out.
+const versionDelete = (r, c, refresh) => deleteButton(t("del.component"), async () => ({
+  text: t("del.versionText", { coord: coord(c) }),
+  del: () => api(apiRepo(r.name, "/components?" + new URLSearchParams({ group: c.group || "", name: c.name, version: c.version })), { method: "DELETE" }),
+}), refresh);
 
 export function confirmDelete(text, title, yesLabel) {
   return new Promise((resolve) => {
@@ -350,9 +359,9 @@ async function versionList(r, c) {
       const d = await pkgVersions(name);
       return { truncated: d.truncated, list: d.list.map((v) => Object.assign({}, v, { path: name + "/-/" + v.version })) };
     }
-    case "cargo": {
+    case "cargo": { // c.name is the published spelling; stored paths are lowercase
       const d = await pkgVersions(c.name);
-      return { truncated: d.truncated, list: d.list.map((v) => Object.assign({}, v, { path: "crates/" + c.name + "/" + v.version + ".crate" })) };
+      return { truncated: d.truncated, list: d.list.map((v) => Object.assign({}, v, { path: "crates/" + c.name.toLowerCase() + "/" + v.version + ".crate" })) };
     }
     case "pypi": { // the rows are files: one version per wheel/sdist group
       const d = await pkgVersions(c.name);
@@ -399,23 +408,24 @@ function versionsBox(r, c, opts) {
 // componentView renders a component in the concept's layout: a hero, tabs
 // (overview, assets, versions), then resource status and actions. assets are
 // {path, size, lastModified}; opts gives assetHref, onAsset, onPath (to open
-// a version in place), (to allow deletion) onDeleted, incomplete: a reason
-// the asset list may be partial, which blocks "Delete component" so it never
-// deletes only some of the files, and fresh: an async function that returns
-// the component's current complete asset list, used instead of assets when
-// deleting (it may throw an error with blocked set).
+// a version in place), (to allow deletion) onDeleted, and for Maven, which
+// deletes file by file, incomplete: a reason the asset list may be partial,
+// which blocks "Delete component" so it never deletes only some of the files,
+// and fresh: an async function that returns the component's current complete
+// asset list, used instead of assets when deleting (it may throw an error
+// with blocked set).
 export function componentView(r, c, assets, opts) {
   const total = assets.reduce((n, a) => n + (Number(a.size) || 0), 0);
   const updated = c.lastUpdated || assets.reduce((m, a) => (a.lastModified && a.lastModified > m ? a.lastModified : m), "");
-  const del = canDelete(r) && opts.onDeleted
-    ? deleteButton(t("del.component"), async () => {
-      const list = opts.fresh ? await opts.fresh() : assets;
-      return {
-        text: t("del.componentText", { coord: coord(c), n: list.length }),
-        del: () => deletePaths(r, list.map((a) => a.path)),
-      };
-    }, opts.onDeleted, opts.incomplete)
-    : null;
+  const del = !canDelete(r) || !opts.onDeleted ? null
+    : r.format !== "maven" ? versionDelete(r, c, opts.onDeleted)
+      : deleteButton(t("del.component"), async () => {
+        const list = opts.fresh ? await opts.fresh() : assets;
+        return {
+          text: t("del.componentText", { coord: coord(c), n: list.length }),
+          del: () => deletePaths(r, list.map((a) => a.path)),
+        };
+      }, opts.onDeleted, opts.incomplete);
   const main = mainAsset(assets);
   // Downloads (plan 11 Decision 1): undefined when the listing did not carry them.
   const known = assets.filter((a) => a.downloads !== undefined);
@@ -454,12 +464,18 @@ export function componentView(r, c, assets, opts) {
 export async function assetView(r, path, opts) {
   const a = await api(apiRepo(r.name, "/asset?path=" + enc(path)));
   const c = deriveComp(r.format, a.path);
+  // A cargo path holds the crate name lowercased; cargo add needs the
+  // published spelling, which the packages API knows (QA L-20).
+  if (c && r.format === "cargo" && r.type === "hosted") {
+    try { c.name = (await api(apiRepo(r.name, "/packages/" + encPath(c.name)))).name || c.name; } catch (e) { /* keep the path's spelling */ }
+  }
   const proxy = r.type === "proxy";
   let target = a.downloadUrl;
   try { target = new URL(a.downloadUrl, location.href).pathname; } catch (e) { /* use as is */ }
-  const del = canDelete(r) && opts.onDeleted
-    ? deleteButton(t("del.asset"), async () => ({ text: t("del.assetText", { path: a.path }), del: () => deletePaths(r, [a.path]) }), opts.onDeleted)
-    : null;
+  // A file of another format is deleted with its whole version.
+  const del = !canDelete(r) || !opts.onDeleted ? null
+    : r.format !== "maven" ? (c ? versionDelete(r, c, opts.onDeleted) : null)
+      : deleteButton(t("del.asset"), async () => ({ text: t("del.assetText", { path: a.path }), del: () => deletePaths(r, [a.path]) }), opts.onDeleted);
   const hash = (v) => (v ? h("code", { class: "hash" }, v) : "");
   return h("div", { class: "two detail" },
     h("section", { class: "card" },
@@ -496,11 +512,19 @@ function setupSnippets(r) {
   const hosted = r.type === "hosted";
   const cred = "<server><id>commandcenter</id><username>ci</username><password>" + t("setup.password") + "</password></server>";
   switch (r.format) {
-    case "maven":
+    case "maven": {
+      // The mirror alone leaves Maven's "central" with snapshots off, so no
+      // SNAPSHOT dependency is ever requested; the profile turns them on for
+      // "central", which the mirror then sends here (QA M-17).
+      const central = (tag) => "<" + tag + "><id>central</id><url>http://central</url>\n          <releases><enabled>true</enabled></releases>\n          <snapshots><enabled>true</enabled></snapshots></" + tag + ">";
       return hosted
         ? [["pom.xml — distributionManagement", "<distributionManagement>\n  <repository>\n    <id>commandcenter</id>\n    <url>" + xml(url) + "</url>\n  </repository>\n</distributionManagement>"],
           ["~/.m2/settings.xml", "<settings>\n  <servers>\n    " + cred + "\n  </servers>\n</settings>"]]
-        : [["~/.m2/settings.xml — mirror", "<settings>\n  <servers>\n    " + cred + "\n  </servers>\n  <mirrors>\n    <mirror><id>commandcenter</id><mirrorOf>*</mirrorOf>\n      <url>" + xml(url) + "</url></mirror>\n  </mirrors>\n</settings>"]];
+        : [["~/.m2/settings.xml — mirror", "<settings>\n  <servers>\n    " + cred + "\n  </servers>\n  <mirrors>\n    <mirror><id>commandcenter</id><mirrorOf>*</mirrorOf>\n      <url>" + xml(url) + "</url></mirror>\n  </mirrors>\n" +
+          "  <profiles>\n    <profile>\n      <id>commandcenter</id>\n      <repositories>\n        " + central("repository") + "\n      </repositories>\n" +
+          "      <pluginRepositories>\n        " + central("pluginRepository") + "\n      </pluginRepositories>\n    </profile>\n  </profiles>\n" +
+          "  <activeProfiles>\n    <activeProfile>commandcenter</activeProfile>\n  </activeProfiles>\n</settings>"]];
+    }
     case "npm":
       return [["~/.npmrc", "registry=" + url], ["npm login", "npm login --registry " + url]];
     case "pypi": {

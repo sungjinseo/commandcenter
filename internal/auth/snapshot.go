@@ -176,10 +176,11 @@ func (s *Snapshot) Settings() meta.Settings {
 func (s *Snapshot) RealmEnabled(id string) bool { return s.realms[id] }
 
 // canPasswordLogin reports whether u may sign in through the local realm:
-// active, local with a password, and the local realm enabled. LDAP users
-// sign in through the ldap realm (ldap.go), never with a stored row.
+// active, local with a password (HashUsable), and the local realm enabled.
+// LDAP users sign in through the ldap realm (ldap.go), never with a stored
+// row.
 func (s *Snapshot) canPasswordLogin(u meta.User) bool {
-	return u.Status == meta.StatusActive && u.Source == meta.SourceLocal && u.PasswordHash != "" && s.realms[meta.RealmLocal]
+	return u.Status == meta.StatusActive && u.Source == meta.SourceLocal && HashUsable(u.PasswordHash) && s.realms[meta.RealmLocal]
 }
 
 // has reports whether any of roles grants one of the actions in want on the
@@ -222,14 +223,14 @@ func CheckLockout(s *Snapshot) error {
 	return ErrLockout
 }
 
-// RestorableAdmins counts the active local users with a password and the
-// admin role, whatever the realm state: the administrators who can sign in
-// again once the local realm is re-enabled.
+// RestorableAdmins counts the active local users with a password
+// (HashUsable) and the admin role, whatever the realm state: the
+// administrators who can sign in again once the local realm is re-enabled.
 func RestorableAdmins(s *Snapshot) int {
 	n := 0
 	for _, id := range s.userIDs {
 		u := s.users[id]
-		if u.Status == meta.StatusActive && u.Source == meta.SourceLocal && u.PasswordHash != "" && hasRole(u.Roles, meta.AdminRole) {
+		if u.Status == meta.StatusActive && u.Source == meta.SourceLocal && HashUsable(u.PasswordHash) && hasRole(u.Roles, meta.AdminRole) {
 			n++
 		}
 	}

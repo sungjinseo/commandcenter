@@ -41,13 +41,6 @@ type fileAttrs struct {
 // errStop ends a walk early once the wanted file is found.
 var errStop = errors.New("stop")
 
-// callbackError marks an error returned by a walk callback, so groups pass it
-// on instead of treating it as a failing member.
-type callbackError struct{ err error }
-
-func (e callbackError) Error() string { return e.err.Error() }
-func (e callbackError) Unwrap() error { return e.err }
-
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) {
 	rt, err := ParseRoute(path)
 	if err == nil {
@@ -102,8 +95,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	return nil
 }
 
+// fileURL is a file's link in a project page: host-relative, keeping the
+// path of baseURL, so pip downloads from the host (and with the credentials)
+// it reached the index with (QA L-5). PEP 503 and PEP 691 allow relative URLs.
 func (h *Handler) fileURL(rp *repo.Repository, project, file string) string {
-	return h.baseURL() + "/repository/" + rp.Name + "/packages/" + project + "/" + url.PathEscape(file)
+	prefix := ""
+	if u, err := url.Parse(h.baseURL()); err == nil {
+		prefix = u.EscapedPath()
+	}
+	return prefix + "/repository/" + rp.Name + "/packages/" + project + "/" + url.PathEscape(file)
 }
 
 func (h *Handler) project(w http.ResponseWriter, r *http.Request, rp *repo.Repository, name string) error {
@@ -142,15 +142,9 @@ func indexTarget(project string) proxy.Target {
 	}
 }
 
-// walk calls fn for every file of project in rp; groups walk their members in
-// order, skipping members that fail as long as another member lists files.
+// walk calls fn for every file of project in rp; a group walks only the
+// member that owns the project (see owner).
 func (h *Handler) walk(ctx context.Context, rp *repo.Repository, project string, fn func(File) error) error {
-	call := func(f File) error {
-		if err := fn(f); err != nil {
-			return callbackError{err}
-		}
-		return nil
-	}
 	switch rp.Type {
 	case "hosted":
 		pkgs, err := h.Store.DB.ListPackages(ctx, rp.Name, project)
@@ -162,7 +156,7 @@ func (h *Handler) walk(ctx context.Context, rp *repo.Repository, project string,
 			if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
 				return err
 			}
-			if err := call(File{Filename: a.Filename, SHA256: a.SHA256, RequiresPython: a.RequiresPython}); err != nil {
+			if err := fn(File{Filename: a.Filename, SHA256: a.SHA256, RequiresPython: a.RequiresPython}); err != nil {
 				return err
 			}
 		}
@@ -181,33 +175,64 @@ func (h *Handler) walk(ctx context.Context, rp *repo.Repository, project string,
 		}
 		defer f.Close()
 		base := rp.RemoteURL.ResolveReference(&url.URL{Path: "simple/" + project + "/"})
-		return parseIndex(f, res.Asset.ContentType, base, call)
+		return parseIndex(f, res.Asset.ContentType, base, fn)
 	case "group":
-		emitted := 0
-		var firstErr error
-		for _, m := range rp.OnlineMembers() {
-			err := h.walk(ctx, m, project, func(f File) error {
-				emitted++
-				return fn(f)
-			})
-			var ce callbackError
-			if err == nil {
-				continue
-			}
-			if errors.As(err, &ce) {
-				return err
-			}
-			slog.Warn("pypi group member failed", "group", rp.Name, "member", m.Name, "project", project, "err", logsafe.Err(err))
-			if firstErr == nil {
-				firstErr = err
-			}
+		m, err := h.owner(ctx, rp, project)
+		if repo.StatusOf(err) == http.StatusNotFound {
+			return nil
 		}
-		if emitted == 0 && firstErr != nil {
-			return firstErr
+		if err != nil {
+			return err
 		}
-		return nil
+		return h.walk(ctx, m, project, fn)
 	}
 	return fmt.Errorf("unknown repository type %q", rp.Type)
+}
+
+// owner returns the repository whose files answer for project in rp: rp
+// itself if it lists a file of project, or for a group the first member in
+// order (nested groups searched in place) that does. As in Cargo groups, that
+// member answers alone: files of a later (public) member never mix in, so its
+// release cannot stand in for an internal one (dependency confusion, QA
+// N-1). Only "not found" moves on; a member ahead of the owner that is
+// offline (503) or fails (5xx) fails the request.
+func (h *Handler) owner(ctx context.Context, rp *repo.Repository, project string) (*repo.Repository, error) {
+	if rp.Type != "group" {
+		found := false
+		err := h.walk(ctx, rp, project, func(File) error {
+			found = true
+			return errStop
+		})
+		switch {
+		case found:
+			return rp, nil
+		case err == nil:
+			return nil, repo.ErrNotFound
+		}
+		return nil, err
+	}
+	for _, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return nil, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+		}
+		o, err := h.owner(ctx, m, project)
+		if err == nil {
+			return o, nil
+		}
+		if repo.StatusOf(err) != http.StatusNotFound {
+			return nil, memberFailure(rp, m, project, err)
+		}
+	}
+	return nil, repo.ErrNotFound
+}
+
+// memberFailure logs a group member's error and returns it as a 5xx.
+func memberFailure(group, m *repo.Repository, project string, err error) error {
+	slog.Error("pypi group member failed", "group", group.Name, "member", m.Name, "project", project, "err", logsafe.Err(err))
+	if repo.StatusOf(err) < http.StatusInternalServerError {
+		return repo.Errorf(http.StatusBadGateway, "repository %q failed", m.Name)
+	}
+	return err
 }
 
 // file returns a distribution file. Proxies find the upstream URL in the
@@ -247,18 +272,27 @@ func (h *Handler) file(ctx context.Context, rp *repo.Repository, project, filena
 		}
 		return res, nil
 	case "group":
-		var firstErr error
-		for _, m := range rp.OnlineMembers() {
+		// Only the owner's files, even by direct URL (QA N-1), as in
+		// resolve.OwnerFile: the first member that has the file answers, a
+		// member without it that lists the project owns the project, and
+		// the last member is not asked. So a cached file needs no index,
+		// also while the upstream is down or after it dropped the project.
+		for i, m := range rp.MemberRepos {
+			if !m.IsOnline() {
+				return proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+			}
 			res, err := h.file(ctx, m, project, filename)
 			if err == nil {
 				return res, nil
 			}
-			if repo.StatusOf(err) != http.StatusNotFound && firstErr == nil {
-				firstErr = err
+			if repo.StatusOf(err) == http.StatusNotFound && i < len(rp.MemberRepos)-1 {
+				if _, err = h.owner(ctx, m, project); err == nil {
+					return proxy.Result{}, repo.ErrNotFound // m owns the project, without this file
+				}
 			}
-		}
-		if firstErr != nil {
-			return proxy.Result{}, firstErr
+			if repo.StatusOf(err) != http.StatusNotFound {
+				return proxy.Result{}, memberFailure(rp, m, project, err)
+			}
 		}
 		return proxy.Result{}, repo.ErrNotFound
 	}

@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -149,19 +150,37 @@ func TestBlobStoreCreateListDelete(t *testing.T) {
 		t.Fatal("store not added to the live map")
 	}
 
-	// A relative path is ignored in favour of the default location.
-	r = e.admin(t, "POST", "/-/api/blobstores", `{"name":"rel","path":"ignored/here"}`)
-	wantStatus(t, r, http.StatusCreated)
-	if got := r.json(t)["path"]; got != filepath.Join(dataDir, "blobstores", "rel") {
-		t.Fatalf("relative path not redirected to default location: %v", got)
+	if w := m["warning"]; w != nil {
+		t.Fatalf("store under the data directory warned: %v", w)
 	}
 
-	// An absolute path is used as given.
+	// QA N-22: a relative path is refused (it used to be ignored silently).
+	for _, rel := range []string{"ignored/here", "../escape", "bs1"} {
+		r = e.admin(t, "POST", "/-/api/blobstores", `{"name":"rel","path":"`+rel+`"}`)
+		if r.status != http.StatusBadRequest || !strings.Contains(r.body, "must be absolute") {
+			t.Fatalf("relative path %q: %d %s", rel, r.status, r.body)
+		}
+	}
+	if e.ui.Store.HasStore("rel") {
+		t.Fatal("a refused store was added")
+	}
+
+	// An absolute path is used as given; QA N-23: outside the data
+	// directory the answer carries a warning, inside it does not.
 	abs := filepath.Join(t.TempDir(), "elsewhere")
 	r = e.admin(t, "POST", "/-/api/blobstores", `{"name":"abs","path":"`+filepath.ToSlash(abs)+`"}`)
 	wantStatus(t, r, http.StatusCreated)
-	if got := r.json(t)["path"]; got != abs {
-		t.Fatalf("absolute path = %v, want %s", got, abs)
+	if m := r.json(t); m["path"] != abs || !strings.Contains(fmt.Sprint(m["warning"]), "outside the data directory") {
+		t.Fatalf("absolute path outside: %s (want path %s and a warning)", r.body, abs)
+	}
+	if !strings.Contains(e.admin(t, "GET", "/-/api/blobstores/abs", "").body, `"warning"`) {
+		t.Fatal("GET lost the warning")
+	}
+	inside := filepath.Join(dataDir, "custom", "inside")
+	r = e.admin(t, "POST", "/-/api/blobstores", `{"name":"inside","path":"`+filepath.ToSlash(inside)+`"}`)
+	wantStatus(t, r, http.StatusCreated)
+	if m := r.json(t); m["path"] != inside || m["warning"] != nil {
+		t.Fatalf("absolute path inside: %s", r.body)
 	}
 
 	// List includes default plus the three created.

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"commandcenter/internal/repo"
 )
@@ -35,6 +36,9 @@ var (
 	// timestampedVersionRE matches a resolved snapshot version such as
 	// 1.4-20260101.000000-1, which is not a release.
 	timestampedVersionRE = regexp.MustCompile(`-\d{8}\.\d{6}-\d+$`)
+	// sbtPluginRE matches an artifact directory with sbt's _<scala>_<sbt>
+	// plugin cross suffix, such as sbt-assembly_2.12_1.0.
+	sbtPluginRE = regexp.MustCompile(`^(.+)_\d+(?:\.\d+)*_\d+(?:\.\d+)*$`)
 )
 
 func ParsePath(p string) (Path, error) {
@@ -64,12 +68,40 @@ func ParsePath(p string) (Path, error) {
 	return out, nil
 }
 
-// validateWritePath refuses names a new upload may not use: control
-// characters and URL delimiters (query, fragment, matrix parameters) never
-// belong to a Maven file name (QA L-13). It applies to writes only, so assets
-// stored by older builds under such names are still served and deleted.
+// fetchable reports whether a proxy may fetch and cache p: a Maven file (an
+// artifact, signatures included, a maven-metadata.xml, the prefix list or the
+// archetype catalog), an sbt plugin file in sbt's legacy layout, or a
+// checksum of one.
+func (p Path) fetchable() bool {
+	return p.Coords != nil || p.Metadata || p.Main == prefixesPath || p.Main == "archetype-catalog.xml" || sbtLegacy(p.Main)
+}
+
+// sbtLegacy reports whether path is an sbt plugin file in the legacy layout,
+// which sbt before 1.9 publishes and asks for (later versions fall back to
+// it): the artifact directory has the cross suffix and the file name does
+// not, as in com/eed3si9n/sbt-assembly_2.12_1.0/2.1.1/sbt-assembly-2.1.1.jar.
+// Such a path has no Coords, so hosted repositories still refuse it.
+func sbtLegacy(path string) bool {
+	segs := strings.Split(path, "/")
+	n := len(segs)
+	if n < 4 {
+		return false
+	}
+	m := sbtPluginRE.FindStringSubmatch(segs[n-3])
+	if m == nil {
+		return false
+	}
+	segs[n-3] = m[1]
+	return parseCoords(segs) != nil
+}
+
+// validateWritePath refuses names a new upload may not use: bytes that are
+// not UTF-8, control characters and URL delimiters (query, fragment, matrix
+// parameters) never belong to a Maven file name (QA L-13). It applies to
+// writes only, so assets stored by older builds under such names are still
+// served and deleted.
 func validateWritePath(p string) error {
-	if strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f || r == '?' || r == '#' || r == ';' }) {
+	if !utf8.ValidString(p) || strings.ContainsFunc(p, func(r rune) bool { return r < 0x20 || r == 0x7f || r == '?' || r == '#' || r == ';' }) {
 		return repo.Errorf(http.StatusBadRequest, "invalid path %q", p)
 	}
 	return nil

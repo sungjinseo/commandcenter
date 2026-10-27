@@ -1,12 +1,16 @@
 package npm
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
+	"context"
 	"crypto/sha1"
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,6 +91,123 @@ func TestVerifyTarball(t *testing.T) {
 	}
 	if err := verifyTarball("", "sha512-AAAA", sums); repo.StatusOf(err) != 400 {
 		t.Fatalf("integrity: %v", err)
+	}
+}
+
+// QA L-15: the tarball must be what npm can install as name@version.
+func TestCheckTarball(t *testing.T) {
+	pj := func(top, name, version string) tarFile {
+		b, _ := json.Marshal(map[string]string{"name": name, "version": version})
+		return tarFile{top + "package.json", string(b)}
+	}
+	ok := pj("package/", "pkg", "1.0.0")
+	gzipped := func(s string) []byte {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		io.WriteString(gz, s)
+		gz.Close()
+		return buf.Bytes()
+	}
+	var link bytes.Buffer
+	gz := gzip.NewWriter(&link)
+	tw := tar.NewWriter(gz)
+	tw.WriteHeader(&tar.Header{Name: "package/package.json", Typeflag: tar.TypeSymlink, Linkname: "../other.json"})
+	tw.Close()
+	gz.Close()
+	full := tarGz(ok, tarFile{"package/index.js", strings.Repeat("x", 4096)})
+	for what, c := range map[string]struct {
+		tgz  []byte
+		want string
+	}{
+		"empty":            {nil, "the file is empty"},
+		"not gzip":         {[]byte("plain bytes"), "not a gzip archive"},
+		"not tar":          {gzipped("hello, not a tar archive"), "not a tar archive"},
+		"truncated":        {full[:len(full)/2], "not a tar archive"},
+		"no package.json":  {tarGz(tarFile{"package/index.js", "x"}), "no package.json"},
+		"no top dir":       {tarGz(pj("", "pkg", "1.0.0")), "no package.json"},
+		"nested":           {tarGz(pj("package/lib/", "pkg", "1.0.0")), "no package.json"},
+		"two":              {tarGz(ok, pj("other/", "pkg", "1.0.0")), "more than one package.json"},
+		"symlink":          {link.Bytes(), "not a regular file"},
+		"bad json":         {tarGz(tarFile{"package/package.json", "{"}), `"package/package.json": unexpected end of JSON input`},
+		"name mismatch":    {tarGz(pj("package/", "other", "1.0.0")), `has name "other"`},
+		"version mismatch": {tarGz(pj("package/", "pkg", "2.0.0")), `has version "2.0.0"`},
+	} {
+		err := checkOne(c.tgz)
+		if repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want 400 with %q", what, err, c.want)
+		}
+	}
+	for what, tgz := range map[string][]byte{
+		"npm pack":          full,
+		"other top dir":     tarGz(pj("pkg-1.0.0/", "pkg", "1.0.0")),
+		"./ prefix":         tarGz(tarFile{"./index.js", "x"}, pj("./", "pkg", "1.0.0")),
+		"byte order mark":   tarGz(tarFile{"package/package.json", "\uFEFF" + ok.body}),
+		"v prefix":          tarGz(pj("package/", "pkg", "v1.0.0")),
+		"build metadata":    tarGz(pj("package/", "pkg", "1.0.0+ci.5")),
+		"package.json last": tarGz(tarFile{"package/a.js", "x"}, ok),
+	} {
+		if err := checkOne(tgz); err != nil {
+			t.Errorf("%s: %v", what, err)
+		}
+	}
+}
+
+func TestCheckTarballLimits(t *testing.T) {
+	oldB, oldP := maxTarballBytes, maxPackageJSON
+	defer func() { maxTarballBytes, maxPackageJSON = oldB, oldP }()
+	tgz := testTarball("pkg", "1.0.0", []byte(strings.Repeat("x", 4096)))
+	maxTarballBytes = 4096
+	if err := checkOne(tgz); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), "more than 4096 bytes uncompressed") {
+		t.Errorf("uncompressed cap: %v", err)
+	}
+	maxTarballBytes = oldB
+	maxPackageJSON = 10
+	if err := checkOne(tgz); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), "larger than 10 bytes") {
+		t.Errorf("package.json cap: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	left := maxTarballBytes
+	if err := checkTarball(ctx, bytes.NewReader(tgz), "pkg", "1.0.0", &left); !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled request: %v", err)
+	}
+}
+
+// checkOne is checkTarball of tgz as pkg@1.0.0 with the whole budget.
+func checkOne(tgz []byte) error {
+	left := maxTarballBytes
+	return checkTarball(context.Background(), bytes.NewReader(tgz), "pkg", "1.0.0", &left)
+}
+
+// TestPublishTarballBudgetPerDocument: one publish document may carry many
+// new versions, each with its own tarball. They share one uncompressed budget,
+// so the document costs no more than one large tarball, and the cheap checks
+// of every version run before any tarball is read.
+func TestPublishTarballBudgetPerDocument(t *testing.T) {
+	old := maxTarballBytes
+	defer func() { maxTarballBytes = old }()
+	maxTarballBytes = 1 << 20
+	const n = 4
+	size := maxTarballBytes - 64<<10 // each tarball passes on its own
+	versions, atts := map[string]any{}, map[string]any{}
+	for i := 0; i < n; i++ {
+		v := fmt.Sprintf("1.0.%d", i)
+		tgz := testTarball("pkg", v, make([]byte, size))
+		s1 := sha1.Sum(tgz)
+		versions[v] = map[string]any{"name": "pkg", "version": v, "dist": map[string]any{"shasum": hex.EncodeToString(s1[:])}}
+		atts["pkg-"+v+".tgz"] = map[string]any{"data": base64.StdEncoding.EncodeToString(tgz)}
+	}
+	doc, _ := json.Marshal(map[string]any{"name": "pkg", "versions": versions, "dist-tags": map[string]string{"latest": "1.0.0"}, "_attachments": atts})
+	e := newEnv(t)
+	if w := e.do("PUT", "npm-hosted", "pkg", string(doc), ci); w.Code != 400 || !strings.Contains(w.Body.String(), "bytes uncompressed in this publish") {
+		t.Fatalf("%d tarballs of %d bytes in one publish: %d %s, want 400", n, size, w.Code, w.Body.String())
+	}
+	if w := e.do("PUT", "npm-hosted", "pkg", publishTgz("pkg", "1.0.0", testTarball("pkg", "1.0.0", make([]byte, size)), false), ci); w.Code != 201 {
+		t.Fatalf("one of them alone: %d %s", w.Code, w.Body.String())
+	}
+	// A wrong shasum is reported without reading the (here broken) tarball.
+	if w := e.do("PUT", "npm-hosted", "pkg", publishTgz("pkg", "2.0.0", []byte("not gzip"), true), ci); w.Code != 400 || !strings.Contains(w.Body.String(), "shasum mismatch") {
+		t.Fatalf("tampered broken tarball: %d %s, want the shasum error", w.Code, w.Body.String())
 	}
 }
 

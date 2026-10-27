@@ -71,6 +71,48 @@ func TestFailedWriteLeavesNoFiles(t *testing.T) {
 	assertEmptyTmp(t, root)
 }
 
+// A process killed mid-write leaves its temp file behind; Open (and SweepTmp,
+// which the compact task runs) removes it once it is stale, but never a temp
+// file a live write may still be using, nor files Write did not create.
+func TestSweepTmpRemovesOnlyStaleTempFiles(t *testing.T) {
+	root := t.TempDir()
+	tmp := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name string, age time.Duration) {
+		t.Helper()
+		p, mod := filepath.Join(tmp, name), time.Now().Add(-age)
+		if err := os.WriteFile(p, []byte("partial"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("up-stale", 2*time.Hour)
+	put("up-live", 30*time.Minute)
+	put("notes.txt", 2*time.Hour)
+
+	s, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, "up-stale")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Open kept the stale temp file: %v", err)
+	}
+	for _, name := range []string{"up-live", "notes.txt"} {
+		if _, err := os.Stat(filepath.Join(tmp, name)); err != nil {
+			t.Fatalf("%s was removed: %v", name, err)
+		}
+	}
+
+	put("up-later", 2*time.Hour)
+	if n, err := s.SweepTmp(); n != 1 || err != nil {
+		t.Fatalf("SweepTmp = %d, %v; want 1, nil", n, err)
+	}
+}
+
 func TestOpenErrors(t *testing.T) {
 	s, _ := Open(t.TempDir())
 	if _, err := s.Open("../../etc/passwd"); err == nil {

@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -147,6 +149,8 @@ func TestStatusOf(t *testing.T) {
 		blob.ErrNotFound:                      404,
 		fmt.Errorf("x: %w", blob.ErrDiskFull): 507,
 		errors.New("boom"):                    500,
+		// QA N-8: a request body cut by IdleBody's deadline
+		&net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}: 408,
 	}
 	for err, want := range cases {
 		if got := StatusOf(err); got != want {
@@ -263,5 +267,27 @@ func TestOnlineMembersAndWriteTarget(t *testing.T) {
 	m["h"].Online = &off
 	if _, err := WriteTarget(g); StatusOf(err) != http.StatusServiceUnavailable {
 		t.Fatalf("offline write member: %v", err)
+	}
+}
+
+// QA N-27: a group serves nothing when each member is offline or itself such
+// a group; a group without members or a hosted repository is not offline.
+func TestMembersOffline(t *testing.T) {
+	off := false
+	m := Build(&config.Config{Repositories: []config.Repository{
+		{Name: "h", Format: "maven", Type: "hosted", Online: &off},
+		{Name: "h2", Format: "maven", Type: "hosted"},
+		{Name: "inner", Format: "maven", Type: "group", Members: []string{"h"}},
+		{Name: "outer", Format: "maven", Type: "group", Members: []string{"h", "inner"}},
+		{Name: "empty", Format: "maven", Type: "group"},
+	}})
+	for name, want := range map[string]bool{"inner": true, "outer": true, "empty": false, "h": false, "h2": false} {
+		if got := m[name].MembersOffline(); got != want {
+			t.Errorf("%s: MembersOffline = %v, want %v", name, got, want)
+		}
+	}
+	m["inner"].MemberRepos = append(m["inner"].MemberRepos, m["h2"])
+	if m["outer"].MembersOffline() {
+		t.Error("outer: a nested group with an online member serves")
 	}
 }

@@ -5,10 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -49,6 +52,10 @@ type Target struct {
 	Header http.Header
 	// SHA256 is the expected content sha256 (hex); a mismatching download is rejected and not cached.
 	SHA256 string
+	// NotHTML marks an asset that is never a web page: a text/html answer
+	// (an upstream directory listing or error page) is taken as a 404, or as
+	// a failed fetch when the asset is cached, which serves the cached copy.
+	NotHTML bool
 }
 
 type Fetcher struct {
@@ -156,7 +163,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		u.RawPath = ""
 		target = u.String()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	req, err := http.NewRequestWithContext(withRemote(ctx, rp.RemoteURL), http.MethodGet, target, nil)
 	if err != nil {
 		return Result{}, err
 	}
@@ -190,9 +197,17 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 	}
 	defer resp.Body.Close()
 	now := f.Now()
+	status := resp.StatusCode
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); status == http.StatusOK && t.NotHTML && mt == "text/html" {
+		if cached { // a maintenance or sign-in page is a remote failure, not a removal
+			return f.stale(rp, t.Key, a, cached, errors.New("remote answered with a web page"))
+		}
+		slog.Warn("remote answered with a web page, taken as not found", "repo", rp.Name, "path", t.Key)
+		status = http.StatusNotFound
+	}
 
 	switch {
-	case resp.StatusCode == http.StatusNotModified && cached:
+	case status == http.StatusNotModified && cached:
 		if err := f.Store.Current(rp); err != nil {
 			return Result{}, err
 		}
@@ -202,10 +217,11 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		a.CheckedAt = now.UTC().Truncate(time.Millisecond)
 		return Result{Asset: a}, nil
 
-	case resp.StatusCode == http.StatusOK:
+	case status == http.StatusOK:
+		body := newStallReader(resp.Body, cancel)
 		var na meta.Asset
 		var verr error
-		sums, err := f.Store.WriteBlob(rp.Name, resp.Body, func(s blob.Sums) error {
+		sums, err := f.Store.WriteBlob(rp.Name, body, func(s blob.Sums) error {
 			if t.SHA256 != "" && !strings.EqualFold(t.SHA256, s.SHA256) {
 				verr = &repo.Error{Status: http.StatusBadGateway, Msg: "upstream content does not match the expected sha256"}
 				if f.Store.Current(rp) != nil {
@@ -242,7 +258,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		}
 		return Result{Asset: na}, nil
 
-	case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
+	case status == http.StatusNotFound || status == http.StatusGone:
 		// A 404 from a remote that was replaced meanwhile must not outlive the change.
 		if cerr := f.Store.Current(rp); cerr != nil {
 			return Result{}, cerr
@@ -254,6 +270,40 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{}, repo.ErrNotFound
 	}
 	return f.stale(rp, t.Key, a, cached, fmt.Errorf("remote status %d", resp.StatusCode))
+}
+
+// bodyIdle is how long a read of a remote body may wait for data before its
+// fetch is cancelled; a var for tests.
+var bodyIdle = 60 * time.Second
+
+// stallReader cancels its fetch when a read waits bodyIdle for the remote,
+// so a stalled remote gives up its fetch slot long before the fetch timeout.
+// The timer runs only inside Read: the time the fetch spends before the first
+// read and between reads (writing to a slow blob store) is not the remote's.
+type stallReader struct {
+	r       io.Reader
+	timer   *time.Timer
+	stalled atomic.Bool
+}
+
+func newStallReader(r io.Reader, cancel context.CancelFunc) *stallReader {
+	s := &stallReader{r: r}
+	s.timer = time.AfterFunc(bodyIdle, func() {
+		s.stalled.Store(true)
+		cancel()
+	})
+	s.timer.Stop()
+	return s
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	s.timer.Reset(bodyIdle)
+	n, err := s.r.Read(p)
+	s.timer.Stop()
+	if err != nil && s.stalled.Load() {
+		err = fmt.Errorf("remote body stalled for %v: %w", bodyIdle, err)
+	}
+	return n, err
 }
 
 func (f *Fetcher) stale(rp *repo.Repository, path string, a meta.Asset, cached bool, cause error) (Result, error) {

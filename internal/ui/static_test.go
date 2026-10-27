@@ -1,9 +1,9 @@
 package ui
 
 import (
-	"fmt"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -323,6 +323,66 @@ func TestOpsWired(t *testing.T) {
 			if !strings.Contains(js, want) {
 				t.Errorf("%s does not contain %s", file, want)
 			}
+		}
+	}
+}
+
+// TestComponentDeleteWired: the browse views offer deletion to whoever has the
+// delete privilege on a hosted repository, in every format: Maven file by file
+// through the repository, the others a whole version through the components
+// API (QA H-2, M-11).
+func TestComponentDeleteWired(t *testing.T) {
+	js := readStatic(t, "browse.js")
+	for _, want := range []string{
+		`const canDelete = (r) => r.type === "hosted" && !!r.canDelete;`,
+		`api(apiRepo(r.name, "/components?" + new URLSearchParams(`,
+		`r.format !== "maven" ? versionDelete(r, c, opts.onDeleted)`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("browse.js does not contain %s", want)
+		}
+	}
+}
+
+// TestMavenSetupEnablesSnapshots: the settings.xml shown for a Maven proxy or
+// group turns snapshots on through an active profile; following a mirror
+// alone breaks every SNAPSHOT dependency (QA M-17).
+func TestMavenSetupEnablesSnapshots(t *testing.T) {
+	js := readStatic(t, "browse.js")
+	for _, want := range []string{"<snapshots><enabled>true</enabled></snapshots>", "<activeProfile>commandcenter</activeProfile>"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("browse.js setup snippet lacks %s", want)
+		}
+	}
+}
+
+// TestCargoUsageUsesPublishedName: a cargo asset path holds the crate name
+// lowercased, so the asset view asks the packages API for the published
+// spelling before showing `cargo add`, and version paths built from a
+// published name are lowercased again (QA L-20).
+func TestCargoUsageUsesPublishedName(t *testing.T) {
+	js := readStatic(t, "browse.js")
+	for _, want := range []string{`r.format === "cargo" && r.type === "hosted"`, `"crates/" + c.name.toLowerCase() + "/"`} {
+		if !strings.Contains(js, want) {
+			t.Errorf("browse.js lacks %s", want)
+		}
+	}
+}
+
+// TestUserListKeepsPrincipalsApart: the user list merges a directory user
+// only into its override row (source "ldap"); next to a local user with the
+// same id it is a row of its own, linked by its owner key, and the account
+// page of an LDAP session shows that key (QA N-19).
+func TestUserListKeepsPrincipalsApart(t *testing.T) {
+	js := readStatic(t, "access.js")
+	for _, want := range []string{
+		`const over = (id) => stored.has(id) && stored.get(id).source === "ldap";`,
+		`key: stored.has(id) ? "ldap:" + id : id`,
+		`.find((x) => x.key === id)`,
+		`ldap ? kv(t("acct.owner"), h("code", null, me.owner)) : null`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("access.js lacks %s", want)
 		}
 	}
 }

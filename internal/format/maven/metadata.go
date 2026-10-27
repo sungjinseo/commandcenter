@@ -47,7 +47,13 @@ type Plugin struct {
 	ArtifactID string `xml:"artifactId"`
 }
 
+// maxMetadataSize bounds a stored or proxied document.
 const maxMetadataSize = 10 << 20
+
+// maxUploadedMetadata bounds an uploaded document (413 beyond it). Real ones
+// are a few KiB; 1 MiB still holds some 30000 versions or a large
+// plugin-group document.
+const maxUploadedMetadata = 1 << 20
 
 func ParseMetadata(r io.Reader) (*Metadata, error) {
 	var m Metadata
