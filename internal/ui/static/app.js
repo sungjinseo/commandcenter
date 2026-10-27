@@ -105,6 +105,14 @@ export function parse(hash) {
   m = /^admin\/support\/status\?(.*)$/.exec(raw);
   if (m) return { key: "admin/support/status", params: [], criteria: new URLSearchParams(m[1]) };
 
+  // Accept slash-form repository edit deep links alongside existing colon URLs.
+  m = /^admin\/repository\/repositories\/([^/:]+)$/.exec(raw);
+  if (m) {
+    const name = dec(m[1]);
+    if (!name || badSeg(name) || name.includes("/")) return { notFound: true };
+    return { key: "admin/repository/repositories", params: [name] };
+  }
+
   // Everything else: <head>[:<param>[:<param>...]], decoded per segment.
   const parts = raw.split(":");
   const head = parts.shift();

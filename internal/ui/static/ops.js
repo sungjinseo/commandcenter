@@ -165,8 +165,10 @@ export function repositoryStatsCard(isLive) {
   const range = sel(rangeOptions(), "24h", { "aria-label": t("repoOps.range") });
   const refresh = button([icon("refresh"), t("logs.refresh")], "small");
   const body = h("div");
-  const collected = h("div", { class: "tiny muted", role: "status" });
-  const panel = card(t("repoOps.title"), t("repoOps.sub"), [collected, body], acts(range, refresh));
+  const collected = h("p", { role: "status", title: t("repoOps.sub") });
+  const panel = card(t("repoOps.title"), null, null, acts(range, refresh));
+  panel.querySelector(".card-head > div").appendChild(collected);
+  panel.appendChild(body);
   panel.hidden = true; // An unimplemented endpoint must leave no panel behind.
   let seq = 0;
   const load = async () => {
@@ -180,7 +182,7 @@ export function repositoryStatsCard(isLive) {
       if (!d || !Array.isArray(d.repositories)) throw new Error("Invalid repository statistics");
       panel.hidden = false;
       put(collected, t("repoOps.collected", {
-        since: d.since ? fmtDate(d.since) : dash,
+        range: rangeOptions().find(([value]) => value === selected)[1],
         at: d.collectedAt ? fmtDate(d.collectedAt) : dash,
       }));
       put(body, tbl([
@@ -197,13 +199,20 @@ export function repositoryStatsCard(isLive) {
         const cacheTotal = metric(r.cacheHits) && metric(r.cacheMisses) ? r.cacheHits + r.cacheMisses : 0;
         const bad = r.errorRate >= 0.01 || (proxy && r.upstreamFailures > 0);
         const status = r.requests > 0 || bad ? (bad ? t("repoOps.bad") : t("repoOps.ok")) : t("repoOps.noTraffic");
-        return h("tr", null,
-          h("td", null, nameCell(r.format, h("a", { href }, h("strong", null, r.name)), r.format + " · " + r.type)),
+        const open = adminRepoLink(r.name);
+        const row = h("tr", { class: "clickable", tabindex: 0, "aria-label": r.name,
+          onclick: (ev) => { if (!ev.target.closest("a,button,.menu")) location.hash = open; },
+          onkeydown: (ev) => {
+            if (ev.target === ev.currentTarget && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); location.hash = open; }
+          },
+        },
+          h("td", null, nameCell(r.format, h("a", { href: open }, h("strong", null, r.name)), r.format + " · " + r.type)),
           h("td", null, badge([h("i", { class: "dot", "aria-hidden": "true" }), status], bad ? "red" : r.requests > 0 ? "green" : null)),
           cell(r.requests), cell(r.errorRate, percent), cell(proxy ? r.upstreamFailures : null),
           latencyCell(proxy ? r.upstreamLatencyAvgMs : null, r.upstreamLatencyMaxMs),
           cell(proxy && cacheTotal > 0 ? r.cacheHits / cacheTotal : null, percent),
           cell(r.bytesIn, fmtBytes), cell(r.bytesOut, fmtBytes), latencyCell(r.latencyAvgMs, r.latencyMaxMs));
+        return row;
       }), t("repoOps.none")));
     } catch (e) {
       if (!isLive() || n !== seq) return;

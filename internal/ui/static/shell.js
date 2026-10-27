@@ -1,6 +1,6 @@
 // The Command Center console shell (plan 10 Decisions 3, 4, 6 and 7): the
 // sidebar, the topbar, menus and dialogs, the theme and the language.
-import { state, ANON, h, put, api, icon, loadRepos, hideBanner, showError, canUpload, isBusy, fmtNum } from "./util.js";
+import { state, ANON, h, put, api, icon, loadRepos, hideBanner, showError, canUpload, isBusy } from "./util.js";
 import { t, getLang, setLang, onLangChange, applyServerDefault } from "./i18n.js";
 
 const hooks = { rerender: () => {} };
@@ -48,20 +48,9 @@ function applyTheme() {
   const m = themePref();
   if (m === "system") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.setAttribute("data-theme", m);
-  if (els.theme) {
-    put(els.theme, icon(THEME_ICON[m]));
-    const label = t("theme.title", { mode: themeLabel(m) });
-    els.theme.title = label;
-    els.theme.setAttribute("aria-label", label);
-  }
+
 }
 applyTheme(); // as early as possible, before the first paint of the shell
-
-function cycleTheme() {
-  const next = THEMES[(THEMES.indexOf(themePref()) + 1) % THEMES.length];
-  setPref("theme", next === "system" ? null : next);
-  applyTheme();
-}
 
 // ---- dialogs ------------------------------------------------------------------
 
@@ -177,7 +166,7 @@ function closeMenu() {
 }
 
 // dropdown wires btn to a role=menu list built by build() on every open.
-function dropdown(btn, build) {
+export function dropdown(btn, build) {
   const list = h("div", { class: "menu", role: "menu", hidden: true });
   const wrap = h("div", { class: "menu-wrap" }, btn, list);
   btn.setAttribute("aria-haspopup", "menu");
@@ -220,7 +209,7 @@ const SEARCH_HASH = "#browse/search/generic";
 function buildTopbar() {
   const hdr = document.getElementById("hdr");
   els.crumb = h("nav", { class: "crumb" });
-  els.resources = h("div", { class: "resource-strip" });
+  els.drawerToggle = h("button", { type: "button", class: "icon-btn drawer-toggle", "aria-controls": "side", "aria-expanded": "false", onclick: () => setDrawer(true) }, icon("menu"));
 
   const q = h("input", { id: "hdr-search", type: "search", autocomplete: "off" });
   els.kbd = h("kbd", { "aria-hidden": "true" }, "/");
@@ -236,39 +225,20 @@ function buildTopbar() {
   els.search = q;
   els.searchForm = form;
 
-  els.theme = h("button", { type: "button", class: "icon-btn" });
-  els.theme.addEventListener("click", cycleTheme);
-  els.lang = h("button", { type: "button", class: "icon-btn lang-btn" });
+  els.lang = h("button", { type: "button", class: "btn small ghost lang-btn" });
   els.lang.addEventListener("click", () => setLang(getLang() === "ko" ? "en" : "ko"));
-  els.role = h("span", { class: "top-role" });
   els.who = h("div", { class: "who" });
 
-  put(hdr, h("div", { class: "top-console" }, els.crumb, els.resources),
-    h("div", { class: "top-actions" }, form, els.theme, els.lang, els.role, els.who));
+  put(hdr, els.drawerToggle, els.crumb,
+    h("div", { class: "top-actions" }, form, els.lang, els.who));
   applyTheme();
-}
-
-// Only summarize repositories already visible to this session. Groups repeat
-// their members' assets, so count files in hosted/proxy repositories once.
-function renderResources() {
-  const repos = state.repos;
-  const files = repos ? repos.filter((r) => r.type !== "group")
-    .reduce((n, r) => n + (Number(r.assets) || 0), 0) : null;
-  const offline = repos ? repos.filter((r) => r.online === false).length : null;
-  const resource = (label, ico, value, warning) => h("div", {
-    class: "resource" + (warning ? " warning" : ""), title: label,
-  }, icon(ico), h("span", { class: "sr-only" }, label + ": "),
-  h("strong", null, value === null ? "—" : fmtNum(value)));
-  put(els.resources,
-    resource(t("dash.repos"), "repos", repos ? repos.length : null),
-    resource(t("col.files"), "file", files),
-    resource(t("repo.down"), "status", offline, offline > 0));
 }
 
 // applyTexts refreshes the language-dependent text of the static chrome.
 function applyTexts() {
   const skip = document.querySelector(".skip");
   if (skip) skip.textContent = t("skip");
+  els.drawerToggle.setAttribute("aria-label", t("nav.aria"));
   els.crumb.setAttribute("aria-label", t("crumb.aria"));
   els.search.placeholder = t("top.search");
   els.search.setAttribute("aria-label", t("top.search"));
@@ -288,20 +258,21 @@ function renderWho() {
   if (els.whoKey === key) return;
   els.whoKey = key;
   if (me.anonymous) {
-    els.role.textContent = "";
-    els.role.hidden = true;
     put(els.who, h("button", { type: "button", class: "btn small primary login-btn", onclick: openLogin }, icon("user"), h("span", null, t("nav.login"))));
     return;
   }
   const role = me.admin ? t("user.admin") : t("user.user");
-  els.role.textContent = role;
-  els.role.hidden = false;
   const initials = (me.user.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2) || "?").toUpperCase();
   const btn = h("button", { type: "button", class: "avatar", title: me.user, "aria-label": t("user.menu", { user: me.user }) }, initials);
   put(els.who, dropdown(btn, () => [
     h("div", { class: "menu-head", role: "presentation" }, h("strong", null, me.user), h("span", { class: "sub" }, role)),
     menuLink("#user/account", t("nav.account"), "user"),
     menuLink(me.admin ? "#admin/security/usertoken" : "#user/usertoken", t("nav.tokens"), "token"),
+    h("div", { class: "menu-sep", role: "separator" }),
+    ...THEMES.map((mode) => menuButton((themePref() === mode ? "✓ " : "") + themeLabel(mode), THEME_ICON[mode], () => {
+      setPref("theme", mode === "system" ? null : mode);
+      applyTheme();
+    })),
     h("div", { class: "menu-sep", role: "separator" }),
     menuButton(t("user.signout"), "signout", signOut),
   ]));
@@ -379,52 +350,8 @@ function renderCrumb(route) {
   }
   const sep = () => h("span", { class: "sep", "aria-hidden": "true" }, "/");
   put(els.crumb,
-    h("a", { href: "#browse/welcome" }, t("brand.local")), sep(),
-    h("strong", { "aria-current": id ? null : "page" }, pageTitle(key)),
+    id ? h("a", { href: "#" + key }, pageTitle(key)) : h("strong", { "aria-current": "page" }, pageTitle(key)),
     id ? [sep(), h("span", { class: "crumb-id", "aria-current": "page" }, id)] : null);
-}
-
-// ---- instance pill and health dot (admins only) -----------------------------
-
-let healthTimer = 0;
-let health = null; // null: unknown, -1: unavailable, n: unhealthy check count
-
-function showHealth() {
-  const pill = els.instance;
-  pill.classList.toggle("good", state.me.admin && health === 0);
-  pill.classList.toggle("bad", state.me.admin && health !== null && health !== 0);
-  const host = els.instanceHost.textContent;
-  let label = t("instance.title", { host });
-  if (state.me.admin && health !== null) {
-    label += " · " + (health < 0 ? t("instance.unavailable") : health ? t("instance.unhealthy", { n: health }) : t("instance.healthy"));
-  }
-  els.instanceState.textContent = !state.me.admin || health === null ? t("instance.unavailable")
-    : health < 0 ? t("instance.unavailable") : health ? t("instance.unhealthy", { n: health }) : t("instance.healthy");
-  pill.title = label;
-  pill.setAttribute("aria-label", label);
-}
-
-async function pollHealth() {
-  if (!state.me.admin) return;
-  try {
-    const d = await api("status/checks");
-    health = (d.checks || []).filter((c) => !c.healthy).length;
-  } catch (e) {
-    health = -1;
-  }
-  showHealth();
-}
-
-function syncHealth() {
-  if (state.me.admin && !healthTimer) {
-    pollHealth();
-    healthTimer = setInterval(() => { if (document.visibilityState === "visible") pollHealth(); }, 60000);
-  } else if (!state.me.admin && healthTimer) {
-    clearInterval(healthTimer);
-    healthTimer = 0;
-    health = null;
-  }
-  showHealth();
 }
 
 // instanceHost is the host of the configured base URL, as the repository
@@ -438,10 +365,7 @@ function instanceHost() {
 
 // ---- sidebar (Decision 6: real features only) ---------------------------------
 
-// Share the favicon's low armored dome and command tower across both brand areas.
-function brandMark() {
-  return h("img", { src: "/ui/icon.svg", alt: "", "aria-hidden": "true", width: 24, height: 24 });
-}
+function brandMark() { return "CC"; }
 
 const SEARCH_SUB = [["cargo", "cargo"], ["docker", "docker"], ["go", "golang"], ["maven", "maven"], ["npm", "npm"], ["pypi", "pypi"]];
 
@@ -450,7 +374,7 @@ function navSections() {
   const me = state.me;
   const repos = state.repos || [];
   const is = (...keys) => (k) => keys.includes(k);
-  const out = [[t("nav.sec.workspace"), [
+  const out = [[null, [
     ["#browse/welcome", t("nav.dashboard"), "dashboard", is("browse/welcome", "login")],
     ["#browse/browse", t("nav.browse"), "repos", is("browse/browse", "browse/component")],
     ["#browse/search/generic", t("nav.search"), "search", (k) => k.startsWith("browse/search/")],
@@ -499,41 +423,39 @@ function searchChildren(key) {
     h("a", { href, class: "nav-sublink" + (active ? " active" : ""), "aria-current": active ? "page" : null }, label)));
 }
 
-// The version comes from /-/api/me, which tells it to signed-in users only.
-function renderFooter() {
-  if (!els.footer) return;
-  const v = state.me.anonymous ? "" : String(state.me.version || "");
-  put(els.footer,
-    h("b", null, t("brand.name")), v ? " · " + (/^[0-9]/.test(v) ? "v" : "") + v : null,
-    h("br"), t("footer.openSource"));
-}
-
 function renderSidebar(route) {
   const side = document.getElementById("side");
   const key = route.key || "";
-  const words = t("brand.name").split(" ");
-  // The sidebar is rebuilt on every route: keep focus on the link it was on.
   const focused = side.contains(document.activeElement) ? document.activeElement.getAttribute("href") : null;
-  els.instanceHost.textContent = instanceHost();
+  const host = instanceHost();
   const nav = h("nav", { class: "nav-scroll", "aria-label": t("nav.aria") },
     navSections().map(([title, items]) => [
-      h("div", { class: "nav-label" }, title),
+      title ? h("div", { class: "nav-label" }, title) : null,
       h("div", { class: "nav-commands" }, items.filter(Boolean).map(([href, label, ico, active]) => [
         navLink(href, label, ico, active(key)),
         href === SEARCH_HASH ? searchChildren(key) : null,
       ])),
     ]));
-  els.footer = h("div", { class: "nav-footer" });
-  renderFooter();
   put(side,
     h("a", { class: "brand", href: "#browse/welcome", "aria-label": t("brand.name") },
       h("div", { class: "brandmark" }, brandMark()),
-      h("div", { class: "brandtext" }, h("strong", null, words.map((w, i) => [i ? h("br") : null, w])), h("small", null, t("brand.sub")))),
-    els.instance, nav, els.footer);
+      h("div", { class: "brandtext" }, h("strong", null, "Command Center"), h("small", { title: host }, host))),
+    h("button", { type: "button", class: "icon-btn drawer-close", "aria-label": t("dialog.close"), onclick: () => setDrawer(false) }, icon("close")), nav);
   if (focused) {
     const again = [...side.querySelectorAll("a[href]")].find((a) => a.getAttribute("href") === focused);
     if (again) again.focus();
   }
+}
+
+function setDrawer(open, returnFocus = true) {
+  const side = document.getElementById("side");
+  const wasOpen = side.classList.contains("open");
+  side.classList.toggle("open", open);
+  document.body.classList.toggle("drawer-open", open);
+  els.drawerBackdrop.hidden = !open;
+  els.drawerToggle.setAttribute("aria-expanded", String(open));
+  if (open) side.querySelector(".drawer-close").focus();
+  else if (wasOpen && returnFocus) els.drawerToggle.focus();
 }
 
 // ---- the "/" shortcut (Decision 7) --------------------------------------------
@@ -583,11 +505,14 @@ export function rerender() { hooks.rerender(); }
 // initShell builds the topbar once; rerender re-runs the current route.
 export function initShell(rerender) {
   hooks.rerender = rerender;
-  els.instanceHost = h("b", null, location.host);
-  els.instanceState = h("span", { class: "instance-state" });
-  els.instance = h("div", { class: "instance" }, h("i", { class: "hdot", "aria-hidden": "true" }),
-    h("span", { class: "instance-copy" }, els.instanceHost, els.instanceState));
   buildTopbar();
+  els.drawerBackdrop = h("button", { type: "button", class: "drawer-backdrop", hidden: true, tabindex: -1, "aria-label": t("dialog.close"), onclick: () => setDrawer(false) });
+  document.body.appendChild(els.drawerBackdrop);
+  document.getElementById("side").addEventListener("click", (ev) => {
+    if (ev.target.closest("a[href]")) setDrawer(false);
+  });
+  const mobile = matchMedia("(max-width: 900px)");
+  mobile.addEventListener("change", () => setDrawer(false, false));
   applyTexts();
   state.idle = () => {
     state.pendingLang = false;
@@ -605,11 +530,19 @@ export function initShell(rerender) {
       hooks.rerender();
     }
   });
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && healthTimer) pollHealth();
-  });
   document.addEventListener("click", (ev) => { if (openMenu && !openMenu.list.parentNode.contains(ev.target)) closeMenu(); });
   document.addEventListener("keydown", (ev) => {
+    const side = document.getElementById("side");
+    if (side.classList.contains("open")) {
+      if (ev.key === "Escape") { ev.preventDefault(); setDrawer(false); return; }
+      if (ev.key === "Tab") {
+        const items = [...side.querySelectorAll(FOCUSABLE)];
+        const first = items[0], last = items[items.length - 1];
+        if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+        else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+        return;
+      }
+    }
     if (ev.key !== "/" || ev.ctrlKey || ev.metaKey || ev.altKey || ev.defaultPrevented) return;
     if (typing(document.activeElement) || document.querySelector("dialog[open]")) return;
     ev.preventDefault();
@@ -623,9 +556,7 @@ export function renderChrome(route) {
   lastRoute = route;
   closeMenu();
   renderWho();
-  renderResources();
   renderSidebar(route);
-  syncHealth();
   renderCrumb(route);
   if (route.key === "browse/search/generic" && route.criteria) els.search.value = route.criteria.get("keyword") || "";
 }

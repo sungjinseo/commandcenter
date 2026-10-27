@@ -157,13 +157,13 @@ const TYPES = { hosted: "hosted", proxy: "proxy", group: "group" };
 export const fmtBadge = (f) => h("span", { class: "badge" + (FORMATS.includes(f) ? " f-" + f : "") }, f);
 export const typeBadge = (ty) => h("span", { class: "badge" + (TYPES[ty] ? " t-" + ty : "") }, ty);
 export const FORMAT_NAMES = { maven: "Maven", npm: "npm", pypi: "PyPI", go: "Go", cargo: "Cargo", docker: "Docker", raw: "Raw", helm: "Helm" };
-const TILES = { maven: "m", npm: "n", pypi: "Py", go: "Go", cargo: "Rs", docker: "D", raw: "R", helm: "H" };
+const TILES = { maven: "mvn", npm: "npm", pypi: "Py", go: "Go", cargo: "Rs", docker: "dkr", raw: "raw", helm: "H" };
 // fmtTile is the concept's coloured format tile.
 export const fmtTile = (f) => h("span", { class: "format" + (FORMATS.includes(f) ? " " + f : ""), "aria-hidden": "true" },
   FORMATS.includes(f) ? TILES[f] : String(f || "?").slice(0, 1));
 // nameCell is a tile, a main line and an optional small second line.
 export const nameCell = (f, main, sub) => h("div", { class: "namecell" }, fmtTile(f), h("span", null, main, sub ? h("small", null, sub) : null));
-export const onlineBadge = (online) => (online === false ? h("span", { class: "badge red" }, t("repo.down")) : h("span", { class: "badge green" }, t("repo.up")));
+export const onlineBadge = (online) => (online === false ? h("span", { class: "badge red" }, h("span", { class: "dot", "aria-hidden": "true" }), t("repo.down")) : h("span", { class: "badge green" }, h("span", { class: "dot", "aria-hidden": "true" }), t("repo.up")));
 
 // ---- concept building blocks ------------------------------------------------
 
@@ -374,16 +374,10 @@ export function copyLine(text, label) {
 }
 
 
-// pageHead is the content header of the design concept: an eyebrow, the
-// title, an optional subtitle and optional controls on the right. opts may
-// be { eyebrow }; older callers pass an icon name there, which is ignored.
-export function pageHead(title, sub, right, opts) {
-  const eyebrow = opts && typeof opts === "object" && opts.eyebrow ? opts.eyebrow : t("brand.name");
+// pageHead contains the title, an optional one-line description and actions.
+export function pageHead(title, sub, right) {
   return h("div", { class: "page-head" },
-    h("div", { class: "page-title" },
-      h("div", { class: "eyebrow" }, eyebrow),
-      h("h1", null, title), sub || null),
-    right || null);
+    h("div", { class: "page-title" }, h("h1", null, title), sub || null), right || null);
 }
 
 export const loading = () => h("div", { class: "loading" }, t("common.loading"));
