@@ -494,7 +494,7 @@ Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, T
 |---|---|
 | `GET /repositories`, `GET /repositories/{name}` | 읽을 수 있는 저장소의 `name`, `format`, `type`, `url`, `attributes.proxy.remoteUrl` |
 | `GET /repositorySettings`, `GET /repositories/{format}/{type}/{name}` | admin. `online`, `storage`, `cleanup`, `proxy`, `negativeCache`, `httpClient.authentication`(사용자 이름만), `group`, `maven` 등 Command Center에 대응 값이 있는 항목 |
-| `POST /repositories/{format}/{type}` → 201, `PUT /repositories/{format}/{type}/{name}` → 204, `DELETE /repositories/{name}` → 204 | admin. maven, npm, pypi, raw, docker, helm, go, cargo |
+| `POST /repositories/{format}/{type}` → 201, `PUT /repositories/{format}/{type}/{name}` → 204, `DELETE /repositories/{name}` → 204 | admin. maven, npm, pypi, raw, docker, helm, go, cargo, nuget, apt, yum |
 | `GET /components?repository=`, `GET /components/{id}`, `DELETE /components/{id}` | 50개씩, `continuationToken`으로 다음 페이지 |
 | `GET /assets?repository=`, `GET /assets/{id}`, `DELETE /assets/{id}` | 삭제는 raw 파일만(아래 차이점) |
 | `GET /search`, `GET /search/assets`, `GET /search/assets/download` | `q`, `repository`, `format`, `group`, `name`, `version`(`*` 와일드카드), `sort`, `direction`, `maven.groupId/artifactId/baseVersion/extension/classifier`, `npm.scope`, `docker.imageName/imageTag` |
