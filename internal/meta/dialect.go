@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -245,6 +247,18 @@ func openPostgres(url string) (*sql.DB, string, error) {
 	return db, "PostgreSQL database " + strconv.Quote(cfg.Database) + " on " + cfg.Host, nil
 }
 
+// ddlError explains a CREATE or ALTER that PostgreSQL refused for lack of
+// privilege: creating and upgrading the tables takes the owner of the
+// database and its tables, while an up-to-date database needs DML only.
+func ddlError(err error, name string) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42501" { // insufficient_privilege
+		return fmt.Errorf("creating or upgrading the tables of %s: %w (the server's role must own the database and its tables, "+
+			"CREATE DATABASE ... OWNER <role>; or run this version once as their owner)", name, err)
+	}
+	return err
+}
+
 // defaultPostgresConns is the PostgreSQL pool size unless SetMaxOpenConns
 // sets another; SQLite's is 4.
 const defaultPostgresConns = 10
@@ -325,4 +339,5 @@ CREATE TABLE IF NOT EXISTS tasks(
   last_log TEXT COLLATE "C" NOT NULL DEFAULT '', next_run BIGINT NOT NULL DEFAULT 0,
   last_removed BIGINT NOT NULL DEFAULT 0, last_bytes BIGINT NOT NULL DEFAULT 0,
   notify_email TEXT COLLATE "C" NOT NULL DEFAULT '[]');
+CREATE TABLE IF NOT EXISTS schema_version(version BIGINT NOT NULL);
 `

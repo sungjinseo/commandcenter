@@ -133,3 +133,19 @@ func TestBlobStoreS3Rejected(t *testing.T) {
 		t.Fatalf("a refused store was stored: %v", err)
 	}
 }
+
+// Review S3-3: the same bucket and prefix with the endpoint spelled
+// differently (a trailing slash) is still the same object namespace, and
+// is refused: the two stores' GCs would delete each other's blobs.
+func TestBlobStoreS3IsolationEndpointSpelling(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	withBlobStore(t, e)
+	srv := s3test.New(t)
+	wantStatus(t, e.admin(t, "POST", "/-/api/blobstores", s3Body(t, srv, "a", nil)), http.StatusCreated)
+	r := e.admin(t, "POST", "/-/api/blobstores", s3Body(t, srv, "b", func(m map[string]any) {
+		m["s3"].(map[string]any)["endpoint"] = strings.ToUpper(srv.URL) + "/"
+	}))
+	if r.status != http.StatusBadRequest || !strings.Contains(fmt.Sprint(r.json(t)["error"]), `already the "a" store's`) {
+		t.Fatalf("same bucket and prefix at %s/ accepted: %d %s", srv.URL, r.status, r.body)
+	}
+}

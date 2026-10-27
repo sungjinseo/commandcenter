@@ -3,6 +3,8 @@ package meta
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -333,4 +335,98 @@ func TestUnstorableText(t *testing.T) {
 			t.Fatalf("%q: tx %v, list %v %v, search %v %v, negative %v %v", p, txErr, list, listErr, hits, searchErr, hit, negErr)
 		}
 	}
+}
+
+// Review postgres-2: CreateUser and CreateBlobStore check and insert under
+// one write lock, so concurrent creates of a look-alike id or the same name
+// end with ErrExists for one of them, never two rows or a raw constraint
+// error.
+func TestCreatesCheckAndInsertUnderTheWriteLock(t *testing.T) {
+	db := openTest(t)
+	race := func(i int, a, b string, create func(id string) error) {
+		t.Helper()
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		for j, id := range []string{a, b} {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				errs[j] = create(id)
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if errs[0] == nil && errs[1] == nil {
+			t.Fatalf("attempt %d: both %q and %q were created", i, a, b)
+		}
+		for _, err := range errs {
+			if err != nil && !errors.Is(err, ErrExists) {
+				t.Fatalf("attempt %d: a create failed with a raw error, not ErrExists: %v", i, err)
+			}
+		}
+	}
+	for i := 0; i < 100; i++ {
+		race(i, fmt.Sprintf("User%d", i), fmt.Sprintf("user%d", i), func(id string) error { return db.CreateUser(ctx, User{ID: id}) })
+		name := fmt.Sprintf("bs%d", i)
+		race(i, name, name, func(id string) error { return db.CreateBlobStore(ctx, BlobStore{Name: id, Path: "/x"}) })
+	}
+}
+
+// Review postgres-1: an up-to-date database opens without DDL rights, so a
+// role with DML on the tables (created by a DBA, or by migrate-db with the
+// admin URL) runs the server; one that needs an upgrade says what the role
+// must be.
+func TestOpenAsLeastPrivilegeRole(t *testing.T) {
+	if !metatest.Postgres() {
+		t.Skip("PostgreSQL only")
+	}
+	target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	db, err := Open(target) // the owner creates the tables
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	admin := rawOpen(t, target)
+	var dbName string
+	if err := admin.db.QueryRow(`SELECT current_database()`).Scan(&dbName); err != nil {
+		t.Fatal(err)
+	}
+	role := fmt.Sprintf("ccapp_%d", time.Now().UnixNano())
+	for _, q := range []string{
+		`CREATE ROLE ` + role + ` LOGIN PASSWORD 'pw'`,
+		`GRANT CONNECT ON DATABASE ` + dbName + ` TO ` + role,
+		`GRANT USAGE ON SCHEMA public TO ` + role,
+		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ` + role,
+	} {
+		if _, err := admin.db.Exec(q); err != nil {
+			t.Fatal(q, err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, q := range []string{`DROP OWNED BY ` + role, `DROP ROLE ` + role} {
+			if _, err := admin.db.Exec(q); err != nil {
+				t.Error(q, err)
+			}
+		}
+	})
+	u, _ := url.Parse(target)
+	u.User = url.UserPassword(role, "pw")
+	app, err := Open(u.String())
+	if err != nil {
+		t.Fatalf("Open as a role with DML rights only on an up-to-date schema: %v", err)
+	}
+	if err := app.PutAsset(ctx, Asset{Repo: "r", Path: "p", BlobSHA256: "s"}); err != nil {
+		t.Fatal(err)
+	}
+	app.Close()
+	if err := stampSchemaVersion(ctx, admin, schemaVersion-1); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Open(u.String())
+	if err == nil || !strings.Contains(err.Error(), "42501") || !strings.Contains(err.Error(), "OWNER") {
+		t.Fatalf("Open of a database to upgrade as the DML-only role: %v, want the privilege error naming the owner", err)
+	}
+	t.Log(err)
 }

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -352,5 +353,100 @@ func TestS3EmptyBlob(t *testing.T) {
 	defer f.Close()
 	if b, err := io.ReadAll(f); len(b) != 0 || err != nil {
 		t.Fatalf("read %q, %v", b, err)
+	}
+}
+
+// Review S3-1: the client never follows a redirect. An endpoint answering
+// 302 (a wrong-region 301, or a hostile gateway) is reported as that status
+// with S3's own body, not followed to the other host, whose reply would
+// otherwise be relayed as the error text or served as the blob.
+func TestS3RedirectNotFollowed(t *testing.T) {
+	var internalHits atomic.Int32
+	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		internalHits.Add(1)
+		w.Header().Set("Content-Length", "9")
+		io.WriteString(w, "IMDS-DATA")
+	}))
+	defer internal.Close()
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, internal.URL+"/latest/meta-data/", http.StatusFound)
+	}))
+	defer endpoint.Close()
+	s, err := blob.OpenS3(t.TempDir(), blob.S3Config{Bucket: "test", Endpoint: endpoint.URL, PathStyle: true, AccessKey: "a", SecretKey: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Check(); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("Check = %v, want the 302 reported", err)
+	}
+	if _, err := s.Open(helloSHA256); err == nil || !strings.Contains(err.Error(), "302") {
+		t.Fatalf("Open = %v, want the 302 reported", err)
+	}
+	if n := internalHits.Load(); n != 0 {
+		t.Fatalf("the redirect was followed: %d hits on the other host", n)
+	}
+}
+
+// Review S3-2: a 200 or a HEAD without Content-Length (chunked, or gzipped
+// by a gateway) is an error, never an empty blob; and the client does not
+// invite compression.
+func TestS3UnsizedObjectRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "" {
+			t.Errorf("%s asked for Accept-Encoding %q", r.Method, r.Header.Get("Accept-Encoding"))
+		}
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush() // no Content-Length
+		io.WriteString(w, "hello world")
+	}))
+	defer srv.Close()
+	s, err := blob.OpenS3(t.TempDir(), blob.S3Config{Bucket: "test", Endpoint: srv.URL, PathStyle: true, AccessKey: "a", SecretKey: "s"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, err := s.Open(helloSHA256); err == nil || !strings.Contains(err.Error(), "Content-Length") {
+		if err == nil {
+			b, _ := io.ReadAll(f)
+			f.Close()
+			t.Fatalf("Open read %q with no error", b)
+		}
+		t.Fatalf("Open = %v, want the missing Content-Length reported", err)
+	}
+	if info, err := s.Stat(helloSHA256); err == nil || !strings.Contains(err.Error(), "Content-Length") {
+		t.Fatalf("Stat = %+v, %v, want the missing Content-Length reported", info, err)
+	}
+}
+
+// Review S3-3: Location names one bucket and prefix the same way however
+// its endpoint is spelled, so the isolation check cannot be fooled.
+func TestS3ConfigLocation(t *testing.T) {
+	base := blob.S3Config{Bucket: "bkt", Prefix: "cc", AccessKey: "a", SecretKey: "s"}
+	same := []func(c *blob.S3Config){
+		func(c *blob.S3Config) { c.Endpoint = "https://s3.us-east-1.amazonaws.com" },
+		func(c *blob.S3Config) { c.Endpoint = "HTTPS://S3.US-EAST-1.AMAZONAWS.COM/"; c.Region = "us-east-1" },
+		func(c *blob.S3Config) { c.Endpoint = "https://s3.us-east-1.amazonaws.com:443"; c.PathStyle = true },
+		func(c *blob.S3Config) { c.Prefix = "/cc/" },
+	}
+	for i, mutate := range same {
+		c := base
+		mutate(&c)
+		if c.Location() != base.Location() {
+			t.Errorf("%d: %q != %q", i, c.Location(), base.Location())
+		}
+	}
+	for i, mutate := range []func(c *blob.S3Config){
+		func(c *blob.S3Config) { c.Endpoint = "http://minio:9000" },
+		func(c *blob.S3Config) { c.Prefix = "cc/2" },
+		func(c *blob.S3Config) { c.Bucket = "bkt2" },
+		func(c *blob.S3Config) { c.Region = "eu-west-1" },
+	} {
+		c := base
+		mutate(&c)
+		if c.Location() == base.Location() {
+			t.Errorf("%d: %q equals the base location", i, c.Location())
+		}
+	}
+	if l := (blob.S3Config{Bucket: "b", Endpoint: "http://minio:80/"}).Location(); l != "http://minio/b/" {
+		t.Fatalf("Location = %q", l)
 	}
 }

@@ -185,8 +185,10 @@ func (d *DB) SizeBytes(ctx context.Context) (int64, error) {
 // upgrade creates the tables, adds the columns older databases lack and
 // stamps schemaVersion in one transaction, so a crash leaves the database
 // either as it was or migrated and stamped. A database a newer build wrote
-// is refused before anything is written. On PostgreSQL the transaction holds
-// the write lock, so two processes starting at once upgrade in turn.
+// is refused before anything is written, and one at schemaVersion is left
+// alone: no DDL runs, so a PostgreSQL role with DML rights alone opens it.
+// On PostgreSQL the transaction holds the write lock, so two processes
+// starting at once upgrade in turn.
 func upgrade(p *pool, name string) error {
 	ctx := context.Background()
 	tx, err := p.begin(ctx, true)
@@ -204,31 +206,33 @@ func upgrade(p *pool, name string) error {
 			"and this version would misread it: run the newer version again, or restore the backup taken before the upgrade "+
 			"together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", name, version, schemaVersion)
 	}
+	if version == schemaVersion {
+		return tx.Commit()
+	}
 	if _, err := q.ExecContext(ctx, pg(q, schema, pgSchema)); err != nil {
-		return err
+		return ddlError(err, name)
 	}
 	if !p.pg { // pgSchema has every column
 		if err := migrate(ctx, q); err != nil {
 			return err
 		}
 	}
-	if version < schemaVersion {
-		if err := stampSchemaVersion(ctx, q, schemaVersion); err != nil {
-			return err
-		}
+	if err := stampSchemaVersion(ctx, q, schemaVersion); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
 
 // schemaVersionOf reads the stamped schema version: 0 for a new database or
-// one from before the stamp.
+// one from before the stamp. It runs no DDL (pgSchema creates the table).
 func schemaVersionOf(ctx context.Context, q querier) (int, error) {
 	var v int
 	if !q.postgres() {
 		err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v)
 		return v, err
 	}
-	if _, err := q.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_version(version BIGINT NOT NULL)`); err != nil {
+	var stamped bool
+	if err := q.QueryRowContext(ctx, `SELECT to_regclass('schema_version') IS NOT NULL`).Scan(&stamped); err != nil || !stamped {
 		return 0, err
 	}
 	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v)

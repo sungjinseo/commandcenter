@@ -101,7 +101,9 @@ func (d *DB) GetUser(ctx context.Context, id string) (User, error) {
 // CreateUser stores a new user; ErrExists if the id is taken, also by an id
 // that differs only in case (QA N-18). Empty source and status default to
 // local and active; zero times to now.
-func (d *DB) CreateUser(ctx context.Context, u User) error { return insertUser(ctx, d.sql, u) }
+func (d *DB) CreateUser(ctx context.Context, u User) error {
+	return d.Tx(ctx, func(tx *Tx) error { return insertUser(ctx, tx.q, u) }) // the check and the insert under one write lock
+}
 
 // UpdateUser replaces the stored user u.ID (created_at is kept); ErrNotFound
 // if there is none.
@@ -242,7 +244,9 @@ func (d *DB) GetRole(ctx context.Context, id string) (Role, error) {
 
 // CreateRole stores a new role; ErrExists if the id is taken, also by an id
 // that differs only in case (QA N-18).
-func (d *DB) CreateRole(ctx context.Context, r Role) error { return insertRole(ctx, d.sql, r) }
+func (d *DB) CreateRole(ctx context.Context, r Role) error {
+	return d.Tx(ctx, func(tx *Tx) error { return insertRole(ctx, tx.q, r) })
+}
 
 // UpdateRole replaces the description and privileges of role r.ID;
 // ErrNotFound if there is none.

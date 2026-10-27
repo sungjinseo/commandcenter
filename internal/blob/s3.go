@@ -91,9 +91,6 @@ func OpenS3(root string, cfg S3Config) (*Store, error) {
 	if cfg.Region == "" {
 		cfg.Region = "us-east-1"
 	}
-	if cfg.Endpoint == "" {
-		cfg.Endpoint = "https://s3." + cfg.Region + ".amazonaws.com"
-	}
 	be := &s3{cfg: cfg, accessKey: cfg.AccessKey, secretKey: cfg.SecretKey, now: time.Now}
 	if be.accessKey == "" {
 		be.accessKey, be.secretKey, be.session = os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN")
@@ -101,8 +98,7 @@ func OpenS3(root string, cfg S3Config) (*Store, error) {
 			return nil, errors.New("no S3 credentials: set accessKey and secretKey, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
 		}
 	}
-	u, _ := url.Parse(cfg.Endpoint) // validated above
-	u.Path, u.RawPath = strings.TrimSuffix(u.Path, "/"), ""
+	u := cfg.endpointURL()
 	if cfg.PathStyle {
 		u.Path += "/" + cfg.Bucket
 	} else {
@@ -111,8 +107,40 @@ func OpenS3(root string, cfg S3Config) (*Store, error) {
 	be.base = u
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = 30 * time.Second
-	be.client = &http.Client{Transport: tr}
+	tr.DisableCompression = true // a gateway that gzips would hide the object's size
+	// S3 never redirects a well-formed request; a 301 names the right
+	// endpoint, which do reports, and following one off the host would
+	// relay another server's reply as the object.
+	be.client = &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return open(root, be)
+}
+
+// endpointURL is the endpoint c targets in one spelling: the region's AWS
+// endpoint for an empty one, scheme and host lower-cased, a default port
+// and a trailing slash dropped. c must have passed Validate.
+func (c S3Config) endpointURL() *url.URL {
+	region := c.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+	ep := c.Endpoint
+	if ep == "" {
+		ep = "https://s3." + region + ".amazonaws.com"
+	}
+	u, _ := url.Parse(ep)
+	u.Scheme, u.Host = strings.ToLower(u.Scheme), strings.ToLower(u.Host)
+	if p := u.Port(); (u.Scheme == "http" && p == "80") || (u.Scheme == "https" && p == "443") {
+		u.Host = strings.TrimSuffix(u.Host, ":"+p)
+	}
+	u.Path, u.RawPath = strings.TrimSuffix(u.Path, "/"), ""
+	return u
+}
+
+// Location names the object namespace c targets, endpoint/bucket/prefix
+// with the endpoint in one spelling, so two configurations of one bucket
+// and prefix compare equal however the endpoint is written.
+func (c S3Config) Location() string {
+	return c.endpointURL().String() + "/" + c.Bucket + "/" + strings.Trim(c.Prefix, "/")
 }
 
 func (s *s3) key(sha string) string {
@@ -306,6 +334,10 @@ func (s *s3) get(key string, from, to int64) (io.ReadCloser, int64, error) {
 		return nil, 0, err
 	}
 	size := resp.ContentLength
+	if size < 0 && resp.StatusCode == http.StatusOK { // chunked: the size is unknown, and so is a clean end
+		resp.Body.Close()
+		return nil, 0, fmt.Errorf("s3 GET %s: no Content-Length", key)
+	}
 	if resp.StatusCode == http.StatusPartialContent {
 		// Content-Range: bytes from-to/size
 		_, total, ok := strings.Cut(resp.Header.Get("Content-Range"), "/")
@@ -338,6 +370,9 @@ func (s *s3) stat(sha string) (Info, error) {
 		return Info{}, err
 	}
 	resp.Body.Close()
+	if resp.ContentLength < 0 {
+		return Info{}, fmt.Errorf("s3 HEAD %s: no Content-Length", sha)
+	}
 	mod, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
 	return Info{Size: resp.ContentLength, ModTime: mod}, nil
 }

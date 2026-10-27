@@ -82,14 +82,6 @@ func (d *DB) GetBlobStore(ctx context.Context, name string) (BlobStore, error) {
 // CreateBlobStore stores a new blob store; ErrExists if the name is taken. A
 // zero CreatedAt defaults to now.
 func (d *DB) CreateBlobStore(ctx context.Context, bs BlobStore) error {
-	var one int
-	err := d.sql.QueryRowContext(ctx, `SELECT 1 FROM blob_stores WHERE name = ?`, bs.Name).Scan(&one)
-	if err == nil {
-		return ErrExists
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
 	if bs.CreatedAt.IsZero() {
 		bs.CreatedAt = time.Now()
 	}
@@ -97,9 +89,19 @@ func (d *DB) CreateBlobStore(ctx context.Context, bs BlobStore) error {
 	if err != nil {
 		return err
 	}
-	_, err = d.sql.ExecContext(ctx, `INSERT INTO blob_stores(`+blobStoreCols+`) VALUES(?,?,?,?,?)`,
-		bs.Name, bs.Path, typ, config, toMs(bs.CreatedAt))
-	return err
+	return d.Tx(ctx, func(tx *Tx) error { // the check and the insert under one write lock
+		var one int
+		err := tx.q.QueryRowContext(ctx, `SELECT 1 FROM blob_stores WHERE name = ?`, bs.Name).Scan(&one)
+		if err == nil {
+			return ErrExists
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		_, err = tx.q.ExecContext(ctx, `INSERT INTO blob_stores(`+blobStoreCols+`) VALUES(?,?,?,?,?)`,
+			bs.Name, bs.Path, typ, config, toMs(bs.CreatedAt))
+		return err
+	})
 }
 
 // SeedBlobStore inserts the named store, or refreshes the path of an existing

@@ -310,7 +310,7 @@ func (u *UI) checkS3Isolation(ctx context.Context, c blob.S3Config) error {
 		return err
 	}
 	for _, bs := range rows {
-		if o := bs.S3; bs.Type == meta.BlobStoreS3 && o != nil && o.Bucket == c.Bucket && o.Prefix == c.Prefix && o.Endpoint == c.Endpoint {
+		if o := bs.S3; bs.Type == meta.BlobStoreS3 && o != nil && o.Location() == c.Location() {
 			return &repo.ValidationError{Errors: []string{
 				fmt.Sprintf("s3 bucket %s prefix %q is already the %q store's", c.Bucket, c.Prefix, bs.Name)}}
 		}
