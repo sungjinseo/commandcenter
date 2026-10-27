@@ -335,46 +335,45 @@ func (u *UI) pypiMetadata(ctx context.Context, rp *repo.Repository, name, versio
 }
 
 // fillCoreMetadata reads Python core metadata (RFC 822 headers up to the
-// first blank line): Summary, License, Home-page, Project-URL and
+// first blank line, folded lines continuing a field) with the pypi
+// format's own parser: Summary, License, Home-page, Project-URL and
 // Requires-Dist. Extras markers are kept in the requirement as declared.
 func fillCoreMetadata(doc string, m *componentMetadata) {
-	head, _, _ := strings.Cut(doc, "\n\n")
-	var repoURL string
-	for _, line := range strings.Split(strings.ReplaceAll(head, "\r\n", "\n"), "\n") {
-		k, v, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
+	f := pypi.CoreFields([]byte(doc))
+	last := func(k string) string {
+		if v := f[k]; len(v) > 0 {
+			return v[len(v)-1]
 		}
-		k, v = strings.ToLower(strings.TrimSpace(k)), strings.TrimSpace(v)
-		switch k {
-		case "summary":
-			m.Description = optStr(v)
-		case "license", "license-expression":
-			if m.License == nil || k == "license-expression" {
-				m.License = optStr(v)
-			}
-		case "home-page":
-			m.Homepage = optStr(v)
-		case "project-url":
-			label, url, ok := strings.Cut(v, ",")
-			if ok && repoURL == "" && strings.Contains(strings.ToLower(label), "source") || ok && strings.Contains(strings.ToLower(label), "repository") {
-				repoURL = strings.TrimSpace(url)
-			}
-			if m.Homepage == nil && ok && strings.Contains(strings.ToLower(label), "homepage") {
-				m.Homepage = optStr(strings.TrimSpace(url))
-			}
-		case "requires-dist":
-			name, rest := v, ""
-			if i := strings.IndexAny(v, " (;<>=!~["); i >= 0 {
-				name, rest = v[:i], strings.TrimSpace(v[i:])
-			}
-			scope := "runtime"
-			if strings.Contains(rest, "extra ==") {
-				scope = "optional"
-			}
-			if len(m.Dependencies) < 2000 {
-				m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: name, Requirement: rest, Optional: scope == "optional"})
-			}
+		return ""
+	}
+	m.Description = optStr(last("summary"))
+	if v := last("license-expression"); v != "" {
+		m.License = optStr(v)
+	} else {
+		m.License = optStr(last("license"))
+	}
+	m.Homepage = optStr(last("home-page"))
+	var repoURL string
+	for _, v := range f["project-url"] {
+		label, url, ok := strings.Cut(v, ",")
+		if ok && repoURL == "" && strings.Contains(strings.ToLower(label), "source") || ok && strings.Contains(strings.ToLower(label), "repository") {
+			repoURL = strings.TrimSpace(url)
+		}
+		if m.Homepage == nil && ok && strings.Contains(strings.ToLower(label), "homepage") {
+			m.Homepage = optStr(strings.TrimSpace(url))
+		}
+	}
+	for _, v := range f["requires-dist"] {
+		name, rest := v, ""
+		if i := strings.IndexAny(v, " (;<>=!~["); i >= 0 {
+			name, rest = v[:i], strings.TrimSpace(v[i:])
+		}
+		scope := "runtime"
+		if strings.Contains(rest, "extra ==") {
+			scope = "optional"
+		}
+		if len(m.Dependencies) < 2000 {
+			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: name, Requirement: rest, Optional: scope == "optional"})
 		}
 	}
 	if repoURL != "" {

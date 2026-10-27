@@ -408,6 +408,9 @@ func (h *Handler) baseURL() string {
 // memberFailure logs a group member's error and returns it as a 5xx.
 func memberFailure(group, m *repo.Repository, name string, err error) error {
 	slog.Error("cargo group member failed", "group", group.Name, "member", m.Name, "crate", name, "err", logsafe.Err(err))
+	if errors.Is(err, proxy.ErrRateLimited) {
+		return err // the remote's 429, so a client's retry policy sees it
+	}
 	if repo.StatusOf(err) < http.StatusInternalServerError {
 		return repo.Errorf(http.StatusBadGateway, "repository %q failed", m.Name)
 	}

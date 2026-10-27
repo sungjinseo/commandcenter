@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -189,4 +190,70 @@ func TestPOMParseSlots(t *testing.T) {
 		t.Fatal("POM recorded while every parse slot was taken")
 	}
 	e.putAll(t, "releases", path)
+}
+
+// ReadPOMInfo: the "${name}" map is built once, not per dependency, so a
+// POM with 1000 properties and 2000 dependencies costs a few MiB, not
+// hundreds.
+func TestReadPOMInfoAllocs(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("<project><properties>")
+	for i := range 1000 {
+		fmt.Fprintf(&b, "<p%d>v</p%d>", i, i)
+	}
+	b.WriteString("</properties><dependencies>")
+	for i := range 2000 {
+		fmt.Fprintf(&b, "<dependency><groupId>${p1}</groupId><artifactId>a%d</artifactId><version>${p2}</version></dependency>", i)
+	}
+	b.WriteString("</dependencies></project>")
+	pom := b.String()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	info := ReadPOMInfo(strings.NewReader(pom))
+	runtime.ReadMemStats(&after)
+	mb := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	t.Logf("pom %d bytes: %.1f MiB allocated in one ReadPOMInfo", len(pom), mb)
+	if mb > 50 {
+		t.Fatalf("%.0f MiB allocated for a %d byte POM", mb, len(pom))
+	}
+	if len(info.Dependencies) != 2000 || info.Dependencies[1999].Version != "v" {
+		t.Fatalf("deps %d, last %+v", len(info.Dependencies), info.Dependencies[len(info.Dependencies)-1])
+	}
+}
+
+// ReadPOMInfo: an element nested deeper than maxPOMDepth is skipped but its
+// end is matched, so what follows it is still read.
+func TestReadPOMInfoDeepNesting(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("<project><build>")
+	for range 1100 {
+		b.WriteString("<x>")
+	}
+	for range 1100 {
+		b.WriteString("</x>")
+	}
+	b.WriteString("</build><description>desc</description><dependencies><dependency><groupId>g</groupId><artifactId>a</artifactId><version>1</version></dependency></dependencies></project>")
+	info := ReadPOMInfo(strings.NewReader(b.String()))
+	if info.Description != "desc" || len(info.Dependencies) != 1 {
+		t.Fatalf("after a 1100-deep element: description %q, deps %d (want desc, 1)", info.Description, len(info.Dependencies))
+	}
+}
+
+// ReadPOMInfo: ${project.*}, ${pom.*} and bare ${version} come from the
+// project's own coordinates, the parent's when the project omits them.
+func TestReadPOMInfoProjectCoordinates(t *testing.T) {
+	for _, c := range []struct{ name, pom, group, version string }{
+		{"own", `<project><groupId>g</groupId><artifactId>parent</artifactId><version>2.5</version>
+<dependencies><dependency><groupId>${project.groupId}</groupId><artifactId>sibling</artifactId><version>${project.version}</version></dependency></dependencies></project>`, "g", "2.5"},
+		{"from parent", `<project><parent><groupId>pg</groupId><artifactId>p</artifactId><version>7</version></parent><artifactId>child</artifactId>
+<dependencies><dependency><groupId>${pom.groupId}</groupId><artifactId>sibling</artifactId><version>${version}</version></dependency></dependencies></project>`, "pg", "7"},
+		{"over property", `<project><groupId>g</groupId><artifactId>a</artifactId><version>1</version><properties><project.version>9</project.version></properties>
+<dependencies><dependency><groupId>${project.groupId}</groupId><artifactId>sibling</artifactId><version>${project.version}</version></dependency></dependencies></project>`, "g", "1"},
+	} {
+		info := ReadPOMInfo(strings.NewReader(c.pom))
+		if len(info.Dependencies) != 1 || info.Dependencies[0].GroupID != c.group || info.Dependencies[0].Version != c.version {
+			t.Fatalf("%s: deps %+v (want %s:sibling:%s)", c.name, info.Dependencies, c.group, c.version)
+		}
+	}
 }

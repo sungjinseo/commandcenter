@@ -687,6 +687,8 @@ func TestDeleteByDigest(t *testing.T) {
 	shared, own := []byte("shared"), []byte("own")
 	_, d1 := e.pushImage("dh/app", "v1", [][]byte{shared, own}, ci)
 	_, d2 := e.pushImage("dh/app", "v2", [][]byte{shared}, ci)
+	e.now = e.now.Add(blob.SessionMaxAge + time.Minute) // past the push grace window of the layers
+	ci = bearer(e.token("ci", "repository:dh/app:pull,push,delete"))
 	resp, b := e.do("DELETE", "/v2/dh/app/manifests/v1", nil, ci)
 	e.check(resp, b, 400, CodeUnsupported)
 	resp, b = e.do("DELETE", "/v2/dh/app/manifests/"+d1, nil, bearer(e.token("reader", "repository:dh/app:pull,push,delete")))
@@ -722,6 +724,45 @@ func TestDeleteByDigest(t *testing.T) {
 	e.check(resp, b, 404, CodeNameUnknown)
 	resp, b = e.do("GET", "/v2/dh/app/blobs/"+digestOf(shared), nil)
 	e.check(resp, b, 404, CodeBlobUnknown)
+}
+
+// A manifest delete keeps the layer rows a push in flight relies on: docker
+// HEADs each layer and skips uploading the ones present, so a layer HEADed
+// (or written) within blob.SessionMaxAge stays linked until a later delete.
+func TestDeleteManifestKeepsLayerOfPushInFlight(t *testing.T) {
+	e := newEnv(t)
+	shared, own := []byte("shared layer"), []byte("own layer")
+	_, d1 := e.pushImage("dh/app", "v1", [][]byte{shared, own}, basic("ci"))
+	e.now = e.now.Add(48 * time.Hour) // v1 is old; the pusher's HEAD marks shared in use
+	resp, b := e.do("HEAD", "/v2/dh/app/blobs/"+digestOf(shared), nil, basic("ci"))
+	e.check(resp, b, 200, "")
+	resp, b = e.do("DELETE", "/v2/dh/app/manifests/"+d1, nil, basic("admin"))
+	e.check(resp, b, 202, "")
+	resp, b = e.do("GET", "/v2/dh/app/blobs/"+digestOf(own), nil, basic("ci"))
+	e.check(resp, b, 404, CodeBlobUnknown)
+	cfg := []byte(`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers"},"v":2}`)
+	cd := e.pushBlob("dh/app", cfg, basic("ci"))
+	m := fmt.Sprintf(`{"schemaVersion":2,"mediaType":%q,"config":{"mediaType":"application/vnd.docker.container.image.v1+json","digest":%q,"size":%d},"layers":[{"mediaType":"application/vnd.docker.image.rootfs.diff.tar.gzip","digest":%q,"size":%d}]}`, mtSchema2, cd, len(cfg), digestOf(shared), len(shared))
+	resp, b = e.do("PUT", "/v2/dh/app/manifests/v2", []byte(m), basic("ci"), hdr("Content-Type", mtSchema2))
+	e.check(resp, b, 201, "")
+	resp, b = e.do("GET", "/v2/dh/app/blobs/"+digestOf(shared), nil, basic("ci"))
+	e.check(resp, b, 200, "")
+}
+
+// ?n=0 is a legal page size: an empty page, no Link, no panic.
+func TestPageNZero(t *testing.T) {
+	e := newEnv(t)
+	e.pushImage("dh/app", "v1", [][]byte{[]byte("l")}, basic("ci"))
+	resp, b := e.do("GET", "/v2/dh/app/tags/list?n=0", nil, basic("ci"))
+	e.check(resp, b, 200, "")
+	if string(bytes.TrimSpace(b)) != `{"name":"dh/app","tags":[]}` || resp.Header.Get("Link") != "" {
+		t.Fatalf("n=0 tags: %s %q", b, resp.Header.Get("Link"))
+	}
+	resp, b = e.do("GET", "/v2/_catalog?n=0", nil, basic("ci"))
+	e.check(resp, b, 200, "")
+	if string(bytes.TrimSpace(b)) != `{"repositories":[]}` {
+		t.Fatalf("n=0 catalog: %s", b)
+	}
 }
 
 func TestSessionRestartAndExpiry(t *testing.T) {

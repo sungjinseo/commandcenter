@@ -282,12 +282,23 @@ func (h *Handler) getBlob(w http.ResponseWriter, r *http.Request, rp *repo.Repos
 		return Err(http.StatusBadRequest, CodeDigestInvalid, "invalid digest: "+rt.Digest)
 	}
 	var res proxy.Result
+	var owner *repo.Repository
 	err := h.walk(r.Context(), rp, rt.Image, func(m *repo.Repository) (err error) {
 		res, err = h.blob(r.Context(), m, rt.Image, rt.Digest)
+		owner = m
 		return err
 	})
 	if err != nil {
 		return err
+	}
+	if r.Method == http.MethodHead && owner.Type == "hosted" {
+		// A push HEADs each layer and skips uploading the ones present, so
+		// the row must outlive the push: deleteManifest keeps rows touched
+		// within blob.SessionMaxAge.
+		res.Asset.LastModified = h.now().UTC().Truncate(time.Millisecond)
+		if err := h.Store.DB.PutAsset(r.Context(), res.Asset); err != nil {
+			return err
+		}
 	}
 	res.Asset.ContentType = "application/octet-stream"
 	w.Header().Set("Docker-Content-Digest", rt.Digest)
@@ -309,11 +320,13 @@ func page(w http.ResponseWriter, r *http.Request, list []string) ([]string, erro
 		}
 		if n < len(list) {
 			list = list[:n]
-			u := *r.URL
-			v := u.Query()
-			v.Set("last", list[len(list)-1])
-			u.RawQuery = v.Encode()
-			w.Header().Set("Link", `<`+u.RequestURI()+`>; rel="next"`)
+			if n > 0 { // n=0 is an empty page; there is no last entry to link from
+				u := *r.URL
+				v := u.Query()
+				v.Set("last", list[len(list)-1])
+				u.RawQuery = v.Encode()
+				w.Header().Set("Link", `<`+u.RequestURI()+`>; rel="next"`)
+			}
 		}
 	}
 	if list == nil {

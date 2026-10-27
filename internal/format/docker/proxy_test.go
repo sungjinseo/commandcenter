@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -565,4 +566,68 @@ func TestGroup(t *testing.T) {
 	e.check(resp, b, 200, "")
 	resp, b = e.do("POST", "/v2/all/app/blobs/uploads/", nil, bearer(e.h.mint(*c)))
 	e.check(resp, b, 403, CodeDenied)
+}
+
+// A transient failure of the upstream token service is a remote failure
+// (5xx, no negative-cache row), not the registry's 401 turned into a
+// not-found that outlives the outage.
+func TestTokenOutageIsNotNegativeCached(t *testing.T) {
+	fr := &fakeRegistry{manifests: map[string]fakeManifest{}, blobs: map[string][]byte{}, served: map[string]int{}, denied: map[string]bool{}}
+	var tokenDown atomic.Bool
+	fr.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" && tokenDown.Load() {
+			http.Error(w, "auth service down", http.StatusServiceUnavailable)
+			return
+		}
+		fr.ServeHTTP(w, r)
+	}))
+	t.Cleanup(fr.ts.Close)
+	fr.bearer = true
+	fr.putImage("team/app", "v1", []byte("layer one"))
+	e := newEnvWith(t, proxyOf(fr, "hub", nil))
+
+	tokenDown.Store(true)
+	resp, b := e.do("GET", "/v2/hub/team/app/manifests/v1", nil)
+	e.check(resp, b, 502, "")
+	tokenDown.Store(false)
+	resp, b = e.do("GET", "/v2/hub/team/app/manifests/v1", nil)
+	e.check(resp, b, 200, "")
+}
+
+// The remote's 429 reaches the client through a group too, not as a 502.
+func TestGroupPassesRateLimitThrough(t *testing.T) {
+	fr := newFakeRegistry(t)
+	fr.putImage("team/app", "v1", []byte("layer one"))
+	tr := true
+	e := newEnvWith(t, proxyOf(fr, "hub", nil),
+		config.Repository{Name: "grp", Format: "docker", Type: "group", Members: []string{"hub"}, AnonymousRead: &tr})
+	fr.set(func() { fr.status = 429 })
+	resp, b := e.do("GET", "/v2/hub/team/app/manifests/v1", nil)
+	e.check(resp, b, 429, CodeTooManyRequests)
+	resp, b = e.do("GET", "/v2/grp/team/app/manifests/v1", nil)
+	e.check(resp, b, 429, CodeTooManyRequests)
+}
+
+// The owner rule holds through a nested group: the inner group's hosted
+// member owns the image, so the outer group never falls through to a proxy
+// that has the tag.
+func TestNestedGroupOwnerRule(t *testing.T) {
+	fr := newFakeRegistry(t)
+	fr.putImage("app", "v2", []byte("upstream layer"))
+	tr := true
+	e := newEnvWith(t, proxyOf(fr, "hub", nil),
+		config.Repository{Name: "inner", Format: "docker", Type: "group", Members: []string{"dh"}, AnonymousRead: &tr},
+		config.Repository{Name: "outer", Format: "docker", Type: "group", Members: []string{"inner", "hub"}, AnonymousRead: &tr})
+	e.pushImage("dh/app", "v1", [][]byte{[]byte("l")}, basic("ci"))
+	resp, b := e.do("GET", "/v2/inner/app/manifests/v2", nil)
+	e.check(resp, b, 404, CodeManifestUnknown)
+	resp, b = e.do("GET", "/v2/outer/app/manifests/v2", nil)
+	e.check(resp, b, 404, CodeManifestUnknown)
+	if fr.count("/v2/app/manifests/v2") != 0 {
+		t.Fatal("the proxy was asked for an image a nested hosted member owns")
+	}
+	// what no hosted member owns still comes from the proxy
+	fr.putImage("web", "latest", []byte("web layer"))
+	resp, b = e.do("GET", "/v2/outer/web/manifests/latest", nil)
+	e.check(resp, b, 200, "")
 }

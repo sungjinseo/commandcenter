@@ -42,6 +42,9 @@ func upstreamPath(rp *repo.Repository, image, rest string) string {
 // earlier one.
 func memberFailure(group, m *repo.Repository, err error) error {
 	slog.Error("docker group member failed", "group", group.Name, "member", m.Name, "err", logsafe.Err(err))
+	if errors.Is(err, proxy.ErrRateLimited) {
+		return err // the remote's 429, so a client's retry policy sees it
+	}
 	if repo.StatusOf(err) < http.StatusInternalServerError {
 		return repo.Errorf(http.StatusBadGateway, "repository %q failed", m.Name)
 	}
@@ -67,17 +70,33 @@ func (h *Handler) walk(ctx context.Context, rp *repo.Repository, image string, f
 		if repo.StatusOf(err) != http.StatusNotFound {
 			return memberFailure(rp, m, err)
 		}
-		if m.Type == "hosted" {
-			st, serr := h.Store.DB.PackageStamp(ctx, m.Name, image)
-			if serr != nil {
-				return memberFailure(rp, m, serr)
-			}
-			if st.Count > 0 {
-				return err
-			}
+		owned, serr := h.owns(ctx, m, image)
+		if serr != nil {
+			return memberFailure(rp, m, serr)
+		}
+		if owned {
+			return err
 		}
 	}
 	return Err(http.StatusNotFound, CodeNameUnknown, "repository name not known to registry: "+rp.Name+"/"+image)
+}
+
+// owns reports whether a hosted repository has image: rp itself, or one
+// under rp when it is a group (so the owner rule holds through nested
+// groups: the group's not found is its hosted member's).
+func (h *Handler) owns(ctx context.Context, rp *repo.Repository, image string) (bool, error) {
+	switch rp.Type {
+	case "hosted":
+		st, err := h.Store.DB.PackageStamp(ctx, rp.Name, image)
+		return st.Count > 0, err
+	case "group":
+		for _, m := range rp.OnlineMembers() {
+			if owned, err := h.owns(ctx, m, image); owned || err != nil {
+				return owned, err
+			}
+		}
+	}
+	return false, nil
 }
 
 // manifest finds the manifest ref (tag or digest) of image in rp (hosted or

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 
+	"commandcenter/internal/blob"
 	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -205,7 +206,11 @@ func unknownRef(err error, kind, digest string) error {
 
 // deleteManifest removes a manifest, the tags that point at it, and the
 // blob rows no other manifest of the image references (the compact task
-// reclaims the blobs). actor is recorded on the event.
+// reclaims the blobs). A blob row written or HEADed (getBlob) within
+// blob.SessionMaxAge stays: a push in flight found it present and skipped
+// the upload, as docker does, and its manifest PUT must still link it. The
+// next delete of a manifest referencing it reclaims it. actor is recorded
+// on the event.
 func (h *Handler) deleteManifest(ctx context.Context, rp *repo.Repository, image, digest, actor string) error {
 	unlock := h.locks.Lock(lockKey(rp, image))
 	defer unlock()
@@ -247,9 +252,17 @@ func (h *Handler) deleteManifest(ctx context.Context, rp *repo.Repository, image
 				}
 			}
 		}
+		keep := h.now().Add(-blob.SessionMaxAge)
 		for _, d := range gone.Blobs {
 			if used[d] {
 				continue
+			}
+			a, err := tx.GetAsset(ctx, rp.Name, blobKey(image, d))
+			if errors.Is(err, meta.ErrNotFound) || err == nil && a.LastModified.After(keep) {
+				continue
+			}
+			if err != nil {
+				return err
 			}
 			if _, err := tx.DeleteAsset(ctx, rp.Name, blobKey(image, d)); offline(err) != nil {
 				return err

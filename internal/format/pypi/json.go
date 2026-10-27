@@ -68,6 +68,12 @@ func parseCore(raw []byte) header {
 	return h
 }
 
+// CoreFields parses the core metadata document raw as parseCore does and
+// returns its fields: lower-cased names to their values in order.
+func CoreFields(raw []byte) map[string][]string {
+	return parseCore(raw).fields
+}
+
 // nullable is a string field of the warehouse JSON: null when absent.
 func nullable(s string) any {
 	if s == "" {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -52,6 +53,9 @@ type upstreamToken struct {
 
 type tokenRequestKey struct{}
 
+// errTokenDenied is a realm's 401 or 403: the credentials are refused.
+var errTokenDenied = errors.New("token endpoint refused the credentials")
+
 func (u *upstream) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Context().Value(tokenRequestKey{}) != nil {
 		return u.base.RoundTrip(req)
@@ -72,12 +76,18 @@ func (u *upstream) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, nil
 	}
 	tok, err := u.fetchToken(req, ch, creds)
-	if err != nil {
-		slog.Warn("upstream registry token", "host", req.URL.Host, "err", logsafe.Err(err))
-		return resp, nil
+	if errors.Is(err, errTokenDenied) {
+		return resp, nil // the realm refused the credentials: the registry's 401 stands
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if err != nil {
+		// Any other failure (realm down, timeout, bad realm) is a remote
+		// failure, not the registry's 401: that would be negative-cached as
+		// not found (DeniedIsNotFound) for the rest of negativeCacheTTL.
+		slog.Warn("upstream registry token", "host", req.URL.Host, "err", logsafe.Err(err))
+		return nil, fmt.Errorf("upstream token: %w", err)
+	}
 	u.remember(scopeKey, ch.key()+"\x00"+creds, tok)
 	return u.base.RoundTrip(withBearer(req, tok.value))
 }
@@ -196,6 +206,9 @@ func (u *upstream) fetchToken(orig *http.Request, ch challenge, creds string) (u
 		return upstreamToken{}, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return upstreamToken{}, fmt.Errorf("%w: %s", errTokenDenied, resp.Status)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return upstreamToken{}, errors.New("token endpoint answered " + resp.Status)
 	}

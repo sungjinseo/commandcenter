@@ -164,3 +164,19 @@ func TestComponentMetadata(t *testing.T) {
 		t.Fatalf("anonymous on a public repository: %d", st)
 	}
 }
+
+// fillCoreMetadata: the body (after the first blank line, CRLF included) and
+// the continuation lines of an old-style folded Description are not fields,
+// so README text cannot add a dependency or replace the license.
+func TestFillCoreMetadataBodyAndFolding(t *testing.T) {
+	for name, doc := range map[string]string{
+		"crlf body":          "Metadata-Version: 2.1\r\nName: x\r\nVersion: 1.0\r\nLicense: MIT\r\nRequires-Dist: requests\r\n\r\n# README\r\nLicense: GPL-3.0 (see LICENSE)\r\nRequires-Dist: evil-package\r\n",
+		"folded description": "Metadata-Version: 2.1\nName: x\nVersion: 1.0\nLicense: MIT\nDescription: My package\n        \n        License: GPL (see LICENSE)\n        Requires-Dist: evil-package\nRequires-Dist: requests\n\n",
+	} {
+		var m componentMetadata
+		fillCoreMetadata(doc, &m)
+		if m.License == nil || *m.License != "MIT" || len(m.Dependencies) != 1 || m.Dependencies[0].Name != "requests" {
+			t.Fatalf("%s: license %v, deps %+v (want MIT, [requests])", name, m.License, m.Dependencies)
+		}
+	}
+}
