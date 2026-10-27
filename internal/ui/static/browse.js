@@ -411,8 +411,43 @@ function versionsBox(r, c, opts) {
   return box;
 }
 
+function metadataBox(r, c) {
+  const box = h("div", null, loading());
+  const query = new URLSearchParams({ group: c.group || "", name: c.name, version: c.version });
+  api(apiRepo(r.name, "/components/metadata?" + query)).then((d) => {
+    if (!d.collected) {
+      put(box, h("div", { class: "empty" }, t("meta.notCollected")));
+      return;
+    }
+    const fields = [
+      [t("col.format"), d.format],
+      [t("meta.description"), d.description],
+      [t("meta.license"), d.license],
+      [t("meta.homepage"), d.homepage],
+      [t("meta.repositoryUrl"), d.repositoryUrl],
+    ];
+    put(box,
+      tbl([t("meta.field"), t("meta.value")], fields.map(([label, value]) =>
+        h("tr", null, h("th", { scope: "row" }, label), h("td", null, value || "—")))),
+      h("h3", null, t("meta.dependencies")),
+      h("p", { class: "muted" }, t("meta.declaredOnly")),
+      tbl([t("meta.scope"), t("comp.group"), t("col.name"), t("meta.requirement"), t("meta.optional")],
+        (d.dependencies || []).map((dep) => h("tr", null,
+          h("td", null, dep.scope),
+          h("td", null, dep.group || "—"),
+          h("td", null, h("a", { href: searchLink("generic", { repo: r.name, format: d.format, group: dep.group || "", name: dep.name }) }, dep.name)),
+          h("td", null, dep.requirement),
+          h("td", null, dep.optional ? t("meta.yes") : t("meta.no")))),
+        t("meta.noDependencies")));
+  }, (e) => {
+    put(box, h("div", { class: "empty" }, e && e.status === 404 ? t("meta.none") : t("detail.loadFailed")));
+    if (!e || e.status !== 404) handleError(e);
+  });
+  return box;
+}
+
 // componentView renders a component in the concept's layout: a hero, tabs
-// (overview, assets, versions), then resource status and actions. assets are
+// (overview, metadata, assets, versions), then resource status and actions. assets are
 // {path, size, lastModified}; opts gives assetHref, onAsset, onPath (to open
 // a version in place), (to allow deletion) onDeleted, and for Maven, which
 // deletes file by file, incomplete: a reason the asset list may be partial,
@@ -452,6 +487,7 @@ export function componentView(r, c, assets, opts) {
         known.length ? kv(t("comp.downloads"), fmtNum(downloads)) : null,
         known.length ? kv(t("comp.lastDownloaded"), lastDl ? fmtDate(lastDl) : t("comp.neverDownloaded")) : null,
         usageBlock(r.format, c)]],
+      [t("meta.title"), once(() => metadataBox(r, c))],
       [t("comp.assets", { n: assets.length }), () => tbl([t("col.file"), { t: t("col.bytes"), cls: "num" }, { t: t("comp.downloads"), cls: "num" }, { t: t("col.actions"), cls: "act" }], assetRows, t("comp.noAssets"))],
       [t("comp.versions"), once(() => versionsBox(r, c, opts))],
     ])));
