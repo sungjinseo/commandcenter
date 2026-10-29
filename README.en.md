@@ -74,7 +74,7 @@ Known limits per format are listed under [limitations](docs/guide.md#제한-사�
 - **SSO and external directories**: OIDC, SAML 2.0 (signed and encrypted assertions verified), Atlassian Crowd and reverse-proxy header (RUT) realms, with group-to-role mapping and default roles for every signed-in user.
 - **User tokens**: a name code and pass code pair that replaces the user name and password (expiry, and an option to accept only tokens on repository endpoints).
 - **Operational visibility**: per-repository requests, error rate, latency, upstream failures and cache hit rate; request trends, activity log, health checks, log viewer, failure e-mails.
-- **Storage**: file or **S3-compatible** blob stores (several at once), content-addressed deduplication, blob GC. Metadata in **SQLite** or **PostgreSQL**, with a migration command between them.
+- **Storage**: file or **S3-compatible** blob stores (several at once), content-addressed deduplication, blob GC. Metadata in **PostgreSQL**.
 - **Blob store groups and S3 failover**: several file or S3 stores as one store (round robin, read-only members, draining a member), soft quotas, read failover to replica buckets, SSE-S3 and SSE-KMS.
 - **Housekeeping**: cleanup policies (age, last download, name pattern), scheduled and maintenance tasks (blob verification, Maven snapshot purge, metadata rebuild, temp file sweep), per-repository online/offline.
 - **Cleanup retain-N**: keep the newest N versions of each component by each format's own version order, exclusion patterns, and a preview (CSV) before saving.
@@ -108,8 +108,9 @@ config:
   adminPasswordHash: '<hash from above>'
 persistence:
   storageClass: <StorageClass>                 # blob storage; NFS works
-database:
-  existingSecret: commandcenter-db             # omit for SQLite; PostgreSQL per the guide
+postgresql:
+  persistence:
+    storageClass: <block storage StorageClass>   # the bundled PostgreSQL; an external one: database.existingSecret
 ```
 
 ```bash
@@ -126,12 +127,12 @@ Clusters that do not use Helm take the manifest attached to every release (`comm
 
 ```bash
 curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.1.1/commandcenter-v0.1.1.yaml
-# fill in baseURL, passwordHash and storageClassName in the file, then
+# fill in baseURL, passwordHash, the PostgreSQL password and storageClassName in the file, then
 kubectl create namespace commandcenter
 kubectl apply -n commandcenter -f commandcenter-v0.1.1.yaml
 ```
 
-It holds a one-pod StatefulSet, the `config.yaml` ConfigMap, a PVC and a Service; add an Ingress or Gateway the way your cluster does it. The chart is also attached as a file (`commandcenter-helm-chart-0.1.1.tgz`) for places that cannot pull OCI charts: `helm install commandcenter ./commandcenter-helm-chart-0.1.1.tgz -f my-values.yaml`.
+It holds a PostgreSQL StatefulSet and its password Secret, a one-pod Command Center StatefulSet, the `config.yaml` ConfigMap, a PVC and a Service; add an Ingress or Gateway the way your cluster does it. The chart is also attached as a file (`commandcenter-helm-chart-0.1.1.tgz`) for places that cannot pull OCI charts: `helm install commandcenter ./commandcenter-helm-chart-0.1.1.tgz -f my-values.yaml`.
 
 ### Docker compose
 
@@ -139,8 +140,9 @@ It holds a one-pod StatefulSet, the `config.yaml` ConfigMap, a PVC and a Service
 git clone --depth 1 --branch v0.1.1 https://github.com/sungjinseo/commandcenter.git
 cd commandcenter
 echo COMMANDCENTER_VERSION=0.1.1 >> .env
+echo POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') >> .env
 cp config.example.yaml config.yaml     # put the hash in passwordHash
-docker compose up -d
+docker compose up -d                   # PostgreSQL and Command Center
 ```
 
 Open `http://localhost:8081/` and sign in as `admin`.
@@ -170,8 +172,8 @@ Details: [Nexus에서 이전하기](docs/guide.md#nexus에서-이전하기) and 
 - Terminate TLS at the Ingress or reverse proxy and set `baseURL` to the `https://` address.
 - Turn off anonymous read (`anonymousRead`) for internal use; give CI API tokens, not passwords.
 - Set a key for stored secrets (SMTP, LDAP, OIDC, Crowd, SAML, remote credentials, S3) with `COMMANDCENTER_SECRET_KEY` or `secretKeyFile`, and keep it apart from backups.
-- Metadata lives in PostgreSQL. To run several nodes (active-active), give them all the same PostgreSQL database and shared storage (ReadWriteMany).
-- A 60-second stop grace period (already in the chart and compose file), regular backups, and a backup before every upgrade. Downgrades are not supported.
+- Metadata lives in PostgreSQL (13 or newer). Keep the PostgreSQL that the chart or compose file runs on block storage, and at production scale use a replicated PostgreSQL or a managed service. To run several nodes (active-active), give them all the same PostgreSQL database and shared storage (ReadWriteMany).
+- A 60-second stop grace period (already in the chart and compose file), regular backups (`pg_dump` and the blobs), and a backup before every upgrade. Downgrades are not supported.
 
 The full list is under [프로덕션 배포](docs/guide.md#프로덕션-배포).
 

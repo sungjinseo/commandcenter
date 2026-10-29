@@ -54,11 +54,14 @@ Kubernetes에는 Helm 차트로 설치합니다("Kubernetes" 참고). 여기서�
    cd commandcenter
    ```
 
-2. `docker-compose.yml`과 같은 폴더에 `.env` 파일을 만들고 쓸 버전을 적습니다. 이미지 태그에는 `v`가 없습니다. compose는 모든 명령에서 이 파일을 읽고, 버전이 없으면 시작하지 않습니다.
+2. `docker-compose.yml`과 같은 폴더에 `.env` 파일을 만들고 쓸 버전과 데이터베이스 비밀번호를 적습니다. 이미지 태그에는 `v`가 없습니다. compose는 모든 명령에서 이 파일을 읽고, 둘 중 하나라도 없으면 시작하지 않습니다.
 
    ```
    COMMANDCENTER_VERSION=1.2.3
+   POSTGRES_PASSWORD=<영문자와 숫자로 된 긴 임의 문자열>
    ```
+
+   `POSTGRES_PASSWORD`는 compose가 함께 띄우는 PostgreSQL(`postgres:17-alpine`)의 비밀번호입니다. URL에 그대로 들어가므로 영문자와 숫자만 쓰세요. 예: `echo POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') >> .env`. PostgreSQL은 처음 시작할 때만 이 값을 읽으므로, 나중에 바꾸려면 DB에서 `ALTER ROLE`로도 바꿔야 합니다.
 
    **소스에서 빌드**하려면 이 checkout을 빌드하고 `.env`에 그 이미지를 적습니다. 빌드 인자 `VERSION`이 `commandcenter version`과 UI에 나오는 버전이 됩니다(지정하지 않으면 `dev`).
 
@@ -91,19 +94,23 @@ Kubernetes에는 Helm 차트로 설치합니다("Kubernetes" 참고). 여기서�
 
    > `docker compose up` 전에 `config.yaml`이 반드시 존재해야 합니다. 없으면 Docker가 같은 이름의 디렉터리를 만들어 서버 시작에 실패합니다.
 
+   > compose 파일이 `COMMANDCENTER_DATABASE_URL`로 DB 주소를 넘기므로 `config.yaml`의 `database.url`은 비워 둡니다. 둘 다 있으면 서버가 시작하지 않습니다.
+
 5. 실행합니다.
 
    ```bash
    docker compose up -d
    ```
 
+   `docker compose up -d`는 PostgreSQL(`commandcenter-postgres`)을 먼저 띄우고 준비되면 Command Center를 띄웁니다. 메타데이터는 볼륨 `commandcenter-postgres`(이름은 `COMMANDCENTER_DB_VOLUME`)에, blob은 볼륨 `commandcenter-data`(이름은 `COMMANDCENTER_VOLUME`)에 있습니다.
+
    상태 확인: `http://localhost:8081/service/rest/v1/status` 가 200을 반환하면 정상입니다.
 
 ## Kubernetes
 
-Kubernetes에는 Helm 차트로 설치합니다. 차트는 기본으로 서버 Pod 하나(StatefulSet), `/data`의 ReadWriteOnce 볼륨, `config.yaml`을 담은 Secret, Service, 그리고 켜면 Ingress를 만듭니다. `replicaCount`를 2 이상으로 두면 PostgreSQL과 ReadWriteMany 볼륨 하나를 함께 쓰는 Deployment로 여러 Pod를 띄웁니다("고가용성(여러 노드)" 참고). 차트는 릴리스마다 `oci://ghcr.io/sungjinseo/charts/commandcenter`에 올라갑니다. 차트 버전은 릴리스 버전(`v1.2.3`이면 `1.2.3`)과 같고, 기본 이미지도 같은 버전의 `ghcr.io/sungjinseo/commandcenter`입니다. OCI 레지스트리의 차트를 받으려면 Helm 3.8 이상이 필요합니다. 차트의 원본은 [`deploy/helm/commandcenter`](../deploy/helm/commandcenter)이고, Helm 없이 설치하려면 "참조 매니페스트"를 보세요.
+Kubernetes에는 Helm 차트로 설치합니다. 차트는 기본으로 서버 Pod 하나(StatefulSet), `/data`의 ReadWriteOnce 볼륨, 메타데이터를 둘 PostgreSQL Pod 하나(StatefulSet), `config.yaml`을 담은 Secret, Service, 그리고 켜면 Ingress를 만듭니다. `replicaCount`를 2 이상으로 두면 PostgreSQL과 ReadWriteMany 볼륨 하나를 함께 쓰는 Deployment로 여러 Pod를 띄웁니다("고가용성(여러 노드)" 참고). 차트는 릴리스마다 `oci://ghcr.io/sungjinseo/charts/commandcenter`에 올라갑니다. 차트 버전은 릴리스 버전(`v1.2.3`이면 `1.2.3`)과 같고, 기본 이미지도 같은 버전의 `ghcr.io/sungjinseo/commandcenter`입니다. OCI 레지스트리의 차트를 받으려면 Helm 3.8 이상이 필요합니다. 차트의 원본은 [`deploy/helm/commandcenter`](../deploy/helm/commandcenter)이고, Helm 없이 설치하려면 "참조 매니페스트"를 보세요.
 
-이 절의 명령은 네임스페이스와 릴리스 이름으로 모두 `commandcenter`를 씁니다. 그러면 StatefulSet과 Service는 `commandcenter`, Pod는 `commandcenter-0`, PVC는 `data-commandcenter-0`, 설정 Secret은 `commandcenter-config`입니다. 릴리스 이름에 `commandcenter`가 들어 있지 않으면 이름이 `<릴리스 이름>-commandcenter`가 됩니다.
+이 절의 명령은 네임스페이스와 릴리스 이름으로 모두 `commandcenter`를 씁니다. 그러면 StatefulSet과 Service는 `commandcenter`, Pod는 `commandcenter-0`, PVC는 `data-commandcenter-0`, 설정 Secret은 `commandcenter-config`입니다. 차트가 띄우는 PostgreSQL은 StatefulSet `commandcenter-postgresql`, Pod `commandcenter-postgresql-0`, PVC `data-commandcenter-postgresql-0`, 비밀번호 Secret `commandcenter-postgresql`입니다. 릴리스 이름에 `commandcenter`가 들어 있지 않으면 이름이 `<릴리스 이름>-commandcenter`가 됩니다.
 
 ### Helm 차트로 설치
 
@@ -128,8 +135,9 @@ Kubernetes에는 Helm 차트로 설치합니다. 차트는 기본으로 서버 P
    config:
      baseURL: https://repo.example.com          # 클라이언트가 접속하는 주소
      adminPasswordHash: '<1번의 출력>'            # 작은따옴표로 감쌉니다
-   persistence:
-     storageClass: <블록 스토리지 StorageClass>    # NFS·SMB는 안 됩니다
+   postgresql:
+     persistence:
+       storageClass: <블록 스토리지 StorageClass>  # 차트가 띄우는 PostgreSQL의 볼륨. NFS·SMB는 안 됩니다
    secretKey:
      existingSecret: commandcenter-secret-key
    ingress:
@@ -165,20 +173,23 @@ Kubernetes에는 Helm 차트로 설치합니다. 차트는 기본으로 서버 P
 - **`config.baseURL`(필수)**: 클라이언트가 접속하는 주소입니다. TLS를 Ingress에서 끝내면 그 `https://` 주소입니다("TLS와 리버스 프록시" 참고).
 - **`config.adminPasswordHash`(필수)**: `admin` 사용자의 bcrypt 해시(`hash-password`의 출력)입니다. 필수 값이 비어 있으면 차트가 설치를 거부합니다.
 - **`replicaCount`(기본 `1`)**: 1이면 지금과 같은 StatefulSet(Pod 하나)을 만듭니다. 2 이상이면 Deployment(롤링 업데이트는 새 Pod를 먼저 띄우고 이전 Pod를 하나씩 멈춥니다. `maxSurge: 1`, `maxUnavailable: 0`), 모든 Pod가 마운트하는 ReadWriteMany PVC 하나(`<이름>-data`. `helm.sh/resource-policy: keep`이라 `helm uninstall`로 지워지지 않습니다. `persistence.existingClaim`을 주면 그 PVC), PodDisruptionBudget(`maxUnavailable: 1`), 그리고 `affinity`가 비어 있으면 Pod를 서로 다른 노드에 두려는 preferred podAntiAffinity(`kubernetes.io/hostname`)를 만듭니다. 2 이상인데 `persistence.accessModes: [ReadWriteMany]`(또는 `persistence.existingClaim`)가 없으면 차트가 설치를 거부합니다.
-- **`persistence.storageClass`(반드시 정하기)**: `/data` 볼륨의 StorageClass입니다. **블록 스토리지만 됩니다.** `meta.db`는 WAL 모드의 SQLite라서 NFS·SMB 같은 네트워크 파일시스템에서는 깨질 수 있습니다("저장 공간과 인스턴스" 참고). 비워 두면 클러스터의 기본 StorageClass를 쓰는데 그것이 NFS인 클러스터도 있으니 이름을 직접 적으세요. `kubectl get storageclass`의 PROVISIONER를 보고 고릅니다. `replicaCount`가 2 이상이면 반대로 ReadWriteMany를 주는 클래스(NFS, CephFS, EFS 등)를 고릅니다.
+- **`postgresql.*`(기본: 차트가 띄움)**: `database.existingSecret`이 비어 있으면 차트가 PostgreSQL(`postgres:17-alpine`) Pod 하나를 StatefulSet `<이름>-postgresql`로 띄우고, 그 볼륨(`postgresql.persistence`, 기본 `8Gi`)에 메타데이터를 둡니다. 비밀번호는 설치할 때 만들어 Secret `<이름>-postgresql`(키 `password`, 서버가 읽는 URL은 키 `url`)에 두고 업그레이드해도 그대로 씁니다. 이 Secret과 볼륨은 `helm uninstall` 뒤에도 남습니다. Pod 하나라 고가용성은 아닙니다. OpenShift에서는 `postgresql.podSecurityContext`의 `runAsUser`, `runAsGroup`, `fsGroup`을 `null`로 둡니다.
+- **`postgresql.persistence.storageClass`(반드시 정하기)**: 차트가 띄우는 PostgreSQL 볼륨의 StorageClass입니다. **블록 스토리지만 됩니다.** 비워 두면 클러스터의 기본 StorageClass를 쓰는데 그것이 NFS인 클러스터도 있으니 이름을 직접 적으세요. `kubectl get storageclass`의 PROVISIONER를 보고 고릅니다.
   - 됩니다: 클라우드 블록 디스크(AWS EBS `ebs.csi.aws.com`, GCE PD `pd.csi.storage.gke.io`, Azure Disk `disk.csi.azure.com`, NKS의 `nks-block-storage`), Ceph RBD, Longhorn, iSCSI, 로컬 볼륨
   - 안 됩니다: NFS(`nfs.csi.k8s.io`, nfs-subdir-external-provisioner), NAS 상품, AWS EFS, Azure Files, GKE Filestore, CephFS
   - `-`를 적으면 `storageClassName: ""`이 되어 미리 만들어 둔 PV에 묶입니다.
+- **`database.existingSecret`, `database.key`(기본 `url`)**: 직접 운영하거나 관리형으로 쓰는 PostgreSQL의 URL이 든 Secret입니다. 지정하면 차트의 PostgreSQL은 만들지 않습니다("메타데이터 데이터베이스" 참고). `config.existingSecret`의 `config.yaml`에 `database.url`을 넣었다면 차트가 알 수 없으므로 `postgresql.enabled: false`로 둡니다. `database.maxConns`는 Pod당 연결 풀 크기입니다(0이면 서버 기본값 10).
+- **`persistence.storageClass`**: `/data` 볼륨(default blob store와 업로드 임시 파일)의 StorageClass입니다. 블록 스토리지와 NFS 모두 됩니다. `replicaCount`가 2 이상이면 ReadWriteMany 클래스(NFS, CephFS, EFS 등)여야 합니다. `-`를 적으면 `storageClassName: ""`이 되어 미리 만들어 둔 PV에 묶입니다.
 - **첫 시작에만 쓰는 값**: `config`의 `baseURL`, `adminPasswordHash`, `anonymousRead`, `repositories`, 그리고 `config.extra`에 넣은 `users`, `roles`, `maxUploadMiB`는 처음 시작할 때 한 번만 DB로 가져옵니다("설정 레퍼런스" 참고). 설치한 뒤에는 웹 UI에서 바꾸세요. 값 파일에서 바꿔 `helm upgrade`를 해도 Pod만 다시 시작되고 반영되지 않습니다.
 - `secretKey.existingSecret`, `secretKey.key`(기본 `key`): 비밀값 키가 든 Secret의 이름과 그 안의 키 이름입니다. 서버에는 환경변수 `COMMANDCENTER_SECRET_KEY`로 들어갑니다. 비워 두면 비밀값을 평문으로 저장합니다.
 - `ingress.enabled`, `ingress.className`, `ingress.annotations`, `ingress.hosts`, `ingress.tls`: "Ingress와 큰 업로드" 참고.
-- `persistence.size`(기본 `50Gi`): blob과 `meta.db`가 들어갑니다. proxy 캐시는 Cleanup 정책이 지울 때까지 계속 커집니다. `persistence`의 값은 설치한 뒤 `helm upgrade`로 바꿀 수 없습니다("차트 업그레이드" 참고).
+- `persistence.size`(기본 `50Gi`): blob이 들어갑니다. proxy 캐시는 Cleanup 정책이 지울 때까지 계속 커집니다. `persistence`의 값은 설치한 뒤 `helm upgrade`로 바꿀 수 없습니다("차트 업그레이드" 참고).
 - `config.anonymousRead`(기본 `false`), `config.repositories`(첫 시작에 만들 저장소, `config.example.yaml`의 형식), `config.extra`(그 밖의 `config.yaml` 최상위 키. `users` 목록을 넣으면 `admin` 사용자 대신 그 목록을 씁니다), `config.existingSecret`(직접 만든 Secret의 `config.yaml` 키를 그대로 씁니다. 이때 다른 `config` 값은 비워 둡니다).
 - `image.repository`, `image.tag`(기본은 차트의 appVersion), `imagePullSecrets`: 사내 레지스트리로 옮긴 이미지나 직접 빌드한 이미지를 쓸 때 바꿉니다. 태그는 버전으로 고정하고 `latest`는 쓰지 마세요.
 - `resources`(기본: 메모리 요청과 한도 `128Mi`, CPU 요청 `100m`, CPU 한도 없음), `goMemLimit`(기본 `80MiB`): 메모리 한도를 올리면 `goMemLimit`도 한도의 60~65 % 정도로 함께 올립니다("리소스", "메모리 설정" 참고).
 - `proxy.http`, `proxy.https`, `proxy.noProxy`: proxy 저장소가 사내 프록시를 거쳐 원격에 접속할 때 씁니다(`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`). 클러스터 안의 원격은 `proxy.noProxy`에 넣으세요(예: `.svc,.cluster.local`).
 - `extraEnv`: 예약 작업의 시간대(`TZ`, "예약 작업" 참고) 같은 환경변수입니다. 예: `extraEnv: [{name: TZ, value: Asia/Seoul}]`
-- `extraVolumes`, `extraVolumeMounts`: 이름 붙은 blob store를 둘 볼륨입니다. blob은 NFS에 둘 수 있지만 `meta.db`는 안 됩니다("저장 공간과 인스턴스" 참고).
+- `extraVolumes`, `extraVolumeMounts`: 이름 붙은 blob store를 둘 볼륨입니다. blob은 NFS에 둘 수 있습니다("저장 공간과 인스턴스" 참고).
 - `terminationGracePeriodSeconds`(기본 60), `startupProbe`, `readinessProbe`, `livenessProbe`, `podSecurityContext`, `securityContext`: 바꿀 일이 거의 없습니다("동작 방식" 참고).
 - 그 밖에 `service`, `serviceAccount`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `nameOverride`, `fullnameOverride`가 있습니다. 릴리스 이름과 `nameOverride`·`fullnameOverride`는 처음 설치할 때 정합니다. 바꾸면 빈 볼륨을 가진 새 StatefulSet이 생깁니다. Pod 수는 `replicaCount`로 정합니다.
 
@@ -216,25 +227,24 @@ helm test commandcenter -n commandcenter
    helm test commandcenter -n commandcenter
    ```
 
-- StatefulSet은 이전 Pod가 끝난 뒤에(최대 60초, "정상 종료" 참고) 새 Pod를 띄우므로 그사이 서비스가 잠시 멈춥니다. 새 버전은 처음 시작할 때 `meta.db`를 새 구조로 바꾸며, startupProbe가 5분까지 기다립니다.
+- StatefulSet은 이전 Pod가 끝난 뒤에(최대 60초, "정상 종료" 참고) 새 Pod를 띄우므로 그사이 서비스가 잠시 멈춥니다. 새 버전은 처음 시작할 때 DB 스키마를 새 구조로 바꾸며, startupProbe가 5분까지 기다립니다.
 - `replicaCount`가 2 이상이면 Deployment가 새 Pod를 먼저 띄우고 이전 Pod를 하나씩 멈추므로 서비스가 멈추지 않습니다. 새 버전이 이전 버전과 함께 돌 수 없는 DB 변경을 하면(CHANGELOG의 Upgrade notes가 compat을 알려 줍니다) 새 Pod는 이유를 로그에 남기고 시작을 거부하며, 이전 Pod가 계속 요청을 받는 채로 롤아웃이 멈춥니다. 그런 버전은 `kubectl -n commandcenter scale deployment commandcenter --replicas=0`으로 모두 멈춘 뒤 올립니다.
 - 이미지는 차트 버전을 따라갑니다. `image.tag`를 정해 두었다면 함께 바꾸세요.
-- `persistence`의 값(`storageClass`, `size`, `accessModes`)은 바꾸지 않습니다. StatefulSet의 볼륨 템플릿은 만든 뒤 바꿀 수 없어서 `helm upgrade`가 `Forbidden: updates to statefulset spec for fields other than …` 오류로 실패합니다. 볼륨을 늘리려면 StorageClass가 `allowVolumeExpansion: true`일 때 PVC를 직접 늘리고, 값 파일의 `size`는 그대로 둡니다.
+- `persistence`와 `postgresql.persistence`의 값(`storageClass`, `size`, `accessModes`)은 바꾸지 않습니다. StatefulSet의 볼륨 템플릿은 만든 뒤 바꿀 수 없어서 `helm upgrade`가 `Forbidden: updates to statefulset spec for fields other than …` 오류로 실패합니다. 볼륨을 늘리려면 StorageClass가 `allowVolumeExpansion: true`일 때 PVC를 직접 늘리고, 값 파일의 `size`는 그대로 둡니다.
 
   ```bash
   kubectl -n commandcenter patch pvc data-commandcenter-0 -p '{"spec":{"resources":{"requests":{"storage":"100Gi"}}}}'
   ```
 
-- **버전을 올린 업그레이드를 `helm rollback`으로 되돌리지 마세요.** 다운그레이드는 지원하지 않습니다("업그레이드" 참고). 되돌려야 하면 "Kubernetes에서 백업"의 복원으로 업그레이드 전의 스냅샷을 되살리되, 마지막 `--replicas=1` 대신 이전 차트 버전으로 `helm upgrade`를 실행합니다. 차트가 Pod를 이전 이미지로 다시 띄웁니다. 값만 바꾼 리비전은 `helm rollback`해도 됩니다.
+- **버전을 올린 업그레이드를 `helm rollback`으로 되돌리지 마세요.** 다운그레이드는 지원하지 않습니다("업그레이드" 참고). 되돌려야 하면 "Kubernetes에서 백업"의 복원으로 업그레이드 전의 백업을 되살리되, 마지막 `--replicas=1` 대신 이전 차트 버전으로 `helm upgrade`를 실행합니다. 차트가 Pod를 이전 이미지로 다시 띄웁니다. 값만 바꾼 리비전은 `helm rollback`해도 됩니다.
 
 ### Kubernetes에서 백업
 
-`meta.db`와 blob은 같은 시점의 것이어야 하므로("백업과 복원" 참고) Pod를 멈추고 받습니다. 클러스터가 CSI 볼륨 스냅샷을 지원하면(`kubectl get volumesnapshotclass`) 스냅샷이 가장 빠르며, 서비스는 스냅샷이 준비될 때까지 멈춥니다.
+메타데이터는 `pg_dump`로, blob은 볼륨 스냅샷으로 받습니다. 순서는 `pg_dump` 먼저, blob 나중입니다(blob은 내용 주소 방식이라 덤프 뒤에 생긴 blob이 섞여도 무해합니다. "백업과 복원" 참고). 그러면 Pod를 멈추지 않아도 됩니다. 아래는 차트가 띄운 PostgreSQL과 CSI 볼륨 스냅샷(`kubectl get volumesnapshotclass`)을 쓰는 예입니다. 외부 PostgreSQL(`database.existingSecret`)이라면 덤프는 그 서버에서 받습니다(관리형 서비스라면 그 스냅샷도 됩니다).
 
 ```bash
 NS=commandcenter SNAP=commandcenter-$(date +%Y%m%d-%H%M)
-kubectl -n $NS scale statefulset commandcenter --replicas=0
-kubectl -n $NS wait --for=delete pod/commandcenter-0 --timeout=120s
+kubectl -n $NS exec commandcenter-postgresql-0 -- pg_dump -U commandcenter -Fc commandcenter > $SNAP.dump
 kubectl -n $NS apply -f - <<EOF
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshot
@@ -246,19 +256,19 @@ spec:
     persistentVolumeClaimName: data-commandcenter-0
 EOF
 kubectl -n $NS wait volumesnapshot/$SNAP --for=jsonpath='{.status.readyToUse}'=true --timeout=30m
-kubectl -n $NS scale statefulset commandcenter --replicas=1
 ```
 
-- 백업하는 동안에는 `helm upgrade`를 하지 마세요(GitOps 도구의 자동 동기화도 멈춥니다). 차트가 Pod를 다시 띄웁니다.
-- `extraVolumes`에 둔 blob store가 있으면 같은 정지 시간에 그 볼륨도 찍습니다.
+- 백업하는 동안에는 compact 작업(`commandcenter gc` 포함)이 돌지 않게 하세요("백업과 복원" 참고).
+- `extraVolumes`에 둔 blob store가 있으면 덤프 뒤에 그 볼륨도 찍습니다.
 - VolumeSnapshot은 네임스페이스에 속합니다. 네임스페이스를 지우면 함께 지워지고, VolumeSnapshotClass의 `deletionPolicy`가 `Delete`이면 스토리지의 스냅샷도 사라집니다. 오래 둘 백업은 `Retain` 클래스로 찍거나 클러스터 밖에도 두세요.
-- 비밀값 키 Secret과 값 파일은 스냅샷에 들어가지 않습니다. 따로 보관하되 키는 스냅샷과 다른 곳에 둡니다.
+- 비밀값 키 Secret과 값 파일은 덤프와 스냅샷에 들어가지 않습니다. 따로 보관하되 키는 덤프·스냅샷과 다른 곳에 둡니다.
 
-**복원**: Pod를 멈추고 PVC를 스냅샷에서 다시 만듭니다. StatefulSet은 이름이 같은 PVC를 그대로 씁니다. 지금 PVC의 데이터는 지워지므로 필요하면 먼저 지금 상태도 스냅샷으로 남기세요.
+**복원**: 서버를 0으로 줄이고(`kubectl -n $NS scale statefulset commandcenter --replicas=0`), `kubectl -n $NS exec -i commandcenter-postgresql-0 -- pg_restore -U commandcenter --clean --if-exists --no-owner -d commandcenter < <덤프>`로 되돌린 뒤 blob 볼륨을 같은 시점의 스냅샷으로 되돌리고 다시 1로 늘립니다. blob 볼륨은 PVC를 스냅샷에서 다시 만들며, StatefulSet은 이름이 같은 PVC를 그대로 씁니다. 지금 데이터는 지워지므로 필요하면 먼저 지금 상태도 백업하세요.
 
 ```bash
 kubectl -n $NS scale statefulset commandcenter --replicas=0
 kubectl -n $NS wait --for=delete pod/commandcenter-0 --timeout=120s
+kubectl -n $NS exec -i commandcenter-postgresql-0 -- pg_restore -U commandcenter --clean --if-exists --no-owner -d commandcenter < $SNAP.dump
 kubectl -n $NS delete pvc data-commandcenter-0
 kubectl -n $NS apply -f - <<EOF
 apiVersion: v1
@@ -279,7 +289,7 @@ EOF
 kubectl -n $NS scale statefulset commandcenter --replicas=1
 ```
 
-**스냅샷을 쓸 수 없을 때**: "백업과 복원"의 멈추고 복사 방법을 "서버를 멈춰야 하는 작업"의 일회용 Pod에서 실행합니다. 복원은 볼륨을 비운 뒤에 풉니다(오래된 `meta.db-wal`·`-shm`이 섞이지 않게).
+**스냅샷을 쓸 수 없을 때**: 덤프를 받은 뒤 blob 볼륨을 "서버를 멈춰야 하는 작업"의 일회용 Pod에서 복사합니다. 복원은 덤프를 되돌린 뒤 볼륨을 비우고 풉니다.
 
 ```bash
 kubectl -n $NS exec commandcenter-maint -- tar czf - -C / data > data.tgz                                            # 백업
@@ -288,7 +298,7 @@ kubectl -n $NS exec -i commandcenter-maint -- sh -c 'find /data -mindepth 1 -del
 
 ### 서버를 멈춰야 하는 작업
 
-멈춘 상태의 백업·복원, 비밀값 키 교체, 키를 잃었을 때의 정리("저장된 비밀값 암호화" 참고)는 서버 Pod를 내리고, 같은 PVC를 마운트해 서버와 같은 UID 65532로 도는 일회용 Pod에서 합니다. 다른 UID로 돌리면 그 사용자 소유의 파일이 볼륨에 남아 서버가 열지 못할 수 있습니다.
+스냅샷 없이 하는 blob 볼륨의 백업·복원과 비밀값 키 교체("저장된 비밀값 암호화" 참고)는 서버 Pod를 내리고, 같은 PVC를 마운트해 서버와 같은 UID 65532로 도는 일회용 Pod에서 합니다. 다른 UID로 돌리면 그 사용자 소유의 파일이 볼륨에 남아 서버가 열지 못할 수 있습니다.
 
 ```bash
 kubectl -n commandcenter scale statefulset commandcenter --replicas=0
@@ -317,7 +327,7 @@ kubectl -n commandcenter delete pod commandcenter-maint
 kubectl -n commandcenter scale statefulset commandcenter --replicas=1
 ```
 
-서버의 명령(`secret-key rotate` 등)은 busybox 대신 지금 버전의 서버 이미지로 돌립니다. `command` 대신 `args`에 명령을 주고, 설정 Secret `commandcenter-config`를 `/etc/commandcenter`에 마운트하며, 지금 키를 `COMMANDCENTER_SECRET_KEY`(Secret 참조)로 줍니다. 명령이 끝나면 Pod가 멈추므로 출력은 `kubectl -n commandcenter logs commandcenter-maint`로 봅니다. `migrate-db -to <URL>`도 같은 방식으로 돌립니다(출력은 Pod 로그).
+서버의 명령(`secret-key rotate` 등)은 busybox 대신 지금 버전의 서버 이미지로 돌립니다. `command` 대신 `args`에 명령을 주고, 설정 Secret `commandcenter-config`를 `/etc/commandcenter`에 마운트하며, 지금 키를 `COMMANDCENTER_SECRET_KEY`(Secret 참조)로, DB URL을 `COMMANDCENTER_DATABASE_URL`(차트라면 Secret `commandcenter-postgresql`의 키 `url`, 외부 DB라면 `database.existingSecret`)로 줍니다. 명령이 끝나면 Pod가 멈추므로 출력은 `kubectl -n commandcenter logs commandcenter-maint`로 봅니다.
 
 ### 삭제(helm uninstall)
 
@@ -325,32 +335,33 @@ kubectl -n commandcenter scale statefulset commandcenter --replicas=1
 helm uninstall commandcenter -n commandcenter
 ```
 
-StatefulSet, Service, Ingress, 설정 Secret은 지워지지만 **PVC `data-commandcenter-0`와 데이터는 남습니다.** StatefulSet이 만든 PVC는 Helm 릴리스에 속하지 않기 때문입니다. 같은 네임스페이스에 같은 릴리스 이름으로 다시 설치하면 이 PVC를 그대로 쓰고, `config`의 첫 시작 값은 다시 가져오지 않습니다. 직접 만든 비밀값 키 Secret도 남습니다(스냅샷을 보관한다면 키도 보관하세요). 데이터까지 지우려면 PVC를 지웁니다. 되돌릴 수 없고, StorageClass의 `reclaimPolicy`가 `Delete`이면 디스크도 지워집니다.
+StatefulSet, Service, Ingress, 설정 Secret은 지워지지만 **PVC `data-commandcenter-0`, `data-commandcenter-postgresql-0`와 데이터는 남습니다.** StatefulSet이 만든 PVC는 Helm 릴리스에 속하지 않기 때문입니다. 차트가 띄운 PostgreSQL의 비밀번호 Secret `commandcenter-postgresql`도 남습니다. 같은 네임스페이스에 같은 릴리스 이름으로 다시 설치하면 이 PVC를 그대로 쓰고, `config`의 첫 시작 값은 다시 가져오지 않습니다. 직접 만든 비밀값 키 Secret도 남습니다(스냅샷을 보관한다면 키도 보관하세요). 데이터까지 지우려면 PVC와 비밀번호 Secret을 지웁니다. 되돌릴 수 없고, StorageClass의 `reclaimPolicy`가 `Delete`이면 디스크도 지워집니다.
 
 ```bash
-kubectl -n commandcenter delete pvc data-commandcenter-0
+kubectl -n commandcenter delete pvc data-commandcenter-0 data-commandcenter-postgresql-0
+kubectl -n commandcenter delete secret commandcenter-postgresql
 ```
 
 ### 동작 방식
 
-- **StatefulSet, Pod 하나(기본)**: StatefulSet은 이전 Pod가 완전히 끝난 뒤에 새 Pod를 띄우므로 업데이트 중에도 두 프로세스가 같은 ReadWriteOnce 볼륨을 쓰지 않습니다. StatefulSet의 `replicas`를 직접 늘리면 Pod마다 빈 볼륨이 따로 생겨 데이터가 서로 다른 서버가 여러 대 생기므로, 여러 대는 `replicaCount`로 띄웁니다. 그러면 StatefulSet 대신 Deployment가 되어 모든 Pod가 같은 PostgreSQL DB와 같은 ReadWriteMany 볼륨을 씁니다("고가용성(여러 노드)" 참고).
-- **볼륨**: `/data`는 ReadWriteOnce PVC(`data-commandcenter-0`, 기본 50Gi)이며 블록 스토리지여야 합니다("차트 값"의 `persistence.storageClass`). `replicaCount`가 2 이상이면 모든 Pod가 함께 마운트하는 ReadWriteMany PVC(`commandcenter-data`)입니다.
+- **StatefulSet, Pod 하나(기본)**: StatefulSet은 이전 Pod가 완전히 끝난 뒤에 새 Pod를 띄우므로 업데이트 중에도 한 볼륨을 두 Pod가 마운트하지 않습니다. StatefulSet의 `replicas`를 직접 늘리면 Pod마다 빈 볼륨이 따로 생겨 데이터가 서로 다른 서버가 여러 대 생기므로, 여러 대는 `replicaCount`로 띄웁니다. 그러면 StatefulSet 대신 Deployment가 되어 모든 Pod가 같은 PostgreSQL DB와 같은 ReadWriteMany 볼륨을 씁니다("고가용성(여러 노드)" 참고).
+- **볼륨**: `/data`는 ReadWriteOnce PVC(`data-commandcenter-0`, 기본 50Gi)입니다. 메타데이터는 차트가 띄운 PostgreSQL의 PVC(`data-commandcenter-postgresql-0`, 기본 8Gi)에 있고, 이 볼륨은 블록 스토리지여야 합니다("차트 값"의 `postgresql.persistence.storageClass`). `replicaCount`가 2 이상이면 모든 Pod가 함께 마운트하는 ReadWriteMany PVC(`commandcenter-data`)입니다.
 - **노드 장애**: Pod가 `Terminating`이나 `Unknown`에 머물러도 `kubectl delete pod --force --grace-period=0`으로 지우지 마세요. 이전 노드에서 프로세스가 아직 돌고 있으면 같은 볼륨을 두 프로세스가 쓰게 될 수 있습니다. `replicaCount`가 2 이상이면 다른 Pod가 계속 요청을 받으므로 그대로 기다리면 됩니다.
-- **프로브**: startupProbe는 `GET /service/rest/v1/status`(인증 없이 200)로 HTTP 서버가 응답하는지만 봅니다. readinessProbe는 `GET /service/rest/v1/status/writable`로, DB가 응답하고 노드가 종료 중이 아니며 스키마가 맞고 (PostgreSQL) 잠금·알림 연결이 살아 있을 때만 200입니다("노드와 준비 상태" 참고. 참조 매니페스트도 같습니다). 여러 Pod일 때 DB나 알림 연결이 끊긴 Pod와 종료 중인 Pod를 Service에서 빼는 것이 이 프로브입니다. 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. livenessProbe는 포트에 TCP 연결만 해 봅니다(`tcpSocket`). TCP 연결은 서버의 연결 자리 1024개가 모두 차 있어도 커널이 받아 주므로(커널 대기열이 넘치지 않는 한), 서버가 바쁘거나 공격을 받아 느려졌다고 Pod가 재시작되어 진행 중인 전송이 모두 끊기지는 않습니다. 그동안 readinessProbe가 실패하면 Pod는 Service에서 잠시 빠졌다가 다시 들어옵니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
-- **보안**: UID 65532(non-root), 읽기 전용 루트 파일시스템, 모든 capability 제거, seccomp `RuntimeDefault`로 Pod Security Standards의 `restricted` 기준에 맞습니다. SQLite 임시 파일은 `/tmp`(emptyDir)에 씁니다. 이름 붙은 blob store는 경로를 비우면 `/data/blobstores/<이름>`에 만들어지고, `/data` 밖의 절대 경로에 두려면 그 경로에 볼륨을 따로 마운트해야 합니다(`extraVolumes`, `extraVolumeMounts`). 루트 파일시스템이 읽기 전용이라 다른 경로에는 만들 수 없고, `/tmp`는 Pod가 다시 만들어지면 비워집니다.
+- **프로브**: startupProbe는 `GET /service/rest/v1/status`(인증 없이 200)로 HTTP 서버가 응답하는지만 봅니다. readinessProbe는 `GET /service/rest/v1/status/writable`로, DB가 응답하고 노드가 종료 중이 아니며 스키마가 맞고 잠금·알림 연결이 살아 있을 때만 200입니다("노드와 준비 상태" 참고. 참조 매니페스트도 같습니다). 여러 Pod일 때 DB나 알림 연결이 끊긴 Pod와 종료 중인 Pod를 Service에서 빼는 것이 이 프로브입니다. 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. livenessProbe는 포트에 TCP 연결만 해 봅니다(`tcpSocket`). TCP 연결은 서버의 연결 자리 1024개가 모두 차 있어도 커널이 받아 주므로(커널 대기열이 넘치지 않는 한), 서버가 바쁘거나 공격을 받아 느려졌다고 Pod가 재시작되어 진행 중인 전송이 모두 끊기지는 않습니다. 그동안 readinessProbe가 실패하면 Pod는 Service에서 잠시 빠졌다가 다시 들어옵니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
+- **보안**: UID 65532(non-root), 읽기 전용 루트 파일시스템, 모든 capability 제거, seccomp `RuntimeDefault`로 Pod Security Standards의 `restricted` 기준에 맞습니다. 임시 파일은 `/tmp`(emptyDir)에 씁니다. 이름 붙은 blob store는 경로를 비우면 `/data/blobstores/<이름>`에 만들어지고, `/data` 밖의 절대 경로에 두려면 그 경로에 볼륨을 따로 마운트해야 합니다(`extraVolumes`, `extraVolumeMounts`). 루트 파일시스템이 읽기 전용이라 다른 경로에는 만들 수 없고, `/tmp`는 Pod가 다시 만들어지면 비워집니다.
 - **리소스**: 메모리 요청과 한도 128Mi, `GOMEMLIMIT=80MiB`(`goMemLimit`)입니다. CPU는 요청(100m)만 두고 한도는 두지 않습니다.
 - **운영 명령**: "운영"의 `docker compose exec commandcenter …`는 `kubectl -n commandcenter exec commandcenter-0 -- …`로 바꿔 씁니다(예: `kubectl -n commandcenter exec commandcenter-0 -- commandcenter token create -user ci`). 로그는 `kubectl -n commandcenter logs commandcenter-0`입니다.
 - **비상 복구**: `user reset-password`는 실행 중인 Pod에서 돌립니다(`printf '%s\n' "$PW" | kubectl exec -i -n commandcenter commandcenter-0 -- commandcenter user reset-password -user admin -admin`). 서버가 5초 안에 반영합니다("비상 복구" 참고).
 
 ### 참조 매니페스트
 
-Helm 없이 설치하려면 [`deploy/kubernetes/commandcenter.yaml`](../deploy/kubernetes/commandcenter.yaml)을 씁니다. ConfigMap(`config.yaml`), Service, StatefulSet으로 되어 있고 Pod 구성(볼륨, 프로브, 보안, 리소스, 중지 대기 시간)은 차트와 같습니다. 파일 맨 위 주석대로 이미지, `config.yaml`의 `baseURL`과 관리자 `passwordHash`, `storageClassName`을 채운 뒤 적용합니다. 이미지는 버전을 고정한 릴리스 이미지(`ghcr.io/sungjinseo/commandcenter:1.2.3`, "릴리스 이미지와 바이너리" 참고)나 직접 빌드해 올린 이미지입니다.
+Helm 없이 설치하려면 [`deploy/kubernetes/commandcenter.yaml`](../deploy/kubernetes/commandcenter.yaml)을 씁니다. PostgreSQL StatefulSet·Service·비밀번호 Secret(값을 채워야 함)과 Command Center의 ConfigMap(`config.yaml`), Service, StatefulSet이 들어 있고, Pod 구성(볼륨, 프로브, 보안, 리소스, 중지 대기 시간)은 차트와 같습니다. 파일 맨 위 주석대로 이미지, `config.yaml`의 `baseURL`과 관리자 `passwordHash`, PostgreSQL 비밀번호, 두 PVC의 `storageClassName`(DB 쪽은 블록 스토리지)을 채운 뒤 적용합니다. 외부 PostgreSQL을 쓰려면 `commandcenter-postgresql` 세 개와 init 컨테이너를 지우고 `COMMANDCENTER_DATABASE_URL`을 Secret에서 넣습니다. 이미지는 버전을 고정한 릴리스 이미지(`ghcr.io/sungjinseo/commandcenter:1.2.3`, "릴리스 이미지와 바이너리" 참고)나 직접 빌드해 올린 이미지입니다.
 
 ```bash
 kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
 ```
 
-이름(`commandcenter`, `commandcenter-0`, `data-commandcenter-0`)이 차트와 같으므로 위의 백업, 서버를 멈춰야 하는 작업, 동작 방식이 그대로 적용됩니다. 업그레이드는 이미지 태그를 바꿔 다시 적용하고, Ingress와 비밀값 키(주석 처리된 `COMMANDCENTER_SECRET_KEY` 항목)는 직접 넣습니다.
+이름(`commandcenter`, `commandcenter-0`, `data-commandcenter-0`, `commandcenter-postgresql-0`)이 차트와 같으므로 위의 백업, 서버를 멈춰야 하는 작업, 동작 방식이 그대로 적용됩니다. 업그레이드는 이미지 태그를 바꿔 다시 적용하고, Ingress와 비밀값 키(주석 처리된 `COMMANDCENTER_SECRET_KEY` 항목)는 직접 넣습니다.
 
 ## 프로덕션 배포
 
@@ -362,11 +373,11 @@ kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
 2. TLS는 리버스 프록시에서 끝내고, 일반 설정의 `baseURL`을 `https://` 주소로 둡니다. 서버 포트 8081은 프록시에서만 닿게 합니다.
 3. 사내 전용 저장소라면 익명 읽기를 끕니다. 일반 설정의 `anonymousRead`와 저장소별 `anonymousRead`를 확인하세요. `config.example.yaml`은 시험하기 편하도록 `anonymousRead: true`입니다. 권한이 없는 로그인 사용자의 읽기까지 막으려면 `authenticatedRead`도 끕니다("읽기 권한" 참고).
 4. 프록시에서 요청 본문 크기, 본문 수신·응답 전송 타임아웃, 클라이언트당 연결 수를 제한합니다.
-5. `dataDir`는 영구 볼륨에 둡니다. 여러 대를 함께 띄우려면 모든 노드가 같은 PostgreSQL DB와 같은 `dataDir`(ReadWriteMany 공유 스토리지)를 씁니다("고가용성(여러 노드)" 참고).
+5. 메타데이터 DB는 PostgreSQL 13 이상입니다. 차트·compose가 띄우는 PostgreSQL을 쓴다면 그 볼륨을 블록 스토리지에 두고, 운영 규모나 고가용성이 필요하면 복제 구성된 PostgreSQL이나 관리형 서비스를 씁니다(`database.url`, `COMMANDCENTER_DATABASE_URL`, 차트의 `database.existingSecret`). `dataDir`는 영구 볼륨에 두고, 여러 대를 함께 띄우려면 모든 노드가 같은 PostgreSQL DB와 같은 `dataDir`(ReadWriteMany 공유 스토리지)를 씁니다("고가용성(여러 노드)" 참고).
 6. 메모리 한도와 `GOMEMLIMIT`을 함께 정합니다.
 7. 중지 대기 시간을 60초로 둡니다(compose 파일, Helm 차트, 참조 매니페스트에는 들어 있습니다. "정상 종료" 참고).
-8. 정기 백업을 돌리고, 복원도 한 번 해 봅니다("백업과 복원" 참고).
-9. 저장된 비밀값을 암호화할 키(`COMMANDCENTER_SECRET_KEY` 또는 `secretKeyFile`)를 정하고, 키는 `meta.db` 백업과 따로 보관합니다("저장된 비밀값 암호화" 참고).
+8. 정기 백업(`pg_dump`와 blob)을 돌리고, 복원도 한 번 해 봅니다("백업과 복원" 참고).
+9. 저장된 비밀값을 암호화할 키(`COMMANDCENTER_SECRET_KEY` 또는 `secretKeyFile`)를 정하고, 키는 DB 백업과 따로 보관합니다("저장된 비밀값 암호화" 참고).
 
 ### TLS와 리버스 프록시
 
@@ -412,8 +423,8 @@ nginx는 기본적으로 요청 본문을 끝까지 받은 다음 서버로 넘�
 
 ### 저장 공간과 인스턴스
 
-- **`meta.db`는 로컬 디스크나 블록 스토리지에**: `dataDir`(기본 `/data`)에는 `meta.db`(SQLite, WAL 모드)와 default blob store(`blobs/`)가 있습니다. WAL은 같은 호스트의 공유 메모리 파일(`meta.db-shm`)과 파일 잠금에 기대므로, NFS나 SMB(CIFS) 같은 네트워크 파일시스템에서는 잠금이 보장되지 않고 DB가 깨질 수 있습니다. 로컬 디스크, 클라우드 블록 디스크, iSCSI, Kubernetes의 ReadWriteOnce 블록 볼륨을 쓰세요.
-- **NFS에는 blob만**: blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로, 이름 붙은 blob store("Blob Store" 참고)는 NFS 경로에 둘 수 있습니다. compact 작업이 파일의 수정 시각으로 진행 중인 업로드를 보호하므로 NFS 서버와 시계를 맞춰 두세요(NTP). 여러 노드는 `dataDir` 전체를 공유 스토리지에 둡니다("고가용성(여러 노드)" 참고).
+- **메타데이터는 PostgreSQL에**: 저장소 정의, 컴포넌트·에셋 목록, 사용자, 설정, 작업 기록은 PostgreSQL에 있고 `dataDir`(기본 `/data`)에는 default blob store(`blobs/`)와 업로드 임시 파일만 있습니다. PostgreSQL의 데이터 디렉터리는 블록 스토리지에 두고, `dataDir`와 blob store는 블록 스토리지나 NFS에 둘 수 있습니다.
+- **blob은 NFS에도**: blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로, `dataDir`와 이름 붙은 blob store("Blob Store" 참고)는 NFS 경로에 둘 수 있습니다. compact 작업이 파일의 수정 시각으로 진행 중인 업로드를 보호하므로 NFS 서버와 시계를 맞춰 두세요(NTP). 여러 노드는 `dataDir` 전체를 공유 스토리지에 둡니다("고가용성(여러 노드)" 참고).
 - **blob store 경로는 영구 볼륨에**: 컨테이너 안의 경로(예: `/tmp/…`)에 store를 만들면 컨테이너를 다시 만들 때 blob이 사라지고 DB 기록만 남습니다.
 - **인스턴스 수**: 노드 여러 대가 같은 PostgreSQL DB와 같은 `dataDir`(ReadWriteMany 공유 스토리지)를 함께 써서 모두 요청을 받을 수 있습니다(active-active, "고가용성(여러 노드)" 참고). 한 대로 돌려도 재시작은 빠릅니다(중지와 기동 모두 보통 1초 안쪽).
 - **디스크 여유**: proxy 캐시는 계속 커집니다. Cleanup 정책과 compact 작업으로 정리하고, Blob Store 화면에서 파일시스템의 남은 용량을 지켜보세요.
@@ -428,7 +439,7 @@ nginx는 기본적으로 요청 본문을 끝까지 받은 다음 서버로 넘�
 
 서버는 SIGTERM(또는 SIGINT)을 받으면 새 연결을 받지 않고 진행 중인 요청을 최대 30초 기다리며, 그때까지 끝나지 않은 요청은 끊습니다. 연결 자리 1024개가 모두 처리 중일 때도 30초에 끝나며, 자리를 기다리던 새 연결은 바로 닫습니다. 그 뒤 다운로드 수·요청 통계, 보낼 메일, 활동 기록을 각각 최대 10초 동안 마저 쓰고 DB를 닫습니다. 실행 중인 예약 작업은 취소됩니다.
 
-Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않으면 프로세스가 강제로 종료됩니다. 진행 중인 업로드가 끊기고 마지막 통계가 사라질 수 있습니다(`meta.db`는 SQLite 트랜잭션으로 쓰므로 깨지지 않습니다). 대기 시간을 60초로 두세요.
+Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않으면 프로세스가 강제로 종료됩니다. 진행 중인 업로드가 끊기고 마지막 통계가 사라질 수 있습니다(DB는 트랜잭션으로 쓰므로 깨지지 않습니다). 대기 시간을 60초로 두세요.
 
 - compose: 들어 있는 `docker-compose.yml`에 `stop_grace_period: 60s`가 있습니다. 다른 compose 파일을 쓰면 서비스에 넣으세요.
 - `docker run`으로 띄웠다면: `docker run --stop-timeout 60 …`으로 띄우거나 `docker stop -t 60 commandcenter`로 멈춥니다.
@@ -438,17 +449,17 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
 ### 노드와 준비 상태
 
 - **노드 등록**: `serve`로 띄운 서버는 시작할 때 메타데이터 DB의 `nodes` 테이블에 자신을 노드로 등록합니다. 노드 ID는 `<호스트 이름>-<16진수 4자리>`이며 시작할 때마다 새로 정해집니다. 노드는 10초마다 DB 서버의 시계로 하트비트를 갱신하고, 마지막 하트비트가 30초 안이면 살아 있는 노드로 봅니다. 정상 종료하면 행을 지우고, 비정상 종료로 남은 행은 24시간이 지나면 정리됩니다. 노드 ID는 모든 로그 레코드의 `node` 속성, `/-/metrics/prometheus`의 `commandcenter_node_info{node,version} 1`, 시스템 정보의 `commandcenter-status.node`, 지원 번들의 `info.json`과 `nodes.json`에 들어갑니다. 등록된 노드는 `GET /-/api/nodes`(관리자)로 봅니다. `self`는 응답한 노드이고, 노드마다 `id`, `hostname`, `version`, `schema`(빌드의 스키마 버전), `startedAt`, `heartbeatAt`, `alive`, `draining`, `leader`(예약 작업 임대를 가진 노드), `runningTask`(그 노드가 실행 중인 예약 작업의 ID, 없으면 빈 문자열)가 있습니다.
-- **여러 노드**: 같은 PostgreSQL DB에 `serve`를 여러 개 띄우면 모두 노드로 등록하고 함께 요청을 처리합니다(active-active, "고가용성(여러 노드)" 참고). 시작할 때 다른 노드를 기다리거나 거부하지 않습니다(이전 버전은 살아 있는 다른 노드가 있으면 시작을 거부했습니다). `token create`, `gc`, `migrate-db` 같은 CLI 명령은 노드로 등록하지 않으므로 실행 중인 서버 옆에서 그대로 쓸 수 있습니다.
-- **노드 사이의 잠금과 캐시(PostgreSQL)**: PostgreSQL을 쓰면 서버의 잠금이 DB의 advisory lock이 되어 같은 DB를 쓰는 모든 노드에 걸칩니다. 같은 경로·패키지·인덱스를 건드리는 업로드와 삭제(모든 포맷, 메타데이터 재생성, 저장소 가져오기, Docker 업로드 세션 포함), 저장소·blob store·정리 정책·라우팅 규칙의 변경, 사용자·역할·Realm·설정의 변경은 어느 노드로 들어오든 한 번에 하나씩 처리됩니다. 한 노드에서 저장소, 라우팅 규칙, blob store, 웹훅, 사용자·역할·설정, 정리 정책, 로그 수준을 바꾸면 다른 노드는 DB 알림(LISTEN/NOTIFY)을 받아 곧바로 DB에서 다시 읽습니다. 알림을 놓쳐도 5초마다 다시 읽으므로 늦어도 몇 초 안에 맞춰집니다. 다른 노드에서 방금 만든 저장소를 가리키는 요청(`/repository/…`, `/v2/…`)은 그 자리에서 DB를 확인하므로 바로 처리됩니다. 저장소마다 세대 번호(`gen`)를 DB에 두므로, 요청이 진행되는 동안 어느 노드에서든 같은 이름의 저장소를 지우고 다시 만들면 그 요청이 트랜잭션으로 쓰는 내용은 새 저장소에 들어가지 않고 `503 repository "<이름>" changed during the request; retry`로 거절됩니다. 다시 시도하면 됩니다(raw 파일과 Maven 아티팩트 파일 하나를 올리는 쓰기는 이 검사 대상이 아닙니다). Blob Store 이동과 blob store 그룹 멤버 변경도 모든 노드에 맞춰집니다("고가용성(여러 노드)" 참고).
-- **여러 노드의 예약 작업과 webhook(PostgreSQL)**: 예약 작업과 webhook 전달은 같은 DB를 쓰는 노드가 여럿이어도 한 번씩만 실행되도록 DB로 조정합니다.
+- **여러 노드**: 같은 PostgreSQL DB에 `serve`를 여러 개 띄우면 모두 노드로 등록하고 함께 요청을 처리합니다(active-active, "고가용성(여러 노드)" 참고). 시작할 때 다른 노드를 기다리거나 거부하지 않습니다(이전 버전은 살아 있는 다른 노드가 있으면 시작을 거부했습니다). `token create`, `gc` 같은 CLI 명령은 노드로 등록하지 않으므로 실행 중인 서버 옆에서 그대로 쓸 수 있습니다.
+- **노드 사이의 잠금과 캐시**: 서버의 잠금은 DB의 advisory lock이라 같은 DB를 쓰는 모든 노드에 걸칩니다. 같은 경로·패키지·인덱스를 건드리는 업로드와 삭제(모든 포맷, 메타데이터 재생성, 저장소 가져오기, Docker 업로드 세션 포함), 저장소·blob store·정리 정책·라우팅 규칙의 변경, 사용자·역할·Realm·설정의 변경은 어느 노드로 들어오든 한 번에 하나씩 처리됩니다. 한 노드에서 저장소, 라우팅 규칙, blob store, 웹훅, 사용자·역할·설정, 정리 정책, 로그 수준을 바꾸면 다른 노드는 DB 알림(LISTEN/NOTIFY)을 받아 곧바로 DB에서 다시 읽습니다. 알림을 놓쳐도 5초마다 다시 읽으므로 늦어도 몇 초 안에 맞춰집니다. 다른 노드에서 방금 만든 저장소를 가리키는 요청(`/repository/…`, `/v2/…`)은 그 자리에서 DB를 확인하므로 바로 처리됩니다. 저장소마다 세대 번호(`gen`)를 DB에 두므로, 요청이 진행되는 동안 어느 노드에서든 같은 이름의 저장소를 지우고 다시 만들면 그 요청이 트랜잭션으로 쓰는 내용은 새 저장소에 들어가지 않고 `503 repository "<이름>" changed during the request; retry`로 거절됩니다. 다시 시도하면 됩니다(raw 파일과 Maven 아티팩트 파일 하나를 올리는 쓰기는 이 검사 대상이 아닙니다). Blob Store 이동과 blob store 그룹 멤버 변경도 모든 노드에 맞춰집니다("고가용성(여러 노드)" 참고).
+- **여러 노드의 예약 작업과 webhook**: 예약 작업과 webhook 전달은 같은 DB를 쓰는 노드가 여럿이어도 한 번씩만 실행되도록 DB로 조정합니다.
   - 예정된 작업은 예약 작업 임대를 가진 노드(`leader`)만 실행합니다. 요청 통계, 네거티브 캐시, 활동 기록의 오래된 행도 리더만 정리합니다. 리더가 죽으면 임대는 30초 안에 다른 노드로 넘어갑니다.
   - 작업은 모든 노드를 통틀어 한 번에 하나만 실행됩니다(클러스터 잠금 `tasks.run`). 다른 노드에서 작업이 실행 중이면 "지금 실행"과 `POST /-/api/gc`는 409입니다. 실행 중인 작업은 어느 노드의 작업 화면에서나 Running으로 보이고, 어느 노드에서나 중지할 수 있으며, 지울 수 없습니다.
   - 작업을 실행하던 노드가 결과를 기록하기 전에 죽으면 잠금이 풀립니다. 작업은 여전히 예정 시각이 지난 상태이므로 다음 리더가 다시 실행합니다(최소 한 번 실행). compact, cleanup, 메타데이터 재생성은 다시 실행해도 결과가 같습니다. 죽은 노드가 남긴 실행 표시는 무시됩니다.
   - `lastDownloadedDays`를 쓰는 cleanup(미리보기 포함)과 SNAPSHOT 정리는 시작할 때 다른 노드들에게 메모리에 쌓인 다운로드 수를 DB에 쓰게 하고 2초 기다립니다. cleanup 정책을 고치면, 어느 노드에서 실행 중인 cleanup이든 다음 컴포넌트 전에 정책을 다시 읽습니다. `PUT /-/api/logging`으로 바꾼 로그 레벨은 모든 노드에 적용됩니다.
   - webhook 전달은 노드 하나가 60초 동안 가져가서(claim) 보내므로, 노드가 여럿이어도 한 번만 나갑니다. 보낸 뒤 기록하기 전에 노드가 죽으면 60초 뒤 다른 노드가 다시 보냅니다(최소 한 번 전달).
-- **준비 상태(readiness)**: `GET /service/rest/v1/status/writable`은 서버가 요청을 받아도 될 때만 200을, 아니면 503을 돌려줍니다. DB가 응답하고, 노드가 종료 중(draining)이 아니며, DB 스키마가 이 버전이 돌 수 있는 것이고, PostgreSQL에서는 잠금 연결과 변경 알림 연결(`LISTEN cc_changed`)도 살아 있어야 200입니다. 더 새 버전이 DB를 업그레이드해 이 버전이 함께 돌 수 없게 되면, 실행 중인 노드는 다음 하트비트에서 이를 알아채고 오류 로그를 남긴 뒤 준비되지 않은 상태가 됩니다. Helm 차트와 참조 매니페스트의 readinessProbe가 이 경로를 씁니다(startupProbe는 `/service/rest/v1/status`, livenessProbe는 TCP 연결 그대로입니다). 관리자 화면 시스템 상태의 `Cluster` 항목(`/service/rest/v1/status/check`, `commandcenter_health_check{name="Cluster"}`에도 나옵니다)이 살아 있는 노드와 리더를 보여 주고, 이 노드가 준비되지 않았으면 실패로 표시합니다.
-- **종료 순서(drain)**: SIGTERM을 받으면 먼저 노드를 draining으로 표시해 준비 상태를 503으로 바꿉니다. PostgreSQL에서는 그 뒤 5초 동안 요청을 계속 받으며 Service 엔드포인트와 로드밸런서가 이 Pod를 빼기를 기다립니다(이미지에 셸이 없어 preStop `sleep`을 쓸 수 없으므로 서버가 직접 기다립니다). 이어서 이전과 같이 진행 중인 요청을 최대 30초 기다리고 통계, 메일, 활동 기록을 쓴 다음, 노드 행을 지우고 임대를 내놓습니다. 모두 합쳐 약 45초로 `terminationGracePeriodSeconds: 60` 안에 끝납니다. SQLite는 5초를 기다리지 않습니다.
-- **DB 연결 수**: PostgreSQL에서 노드 하나는 연결 풀(기본 10개) 외에 잠금 연결 1개와 알림 연결 1개를 더 씁니다. 두 연결은 TCP keepalive(30초 뒤 10초 간격으로 3회)를 켜 두므로, DB와 끊긴 노드의 잠금은 약 1분 안에 풀립니다.
+- **준비 상태(readiness)**: `GET /service/rest/v1/status/writable`은 서버가 요청을 받아도 될 때만 200을, 아니면 503을 돌려줍니다. DB가 응답하고, 노드가 종료 중(draining)이 아니며, DB 스키마가 이 버전이 돌 수 있는 것이고, 잠금 연결과 변경 알림 연결(`LISTEN cc_changed`)이 살아 있어야 200입니다. 더 새 버전이 DB를 업그레이드해 이 버전이 함께 돌 수 없게 되면, 실행 중인 노드는 다음 하트비트에서 이를 알아채고 오류 로그를 남긴 뒤 준비되지 않은 상태가 됩니다. Helm 차트와 참조 매니페스트의 readinessProbe가 이 경로를 씁니다(startupProbe는 `/service/rest/v1/status`, livenessProbe는 TCP 연결 그대로입니다). 관리자 화면 시스템 상태의 `Cluster` 항목(`/service/rest/v1/status/check`, `commandcenter_health_check{name="Cluster"}`에도 나옵니다)이 살아 있는 노드와 리더를 보여 주고, 이 노드가 준비되지 않았으면 실패로 표시합니다.
+- **종료 순서(drain)**: SIGTERM을 받으면 먼저 노드를 draining으로 표시해 준비 상태를 503으로 바꿉니다. 그 뒤 5초 동안 요청을 계속 받으며 Service 엔드포인트와 로드밸런서가 이 Pod를 빼기를 기다립니다(이미지에 셸이 없어 preStop `sleep`을 쓸 수 없으므로 서버가 직접 기다립니다). 이어서 이전과 같이 진행 중인 요청을 최대 30초 기다리고 통계, 메일, 활동 기록을 쓴 다음, 노드 행을 지우고 임대를 내놓습니다. 모두 합쳐 약 45초로 `terminationGracePeriodSeconds: 60` 안에 끝납니다.
+- **DB 연결 수**: 노드 하나는 연결 풀(기본 10개) 외에 잠금 연결 1개와 알림 연결 1개를 더 씁니다. 두 연결은 TCP keepalive(30초 뒤 10초 간격으로 3회)를 켜 두므로, DB와 끊긴 노드의 잠금은 약 1분 안에 풀립니다.
 
 ### 고가용성(여러 노드)
 
@@ -456,7 +467,7 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
 
 **요구 사항**
 
-- **같은 PostgreSQL DB**: 모든 노드가 같은 DB(PostgreSQL 13 이상)를 씁니다(`database.url` 또는 `COMMANDCENTER_DATABASE_URL`). 노드 하나는 연결 풀(기본 10개)에 잠금·알림 연결 2개를 더 쓰므로 노드 3대면 약 36개가 필요합니다.
+- **같은 PostgreSQL DB**: 모든 노드가 같은 DB(PostgreSQL 13 이상)를 씁니다(`database.url` 또는 `COMMANDCENTER_DATABASE_URL`). 노드 하나는 연결 풀(기본 10개)에 잠금·알림 연결 2개를 더 쓰므로 노드 3대면 약 36개가 필요합니다. 차트가 띄우는 PostgreSQL은 Pod 하나이므로 고가용성에는 복제 구성된 PostgreSQL(`database.existingSecret`)을 씁니다.
 - **공유 스토리지**: `dataDir`를 모든 노드가 같은 경로로 마운트하는 ReadWriteMany 파일시스템(NFS, CephFS, EFS 등)에 둡니다. default blob store(`blobs/`)와 모든 store의 임시 파일·Docker 업로드 세션(`tmp/`)이 여기 있으므로, 이름 붙은 store를 S3에 두더라도 `dataDir`는 공유해야 합니다(S3 store의 임시 파일도 `dataDir` 아래에 있습니다). 이름 붙은 파일 store를 `dataDir` 밖의 절대 경로에 두면 그 경로도 모든 노드에 같은 경로로 공유 마운트합니다. 한 노드에만 있는 경로에 store를 만들면 노드마다 다른 파일을 보게 됩니다. 내보내기와 가져오기 작업은 다른 노드에서 돌 수 있으므로 `exportRoot`도 공유 경로에 둡니다.
 - **시계**: 노드와 NFS 서버의 시계를 NTP로 맞춥니다. 임대와 하트비트는 DB 서버의 시계를 쓰지만, compact 작업은 blob 파일의 수정 시각을 노드의 시계와 비교합니다.
 - **같은 설정과 같은 비밀값 키**: 모든 노드에 같은 `config.yaml`과 같은 `COMMANDCENTER_SECRET_KEY`(또는 `secretKeyFile`)를 줍니다. 다른 키로, 또는 키 없이 시작한 노드는 시작을 거부합니다. `secret-key rotate`는 모든 노드를 멈추고 실행합니다.
@@ -488,47 +499,6 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
 3. 모든 노드를 같은 설정, 같은 비밀값 키, 같은 DB와 공유 볼륨으로 띄웁니다. Helm이라면 `--set replicaCount=3,persistence.existingClaim=<RWX PVC>`로 `helm upgrade`합니다. Helm이 StatefulSet을 Deployment로 바꾸고, 이전 PVC `data-commandcenter-0`은 직접 지울 때까지 남습니다.
 
 다시 한 대로 돌아가려면 `replicaCount: 1`로 둡니다. 그러면 같은 PostgreSQL DB를 쓰는 StatefulSet이 다시 만들어집니다(볼륨은 새 claim 템플릿, 또는 `persistence.existingClaim`).
-
-## repolite에서 이전하기
-
-이전 이름(repolite)으로 설치한 서버를 Command Center로 바꿀 때 확인할 것입니다. 데이터 형식(`dataDir`, 디스크 구조)은 바뀌지 않았습니다.
-
-1. **이전 스택을 먼저 내리고 데이터 볼륨을 이어서 쓰기.** 순서가 중요합니다. 먼저 **이전 checkout 폴더에서** 이전 스택을 내립니다(compose 파일을 새 버전으로 받거나 바꾸기 전에).
-
-   ```bash
-   docker compose down --remove-orphans   # -v는 붙이지 마세요. 볼륨이 지워집니다
-   ```
-
-   그다음 compose 파일을 새 버전으로 받고, 쓸 버전을 `.env`의 `COMMANDCENTER_VERSION`에 적은 뒤("빠른 시작"의 2번) 볼륨 이름을 지정해 올립니다. compose의 기본 볼륨 이름이 `commandcenter-data`로 바뀌었으므로 그냥 `docker compose up`을 하면 빈 볼륨이 새로 생깁니다. 기존 데이터를 쓰려면 `COMMANDCENTER_VOLUME`에 이전 볼륨 이름을 지정하세요. 이름은 `docker volume ls`로 찾습니다. 보통 `repolite_repolite-data`(compose 프로젝트 이름 + 볼륨 이름)입니다.
-
-   ```bash
-   docker volume ls | grep repolite
-   ```
-
-   ```powershell
-   # PowerShell: 현재 세션에서만 유효
-   $env:COMMANDCENTER_VOLUME = "repolite_repolite-data"
-   docker compose up -d
-   ```
-
-   ```bash
-   # Git Bash / macOS / Linux
-   COMMANDCENTER_VOLUME=repolite_repolite-data docker compose up -d
-   ```
-
-   매번 지정하기 번거로우면 `docker-compose.yml`과 같은 폴더의 `.env` 파일에 적어 두세요. compose가 자동으로 읽습니다.
-
-   ```
-   COMMANDCENTER_VERSION=1.2.3
-   COMMANDCENTER_VOLUME=repolite_repolite-data
-   ```
-
-   이전 볼륨(`repolite_repolite-data`)을 지정해 올리면 `volume "…" already exists but was created for project "repolite"` 경고가 나올 수 있습니다. 데이터에는 영향이 없는 무해한 경고입니다. 이전 이름의 컨테이너가 남아 있으면 `docker rm -f repolite`로 정리합니다.
-2. **설정 파일 경로.** 컨테이너 안의 설정 경로가 `/etc/repolite/config.yaml`에서 `/etc/commandcenter/config.yaml`로 바뀌었습니다. 새 경로에 파일이 없고 이전 경로에 있으면 이전 경로를 쓰고 시작할 때 경고를 로그에 남깁니다. 그래서 이전 compose 파일을 그대로 써도 동작하지만, `docker-compose.yml`의 마운트를 새 경로로 고치는 것을 권장합니다.
-3. **토큰.** 이전에 발급한 `rl_` 토큰은 계속 동작합니다(Bearer, Cargo 토큰, Basic 비밀번호 자리 모두). 새로 발급하는 토큰은 `cc_`로 시작합니다. 클라이언트 설정을 바꿀 필요는 없습니다.
-4. **UI 세션 초기화.** 세션 쿠키 이름이 `cc_session`(`baseURL`이 https면 `__Host-cc_session`)으로 바뀌고 세션은 원래 메모리에만 있으므로, 업그레이드하면 모두 로그아웃되어 한 번 다시 로그인해야 합니다. 로그인과 로그아웃 때 이전 `repolite_session` 쿠키는 만료시켜 지웁니다.
-   - **클라이언트 설정의 id.** 웹 UI와 이 문서의 새 클라이언트 설정 예시는 서버 id와 레지스트리 이름으로 `commandcenter`를 씁니다. `repolite`를 쓰는 기존 `settings.xml`과 cargo 설정은 그대로 동작합니다. 다만 `settings.xml`에서는 `<server>`의 `<id>`와 저장소(`<repository>`, `<mirror>`)의 id가 서로 같아야 인증이 붙습니다. 새 이름으로 바꾸려면 둘을 함께 바꾸세요.
-5. **이미지와 컨테이너 이름.** 이미지는 `ghcr.io/sungjinseo/commandcenter:<버전>`(직접 빌드했다면 `.env`의 `COMMANDCENTER_IMAGE`에 적은 이름), compose 서비스와 컨테이너는 `commandcenter`입니다. `docker logs commandcenter`, `docker exec commandcenter ...`처럼 이름을 쓰는 스크립트와 모니터링을 고치세요. 바이너리 서브커맨드(`commandcenter hash-password`, `token create`, `gc`, `healthcheck`)도 같은 이름입니다. `token create`는 `-config`를 생략하면 기본 경로(`/etc/commandcenter/config.yaml`)를 쓰고, 없으면 이전 경로로 대체하므로 예시에서는 `-config`를 쓰지 않습니다. 다른 경로의 파일을 쓸 때만 `-config <경로>`를 붙이세요.
 
 ## Nexus에서 이전하기
 
@@ -767,7 +737,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 
 관리자는 저장소 설정에서 저장소를 만들고, 고치고, 지울 수 있습니다. 서버를 재시작하지 않아도 바로 반영됩니다.
 
-> **경고: `config.yaml`의 `repositories:`는 첫 시작 때 한 번만 읽습니다.** 저장소 정의는 `meta.db`(SQLite)로 옮겨지고, 그 뒤로는 `config.yaml`의 `repositories:`를 고쳐도 **무시**됩니다(시작할 때 파일 이름을 밝히는 경고 로그가 남습니다). 저장소는 UI(또는 `/-/api/repositories` API)로 바꾸세요. 사용자, 역할, 일반 설정, 라우팅 규칙, 컨텐츠 셀렉터도 첫 시작 때 한 번만 가져오며 이후 UI에서 관리합니다("업그레이드" 참고).
+> **경고: `config.yaml`의 `repositories:`는 첫 시작 때 한 번만 읽습니다.** 저장소 정의는 DB로 옮겨지고, 그 뒤로는 `config.yaml`의 `repositories:`를 고쳐도 **무시**됩니다(시작할 때 파일 이름을 밝히는 경고 로그가 남습니다). 저장소는 UI(또는 `/-/api/repositories` API)로 바꾸세요. 사용자, 역할, 일반 설정, 라우팅 규칙, 컨텐츠 셀렉터도 첫 시작 때 한 번만 가져오며 이후 UI에서 관리합니다("업그레이드" 참고).
 
 - **만들기**: "Create repository"를 누르면 레시피 선택 화면(`maven2`, `npm`, `pypi`, `go`, `cargo` 각각 hosted, proxy, group)이 나오고, 고르면 해당 유형의 폼이 열립니다. 검증은 `config.yaml`과 같고 오류는 폼 맨 위에 표시됩니다. 새 저장소 이름은 영문자와 숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만 쓸 수 있으며 최대 64자입니다. `create`는 예약어라 쓸 수 없습니다(이미 저장된 이름은 그대로 동작합니다).
 - **편집**: `name`, `format`, `type`은 만든 뒤 바꿀 수 없습니다(폼에서 비활성). 나머지(remote, 인증, 최대 보관 시간, negative cache TTL, 라우팅 규칙(routingRule), group 멤버와 순서, writeMember, versionPolicy, 배포 정책(writePolicy), anonymousRead, Online/Offline)는 고칠 수 있습니다. 저장소의 Blob Store(`blobStore`)는 편집으로는 바꿀 수 없고 `repository.change-blobstore` 작업으로 옮깁니다("저장소의 blob store 바꾸기" 참고). proxy의 `remote`를 바꿔도 캐시된 파일은 유지되지만, 이전 remote에서 받은 "없음" 기록(negative cache)은 지워집니다.
@@ -779,7 +749,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - **입력 검사**: 저장소를 만들거나 편집할 때(UI·API, 첫 시작의 config 가져오기) group의 멤버가 중복되면 거부하고(`duplicate member`), 시간 값(`metadataMaxAge`, `contentMaxAge`, `negativeCacheTTL`)에 음수(`-5m`)를 쓰면 거부합니다(400). "영원히"는 `-1`로만 씁니다. `remote`와 `remoteAuth`는 proxy에만 쓸 수 있고 `versionPolicy`는 group에 쓸 수 없습니다(400). 웹 UI의 Maven group 폼에는 versionPolicy 칸이 없습니다. 이전 버전이 이미 저장한 정의는 그대로 읽습니다. 음수 시간은 0(캐시하지 않음, 즉시 만료)으로, 중복 멤버는 한 번만 쓰고, hosted·group의 `remote`·`remoteAuth`와 group의 `versionPolicy`는 쓰이지 않던 값이라 버리며, 시작 시 저장소마다 경고를 한 줄 남깁니다. 그런 저장소가 있어도 서버는 시작하고 다른 저장소의 편집도 막지 않으며, 그 저장소를 편집할 때 값을 고치면 됩니다. 저장소를 만들거나 지우면 목록의 개수·크기 통계(약 30초 캐시)도 바로 다시 계산하므로, 같은 이름으로 다시 만든 빈 저장소가 이전 값을 보여 주지 않습니다.
 - **원격 인증 정보**: proxy의 비밀번호와 Bearer 토큰은 DB에 저장되지만(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) **어떤 API와 화면에도 다시 보이지 않습니다**(설정되어 있는지 여부만 표시). 편집 때 비워 두면 기존 값을 유지하고, "clear" 체크로 지웁니다. `remote`의 **호스트가 바뀌면 인증 정보를 다시 입력해야 합니다**(토큰을 새 호스트로 옮길 수 없습니다).
 - **권한**: 만들기, 편집, 삭제는 관리자이면서 비밀번호 또는 세션으로 인증한 경우에만 됩니다(API 토큰으로는 403). 쓰기 요청에는 `X-Command-Center-UI: 1` 헤더가 필요합니다.
-- **백업**: 저장소 정의가 `meta.db`에 있으므로 **백업에 `meta.db`가 반드시 포함되어야 합니다**(데이터 볼륨 전체를 백업하면 됩니다). 정의 없이 blob만 복원하면 저장소가 없는 상태가 됩니다.
+- **백업**: 저장소 정의가 DB에 있으므로 **백업에 DB(`pg_dump`)가 반드시 포함되어야 합니다**("백업과 복원" 참고). 정의 없이 blob만 복원하면 저장소가 없는 상태가 됩니다.
 
 ### 라우팅 규칙
 
@@ -826,7 +796,7 @@ repositories:
 
 설정 파일은 YAML이며 알 수 없는 키가 있으면 시작이 실패합니다. 설정을 바꾼 뒤에는 `docker compose restart`로 반영하세요.
 
-**한 번만 가져오는 키**: `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`는 **첫 시작 때 한 번만** 읽어 DB로 가져옵니다. 이후에는 파일에 남아 있어도 무시되며(시작할 때마다 경고가 한 줄 남습니다) 웹 UI에서 관리합니다("업그레이드"의 이전 안내 참고). `config.yaml`에 계속 쓰는 키는 `listen`, `dataDir`, `memoryLimitMiB`, `metricsFlushSeconds`, `secretKeyFile`, `exportRoot`뿐입니다(`repositories`도 첫 시작에만 가져옵니다).
+**한 번만 가져오는 키**: `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`는 **첫 시작 때 한 번만** 읽어 DB로 가져옵니다. 이후에는 파일에 남아 있어도 무시되며(시작할 때마다 경고가 한 줄 남습니다) 웹 UI에서 관리합니다("업그레이드"의 이전 안내 참고). `config.yaml`에 계속 쓰는 키는 `listen`, `dataDir`, `database`, `memoryLimitMiB`, `metricsFlushSeconds`, `secretKeyFile`, `exportRoot`뿐입니다(`repositories`도 첫 시작에만 가져옵니다).
 전체 예시는 `config.example.yaml`을 참고하세요.
 
 ### 최상위 키
@@ -835,7 +805,9 @@ repositories:
 |---|---|---|---|
 | `listen` | 문자열 | `":8081"` | 수신 주소. 컨테이너 안에서는 8081을 유지하세요(헬스체크가 127.0.0.1:8081을 확인). |
 | `baseURL` | URL | `"http://localhost:8081"` | (가져온 뒤 UI의 일반 설정에서 관리) 클라이언트가 접속하는 주소. npm·Cargo 응답의 다운로드 URL이 이 값으로 만들어집니다(PyPI 파일 링크는 호스트 없는 경로이며 이 값의 경로 부분만 앞에 붙습니다). 끝의 `/`는 무시되고, 사용자 정보(`user:pass@`), 쿼리(`?…`), 프래그먼트(`#…`)가 없는 `http(s)` URL이어야 합니다. 이 값은 클라이언트에게 주는 URL의 앞부분이 되므로 사용자 정보가 있으면 그 자격 증명이 모든 클라이언트에게 넘어가고, `?`나 `#`가 있으면 URL이 깨집니다. |
-| `dataDir` | 경로 | `"/data"` | blob과 `meta.db`(SQLite)를 저장하는 디렉터리. compose에서는 named volume입니다. |
+| `dataDir` | 경로 | `"/data"` | blob(default blob store)과 업로드 임시 파일을 저장하는 디렉터리. compose에서는 named volume입니다. |
+| `database.url` | 문자열 | 없음(필수) | 메타데이터 DB(PostgreSQL 13 이상)의 `postgres://` 또는 `postgresql://` URL. 환경 변수 `COMMANDCENTER_DATABASE_URL`로 대신 줄 수 있고, 둘 다 있으면 시작하지 않습니다. 둘 다 없으면 `no database configured: set database.url (or COMMANDCENTER_DATABASE_URL) to a PostgreSQL URL`로 시작하지 않습니다. 로그와 오류에 URL은 남지 않습니다. "메타데이터 데이터베이스" 참고. |
+| `database.maxConns` | 정수 | `10` | 연결 풀 크기(1..1000). |
 | `memoryLimitMiB` | 정수 | `80` | Go 메모리 한도(MiB). 환경변수 `GOMEMLIMIT`가 있으면 무시됩니다(compose 기본값은 `GOMEMLIMIT: 80MiB`). |
 | `maxUploadMiB` | 정수 | `1024` | (가져온 뒤 UI에서 관리, 바로 적용) GET/HEAD가 아닌 요청 본문의 최대 크기(MiB). 허용 범위 1..1048576, 0이면 기본값. 초과하면 모든 포맷에서 413. 포맷별로 더 작은 제한이 있으면 그것이 먼저 적용됩니다. |
 | `anonymousRead` | 불리언 | `false` | (가져온 뒤 UI에서 관리) 인증 없는 다운로드 허용 여부. 저장소별로 덮어쓸 수 있습니다. |
@@ -1006,11 +978,11 @@ Maven `settings.xml` 예:
 
 ### 세션과 SSO 상태
 
-- **세션:** UI 세션은 메타데이터 데이터베이스(`sessions` 테이블)에 저장합니다. 재시작해도 로그인이 유지되며(SQLite 포함), PostgreSQL에서는 어느 노드에서 로그인해도 모든 노드가 같은 세션을 받습니다. 유휴 시간 제한은 일반 설정 값을 요청마다 확인합니다. 마지막 사용 시각은 1분에 한 번만 기록하므로 세션이 최대 1분 일찍 끝날 수 있습니다. 사용자당 세션은 20개까지이며, 그 이상 로그인하면 가장 오래 쓰지 않은 세션이 끝납니다. 세션은 시작 후 7일이 지나면 끝납니다.
-- **SSO 신원:** PostgreSQL에서는 OIDC, SAML, RUT, Crowd 사용자의 신원을 데이터베이스(`sso_identities`)에 저장하므로, 재시작한 뒤나 다른 노드에서도 세션과 토큰이 그대로 동작합니다. 신원은 마지막 로그인 후 7일 동안 유효하며, 그 뒤에는 다시 로그인할 때까지 토큰이 거부됩니다. Realm 설정을 바꾸면 이전 설정으로 기록된 신원은 쓰지 않습니다. 단, 클라이언트 시크릿·SP 키·애플리케이션 비밀번호만 바꾸면 신원은 유지됩니다. Crowd 사용자는 다른 노드에서도 `cacheMinutes` 동안 Crowd에 다시 묻지 않습니다. SQLite에서는 전처럼 프로세스 메모리에만 두므로 재시작 후 다시 로그인해야 합니다. OIDC·SAML의 진행 중인 로그인 상태와 SAML assertion 재사용 기록은 두 DB 모두 데이터베이스에 둡니다.
-- **로그인 제한:** PostgreSQL에서는 로그인 이름별 실패 횟수를 데이터베이스(`auth_failures`, UNLOGGED)에 기록하므로, 노드가 여러 대여도 같은 이름에 허용하는 추측 횟수가 늘지 않습니다. 주소별 제한은 노드마다 따로 세므로 노드 수만큼 약해집니다. 실패 횟수를 읽을 수 없으면 비밀번호를 확인하지 않고 거부합니다. PostgreSQL이 비정상 종료되면 UNLOGGED 테이블이 비워질 수 있습니다. `user reset-password`는 해당 이름의 실패 기록도 지웁니다.
-- **토큰 서명 키:** PostgreSQL에서는 Docker와 Conan 토큰을 서명하는 키를 settings의 `registry.tokenKey`에 한 번 저장하고 비밀값 키로 암호화합니다. 그래서 한 노드에서 받은 토큰을 다른 노드도 받아들입니다. 비밀값 키가 없으면 이 키가 평문으로 저장되므로, PostgreSQL에서는 비밀값 키를 설정하세요.
-- **비밀값 키 확인:** PostgreSQL에서는 비밀값 키로 처음 시작할 때 키 확인값(settings의 `secretKey.check`, HMAC)을 저장합니다. 이후 다른 키로 시작하거나, 키 없이 시작하면 시작을 거부합니다. 모든 노드가 같은 키를 써야 합니다. 키를 바꾸려면 모든 노드를 멈추고 `commandcenter secret-key rotate`를 실행한 뒤 새 키로 시작합니다.
+- **세션:** UI 세션은 메타데이터 데이터베이스(`sessions` 테이블)에 저장합니다. 재시작해도 로그인이 유지되며, 어느 노드에서 로그인해도 모든 노드가 같은 세션을 받습니다. 유휴 시간 제한은 일반 설정 값을 요청마다 확인합니다. 마지막 사용 시각은 1분에 한 번만 기록하므로 세션이 최대 1분 일찍 끝날 수 있습니다. 사용자당 세션은 20개까지이며, 그 이상 로그인하면 가장 오래 쓰지 않은 세션이 끝납니다. 세션은 시작 후 7일이 지나면 끝납니다.
+- **SSO 신원:** OIDC, SAML, RUT, Crowd 사용자의 신원을 데이터베이스(`sso_identities`)에 저장하므로, 재시작한 뒤나 다른 노드에서도 세션과 토큰이 그대로 동작합니다. 신원은 마지막 로그인 후 7일 동안 유효하며, 그 뒤에는 다시 로그인할 때까지 토큰이 거부됩니다. Realm 설정을 바꾸면 이전 설정으로 기록된 신원은 쓰지 않습니다. 단, 클라이언트 시크릿·SP 키·애플리케이션 비밀번호만 바꾸면 신원은 유지됩니다. Crowd 사용자는 다른 노드에서도 `cacheMinutes` 동안 Crowd에 다시 묻지 않습니다. OIDC·SAML의 진행 중인 로그인 상태와 SAML assertion 재사용 기록도 데이터베이스에 둡니다.
+- **로그인 제한:** 로그인 이름별 실패 횟수를 데이터베이스(`auth_failures`, UNLOGGED)에 기록하므로, 노드가 여러 대여도 같은 이름에 허용하는 추측 횟수가 늘지 않습니다. 주소별 제한은 노드마다 따로 세므로 노드 수만큼 약해집니다. 실패 횟수를 읽을 수 없으면 비밀번호를 확인하지 않고 거부합니다. PostgreSQL이 비정상 종료되면 UNLOGGED 테이블이 비워질 수 있습니다. `user reset-password`는 해당 이름의 실패 기록도 지웁니다.
+- **토큰 서명 키:** Docker와 Conan 토큰을 서명하는 키를 settings의 `registry.tokenKey`에 한 번 저장하고 비밀값 키로 암호화합니다. 그래서 한 노드에서 받은 토큰을 다른 노드도 받아들입니다. 비밀값 키가 없으면 이 키가 평문으로 저장되므로 비밀값 키를 설정하세요.
+- **비밀값 키 확인:** 비밀값 키로 처음 시작할 때 키 확인값(settings의 `secretKey.check`, HMAC)을 저장합니다. 이후 다른 키로 시작하거나, 키 없이 시작하면 시작을 거부합니다. 모든 노드가 같은 키를 써야 합니다. 키를 바꾸려면 모든 노드를 멈추고 `commandcenter secret-key rotate`를 실행한 뒤 새 키로 시작합니다.
 
 ### 비상 복구(break-glass)
 
@@ -1030,7 +1002,7 @@ printf '%s\n' "$PW" | docker compose run --rm -T commandcenter user reset-passwo
 - `-admin`을 주면 `admin` 역할을 더합니다.
 - `local` Realm을 켭니다. Realm 목록에 없으면 맨 앞에 넣습니다.
 
-첫 시작 전이라 `config.yaml`을 아직 가져오지 않았다면 가져오기를 먼저 합니다. `-config`는 `token create`와 같습니다. 실행 중인 서버는 사용자·역할·Realm·설정을 5초마다 DB에서 다시 읽으므로 바뀐 내용이 몇 초 안에 반영되며 재시작할 필요가 없습니다. PostgreSQL에서는 명령이 실행 중인 서버들에 알리므로 곧바로 반영됩니다(`token create`도 같습니다). 웹 UI에서 바꿀 때와 같이 비밀번호가 바뀐 사용자의 기존 세션은 끝나고 그 이름의 로그인 시도 제한(아래 "보호")도 풀리며, API 토큰은 그대로 유효합니다(필요하면 웹 UI의 사용자 화면에서 **토큰 모두 폐기**를 누르세요). 출력의 마지막 줄은 `done; sign in as <id> (a running server applies the change within a few seconds)`입니다.
+첫 시작 전이라 `config.yaml`을 아직 가져오지 않았다면 가져오기를 먼저 합니다. `-config`는 `token create`와 같습니다. 명령이 실행 중인 서버들에 알리므로 바뀐 내용이 곧바로 반영되며(`token create`도 같습니다. 알림을 놓쳐도 서버가 사용자·역할·Realm·설정을 5초마다 DB에서 다시 읽습니다) 재시작할 필요가 없습니다. 웹 UI에서 바꿀 때와 같이 비밀번호가 바뀐 사용자의 기존 세션은 끝나고 그 이름의 로그인 시도 제한(아래 "보호")도 풀리며, API 토큰은 그대로 유효합니다(필요하면 웹 UI의 사용자 화면에서 **토큰 모두 폐기**를 누르세요). 출력의 마지막 줄은 `done; sign in as <id> (a running server applies the change within a few seconds)`입니다.
 
 ### 보호
 
@@ -1039,46 +1011,52 @@ printf '%s\n' "$PW" | docker compose run --rm -T commandcenter user reset-passwo
 - **로그인 시도 제한**: 비밀번호 확인(`/repository/`와 API의 Basic 인증, 웹 UI 로그인, `npm login`, 본인 비밀번호 변경의 현재 비밀번호)은 로컬과 LDAP 모두 로그인 이름마다 실패를 셉니다. 성공 없이 **5번** 실패한 이름은 마지막 실패로부터 **1분** 동안 비밀번호를 확인하지 않고 `429 Too Many Requests`로 거절됩니다(`Retry-After` 헤더에 남은 초, 웹 UI에는 기다릴 시간이 나옵니다). 그 뒤에도 실패하면 거절 시간이 실패마다 두 배가 되어 최대 **15분**까지 늘어납니다. 성공하거나 **1시간** 동안 실패가 없으면 잊습니다. 이름은 대소문자를 구분하지 않고 셉니다. 없는 이름도 같은 규칙이라 거절 여부로 계정이 있는지 알 수 없고, 디렉터리 장애로 실패한 LDAP 로그인도 실패로 셉니다. 같은 이름의 확인은 한 번에 하나씩 하므로 병렬 요청으로 한꺼번에 여러 비밀번호를 시험할 수 없고, 맞는 비밀번호를 쓰는 병렬 빌드는 첫 확인을 기다렸다가 캐시로 통과합니다.
   - 출력 가능한 ASCII(영문자, 숫자, 기호, 공백)가 아니거나 앞뒤에 공백이 있거나 공백이 연달아 있는 이름은 어떤 Realm에도 보내지 않고 틀린 비밀번호와 똑같이 401로 거부하며, 실패로 세지도 않습니다(웹 UI 로그인 창은 이름 앞뒤의 공백을 지우고 보냅니다). LDAP 디렉터리는 이름을 찾을 때 대소문자, 전각·반각, 유니코드 정규화 형태, 앞뒤·연속 공백의 차이를 무시하므로(RFC 4518), 그런 이름까지 받으면 한 계정을 철자만 바꿔 가며 제한 없이 시도할 수 있기 때문입니다. 로컬 사용자 ID는 원래 이 규칙에 맞으므로 영향이 없고, LDAP도 `uid`, `sAMAccountName`, ASCII `mail`이나 `Alice Smith`처럼 공백이 하나씩인 이름은 그대로 로그인합니다. 다만 `userFilter`가 한글 `cn`처럼 ASCII가 아닌 값으로 사용자를 찾는 설정에서는 그 값으로 로그인할 수 없으므로 `uid` 같은 ASCII 속성으로 찾게 하세요.
   - 한 클라이언트 주소(IPv6는 /64)가 첫 실패로부터 15분 안에 **20번** 실패하면, 그 15분이 끝날 때까지 그 주소에서는 이름마다 한 번만 실패해도 거절됩니다(여러 계정에 흔한 비밀번호를 대입하는 공격 대비). 주소 전체를 막지는 않습니다. 리버스 프록시 뒤에서는 모든 클라이언트가 프록시 주소로 보이므로(`X-Forwarded-For`는 보지 않습니다) 한 클라이언트가 모두를 막지 못하게 하기 위해서이며, 그 대신 프록시 뒤에서는 주소 기준 제한을 모든 클라이언트가 함께 받습니다.
-  - 거절은 저절로 풀리고, 관리자가 그 사용자의 비밀번호를 재설정하거나 `user reset-password`를 실행해도 풀립니다. 기록은 메모리에만 있어(이름과 주소를 합쳐 최대 10000개) 재시작하면 지워집니다. 이름이나 주소가 한도에 닿으면 WARN 로그(`sign-in throttled`)가 한 번 남습니다. 한도는 고정값이며 설정으로 바꿀 수 없습니다.
+  - 거절은 저절로 풀리고, 관리자가 그 사용자의 비밀번호를 재설정하거나 `user reset-password`를 실행해도 풀립니다. 이름별 기록은 데이터베이스에 두고("세션과 SSO 상태"의 로그인 제한), 주소별 기록은 노드의 메모리에만 있어(최대 10000개) 재시작하면 지워집니다. 이름이나 주소가 한도에 닿으면 WARN 로그(`sign-in throttled`)가 한 번 남습니다. 한도는 고정값이며 설정으로 바꿀 수 없습니다.
   - API 토큰과 이미 로그인한 세션은 영향을 받지 않습니다. 누군가 일부러 계속 틀리면 그 이름의 비밀번호 로그인은 계속 거절되므로, 빌드와 CI는 비밀번호 대신 API 토큰을 쓰세요. 토큰 형식의 값(`cc_`나 `rl_` 뒤에 16진수 64자리)을 Basic 비밀번호로 보냈다가 토큰 확인에 실패한 요청(폐기했거나 잘못된 토큰)은 실패로 세지 않습니다.
 
 ### 메타데이터 데이터베이스
 
-기본값은 `<dataDir>/meta.db`의 SQLite입니다(docker-compose, 소규모 설치). NFS처럼 파일 잠금이 느린 스토리지(Kubernetes의 NAS 볼륨 등)에서는 쓰기마다 몇 초씩 기다리게 되므로 PostgreSQL을 쓰십시오. 그러면 볼륨에는 blob만 남고, blob은 NFS에 두어도 됩니다.
+저장소 정의, 컴포넌트·에셋 목록, 사용자·역할·설정, 토큰 해시, 작업과 활동 기록은 PostgreSQL(13 이상)에 둡니다. blob은 데이터베이스가 아니라 blob store(`dataDir` 또는 S3)에 있습니다. docker-compose와 Helm 차트는 PostgreSQL을 함께 띄우며, 운영 환경에서는 복제 구성된 PostgreSQL이나 관리형 서비스를 쓰는 것을 권장합니다.
 
 ```yaml
 database:
   url: postgres://cc:비밀번호@db.example:5432/commandcenter?sslmode=require
-  maxConns: 10        # 생략 시 SQLite 4, PostgreSQL 10
+  maxConns: 10        # 생략 시 10
 ```
 
-- 환경 변수 `COMMANDCENTER_DATABASE_URL`로도 지정할 수 있습니다(Kubernetes에서는 Secret으로 넣는 것을 권장. Helm 차트의 `database.existingSecret`). 둘 다 지정하면 시작을 거부합니다.
+- `database.url` 또는 환경 변수 `COMMANDCENTER_DATABASE_URL` 중 하나가 필요합니다(Kubernetes에서는 Secret으로 넣는 것을 권장합니다. Helm 차트의 `database.existingSecret`). 둘 다 없으면 `no database configured: set database.url (or COMMANDCENTER_DATABASE_URL) to a PostgreSQL URL` 오류로, 둘 다 있으면 `set COMMANDCENTER_DATABASE_URL or database.url, not both` 오류로 시작하지 않습니다.
 - `postgres://`와 `postgresql://`만 허용합니다. URL과 비밀번호는 로그나 오류 메시지에 남지 않습니다. 사용자 이름과 비밀번호의 특수문자는 퍼센트 인코딩하십시오.
-- PostgreSQL 13 이상. 데이터베이스는 서버가 쓰는 역할을 소유자로 미리 만들어 두어야 하며(`CREATE DATABASE commandcenter OWNER <역할>`; PostgreSQL 15부터는 소유자가 아니면 `public` 스키마에 테이블을 만들 수 없습니다), 테이블은 첫 시작 때 그 역할이 만듭니다. 테이블을 만들고 업그레이드할 때만 소유자 권한이 필요하고, 스키마 버전이 현재 버전과 같은 데이터베이스는 테이블에 대한 SELECT/INSERT/UPDATE/DELETE와 스키마 USAGE만 있는 역할로도 열립니다. 권한이 모자라면 시작 오류에 `SQLSTATE 42501`과 함께 소유자가 필요하다는 안내가 나옵니다. 스키마 버전은 `schema_version` 테이블에 기록되고, 더 새 버전이 쓴 데이터베이스는 SQLite와 같이 시작을 거부합니다.
-- 모든 CLI 명령(`token create`, `user reset-password`, `gc`, `secret-key rotate`, `migrate-db`)이 같은 설정을 읽습니다.
-- 백업은 `pg_dump`로 합니다. 시스템 정보 화면의 메타데이터 DB 크기는 PostgreSQL에서는 `pg_database_size` 값입니다.
-- 쓰기는 한 번에 하나씩 처리합니다. 같은 DB와 공유 스토리지로 여러 노드를 함께 띄울 수 있습니다("고가용성(여러 노드)" 참고).
-- **SQLite에서 PostgreSQL로 옮기기**: `commandcenter migrate-db -config <설정 파일> -to <postgres URL>`이 설정이 가리키는 `meta.db`의 모든 테이블을 비어 있는 PostgreSQL 데이터베이스로 복사합니다. 대상 데이터베이스는 미리 만들어 두고(`CREATE DATABASE commandcenter`), 테이블은 명령이 만듭니다. `-to` URL에는 서버가 쓸 바로 그 역할을 지정하십시오. 관리자 역할로 옮기면 테이블의 소유자가 관리자가 되어, 다음 스키마 업그레이드 때 서버 역할로는 시작하지 못합니다(그 경우 `ALTER TABLE ... OWNER TO <역할>`로 소유자를 넘기거나 업그레이드를 소유자로 한 번 실행하십시오). 서버를 먼저 멈추고 백업을 받은 뒤 실행하세요. 대상 데이터베이스에 행이 하나라도 있거나 스키마 버전이 다르면 아무것도 쓰지 않고 거부합니다. 복사는 대상의 한 트랜잭션으로 하고 테이블마다 행 수를 확인한 뒤에만 커밋하므로 중간에 실패해도 대상은 비어 있는 그대로입니다. ID, 시각, JSON 문서, 암호화된 비밀값(`enc:v1:…`)은 바이트 그대로 복사되므로 **같은 비밀값 키**로 서버를 시작해야 합니다. blob은 옮기지 않으며 `dataDir`의 blob 저장소를 그대로 씁니다. 끝나면 테이블별 행 수를 출력합니다. URL과 비밀번호는 출력이나 오류 메시지에 남지 않습니다. 그 뒤 `database.url`(또는 `COMMANDCENTER_DATABASE_URL`)을 대상으로 바꾸고 서버를 시작합니다. 반대 방향(PostgreSQL → SQLite)은 `-to`에 새 SQLite 파일 경로를 주면 됩니다(설정은 PostgreSQL을 가리킨 채로). 예:
-  ```sh
-  docker compose stop commandcenter
-  docker compose run --rm commandcenter migrate-db -to 'postgres://cc:비밀번호@db.example:5432/commandcenter?sslmode=require'
-  ```
-- NUL이나 잘못된 UTF-8이 든 이름(옛 빌드가 저장한 Maven 경로)은 PostgreSQL에 저장할 수 없으므로 400으로 거부합니다.
+- 데이터베이스는 서버가 쓰는 역할을 소유자로 미리 만들어 둡니다(`CREATE DATABASE commandcenter OWNER <역할>`; PostgreSQL 15부터는 소유자가 아니면 `public` 스키마에 테이블을 만들 수 없습니다). 테이블은 첫 시작 때 그 역할이 만듭니다. 테이블을 만들고 업그레이드할 때만 소유자 권한이 필요하고, 스키마 버전이 현재 버전과 같은 데이터베이스는 테이블에 대한 SELECT/INSERT/UPDATE/DELETE와 스키마 USAGE만 있는 역할로도 열립니다. 권한이 모자라면 시작 오류에 `SQLSTATE 42501`과 함께 소유자가 필요하다는 안내가 나옵니다. 스키마 버전은 `schema_version` 테이블에 기록되고, 더 새 버전이 쓴 데이터베이스는 시작을 거부합니다("업그레이드" 참고).
+- 모든 CLI 명령(`token create`, `user reset-password`, `gc`, `secret-key rotate`)이 같은 설정을 읽습니다.
+- 쓰기는 advisory lock으로 한 번에 하나씩 처리하고(쓰기 잠금 대기 최대 5초, URL의 `lock_timeout`으로 바꿀 수 있습니다), 읽기는 쓰기를 기다리지 않습니다. 같은 데이터베이스로 여러 노드를 함께 띄울 수 있으며("고가용성(여러 노드)" 참고), 노드 하나는 연결 풀 외에 잠금 연결과 알림 연결을 하나씩 더 씁니다("노드와 준비 상태" 참고).
+- 시스템 정보 화면의 메타데이터 DB 크기는 `pg_database_size` 값입니다. 백업은 `pg_dump`로 합니다("백업과 복원" 참고).
+- NUL이나 잘못된 UTF-8이 든 이름은 저장할 수 없으므로 400으로 거부합니다.
 
 ### 저장된 비밀값 암호화
 
-SMTP 비밀번호, LDAP bind 비밀번호, Crowd 애플리케이션 비밀번호, proxy 저장소의 `remoteAuth` 비밀번호와 Bearer 토큰은 원격 서버에 그대로 보내야 하고 SAML SP 개인키는 서명·복호화에 써야 하므로 사용자 비밀번호나 토큰처럼 해시로 저장할 수 없습니다. **비밀값 키를 정하면** 이 값들을 AES-256-GCM으로 암호화해 `meta.db`에 저장하고(`enc:v1:`로 시작하는 값) 쓸 때 풉니다. 그러면 `meta.db`, 볼륨 복사본, 백업 파일이 새어도 키 없이는 비밀값을 알 수 없습니다. 키가 없으면 평문으로 저장하고, 시작할 때마다 WARN 로그(`no secret key is configured`)가 한 줄 남습니다.
+SMTP 비밀번호, LDAP bind 비밀번호, Crowd 애플리케이션 비밀번호, proxy 저장소의 `remoteAuth` 비밀번호와 Bearer 토큰은 원격 서버에 그대로 보내야 하고 SAML SP 개인키는 서명·복호화에 써야 하므로 사용자 비밀번호나 토큰처럼 해시로 저장할 수 없습니다. **비밀값 키를 정하면** 이 값들을 AES-256-GCM으로 암호화해 DB에 저장하고(`enc:v1:`로 시작하는 값) 쓸 때 풉니다. 그러면 DB, 덤프, 백업 파일이 새어도 키 없이는 비밀값을 알 수 없습니다. 키가 없으면 평문으로 저장하고, 시작할 때마다 WARN 로그(`no secret key is configured`)가 한 줄 남습니다.
 
 - **키 만들기**: 32바이트 난수를 base64로 적은 값입니다. `head -c 32 /dev/urandom | base64`나 `openssl rand -base64 32`로 만들고, 셸이 없는 PC에서는 `docker run --rm busybox sh -c 'head -c 32 /dev/urandom | base64'`를 씁니다.
 - **키 주기**: 환경변수 `COMMANDCENTER_SECRET_KEY`에 그 값을 넣거나, 그 값을 담은 파일을 `config.yaml`의 `secretKeyFile`로 가리킵니다(파일은 서버 UID 65532만 읽을 수 있게 두세요). 둘 다 주면 시작하지 않습니다. compose는 `docker-compose.yml`의 주석 처리된 `COMMANDCENTER_SECRET_KEY` 줄을 쓰면 됩니다. Kubernetes에서는 키를 Secret으로 만들고 차트의 `secretKey.existingSecret`에 그 이름을 적습니다("Helm 차트로 설치" 참고. 참조 매니페스트라면 주석 처리된 `COMMANDCENTER_SECRET_KEY`(Secret 참조) 항목). `gc`, `token create` 명령도 같은 키가 필요하고(`docker exec`는 컨테이너의 환경변수를 물려받습니다), `user reset-password`는 키 없이도 됩니다.
 - **처음 켤 때**: 키를 주고 시작하면 평문으로 남아 있던 비밀값을 그 자리에서 암호화하고 INFO 로그(`encrypted the stored secrets that were plain text`)를 남깁니다. 그 뒤 저장하는 값은 바로 암호화됩니다. 키와 비밀값은 로그에 남지 않습니다.
-- **`remote` URL에 넣은 인증 정보는 암호화하지 않습니다.** `https://user:token@host/…`처럼 URL에 넣은 사용자 이름·비밀번호나 `?token=…` 같은 쿼리는 키를 정해도 `meta.db`에 평문으로 남습니다. 사용자 이름과 비밀번호는 URL에서 빼고 `remoteAuth`의 `username`/`password`에 넣으세요(원격이 Bearer 토큰을 받으면 `bearerToken`). 키를 정했는데 이런 proxy가 있으면 시작할 때마다 그 저장소 이름을 적은 WARN 로그(`the remote URL of these proxies holds a user name, password or query…`)가 한 줄 남습니다. URL은 로그에 남지 않습니다. 쿼리로만 토큰을 받는 원격은 옮길 곳이 없으니 `meta.db`와 백업의 접근을 제한하세요.
-- **키를 잃으면 비밀값을 되살릴 수 없습니다.** 키는 반드시 백업하되 `meta.db` 백업과 **다른 곳**에 두세요. 키 없이 시작하면 `it is encrypted, and no secret key is set`, 다른 키로 시작하면 `it was encrypted with another key` 오류로 시작하지 않습니다(다른 키로는 아무것도 다시 쓰지 않습니다). 키를 정말 잃었다면 서버를 멈추고, "백업과 복원"에서처럼 같은 UID로 `sqlite3 /data/meta.db`를 열어 암호화된 값을 지운 뒤 새 키로 시작하고 UI에서 비밀번호를 다시 입력합니다.
+- **`remote` URL에 넣은 인증 정보는 암호화하지 않습니다.** `https://user:token@host/…`처럼 URL에 넣은 사용자 이름·비밀번호나 `?token=…` 같은 쿼리는 키를 정해도 DB에 평문으로 남습니다. 사용자 이름과 비밀번호는 URL에서 빼고 `remoteAuth`의 `username`/`password`에 넣으세요(원격이 Bearer 토큰을 받으면 `bearerToken`). 키를 정했는데 이런 proxy가 있으면 시작할 때마다 그 저장소 이름을 적은 WARN 로그(`the remote URL of these proxies holds a user name, password or query…`)가 한 줄 남습니다. URL은 로그에 남지 않습니다. 쿼리로만 토큰을 받는 원격은 옮길 곳이 없으니 DB와 백업의 접근을 제한하세요.
+- **키를 잃으면 비밀값을 되살릴 수 없습니다.** 키는 반드시 백업하되 DB 백업과 **다른 곳**에 두세요. 키 없이 시작하면 `it is encrypted, and no secret key is set`, 다른 키로 시작하면 `it was encrypted with another key` 오류로 시작하지 않습니다(다른 키로는 아무것도 다시 쓰지 않습니다). 키를 정말 잃었다면 Command Center를 멈추고(PostgreSQL은 그대로 둡니다) 백업을 받은 뒤, `psql`로 DB에 접속해(compose: `docker compose exec postgres psql -U commandcenter -d commandcenter`, Kubernetes: `kubectl -n commandcenter exec -it commandcenter-postgresql-0 -- psql -U commandcenter -d commandcenter`) 아래처럼 암호화된 값을 비우고 키 확인값(`secretKey.check`)과 토큰 서명 키(`registry.tokenKey`)를 지웁니다. 접근 키를 저장한 S3 blob store는 비밀 키를 비우면 시작하지 못하므로 평문으로 다시 넣습니다(시작할 때 새 키로 암호화합니다). 그다음 새 키로 시작하고 UI에서 비밀번호, 키, webhook 비밀값을 다시 입력합니다.
 
   ```sql
-  UPDATE settings SET value = json_set(value, '$.password', '') WHERE key = 'smtp';
-  UPDATE settings SET value = json_set(value, '$.bindPassword', '') WHERE key = 'ldap';
-  UPDATE repositories SET config = json_remove(config, '$.remoteAuth.password', '$.remoteAuth.bearerToken') WHERE json_extract(config, '$.remoteAuth') IS NOT NULL;
+  BEGIN;
+  UPDATE settings SET value = jsonb_set(value::jsonb, '{password}', '""')::text WHERE key = 'smtp';
+  UPDATE settings SET value = jsonb_set(value::jsonb, '{bindPassword}', '""')::text WHERE key = 'ldap';
+  UPDATE settings SET value = jsonb_set(value::jsonb, '{clientSecret}', '""')::text WHERE key = 'oidc';
+  UPDATE settings SET value = jsonb_set(value::jsonb, '{applicationPassword}', '""')::text WHERE key = 'crowd';
+  UPDATE settings SET value = jsonb_set(value::jsonb, '{spPrivateKey}', '""')::text WHERE key = 'saml';
+  UPDATE settings SET value = jsonb_set(value::jsonb, '{proxy,password}', '""')::text WHERE key = 'http' AND value::jsonb ? 'proxy';
+  DELETE FROM settings WHERE key IN ('secretKey.check', 'registry.tokenKey');
+  UPDATE repositories SET config = ((config::jsonb - 'signingKey') #- '{remoteAuth,password}' #- '{remoteAuth,bearerToken}')::text
+    WHERE config::jsonb ?| array['remoteAuth', 'signingKey'];
+  UPDATE webhooks SET secret = '' WHERE secret <> '';
+  -- 접근 키를 저장한 S3 blob store마다
+  UPDATE blob_stores SET config = jsonb_set(config::jsonb - 'secretKey', '{secretAccessKey}', to_jsonb('<S3 비밀 키>'::text))::text WHERE name = '<store 이름>';
+  COMMIT;
   ```
 
 - **키 교체**: `secret-key rotate`가 저장된 비밀값을 지금 키에서 새 키로 한 트랜잭션에 다시 암호화합니다. 실행 중인 서버는 시작할 때 읽은 키를 메모리에 계속 들고 있어서, 서버가 도는 동안 바꾸면 바뀐 값을 읽지 못하고 그 뒤 저장하는 값은 이전 키로 암호화해 두 키가 섞입니다. 그래서 **서버를 먼저 멈추고** 실행한 뒤 새 키로 시작합니다. 실행 전에 백업을 받아 두세요("백업과 복원" 참고).
@@ -1220,11 +1198,11 @@ groupMappings: [{ "group": "cc-admins", "roles": ["admin"] }]
 
 로그인 흐름과 검증은 다음과 같습니다.
 
-1. `GET /-/sso/oidc/start?next=<#해시>`가 state·nonce·PKCE verifier를 만들어 메모리에 10분간 보관하고(state 쿠키 `cc_oidc_state`, `https` baseURL에서는 `__Host-cc_oidc_state`) 제공자의 authorization 엔드포인트로 302합니다. `next`는 `#`으로 시작하는 512자 이하의 해시여야 하며 아니면 무시합니다. `baseURL`이 비어 있으면 503입니다.
+1. `GET /-/sso/oidc/start?next=<#해시>`가 state·nonce·PKCE verifier를 만들어 데이터베이스에 10분간 보관하고(state 쿠키 `cc_oidc_state`, `https` baseURL에서는 `__Host-cc_oidc_state`) 제공자의 authorization 엔드포인트로 302합니다. `next`는 `#`으로 시작하는 512자 이하의 해시여야 하며 아니면 무시합니다. `baseURL`이 비어 있으면 503입니다.
 2. 제공자가 `/-/sso/oidc/callback?code&state`로 돌려보내면 쿠키의 state와 비교하고 보관한 항목을 **한 번만** 씁니다(재사용·만료는 400). 토큰 엔드포인트에서 code를 교환하고 ID 토큰을 검증합니다: 서명(RS256·ES256, JWKS는 캐시하고 모르는 `kid`가 오면 1분에 한 번만 다시 받음), `iss`, `aud`(여럿이면 `azp`), `exp`(60초 허용), `iat`, `nonce`. 제공자가 `error`로 돌려보내면 로그인 실패 페이지(400)입니다. 응답 본문은 모두 1 MiB로 제한하고, 제공자 호출은 proxy와 같은 송신 정책(사설·루프백 주소 차단, `caCert`와 `insecureSkipVerify` 적용)을 따릅니다.
-3. 사용자 ID와 그룹을 메모리에 기록하고 소유자 `oidc:<id>`의 세션을 만든 뒤 `/` + `next`로 302합니다. 역할은 요청마다 최신 매핑과 `source`가 `oidc`인 **역할 덮어쓰기 행**(LDAP와 같은 규칙: 역할을 더하고, `disabled`면 로그인 거부 403)으로 계산합니다. 사용자 화면에는 로그인한 OIDC 사용자가 `source: oidc`, `realm: OIDC` 행으로 보이고 `/-/api/me`의 `realm`은 `OIDC`입니다.
+3. 사용자 ID와 그룹을 데이터베이스에 기록하고 소유자 `oidc:<id>`의 세션을 만든 뒤 `/` + `next`로 302합니다. 역할은 요청마다 최신 매핑과 `source`가 `oidc`인 **역할 덮어쓰기 행**(LDAP와 같은 규칙: 역할을 더하고, `disabled`면 로그인 거부 403)으로 계산합니다. 사용자 화면에는 로그인한 OIDC 사용자가 `source: oidc`, `realm: OIDC` 행으로 보이고 `/-/api/me`의 `realm`은 `OIDC`입니다.
 
-OIDC 사용자의 항목은 제공자에 다시 묻지 않습니다. SQLite에서는 **메모리에만** 있어서 서버를 재시작하거나 OIDC 설정을 바꾸면 항목이 사라지고, 그 사용자의 세션과 API 토큰은 다시 로그인할 때까지 거부됩니다(브라우저는 SSO 버튼을 다시 누르면 됩니다). PostgreSQL에서는 데이터베이스에 두므로 재시작과 다른 노드에서도 유지되며, 설정을 바꾸면 이전 설정의 항목은 쓰지 않습니다("세션과 SSO 상태" 참고). 진행 중인 로그인 state는 두 DB 모두 데이터베이스에 둡니다. 제공자에서 사용자를 지워도 Command Center가 바로 알지는 못하므로 즉시 막으려면 `source: oidc` 덮어쓰기 행을 `disabled`로 두거나 토큰을 폐기하세요.
+OIDC 사용자의 항목은 제공자에 다시 묻지 않습니다. 신원은 데이터베이스에 두므로 재시작한 뒤나 다른 노드에서도 세션과 토큰이 그대로 동작합니다. 마지막 로그인 후 7일이 지나거나 OIDC 설정을 바꾸면(클라이언트 시크릿만 바꾼 경우는 제외) 이전 항목을 쓰지 않으므로, 그 사용자의 세션과 API 토큰은 다시 로그인할 때까지 거부됩니다(브라우저는 SSO 버튼을 다시 누르면 됩니다. "세션과 SSO 상태" 참고). 진행 중인 로그인 state도 데이터베이스에 둡니다. 제공자에서 사용자를 지워도 Command Center가 바로 알지는 못하므로 즉시 막으려면 `source: oidc` 덮어쓰기 행을 `disabled`로 두거나 토큰을 폐기하세요.
 
 `POST /-/api/realms/oidc/test`(PUT과 같은 본문, 저장하지 않음)는 보낸 설정으로 discovery 문서를 읽어 `{issuer, authorizationEndpoint, tokenEndpoint, jwksUri, scopesSupported, algs}`를 돌려주고, 실패하면 400과 이유입니다(`caCert`가 맞는지 확인할 때 쓰세요). 설정 변경은 활동 기록에 `realms.oidc.update`로 바뀐 키 이름만 남습니다.
 
@@ -1306,7 +1284,7 @@ caCert:         (Gitea가 사내 CA 인증서를 쓰면 그 PEM)
 - **SP 키와 메타데이터.** 처음 저장할 때 SP 키 쌍(RSA 2048비트, 10년짜리 자체 서명 인증서)을 만듭니다. 개인키는 저장만 되고(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) API·로그·이벤트에 나오지 않으며, 인증서는 `spCertificate`와 `spCertificateInfo`(주체, SHA-256 지문, 유효 기간)로 보입니다. 이 키로 암호화된 assertion을 풀고 요청에 서명합니다. IdP에 등록할 SP 메타데이터(entity ID, ACS `<baseURL>/-/sso/saml/acs`, 인증서)는 `GET <baseURL>/-/sso/saml/metadata`(IdP 메타데이터를 넣은 뒤, 인증 없이)나 `GET /-/api/realms/saml/sp-metadata`(관리자, 언제나)에서 받습니다. GET 응답의 `idp`는 읽어 들인 IdP 메타데이터(entity ID, SSO 주소, 인증서와 만료 여부)이고, 읽지 못하면 `idpError`에 이유가 나옵니다.
 - **검증.** 응답은 256 KiB 이하이고 Response 바로 아래에 assertion이 정확히 하나 있어야 하며, DTD가 있으면 거부합니다. 서명은 IdP 메타데이터의 인증서로만 확인하고 서명이 덮는 부분만 읽으므로 서명 감싸기(signature wrapping) 공격이 통하지 않습니다. 그 밖에 Destination과 SubjectConfirmation의 Recipient가 ACS 주소인지, InResponseTo가 이 로그인이 보낸 요청인지, Issuer가 IdP인지, audience가 `entityId`인지, NotBefore·NotOnOrAfter·SessionNotOnOrAfter를 확인하고, 이미 받은 assertion ID는 거부합니다(재전송 방지). 암호화된 assertion(RSA-OAEP와 AES-CBC·AES-GCM)도 받습니다. 실패하면 로그인 실패 페이지(400)에 이유가 나오고 서버 로그에 경고가 남습니다.
 - **사용자와 역할.** 세션과 토큰의 소유자는 `saml:<id>`이고 `/-/api/me`의 `realm`은 `SAML`입니다. 역할은 그룹 매핑, 이 Realm의 `defaultRoles`, 일반 설정의 `defaultRoles`, 같은 ID의 `source: saml` 덮어쓰기 행(역할을 더하고, `disabled`면 로그인 거부 403)으로 정해집니다. 최근 로그인한 SAML 사용자는 사용자 목록에 `directory` 행으로 보입니다. 그룹 매핑이나 기본 역할에 쓰인 역할은 지울 수 없습니다(409).
-- **상태 저장.** 진행 중인 로그인(10분)과 재전송 방지 기록은 데이터베이스에 두므로 노드가 바뀌어도 동작합니다. SAML 사용자의 항목은 SQLite에서는 메모리에만 있어서 재시작하거나 SAML 설정을 바꾸면 그 사용자가 다시 로그인할 때까지 세션과 토큰이 거부되고, PostgreSQL에서는 데이터베이스에 두어 재시작과 다른 노드에서도 유지됩니다("세션과 SSO 상태" 참고). 받아 둔 IdP 메타데이터는 노드마다 따로 받습니다.
+- **상태 저장.** 진행 중인 로그인(10분)과 재전송 방지 기록은 데이터베이스에 두므로 노드가 바뀌어도 동작합니다. SAML 사용자의 항목도 데이터베이스에 두어 재시작과 다른 노드에서도 유지됩니다("세션과 SSO 상태" 참고). 받아 둔 IdP 메타데이터는 노드마다 따로 받습니다.
 - **로그아웃.** Single Logout(SLO)은 없습니다. 로그아웃은 Command Center 세션만 끝내고 IdP 세션은 그대로 둡니다.
 - **https.** 로그인 상태 쿠키(`__Host-cc_saml_state`)는 `https` baseURL에서 `SameSite=None; Secure`입니다. IdP의 응답은 다른 사이트에서 오는 POST이므로 `http` baseURL에서는 브라우저가 쿠키를 보내지 않아 로그인이 실패할 수 있습니다. `baseURL`을 `https://`로 두세요.
 - 설정 변경은 활동 기록에 `realms.saml.update`로 바뀐 키 이름만 남습니다(webhook `realm.updated`).
@@ -1404,7 +1382,7 @@ Command Center는 Nexus Repository의 webhook처럼 서버에서 일어난 일�
 
 `data`는 종류별로 다릅니다: 컴포넌트는 `format, group, name, version`, 파일(asset)은 `path, size, sha256`, 저장소는 `name, format, type`, 작업은 `name, type, result`(OK 또는 Failed)입니다. `repository`는 저장소와 무관한 이벤트에서는 `null`입니다.
 
-전달은 백그라운드에서 4개의 작업자가 요청당 10초 제한으로 보내며, 2xx 응답이면 성공입니다. 그 외 응답이나 연결 실패는 30초, 2분, 10분, 1시간 뒤에 다시 시도하고(최대 5회) 리다이렉트는 따라가지 않습니다. 대기 중인 전달은 데이터베이스에 저장되므로 서버를 재시작해도 이어서 보냅니다. 비활성화한 webhook에는 보내지 않으며(대기 중인 전달은 다시 활성화할 때까지 멈춥니다), webhook을 지우면 그 전달 기록도 지워집니다. webhook마다 최근 200건의 전달 기록(상태, 시도 횟수, 응답 코드, 오류)을 보관하며 화면이나 `GET /-/api/webhooks/{id}/deliveries`에서 확인하고 `redeliver`로 다시 보낼 수 있습니다. "테스트" 버튼(`POST /-/api/webhooks/{id}/test`)은 `ping` 이벤트를 즉시 보내고 응답 코드를 알려 줍니다. 대상 URL은 프록시 원격과 같은 송신 정책을 따릅니다: 사설 주소도 허용되지만 `10.1`처럼 숫자로만 적은 IPv4 주소나 ASCII가 아닌 호스트 이름은 거부됩니다. 비밀값은 다른 비밀값과 같이 비밀값 키로 암호화해 저장하고 API로 돌려주지 않으며(`secretSet`만 알려 줍니다), 로그에도 본문과 비밀값은 남지 않습니다. 전달은 `serve`로 띄운 서버만 보냅니다. CLI 명령(`gc`, `token create` 등)에서 생긴 이벤트의 전달은 DB에 저장만 하고, 실행 중인 서버가 보냅니다. 실행 중인 서버가 없으면 다음에 시작하는 서버가 보냅니다. 각 전달은 그것을 가져간(claim) 노드 하나만 보냅니다. 보내는 도중 서버가 죽으면 다시 시작할 때 다시 보냅니다. PostgreSQL에서 다른 노드가 있으면 60초 뒤 그 노드가 보냅니다. 따라서 같은 전달이 두 번 갈 수 있으므로(최소 한 번 전달), 수신 쪽은 `X-Command-Center-Delivery`(또는 `X-Nexus-Webhook-Delivery`)로 중복을 거르세요.
+전달은 백그라운드에서 4개의 작업자가 요청당 10초 제한으로 보내며, 2xx 응답이면 성공입니다. 그 외 응답이나 연결 실패는 30초, 2분, 10분, 1시간 뒤에 다시 시도하고(최대 5회) 리다이렉트는 따라가지 않습니다. 대기 중인 전달은 데이터베이스에 저장되므로 서버를 재시작해도 이어서 보냅니다. 비활성화한 webhook에는 보내지 않으며(대기 중인 전달은 다시 활성화할 때까지 멈춥니다), webhook을 지우면 그 전달 기록도 지워집니다. webhook마다 최근 200건의 전달 기록(상태, 시도 횟수, 응답 코드, 오류)을 보관하며 화면이나 `GET /-/api/webhooks/{id}/deliveries`에서 확인하고 `redeliver`로 다시 보낼 수 있습니다. "테스트" 버튼(`POST /-/api/webhooks/{id}/test`)은 `ping` 이벤트를 즉시 보내고 응답 코드를 알려 줍니다. 대상 URL은 프록시 원격과 같은 송신 정책을 따릅니다: 사설 주소도 허용되지만 `10.1`처럼 숫자로만 적은 IPv4 주소나 ASCII가 아닌 호스트 이름은 거부됩니다. 비밀값은 다른 비밀값과 같이 비밀값 키로 암호화해 저장하고 API로 돌려주지 않으며(`secretSet`만 알려 줍니다), 로그에도 본문과 비밀값은 남지 않습니다. 전달은 `serve`로 띄운 서버만 보냅니다. CLI 명령(`gc`, `token create` 등)에서 생긴 이벤트의 전달은 DB에 저장만 하고, 실행 중인 서버가 보냅니다. 실행 중인 서버가 없으면 다음에 시작하는 서버가 보냅니다. 각 전달은 그것을 가져간(claim) 노드 하나만 보냅니다. 보내는 도중 서버가 죽으면 다시 시작할 때 다시 보냅니다. 다른 노드가 있으면 60초 뒤 그 노드가 보냅니다. 따라서 같은 전달이 두 번 갈 수 있으므로(최소 한 번 전달), 수신 쪽은 `X-Command-Center-Delivery`(또는 `X-Nexus-Webhook-Delivery`)로 중복을 거르세요.
 
 등록 예:
 
@@ -2151,7 +2129,7 @@ Kubernetes에서는 `docker compose exec commandcenter` 대신 `kubectl -n <네�
 
 ### 로그 레벨
 
-로그 레벨은 실행 중에 바꿀 수 있습니다. `GET /-/api/logging`(관리자)은 현재 레벨을 `{"level":"info","persistent":false}`로 알려 주고, `PUT /-/api/logging`에 `{"level":"debug"}`(`debug`, `info`, `warn`, `error`)를 보내면(관리자, 비밀번호·세션 로그인, `X-Command-Center-UI: 1` 헤더) 바로 적용됩니다. PostgreSQL에서 노드가 여럿이면 모든 노드에 함께 적용됩니다. 관리자 화면의 로그 페이지에서도 고를 수 있습니다. 바뀐 레벨은 저장되지 않아 서버를 다시 시작하면 `info`로 돌아오고, 활동 이벤트 `logging.level`이 남습니다. `debug`는 로그 양이 크게 늘어나므로 원인을 찾은 뒤 되돌리는 것이 좋습니다.
+로그 레벨은 실행 중에 바꿀 수 있습니다. `GET /-/api/logging`(관리자)은 현재 레벨을 `{"level":"info","persistent":false}`로 알려 주고, `PUT /-/api/logging`에 `{"level":"debug"}`(`debug`, `info`, `warn`, `error`)를 보내면(관리자, 비밀번호·세션 로그인, `X-Command-Center-UI: 1` 헤더) 바로 적용됩니다. 노드가 여럿이면 모든 노드에 함께 적용됩니다. 관리자 화면의 로그 페이지에서도 고를 수 있습니다. 바뀐 레벨은 저장되지 않아 서버를 다시 시작하면 `info`로 돌아오고, 활동 이벤트 `logging.level`이 남습니다. `debug`는 로그 양이 크게 늘어나므로 원인을 찾은 뒤 되돌리는 것이 좋습니다.
 
 ### 메트릭
 
@@ -2248,7 +2226,7 @@ curl -s http://localhost:8081/-/api/openapi.json | jq '.paths | keys | length'
 
 ### 예약 작업
 
-OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. 작업은 한 번에 하나씩 실행하며, 실행 중에 시간이 된 다른 작업은 다음 확인(30초마다) 때 실행됩니다. PostgreSQL에서 노드가 여럿이면 모든 노드를 통틀어 하나씩 실행하고, 예정된 실행은 리더 노드만 합니다("노드와 준비 상태" 참고).
+OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. 작업은 한 번에 하나씩 실행하며, 실행 중에 시간이 된 다른 작업은 다음 확인(30초마다) 때 실행됩니다. 노드가 여럿이면 모든 노드를 통틀어 하나씩 실행하고, 예정된 실행은 리더 노드만 합니다("노드와 준비 상태" 참고).
 
 | 종류 | 설명 | 파라미터 |
 |---|---|---|
@@ -2333,7 +2311,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 
 ### blob 정리 (`commandcenter gc`)
 
-어떤 자산에도 참조되지 않는 blob 파일(업로드 실패나 덮어쓰기로 남은 것)을 지웁니다. 수정된 지 1시간이 안 된 blob은 진행 중인 업로드를 보호하기 위해 지우지 않습니다. 결과는 `removed N unreferenced blobs`로 출력됩니다. PostgreSQL을 쓰면 `gc`는 예약 작업과 같은 실행 잠금을 잡습니다. 어느 노드에서든 작업이 실행 중이면 `task "<ID>" is running` 오류로 끝나므로 잠시 뒤 다시 실행하세요. `gc`가 도는 동안에는 예약 작업이 시작되지 않고, 지금 실행은 409를 받습니다. SQLite에서는 이전과 같습니다.
+어떤 자산에도 참조되지 않는 blob 파일(업로드 실패나 덮어쓰기로 남은 것)을 지웁니다. 수정된 지 1시간이 안 된 blob은 진행 중인 업로드를 보호하기 위해 지우지 않습니다. 결과는 `removed N unreferenced blobs`로 출력됩니다. `gc`는 예약 작업과 같은 실행 잠금을 잡습니다. 어느 노드에서든 작업이 실행 중이면 `task "<ID>" is running` 오류로 끝나므로 잠시 뒤 다시 실행하세요. `gc`가 도는 동안에는 예약 작업이 시작되지 않고, 지금 실행은 409를 받습니다.
 
 쓰기 도중 프로세스가 강제 종료되면(SIGKILL, OOM, 중지 대기 시간 초과) store의 `tmp/`에 미완성 임시 파일(`up-*`)이 남습니다. 1시간 넘게 수정되지 않은 임시 파일은 GC 때와 서버 시작 때 지웁니다. `gc`, `token create` 같은 CLI 명령도 시작할 때 같은 정리를 합니다. 진행 중인 쓰기는 늦어도 몇 분마다 파일을 갱신하므로, 서버가 돌고 있을 때 CLI를 실행해도 쓰는 중인 파일은 지워지지 않습니다. 지운 임시 파일 수는 위 결과에 들어가지 않습니다. compact 작업이 지운 경우에는 서버 로그에 `removed stale temp files`로 남습니다.
 
@@ -2341,52 +2319,34 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 
 Kubernetes의 명령은 "Kubernetes에서 백업"에 있습니다. 원칙은 이 절과 같습니다.
 
-데이터는 named volume에 있습니다. 볼륨 이름은 기본 `commandcenter-data`이며 `COMMANDCENTER_VOLUME`으로 바꿀 수 있습니다. 이전 repolite 설치의 데이터를 쓰려면 `COMMANDCENTER_VOLUME=repolite_repolite-data`(또는 `docker volume ls`에 보이는 이름)를 지정하세요.
+- **백업 대상**: 메타데이터 DB(저장소 정의, 사용자, 역할, 토큰 해시, 설정, 파일 목록)와 모든 blob store입니다. compose에서는 DB가 볼륨 `commandcenter-postgres`에, default store가 볼륨 `commandcenter-data`의 `blobs/`에, 경로를 비워 만든 이름 붙은 store가 같은 볼륨의 `blobstores/<이름>`에 있습니다. 절대 경로로 만든 store와 S3 store는 따로 챙기세요. `config.yaml`과 `.env`도 함께 보관하세요.
+- **백업 파일 보호**: DB에는 proxy 원격 인증, LDAP bind, SMTP 비밀번호가 들어 있고, 비밀값 키를 정하지 않았다면 평문입니다("저장된 비밀값 암호화" 참고). 덤프 파일도 서버와 같은 수준으로 접근을 제한하세요. 키를 정했다면 키도 백업하되 DB 백업과 다른 곳에 두세요. 키가 없으면 복원한 서버가 시작하지 않습니다.
+- **순서: DB 먼저, blob 나중.** `pg_dump`는 서버를 멈추지 않고 한 시점의 일관된 덤프를 받습니다. 그 **뒤에** blob 디렉터리를 복사하면 덤프가 가리키는 blob은 모두 들어갑니다. blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로 덤프 뒤에 생긴 blob이 섞여도 무해합니다(다음 compact 작업이 정리합니다). 순서를 바꾸면 덤프가 복사되지 않은 blob을 가리켜 복원한 뒤 404가 됩니다.
+- 백업하는 동안에는 compact 작업(`commandcenter gc` 포함)이 돌지 않게 하세요. 덤프 뒤에 지워진 파일의 blob을 compact가 회수하면 백업에서 빠집니다. 기본 compact 작업은 매일 03:00(서버 시간대)에 돕니다.
 
-- **백업 대상**: `meta.db`(저장소 정의, 사용자, 역할, 토큰 해시, 설정, 파일 목록)와 모든 blob store입니다. default store는 같은 볼륨의 `blobs/`에, 경로를 비워 만든 이름 붙은 store는 같은 볼륨의 `blobstores/<이름>`에 있습니다. 절대 경로로 만든 store는 그 경로에 있으니 따로 챙기세요. `meta.db`와 blob은 같은 시점의 것이어야 합니다. `config.yaml`도 함께 보관하세요.
-- **백업 파일 보호**: `meta.db`에는 proxy 원격 인증, LDAP bind, SMTP 비밀번호가 들어 있고, 비밀값 키를 정하지 않았다면 평문입니다("저장된 비밀값 암호화" 참고). 백업 파일도 서버와 같은 수준으로 접근을 제한하세요. 키를 정했다면 키도 백업하되 `meta.db` 백업과 다른 곳에 두세요. 키가 없으면 복원한 서버가 시작하지 않습니다.
-- **실행 중인 볼륨을 그대로 복사하면 백업이 되지 않습니다.** `cp`나 `tar`가 `meta.db`를 읽는 동안 내용이 바뀌거나, `meta.db`가 아직 복사되지 않은 blob을 가리켜서 복원한 뒤 그 파일들이 404가 됩니다(`allow_once` 저장소에는 같은 파일을 다시 올릴 수도 없습니다).
-
-일관된 백업 방법은 두 가지입니다.
-
-1. **멈추고 복사(가장 단순)**: 아래 명령처럼 서버를 멈추고 볼륨을 통째로 복사한 뒤 다시 시작합니다. 중지와 기동은 보통 1초 안쪽이지만 복사하는 동안은 서비스가 멈춥니다.
-2. **무중단**: 먼저 `meta.db`를 SQLite의 online backup API나 `VACUUM INTO`로 스냅샷하고, **그다음에** blob 디렉터리를 복사합니다. blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로 스냅샷 뒤에 생긴 blob이 섞여도 무해합니다(다음 compact 작업이 정리합니다). 순서를 바꾸면 안 됩니다.
-   - 서버 이미지에는 셸과 `sqlite3`가 없습니다. 같은 볼륨을 마운트한 다른 컨테이너에서 **서버와 같은 UID 65532로** 실행하세요(다른 사용자로 실행하면 그 사용자 소유의 파일이 볼륨에 남아 서버가 열지 못할 수 있습니다). 예: `sqlite3 /data/meta.db "VACUUM INTO '/data/meta-snapshot.db'"`. 그다음 `blobs/`(와 이름 붙은 store)를 스냅샷 파일과 함께 복사하고, 볼륨 안의 스냅샷은 지웁니다(`VACUUM INTO`는 이미 있는 파일에 쓰지 않습니다).
-   - 백업하는 동안에는 compact 작업(`commandcenter gc` 포함)이 돌지 않게 하세요. 스냅샷 뒤에 지워진 파일의 blob을 compact가 회수하면 백업에서 빠집니다. 기본 compact 작업은 매일 03:00(서버 시간대)에 돕니다.
-   - 복원할 때는 스냅샷을 `meta.db`라는 이름으로 두고, `meta.db-wal`·`meta.db-shm` 없이 시작합니다.
-
-아래는 1번(멈추고 복사) 방법의 명령입니다.
-
-**백업 (PowerShell)**
-
-```powershell
-docker compose stop
-docker run --rm -v commandcenter-data:/data -v "${PWD}:/backup" busybox tar czf /backup/data.tgz /data
-docker compose start
-```
-
-**백업 (Git Bash)** — Git Bash는 컨테이너 안 경로(`/backup`, `/data`)를 윈도우 경로로 바꾸므로 `MSYS_NO_PATHCONV=1`과 `pwd -W`가 필요합니다.
+**백업 (compose, Linux/macOS/Git Bash)**
 
 ```bash
-docker compose stop
-MSYS_NO_PATHCONV=1 docker run --rm -v commandcenter-data:/data -v "$(pwd -W)":/backup busybox tar czf /backup/data.tgz /data
-docker compose start
+docker compose exec -T postgres pg_dump -U commandcenter -Fc commandcenter > commandcenter.dump
+docker run --rm -v commandcenter-data:/data -v "$PWD":/backup busybox tar czf /backup/data.tgz /data
 ```
 
-Linux/macOS는 `-v "$PWD":/backup`을 쓰면 됩니다.
+(Git Bash는 두 번째 줄 앞에 `MSYS_NO_PATHCONV=1`을 붙이고 `"$(pwd -W)"`를, PowerShell은 `"${PWD}:/backup"`을 씁니다. PowerShell의 `>`는 바이너리 덤프를 깨뜨리므로 `pg_dump … -f /tmp/cc.dump` 후 `docker compose cp postgres:/tmp/cc.dump .`로 꺼내세요.)
 
-**복원** — 오래된 `meta.db-wal`/`-shm` 파일이 섞이지 않도록 반드시 빈 볼륨에서 시작합니다. `docker compose down -v`는 데이터 볼륨을 삭제하므로 백업 파일을 먼저 확인하세요.
+**복원** — 서버를 멈추고 빈 데이터베이스와 빈 blob 볼륨에 되돌립니다. `docker compose down -v`는 두 볼륨을 모두 삭제하므로 백업 파일을 먼저 확인하세요.
 
-```powershell
+```bash
 docker compose down -v
-docker compose create
-docker run --rm -v commandcenter-data:/data -v "${PWD}:/backup" busybox tar xzf /backup/data.tgz -C /
+docker compose up -d --wait postgres
+docker compose exec -T postgres pg_restore -U commandcenter -d commandcenter --no-owner < commandcenter.dump
+docker compose create commandcenter
+docker run --rm -v commandcenter-data:/data -v "$PWD":/backup busybox tar xzf /backup/data.tgz -C /
 docker compose up -d
 ```
 
-Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이고 `-v "$(pwd -W)":/backup`을 씁니다.
+외부 PostgreSQL이라면 그 서버에서 `pg_dump`/`pg_restore`(또는 관리형 서비스의 스냅샷)를 쓰고, 위의 blob 복사만 compose 볼륨에 합니다.
 
-**저장소 점검(verify-blobs)**: `repository.verify-blobs` 작업은 `meta.db`의 에셋이 가리키는 blob이 blob store에 실제로 있는지 점검합니다("예약 작업" 참고). 백업을 복원한 뒤나 blob 디렉터리를 옮긴 뒤 한 번 돌려 두 쪽이 같은 시점의 것인지 확인하세요. 기본은 존재와 크기만 보므로 빠르고, `checksum`을 켜면 blob을 다시 읽어 SHA-256까지 비교합니다. 큰 store는 `maxBytes`(기본 10 GiB)만큼 읽고 멈춘 뒤 다음 실행이 저장소별 커서에서 이어 가므로 매일 밤 일정으로 두면 전체를 돌아가며 점검합니다. 결과가 Failed면 로그에 빠진 blob(`missing:`)과 내용이 다른 blob(`mismatch:`)의 경로가 100개까지 남습니다. 작업은 아무것도 지우지 않습니다. 빠진 blob은 백업에서 해당 파일(`blobs/sha256/xx/yy/<sha>`)을 되돌리거나 에셋을 지우고 다시 올리고, 내용이 다른 blob은 디스크 손상을 의심하고 백업에서 되돌리세요.
+**저장소 점검(verify-blobs)**: `repository.verify-blobs` 작업은 DB의 에셋이 가리키는 blob이 blob store에 실제로 있는지 점검합니다("예약 작업" 참고). 백업을 복원한 뒤나 blob 디렉터리를 옮긴 뒤 한 번 돌려 두 쪽이 같은 시점의 것인지 확인하세요. 기본은 존재와 크기만 보므로 빠르고, `checksum`을 켜면 blob을 다시 읽어 SHA-256까지 비교합니다. 큰 store는 `maxBytes`(기본 10 GiB)만큼 읽고 멈춘 뒤 다음 실행이 저장소별 커서에서 이어 가므로 매일 밤 일정으로 두면 전체를 돌아가며 점검합니다. 결과가 Failed면 로그에 빠진 blob(`missing:`)과 내용이 다른 blob(`mismatch:`)의 경로가 100개까지 남습니다. 작업은 아무것도 지우지 않습니다. 빠진 blob은 백업에서 해당 파일(`blobs/sha256/xx/yy/<sha>`)을 되돌리거나 에셋을 지우고 다시 올리고, 내용이 다른 blob은 디스크 손상을 의심하고 백업에서 되돌리세요.
 
 ### 릴리스 이미지와 바이너리
 
@@ -2419,10 +2379,10 @@ Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이�
 
    소스에서 빌드한다면 새 버전의 checkout에서 이미지를 빌드하고(`docker build --build-arg VERSION=v1.2.4 -t commandcenter:1.2.4 .`) `.env`의 `COMMANDCENTER_VERSION`을 그 태그(`1.2.4`)로 바꿔 올립니다. 이전 컨테이너는 진행 중인 요청을 마친 뒤 끝납니다("정상 종료" 참고). Helm 차트로 설치했다면 "차트 업그레이드"를 따릅니다.
 
-   데이터 볼륨은 그대로 유지되고, 새 버전은 처음 시작할 때 `meta.db`를 필요한 만큼 새 구조로 바꿉니다. 구조 변경과 DB 구조 버전 기록은 한 트랜잭션으로 하므로, 도중에 중단되어도 `meta.db`는 이전 상태로 남고 다음 시작 때 다시 바꿉니다.
+   데이터 볼륨과 DB는 그대로 유지되고, 새 버전은 처음 시작할 때 DB 스키마를 필요한 만큼 새 구조로 바꿉니다. 구조 변경과 스키마 버전 기록은 한 트랜잭션으로 하므로, 도중에 중단되어도 DB는 이전 상태로 남고 다음 시작 때 다시 바꿉니다.
 4. 시작 로그에 ERROR가 없는지 보고, 로그인·다운로드·업로드를 한 번씩 확인합니다. UI 세션은 재시작으로 끊기고 API 토큰은 유지됩니다.
 
-**다운그레이드는 지원하지 않습니다.** 이 버전부터 `meta.db`에 DB 구조 버전(SQLite `PRAGMA user_version`, 지금은 4)을 기록하고, 자기보다 새 버전이 기록한 `meta.db`로는 시작하지 않습니다. 이때 시작 오류는 `/data/meta.db was written by a newer version of Command Center (database schema 2; this version supports up to 1) …`처럼 두 구조 버전을 알려 주며, `meta.db`는 건드리지 않습니다. 되돌려야 하면 업그레이드 전에 받은 백업을 이전 버전의 이미지와 함께 복원하세요("백업과 복원" 참고). 백업 뒤에 올라온 패키지와 바뀐 설정은 사라집니다.
+**다운그레이드는 지원하지 않습니다.** DB에 스키마 버전(`schema_version` 테이블, 지금은 6)을 기록하고, 이 버전이 돌 수 없는 더 새 스키마의 DB로는 시작하지 않습니다. 이때 시작 오류는 `PostgreSQL database "commandcenter" on db.example was written by a newer version of Command Center (database schema 7, for builds of schema 7 and newer; this version supports up to 6) …`처럼 두 버전을 알려 주며, DB는 건드리지 않습니다. 되돌려야 하면 업그레이드 전에 받은 백업을 이전 버전의 이미지와 함께 복원하세요("백업과 복원" 참고). 백업 뒤에 올라온 패키지와 바뀐 설정은 사라집니다.
 
 이 검사가 없는 이전 버전(구조 버전을 기록하지 않음)은 새 버전이 쓴 데이터로도 경고 없이 시작해 잘못 동작합니다. 사용자를 `config.yaml`에서 읽던 버전으로 내리면 인증이 `config.yaml`의 해시로 돌아가 UI에서 바꾼 비밀번호가 통하지 않습니다. 이름 붙은 blob store를 모르는 버전으로 내리면 기본이 아닌 store에 둔 저장소는 기존 파일을 찾지 못하고, 새로 올린 파일은 default store(`<dataDir>/blobs`)에 씁니다. 비밀값 키를 정해 두었다면 암호화된 값을 그대로 비밀번호로 보내 원격·SMTP·LDAP 인증이 실패합니다. 그렇게 돌린 뒤 이 버전으로 다시 올렸다면, default store의 GC는 어느 저장소든 참조하는 blob을 지우지 않으므로 그동안 쓴 파일은 남아 있습니다("Blob Store" 참고). 서버를 멈추고 default store의 blob을 그 저장소의 store로 복사하면 다시 받을 수 있습니다. 내용 주소 방식이라 이름이 같으면 내용도 같으므로 덮어써도 무해하고, 그 store의 저장소가 참조하지 않는 사본은 다음 compact 작업이 지웁니다. 경로를 비워 만든 store라면 아래와 같이 합니다(절대 경로로 만든 store는 그 경로를 마운트해 바꿔 쓰세요).
 
@@ -2431,8 +2391,6 @@ docker compose stop
 docker run --rm -u 65532:65532 -v commandcenter-data:/data busybox cp -a /data/blobs/sha256/. /data/blobstores/<store 이름>/blobs/sha256/
 docker compose start
 ```
-
-**사용자를 `config.yaml`에서 읽던 버전에서 올릴 때(설정 가져오기)**: 첫 오픈소스 릴리스(2026-10) 전의 빌드(repolite 포함)는 사용자와 역할을 시작할 때마다 `config.yaml`에서 읽었습니다. 지금 버전은 처음 시작할 때 `config.yaml`의 `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`를 DB로 **한 번** 가져옵니다(`repositories`와 같은 방식). 가져온 뒤에는 이 키들이 파일에 있어도 무시되며 시작할 때마다 경고가 한 줄 남습니다. 이 값들은 UI(사용자, 역할, Realm, 일반 설정)에서 관리합니다. `config.yaml`에는 `listen`, `dataDir`, `memoryLimitMiB`, `metricsFlushSeconds`(그리고 쓴다면 `secretKeyFile`)만 남기면 됩니다. 가져오기 전 `users`나 `roles` 항목이 잘못되어 있으면 시작이 실패하고, 가져온 뒤에 생긴 문제는 경고로만 남습니다. **업그레이드 전에** `config.yaml`의 `passwordHash`가 실제 비밀번호의 해시인지 확인하세요. 가져간 해시가 틀렸다면 파일을 고쳐도 반영되지 않으므로 UI의 사용자 관리나 `user reset-password`("비상 복구" 참고)로 비밀번호를 재설정해야 합니다. 기존 API 토큰과 `meta.db`는 그대로 쓰이고, 세션은 서버 재시작으로 끊깁니다. 예전 `write` 역할은 해당 저장소(또는 `*`)의 browse, read, add, edit, delete 전부로 바뀌며(예전 쓰기는 삭제를 포함했습니다), 로그인한 사용자의 읽기는 `authenticatedRead` 기본값(켜짐) 덕분에 예전과 같습니다. 가져온 뒤에는 `config.yaml`을 고쳐도 사용자·역할이 바뀌지 않으므로 UI를 쓰세요.
 
 ### 메모리 설정
 
@@ -2470,7 +2428,7 @@ docker compose start
 - **p2·Swift·CocoaPods·HuggingFace의 알려진 제한**: p2는 Nexus와 같이 proxy·group만 되고(hosted 없음), 복합 사이트의 `.xml.xz` 문서는 풀지 않고 그대로 전달하므로 그 안의 자식 위치는 바뀌지 않습니다. Swift의 `swift package-registry` 명령은 레지스트리 명세를 따라 적은 것으로 실제 SwiftPM 클라이언트로는 아직 검증하지 않았고, SwiftPM은 레지스트리를 HTTPS로 열므로 운영에서는 `baseURL`을 `https://`로 두어야 합니다. CocoaPods는 트렁크 CDN 소스만 proxy하며 `source.git`(svn·hg 포함) Pod는 proxy하지 않으므로 클라이언트가 원본 git 서버에 직접 접속해야 합니다. HuggingFace는 한 파일을 원본에서 30분 안에 받아야 하고, 큰 파일의 첫 요청은 클라이언트가 먼저 시간 초과할 수 있으므로 `HF_HUB_DOWNLOAD_TIMEOUT`을 늘리세요. `/`가 든 리비전(`refs/pr/*`), `POST …/paths-info`, Xet 전송, 업로드는 지원하지 않습니다("p2 설정", "Swift 설정", "CocoaPods 설정", "HuggingFace 설정" 참고).
 - **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브의 압축 해제 창이 8 MiB를 넘는 `.deb`(`xz -7` 이상 등)를 400으로 거부합니다. Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
 - **RubyGems·Composer·Conda의 알려진 제한**: RubyGems group은 `versions`·`names`만 병합하고 Marshal 인덱스(`specs.4.8.gz` 등)는 그 파일을 처음 가진 멤버 것을 그대로 냅니다. Conda hosted는 `repodata.json.bz2`·`.zst`·`.jlap`를 만들지 않습니다(클라이언트는 `repodata.json`으로 넘어갑니다). Composer는 v1 `providers-url`과 `notify-batch`·`security-advisories`를 제공하지 않으며(Composer 2 전용), `/`가 든 브랜치 버전은 올릴 수 없습니다("RubyGems 설정", "Composer 설정", "Conda 설정" 참고).
-- **여러 대의 쓰기 처리량**: 같은 PostgreSQL DB와 공유 스토리지로 여러 대를 함께 띄울 수 있지만(active-active), 쓰기는 DB에서 하나씩 처리되므로 노드를 늘려도 쓰기 처리량은 늘지 않습니다("고가용성(여러 노드)" 참고).
+- **여러 대의 쓰기 처리량**: 같은 PostgreSQL DB와 공유 스토리지로 여러 대를 함께 띄울 수 있지만(active-active), 쓰기는 DB에서 하나씩 처리되므로 노드를 늘려도 쓰기 처리량은 늘지 않습니다. 차트와 compose가 띄우는 PostgreSQL은 Pod(컨테이너) 하나라 고가용성이 아니므로, 고가용성에는 복제 구성된 PostgreSQL이나 관리형 서비스를 씁니다("고가용성(여러 노드)" 참고).
 - HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
 - **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**(blob store의 소프트 쿼터는 있습니다), 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, LDAP 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기.
 - Go 체크섬 DB(`sumdb/`)는 프록시하지 않습니다. 사내 모듈에는 `GONOSUMDB`를 쓰세요.
@@ -2503,7 +2461,8 @@ docker compose start
 
 - **`baseURL` 불일치**: npm/cargo가 "다운로드 실패", 엉뚱한 호스트로 접속, `ECONNREFUSED`를 내면 응답 안의 URL이 클라이언트가 접속하는 주소와 다른 것입니다. `baseURL`을 클라이언트가 쓰는 주소(스킴, 호스트, 포트)와 똑같이 맞추고 `docker compose restart` 하세요. pip는 PyPI 파일 링크가 호스트 없는 경로라서 해당하지 않습니다(`baseURL`의 경로 부분만 맞으면 됩니다).
 - **npm 401**: `~/.npmrc`의 토큰이 서버에 없으면(예: 볼륨을 다시 만든 뒤) `anonymousRead`가 켜져 있어도 모든 요청이 401입니다. `npm login`을 다시 하거나 `_authToken` 줄을 지우세요.
-- **`meta.db was written by a newer version of Command Center`**: 더 새 버전이 쓴 `meta.db`로 이전 버전을 띄웠습니다. 새 버전으로 다시 시작하거나, 업그레이드 전에 받은 백업을 지금 버전과 함께 복원하세요("업그레이드" 참고).
+- **`… was written by a newer version of Command Center`**: 더 새 버전이 업그레이드한 DB로 이전 버전을 띄웠습니다. 새 버전으로 다시 시작하거나, 업그레이드 전에 받은 백업을 지금 버전과 함께 복원하세요("업그레이드" 참고).
+- **`no database configured: set database.url (or COMMANDCENTER_DATABASE_URL) to a PostgreSQL URL`**: 설정 파일의 `database.url`이나 환경 변수 `COMMANDCENTER_DATABASE_URL`에 PostgreSQL URL을 넣으세요("메타데이터 데이터베이스" 참고).
 - **`it is encrypted, and no secret key is set` / `it was encrypted with another key`**: 비밀값 키가 없거나 다릅니다. 암호화할 때 쓴 키를 `COMMANDCENTER_SECRET_KEY`나 `secretKeyFile`로 주세요. `secret-key rotate`로 키를 바꿨다면 새 키이고, 교체 전에 받은 백업을 복원했다면 이전 키입니다("저장된 비밀값 암호화" 참고).
 - **`508 proxy loop detected`**: proxy 저장소의 `remote`가 결국 같은 Command Center 인스턴스를 가리키면(예: 자기 자신의 그룹) 요청이 돌고 돌지 않도록 서버가 508로 거절합니다. 요청마다 `X-Command-Center-Hop` 헤더에 인스턴스 ID를 덧붙여 알아내므로, 서로 다른 두 인스턴스가 이어지는 것(A가 B를 proxy)은 막지 않습니다. `remote`를 고치세요.
 - **`431 Request Header Fields Too Large`**: 요청 헤더가 16 KiB를 넘었습니다. 브라우저라면 같은 사이트(상위 도메인 포함)에 쌓인 쿠키가 큰 경우가 많으니 쿠키를 지워 보세요.
@@ -2514,7 +2473,7 @@ docker compose start
 - **`remoteAuth`를 쓰는 proxy의 로그에 `remote status 401`(또는 403)**: 클라이언트는 502(만료된 캐시가 있으면 그 캐시)를 받습니다. 자격 증명이 맞다면, 원격이 다른 포트, `http`, 하위 도메인으로 리다이렉트해서 그 요청에 자격 증명을 보내지 않은 것일 수 있습니다(`remoteAuth` 참고. 같은 호스트의 `http`에서 `https`로 옮기는 리다이렉트는 자격 증명을 유지합니다). TLS를 끝내는 앞단 뒤의 원격이 `http://…:8081/` 같은 주소로 리다이렉트하는 경우가 흔하니, 원격이 자기 `https` 주소로 리다이렉트하게 고치세요(앞단이 `X-Forwarded-Proto`를 넘기게 하는 등). 최종 주소가 `https`라면 `remote`를 그 주소로 바꿔도 됩니다.
 - **Kubernetes에서 Pod가 `CreateContainerConfigError`**: `secretKey.existingSecret`이 가리키는 Secret이나 그 안의 키(`secretKey.key`)가 없습니다. Secret을 만들면 Pod가 곧 시작합니다("Helm 차트로 설치" 참고).
 - **`config.yaml`이 디렉터리**: `config.yaml` 없이 `docker compose up`을 하면 Docker가 같은 이름의 디렉터리를 만듭니다. `docker compose down`, 디렉터리 삭제, 파일 복사 후 다시 실행하세요.
-- **Windows 경로**: Git Bash에서 `docker run -v`에 `/c/...` 같은 경로를 쓰면 경로가 변환되어 마운트가 어긋날 수 있습니다. `MSYS_NO_PATHCONV=1`을 설정하고 `$(pwd -W)`(또는 PowerShell의 `${PWD}`)를 쓰세요. 데이터는 바인드 마운트보다 named volume(compose 기본값)이 SQLite 잠금과 I/O에 안정적입니다.
+- **Windows 경로**: Git Bash에서 `docker run -v`에 `/c/...` 같은 경로를 쓰면 경로가 변환되어 마운트가 어긋날 수 있습니다. `MSYS_NO_PATHCONV=1`을 설정하고 `$(pwd -W)`(또는 PowerShell의 `${PWD}`)를 쓰세요. 데이터는 바인드 마운트보다 named volume(compose 기본값)이 파일 권한과 I/O에 안정적입니다.
 - **시작 실패 / 동작 이상**: 먼저 `docker logs commandcenter`(또는 `docker compose logs`)를 확인하세요. 설정 오류는 시작할 때 항목별로 출력됩니다.
 - **로그인이 `429 too many failed sign-ins`**: 그 이름으로 실패가 반복되어 잠시 거절된 것입니다("보호"의 로그인 시도 제한). `Retry-After`만큼 기다리거나 관리자가 비밀번호를 재설정하면 풀립니다. 예전 비밀번호를 저장한 빌드나 CI가 계속 재시도하고 있지 않은지 서버 로그의 `sign-in throttled`와 요청 로그로 확인하세요.
 - **proxy 저장소가 비어 있음**: 컨테이너에서 원격 레지스트리로 HTTPS 접속이 되어야 합니다. 사내 프록시가 있으면 compose의 `HTTPS_PROXY` 환경변수를 설정하고, 프록시를 거치지 않을 사내 호스트는 `NO_PROXY`에 넣으세요.
@@ -2523,12 +2482,14 @@ docker compose start
 
 로컬에 Go를 설치하지 않고 컨테이너(golang:1.26)에서 테스트합니다.
 
-main에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/ci.yml`)가 gofmt, `go vet`, `go test`(배포 바이너리처럼 CGO 끔), `go test -race`, govulncheck, UI 스크립트 구문 검사, 이미지 빌드(linux/amd64·arm64), Helm 차트와 참조 매니페스트 검사(`helm lint`, `helm template`, kubeconform)를 실행합니다. `ci.yml`의 `go-version`이 Dockerfile의 `golang` 태그(현재 1.26.10)와 다르거나, `THIRD_PARTY_LICENSES.txt`가 바이너리에 링크되는 모듈·Go 버전과 맞지 않으면(`scripts/third-party-licenses.sh --check`) CI가 실패합니다. Dependabot이 Go 모듈, 베이스 이미지, Actions 업데이트를 매주 PR로 올리는데, 링크되는 모듈이나 `golang` 태그를 바꾸는 PR은 이 검사에서 실패합니다. 그 PR 브랜치에서 `bash scripts/third-party-licenses.sh`로 `THIRD_PARTY_LICENSES.txt`를 다시 만들어 커밋하고(스크립트는 Dockerfile의 `golang` 이미지에서 돌므로 Docker만 있으면 됩니다), `golang` 태그가 바뀌었으면 `ci.yml`의 `go-version`도 같은 버전으로 올리세요.
+테스트는 PostgreSQL이 필요합니다. `docker run -d --name cc-test-pg -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:17-alpine`로 띄우고 `COMMANDCENTER_TEST_POSTGRES_URL='postgres://postgres:pw@localhost:5432/postgres?sslmode=disable' go test ./...`로 실행합니다. 테스트마다 데이터베이스를 따로 만들고 지우므로 패키지가 병렬로 돌아도 겹치지 않습니다. 변수가 없으면 DB가 필요한 테스트는 그 이유를 밝히며 실패합니다. 스모크·부하 테스트(`test/smoke`, `test/load`)는 PostgreSQL 컨테이너(`postgres:17-alpine`, `SMOKE_PG_IMAGE`로 바꿈)를 함께 띄웁니다.
+
+main에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/ci.yml`)가 gofmt, `go vet`, `go test`(배포 바이너리처럼 CGO 끔, PostgreSQL 서비스 컨테이너), `go test -race`, govulncheck, UI 스크립트 구문 검사, 이미지 빌드(linux/amd64·arm64), Helm 차트와 참조 매니페스트 검사(`helm lint`, `helm template`, kubeconform)를 실행합니다. `ci.yml`의 `go-version`이 Dockerfile의 `golang` 태그(현재 1.26.10)와 다르거나, `THIRD_PARTY_LICENSES.txt`가 바이너리에 링크되는 모듈·Go 버전과 맞지 않으면(`scripts/third-party-licenses.sh --check`) CI가 실패합니다. Dependabot이 Go 모듈, 베이스 이미지, Actions 업데이트를 매주 PR로 올리는데, 링크되는 모듈이나 `golang` 태그를 바꾸는 PR은 이 검사에서 실패합니다. 그 PR 브랜치에서 `bash scripts/third-party-licenses.sh`로 `THIRD_PARTY_LICENSES.txt`를 다시 만들어 커밋하고(스크립트는 Dockerfile의 `golang` 이미지에서 돌므로 Docker만 있으면 됩니다), `golang` 태그가 바뀌었으면 `ci.yml`의 `go-version`도 같은 버전으로 올리세요.
 
 릴리스는 태그를 푸시하면 됩니다(`git tag v1.2.3 && git push origin v1.2.3`). 결과물은 "릴리스 이미지와 바이너리"를 보세요. 여러 버전을 함께 낼 때(예: `v1.3.0`과 유지보수 릴리스 `v1.2.5`)는 태그를 한 번에 푸시하세요(`git push origin v1.2.5 v1.3.0`). 각 실행은 시작할 때 본 태그로 움직이는 태그를 정하므로, 낮은 버전의 실행이 높은 버전의 태그를 보지 못하면 `latest`가 낮은 버전으로 돌아갈 수 있습니다.
 
 ```bash
-scripts/go.sh test ./...      # 단위·통합 테스트
+scripts/go.sh test ./...      # 단위·통합 테스트(PostgreSQL 컨테이너 commandcenter-test-pg를 함께 띄웁니다)
 scripts/go.sh vet ./...
 
 test/e2e.sh                   # 스모크 테스트(포맷 5개, UI, LDAP, 메일)와 부하 테스트를 모두 실행하고 요약 출력

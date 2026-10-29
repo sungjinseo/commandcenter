@@ -74,7 +74,7 @@
 - **SSO와 외부 디렉터리**: OIDC, SAML 2.0(서명·암호화된 assertion 검증), Atlassian Crowd, 리버스 프록시 헤더(RUT) Realm. 그룹 → 역할 매핑과 로그인한 모든 사용자에게 주는 기본 역할.
 - **사용자 토큰**: 사용자 이름·비밀번호 대신 쓰는 이름 코드·패스 코드 한 쌍(만료, 저장소 접근에 토큰만 받기).
 - **운영 가시성**: 저장소별 요청 수 · 오류율 · 응답 시간 · 원격 실패 · 캐시 적중률, 요청 추이, 활동 로그, 상태 점검, 로그 뷰어, 실패 알림 메일.
-- **스토리지**: 파일 또는 **S3 호환** blob store(여러 개), 내용 주소 저장으로 중복 제거, blob GC. 메타데이터는 **SQLite** 또는 **PostgreSQL**, 둘 사이의 이전 도구 포함.
+- **스토리지**: 파일 또는 **S3 호환** blob store(여러 개), 내용 주소 저장으로 중복 제거, blob GC. 메타데이터는 **PostgreSQL**.
 - **Blob store 그룹과 S3 장애 조치**: 파일·S3 store 여러 개를 한 store로 묶기(라운드 로빈, 읽기 전용 멤버, 멤버 비우기), 소프트 쿼터, 복제 버킷으로 읽기 장애 조치, SSE-S3 · SSE-KMS.
 - **정리와 자동화**: Cleanup 정책(나이 · 마지막 다운로드 · 이름 패턴), 예약 작업과 유지보수 작업(blob 검증, Maven 스냅샷 정리, 메타데이터 재생성, 임시 파일 정리), 저장소 Online/Offline 전환.
 - **Cleanup 버전 유지**: 컴포넌트마다 최신 N개 버전을 포맷별 버전 규칙으로 남기기(retain), 제외 패턴, 저장 전 미리보기(CSV).
@@ -108,8 +108,9 @@ config:
   adminPasswordHash: '<위에서 나온 해시>'
 persistence:
   storageClass: <StorageClass>                 # blob 저장소. NFS도 됩니다
-database:
-  existingSecret: commandcenter-db             # 비우면 SQLite. PostgreSQL은 가이드 참고
+postgresql:
+  persistence:
+    storageClass: <블록 스토리지 StorageClass>   # 차트가 띄우는 PostgreSQL. 외부 DB는 database.existingSecret
 ```
 
 ```bash
@@ -126,12 +127,12 @@ Helm을 쓰지 않는 클러스터에는 릴리스마다 붙는 매니페스트 
 
 ```bash
 curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.1.1/commandcenter-v0.1.1.yaml
-# 파일 안의 baseURL, passwordHash, storageClassName 세 곳을 채운 뒤
+# 파일 안의 baseURL, passwordHash, PostgreSQL 비밀번호, storageClassName을 채운 뒤
 kubectl create namespace commandcenter
 kubectl apply -n commandcenter -f commandcenter-v0.1.1.yaml
 ```
 
-파드 하나짜리 StatefulSet, ConfigMap의 `config.yaml`, PVC, Service가 들어 있습니다. Ingress나 Gateway는 클러스터 방식대로 붙입니다. 차트 파일(`commandcenter-helm-chart-0.1.1.tgz`)도 릴리스에 있어 OCI 레지스트리를 못 쓰는 곳에서는 `helm install commandcenter ./commandcenter-helm-chart-0.1.1.tgz -f my-values.yaml`로 설치합니다.
+PostgreSQL StatefulSet과 비밀번호 Secret, 파드 하나짜리 Command Center StatefulSet, ConfigMap의 `config.yaml`, PVC, Service가 들어 있습니다. Ingress나 Gateway는 클러스터 방식대로 붙입니다. 차트 파일(`commandcenter-helm-chart-0.1.1.tgz`)도 릴리스에 있어 OCI 레지스트리를 못 쓰는 곳에서는 `helm install commandcenter ./commandcenter-helm-chart-0.1.1.tgz -f my-values.yaml`로 설치합니다.
 
 ### Docker compose
 
@@ -139,8 +140,9 @@ kubectl apply -n commandcenter -f commandcenter-v0.1.1.yaml
 git clone --depth 1 --branch v0.1.1 https://github.com/sungjinseo/commandcenter.git
 cd commandcenter
 echo COMMANDCENTER_VERSION=0.1.1 >> .env
+echo POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') >> .env
 cp config.example.yaml config.yaml     # passwordHash 자리에 해시를 넣습니다
-docker compose up -d
+docker compose up -d                   # PostgreSQL과 Command Center
 ```
 
 `http://localhost:8081/`을 열고 `admin`으로 로그인합니다.
@@ -170,8 +172,8 @@ docker compose up -d
 - TLS는 Ingress나 리버스 프록시에서 끝내고 `baseURL`을 `https://` 주소로 둡니다.
 - 사내 전용이면 익명 읽기(`anonymousRead`)를 끕니다. CI에는 비밀번호 대신 API 토큰을 줍니다.
 - 저장된 비밀값(SMTP · LDAP · OIDC · Crowd · SAML · 원격 인증 · S3)을 암호화하는 키(`COMMANDCENTER_SECRET_KEY` 또는 `secretKeyFile`)를 두고 백업과 따로 보관합니다.
-- 메타데이터는 PostgreSQL에 둡니다. 여러 대를 함께(active-active) 띄우려면 모든 노드가 같은 PostgreSQL DB와 공유 스토리지(ReadWriteMany)를 씁니다.
-- 중지 대기 시간 60초(차트와 compose에 들어 있음), 정기 백업, 업그레이드 전 백업. 다운그레이드는 지원하지 않습니다.
+- 메타데이터는 PostgreSQL(13 이상)에 둡니다. 차트·compose가 띄우는 PostgreSQL은 블록 스토리지에 두고, 운영 규모에서는 복제 구성된 PostgreSQL이나 관리형 서비스를 씁니다. 여러 대를 함께(active-active) 띄우려면 모든 노드가 같은 PostgreSQL DB와 공유 스토리지(ReadWriteMany)를 씁니다.
+- 중지 대기 시간 60초(차트와 compose에 들어 있음), 정기 백업(`pg_dump`와 blob), 업그레이드 전 백업. 다운그레이드는 지원하지 않습니다.
 
 전체 목록은 [프로덕션 배포](docs/guide.md#프로덕션-배포)에 있습니다.
 

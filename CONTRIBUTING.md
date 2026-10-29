@@ -23,7 +23,7 @@ You need Docker and bash. The scripts run Go in the `golang:1.26` container, so 
 to install. In Windows PowerShell, `.\scripts\go.ps1` takes the same arguments as `scripts/go.sh`.
 
 ```bash
-bash scripts/go.sh test ./...                                      # unit and integration tests
+bash scripts/go.sh test ./...                                      # unit and integration tests (starts PostgreSQL in commandcenter-test-pg)
 bash scripts/go.sh vet ./...
 docker run --rm -v "$PWD":/src -w /src golang:1.26 gofmt -l .      # must print nothing
 ```

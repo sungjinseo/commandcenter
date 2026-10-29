@@ -25,20 +25,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `test/ha/ha-smoke.sh` (`test/e2e.sh --ha`): PostgreSQL and two nodes on one volume in Docker. It covers
   formats, sessions and Docker chunks across nodes, a task run once, webhooks delivered once, a `kill -9`
   under load and a rolling restart under load.
-- Cluster-wide locks and cache invalidation on PostgreSQL (HA groundwork): every format's per-path,
+- Cluster-wide locks and cache invalidation (HA groundwork): every format's per-path,
   per-package and per-index locks (uploads, deletes, metadata rebuilds, repository import, Docker upload
   sessions) and repository, blob store, cleanup policy, routing rule, user, role, realm and settings
   changes are serialized across all nodes on the database (advisory locks). A node that changes
   repositories, routing rules, blob stores, webhooks or users/roles/settings notifies the others
   (LISTEN/NOTIFY), which re-read at once (the 5 s reload stays as the safety net), and a request naming a
-  repository another node just created is served at once. SQLite keeps in-process locks; the
-  single-writer guard stays until HA is turned on.
-- UI sessions are stored in the database: they survive restarts on both drivers, and on PostgreSQL every
-  node accepts them. On PostgreSQL the per-name sign-in throttle is shared by all nodes, OIDC and SAML
+  repository another node just created is served at once.
+- UI sessions are stored in the database: they survive restarts, and every node accepts them. The
+  per-name sign-in throttle is shared by all nodes, OIDC and SAML
   login state is single-use across nodes and SAML assertion replay is refused across nodes, OIDC, SAML,
   RUT and Crowd identities are shared for up to 7 days after the login, Docker and Conan tokens verify
   on every node, and the secret key is checked at start.
-- Scheduling on several nodes (PostgreSQL, ahead of high availability):
+- Scheduling on several nodes (ahead of high availability):
   - Only the scheduler lease holder runs due tasks and prunes request statistics, the negative cache
     and events.
   - One task run at a time across all nodes (cluster lock `tasks.run`). The run shows as running on
@@ -49,7 +48,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Webhook deliveries are claimed by one node for 60 s and sent once (at least once after a crash).
 - A node registry: `GET /-/api/nodes`, `commandcenter_node_info`, the `node` log attribute, a `Cluster`
   status check, and readiness on `/service/rest/v1/status/writable` that covers draining, schema
-  compatibility and, on PostgreSQL, the lock and listener connections.
+  compatibility and the lock and listener connections.
 - The `rubygems` format: RubyGems repositories at `/repository/<repo>/` for Bundler and `gem` (the
   compact index `versions`, `names` and `info/<gem>` with the md5 `ETag`, `Repr-Digest` and byte
   ranges Bundler uses to fetch increments; the legacy `specs.4.8.gz`, `latest_specs.4.8.gz`,
@@ -376,6 +375,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The metadata database is PostgreSQL; `database.url` (or `COMMANDCENTER_DATABASE_URL`) is required.
+  docker-compose.yml and the Helm chart run a PostgreSQL 17 alongside (`postgresql.*` values) unless an
+  external one is configured (`database.existingSecret`).
 - `serve` no longer refuses to start beside another live node: the single-writer guard is gone. The
   `Cluster` status check no longer reports more than one live node as unhealthy.
 - The reference manifest `deploy/kubernetes/commandcenter.yaml` uses
@@ -383,11 +385,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - On a node other than the one running a repository's blob store move, the repository list shows the move
   as `copying` while its task runs on any node, and `interrupted` otherwise. The copy counts are only on
   the node running the task.
-- `commandcenter user reset-password` and `token create` take effect at once on servers using PostgreSQL.
+- `commandcenter user reset-password` and `token create` take effect at once on the running servers.
 - Webhook deliveries are sent only by `serve`. CLI commands store the deliveries their events make and
   leave them to the running server, or to the next one started. Before, a CLI command beside a server
   sent them too, sometimes twice.
-- On PostgreSQL, `commandcenter gc` takes the task run lock. It fails with `task "<id>" is running`
+- `commandcenter gc` takes the task run lock. It fails with `task "<id>" is running`
   while a task runs on any node, and task runs wait while it collects (run now answers 409).
 
 ### Fixed
@@ -426,25 +428,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `sso_identities` plus the settings rows `registry.tokenKey` and `secretKey.check`, created on the
   first start of this version. Compat is 6: a full stop, older versions refuse the upgraded database,
   so stop every older instance first and take a backup if you may need to go back.
-- UI sessions now survive restarts (SQLite too). On PostgreSQL, SSO identities also survive restarts,
-  for up to 7 days after the login.
-- On PostgreSQL a start with a different secret key, or with none after one was used, is refused;
+- UI sessions now survive restarts, and so do SSO identities, for up to 7 days after the login.
+- A start with a different secret key, or with none after one was used, is refused;
   `secret-key rotate` needs every node stopped. Without a secret key the token signing key is stored
-  in plain text on PostgreSQL.
-- The database schema version is now 5: new tables `nodes` and `leases`, and on PostgreSQL the column
+  in plain text.
+- The database schema version is now 5: new tables `nodes` and `leases`, and the column
   `schema_version.compat`, created on the first start of this version. From now on the stamp also says
   which older builds may still run on the database: a build starts on a database of a newer schema only
   when that database's compat is at or below the build's own schema (an expand-only change keeps compat
   one below, so the previous release can run beside it or be rolled back to). Schema 5 sets compat 5, so
-  older versions refuse the upgraded database as before: back up before upgrading. On PostgreSQL, nodes
+  older versions refuse the upgraded database as before: back up before upgrading. Nodes
   that start at once upgrade one after the other with no lock timeout (the startup probe bounds the wait),
   and an upgrade is refused while a live node of a build older than compat is registered.
 - The Helm chart's readinessProbe asks `GET /service/rest/v1/status/writable`, and a stopping server stays
   unready for 5 s before it stops taking connections.
 - The database schema version is now 4 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`,
   `content_selectors`, `user_tokens`, `tags`, `component_tags`, `blob_store_moves`, `vuln_advisories`,
-  `vuln_queries`, `vuln_findings` and `firewall_quarantine`, created on the first start of this version
-  on SQLite and PostgreSQL; blob store groups and the `retain`, `exclude` and `pathPattern` cleanup
+  `vuln_queries`, `vuln_findings` and `firewall_quarantine`, created on the first start of this version;
+  blob store groups and the `retain`, `exclude` and `pathPattern` cleanup
   criteria are stored in existing rows an older build would misread). An older version refuses to start
   on the upgraded database, so back up before upgrading; downgrades are not supported ("업그레이드" in the
   operations guide).
