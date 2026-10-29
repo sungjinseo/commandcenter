@@ -2,14 +2,18 @@ package app
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
+	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/webhook"
@@ -46,46 +50,80 @@ func serveBackground(t *testing.T, a *App) (stop func() error) {
 	}
 }
 
-// The single-writer guard (HA design 4.4): a second server on one
-// PostgreSQL database is refused, naming the first, and starts once the
-// first stopped. On SQLite there is no guard, as before.
-func TestSecondServerRefused(t *testing.T) {
+// Two servers on one PostgreSQL database start and serve side by side
+// (high availability), both registered, alive and ready, one the leader,
+// and the Cluster check is healthy. SQLite starts a second as before, which
+// it does not support: the check says so.
+func TestTwoServersStart(t *testing.T) {
 	fastNodes(t)
 	cfg := testConfig(t, "")
 	cfg.Listen = "127.0.0.1:0"
-	a, err := New(cfg, quiet(), AsServer())
+	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	cfg.Users = append(cfg.Users, config.User{Name: "root", PasswordHash: string(h), Roles: []string{"admin"}})
+	var apps []*App
+	for range 2 {
+		a, err := New(cfg, quiet(), AsServer())
+		if err != nil {
+			t.Fatalf("server %d: %v", len(apps)+1, err)
+		}
+		defer a.Close()
+		stop := serveBackground(t, a)
+		defer func() {
+			if err := stop(); err != nil {
+				t.Error(err)
+			}
+		}()
+		apps = append(apps, a)
+	}
+	pg := metatest.Postgres()
+	for deadline := time.Now().Add(5 * time.Second); pg; time.Sleep(20 * time.Millisecond) {
+		nodes, err := apps[0].DB.Nodes(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		alive, leaders := 0, 0
+		for _, n := range nodes {
+			if n.Alive && (n.ID == apps[0].Node || n.ID == apps[1].Node) {
+				alive++
+			}
+			if n.Leader {
+				leaders++
+			}
+		}
+		ready := apps[0].DB.Ready(context.Background()) == nil && apps[1].DB.Ready(context.Background()) == nil
+		if alive == 2 && leaders == 1 && ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("nodes %+v (ready %v), want both alive and ready with one leader", nodes, ready)
+		}
+	}
+	ts := httptest.NewServer(apps[0].Handler)
+	defer ts.Close()
+	req, _ := http.NewRequest("GET", ts.URL+"/-/api/status/checks", nil)
+	req.SetBasicAuth("root", "pw")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer a.Close()
-	stop := serveBackground(t, a)
-	b, err := New(cfg, quiet(), AsServer())
-	if !metatest.Postgres() {
-		if err != nil {
-			t.Fatalf("SQLite: %v", err)
+	defer resp.Body.Close()
+	var out struct {
+		Checks []struct {
+			Name, Message string
+			Healthy       bool
 		}
-		b.Close()
-		if err := stop(); err != nil {
-			t.Fatal(err)
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	for _, c := range out.Checks {
+		if c.Name != "Cluster" {
+			continue
+		}
+		if c.Healthy != pg || !strings.Contains(c.Message, "2 live node(s)") || !pg && !strings.Contains(c.Message, "SQLite takes one instance") {
+			t.Fatalf("Cluster check: %+v", c)
 		}
 		return
 	}
-	var guard *meta.GuardError
-	if !errors.As(err, &guard) || guard.Other.ID != a.Node {
-		t.Fatalf("second server: %v, want the guard naming %s", err, a.Node)
-	}
-	if err := stop(); err != nil {
-		t.Fatal(err)
-	}
-	start := time.Now()
-	b, err = New(cfg, quiet(), AsServer())
-	if err != nil {
-		t.Fatalf("after the first stopped: %v", err)
-	}
-	defer b.Close()
-	if d := time.Since(start); d > meta.NodeTTL/2 {
-		t.Fatalf("waited %v for a node that left", d)
-	}
+	t.Fatalf("no Cluster check: %+v", out)
 }
 
 // Readiness (GET /service/rest/v1/status/writable) is 200 while serving;

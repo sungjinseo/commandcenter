@@ -99,12 +99,15 @@ func (s *Store) writing(repo string) func() {
 	}
 }
 
-// WaitWrites returns once the blob writes to repo that started before its
-// move began have finished (BeginMove first).
-func (s *Store) WaitWrites(ctx context.Context, repo string) error {
+// WaitWrites returns once the blob writes this node began to a moving
+// repository before it learned of the move (BeginMove) have finished.
+func (s *Store) WaitWrites(ctx context.Context) error {
 	for {
 		s.moveMu.Lock()
-		n := s.writes[repo]
+		n := 0
+		for repo := range s.moves {
+			n += s.writes[repo]
+		}
 		s.moveMu.Unlock()
 		if n == 0 {
 			return nil
@@ -115,6 +118,48 @@ func (s *Store) WaitWrites(ctx context.Context, repo string) error {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// SyncMoves brings the moves in line with the stored ones
+// (blob_store_moves), which another node may have begun or ended: a move
+// this node did not know routes the repository's blobs at once, as
+// "interrupted" (ui shows "copying" while its task runs on a node), and one
+// whose row went ends. Callers hold the registry lock, under which every
+// move row changes, after the registry re-read the repositories: a move
+// that ended has its target as the repository's store by then.
+func (s *Store) SyncMoves(ctx context.Context) error {
+	rows, err := s.DB.ListBlobStoreMoves(ctx)
+	if err != nil {
+		return err
+	}
+	stored := map[string]bool{}
+	for _, m := range rows {
+		stored[m.Repo] = true
+		if cur, ok := s.MoveOf(m.Repo); !ok || cur.Source != m.Source || cur.Target != m.Target {
+			s.BeginMove(m.Repo, m.Source, m.Target, "interrupted")
+		}
+	}
+	s.moveMu.Lock()
+	defer s.moveMu.Unlock()
+	for repo := range s.moves {
+		if !stored[repo] {
+			delete(s.moves, repo)
+		}
+	}
+	return nil
+}
+
+// Sync returns once every node applied the blob stores, groups and moves
+// stored now and finished the blob writes it began before (WaitWrites; a
+// group's SetGroup waits for its own): SyncNodes on PostgreSQL, else this
+// node's WaitWrites. A move task syncs before it copies, and a group
+// member's removal before it copies the member's blobs. Never call it with
+// the registry lock held: the other nodes take it to apply the change.
+func (s *Store) Sync(ctx context.Context) error {
+	if s.SyncNodes != nil {
+		return s.SyncNodes(ctx)
+	}
+	return s.WaitWrites(ctx)
 }
 
 // SetBlobStore ends a blob store move of the named repository: in one

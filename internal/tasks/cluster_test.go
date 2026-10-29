@@ -14,8 +14,8 @@ import (
 )
 
 // twoNodes is node A, the harness, and node B, a Service on a second handle
-// of its database, both joined as nodes with the single-writer guard off
-// (two servers on one database, as high availability runs them); A joins
+// of its database, both joined as nodes (two servers on one database, as
+// high availability runs them); A joins
 // first and holds the scheduler lease, and both are ready (listening).
 // PostgreSQL only: on SQLite one process runs.
 func twoNodes(t *testing.T) (h *harness, b *Service, memberA *meta.Member) {
@@ -23,8 +23,6 @@ func twoNodes(t *testing.T) (h *harness, b *Service, memberA *meta.Member) {
 	if !metatest.Postgres() {
 		t.Skip("several nodes need PostgreSQL")
 	}
-	meta.SingleWriter = false
-	t.Cleanup(func() { meta.SingleWriter = true })
 	h = newHarness(t)
 	dbB, err := meta.Open(metatest.Target(t, filepath.Join(h.dir, "meta.db")))
 	if err != nil {

@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Runs every end-to-end check: the real-client smoke test of each format and
 # the memory load test. Prints a summary and fails if any check failed.
+# --ha adds the high availability smoke test (test/ha/ha-smoke.sh: PostgreSQL
+# and two nodes, a kill -9 and a rolling restart; about 6 minutes).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 checks=(maven-smoke npm-smoke pypi-smoke go-smoke cargo-smoke ui-smoke ldap-smoke mail-smoke load)
+[ "${1:-}" = --ha ] && checks+=(ha-smoke)
 declare -A result duration memory
 failed=0
 for c in "${checks[@]}"; do
   script="test/smoke/$c.sh"
   [ "$c" = load ] && script="test/load/load.sh"
+  [ "$c" = ha-smoke ] && script="test/ha/ha-smoke.sh"
   log="$(mktemp)"
   start=$(date +%s)
   if "$script" >"$log" 2>&1; then result[$c]=OK; else result[$c]=FAIL; failed=1; fi

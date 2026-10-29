@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,13 +21,14 @@ import (
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta/metatest"
+	"commandcenter/internal/tasks"
 )
 
 // The nodes of a cluster in one process (HA design, P2 tests): apps on one
 // PostgreSQL database and one data directory, each with its own HTTP
-// server. They are built without AsServer, so the single-writer guard,
-// which refuses a second serve until HA is turned on, does not apply; each
-// runs follow, the cache loop Serve runs, unless the test leaves it off.
+// server. They are registered as nodes only with AsServer (as a test that
+// needs the other nodes listed, such as Store.Sync's, passes); each runs
+// follow, the cache loop Serve runs, unless the test leaves it off.
 // Package globals (proxy settings, the trust store) are shared, as they
 // would not be across processes.
 
@@ -479,5 +481,170 @@ func TestClusterAccessWebhooksLogLevel(t *testing.T) {
 	a.want(t, "PUT", "/-/api/logging", `{"level":"debug"}`, ok(200))
 	if !eventually(time.Second, func() bool { return lvlB.Level() == slog.LevelDebug }) {
 		t.Fatalf("the log level set on A is %v on B", lvlB.Level())
+	}
+}
+
+// inStore reports whether n's blob store holds body.
+func (n *node) inStore(store, body string) bool {
+	bs := n.Store.StoreByName(store)
+	if bs == nil {
+		return false
+	}
+	_, err := bs.Stat(sha256Hex([]byte(body)))
+	return err == nil
+}
+
+// fastSync makes syncNodes ask the nodes that have not answered again
+// every 50 ms.
+func fastSync(t *testing.T) {
+	d := syncResend
+	syncResend = 50 * time.Millisecond
+	t.Cleanup(func() { syncResend = d })
+}
+
+// A blob store move started on A: B learns of it at once and writes the
+// repository to the target; the copy waits for a write B began to the
+// source before the move and copies it; meanwhile B reads from both
+// stores and shows it as copying, the state of A's task; at the end both
+// nodes use the target (HA P5).
+func TestClusterMoveAcrossNodes(t *testing.T) {
+	fastSync(t)
+	cfg := clusterConfig(t, "")
+	a, b := startNode(t, cfg, true, AsServer()), startNode(t, cfg, true, AsServer())
+	a.Tasks.MoveSettle = time.Millisecond
+	a.want(t, "POST", "/-/api/blobstores", `{"name":"s1"}`, ok(201))
+	a.want(t, "POST", "/-/api/blobstores", `{"name":"s2"}`, ok(201))
+	a.want(t, "POST", "/-/api/repositories", `{"name":"raw-m","format":"raw","type":"hosted","blobStore":"s1"}`, ok(201))
+	files := map[string]string{"a.txt": "alpha", "b.txt": "beta"}
+	b.want(t, "PUT", "/repository/raw-m/a.txt", files["a.txt"], ok(201))
+	a.want(t, "PUT", "/repository/raw-m/b.txt", files["b.txt"], ok(201))
+
+	slow := strings.Repeat("slow", 1<<14)
+	pr, pw := io.Pipe()
+	res := make(chan int, 1)
+	go func() { st, _, _ := b.do(t, "root", "PUT", "/repository/raw-m/slow.bin", pr); res <- st }()
+	if _, err := io.WriteString(pw, slow[:1024]); err != nil { // returns once B streams it to s1
+		t.Fatal(err)
+	}
+	var copies atomic.Int32
+	paused, resume := make(chan struct{}), make(chan struct{})
+	a.Tasks.AfterMoveCopy = func(string, string) {
+		if copies.Add(1) == 1 {
+			close(paused)
+			<-resume
+		}
+	}
+	a.want(t, "POST", "/-/api/repositories/raw-m/blobstore", `{"blobStore":"s2"}`, ok(202))
+	if !eventually(time.Second, func() bool { _, ok := b.Store.MoveOf("raw-m"); return ok }) {
+		t.Fatal("B did not learn of the move within 1 s")
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := copies.Load(); n != 0 {
+		t.Fatalf("the move copied %d blobs while B's write to the old store was going", n)
+	}
+	io.WriteString(pw, slow[1024:])
+	pw.Close()
+	if st := <-res; st != 201 {
+		t.Fatalf("B's upload begun before the move: %d", st)
+	}
+	files["slow.bin"] = slow
+	select {
+	case <-paused:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the move did not start copying after B's write ended")
+	}
+	if m, _ := b.Store.MoveOf("raw-m"); m.State != "interrupted" ||
+		!strings.Contains(b.want(t, "GET", "/-/api/repositories", nil, ok(200)), `"source":"s1","target":"s2","state":"copying"`) {
+		t.Fatalf("B shows the move A copies as %q, not copying", m.State)
+	}
+	b.want(t, "PUT", "/repository/raw-m/c.txt", "gamma", ok(201))
+	files["c.txt"] = "gamma"
+	if a.inStore("s1", "gamma") || !a.inStore("s2", "gamma") {
+		t.Fatal("B's upload during the move did not go to the target only")
+	}
+	for p, body := range files {
+		if got := b.want(t, "GET", "/repository/raw-m/"+p, nil, ok(200)); got != body {
+			t.Fatalf("B reads %s during the move: %d bytes", p, len(got))
+		}
+	}
+	close(resume)
+	a.Tasks.Wait()
+	for _, n := range []*node{a, b} {
+		if !eventually(time.Second, func() bool {
+			_, moving := n.Store.MoveOf("raw-m")
+			return !moving && n.Registry.Get("raw-m").BlobStore == "s2"
+		}) {
+			t.Fatalf("node %s: the move did not end on s2", n.Node)
+		}
+		for p, body := range files {
+			if !n.inStore("s2", body) {
+				t.Fatalf("%s is not in s2", p)
+			}
+			if got := n.want(t, "GET", "/repository/raw-m/"+p, nil, ok(200)); got != body {
+				t.Fatalf("node %s reads %s after the move: %d bytes", n.Node, p, len(got))
+			}
+		}
+	}
+}
+
+// Removing a member from a group waits until every node made it
+// read-only: B, which does not follow the database at first, keeps
+// writing to the member, and the task does not copy until B applied the
+// change; then the member's blobs, B's late one too, move to the other
+// member and it leaves the group on both nodes (HA P5).
+func TestClusterGroupMemberRemovalWaitsForNodes(t *testing.T) {
+	fastSync(t)
+	cfg := clusterConfig(t, "")
+	a, b := startNode(t, cfg, true, AsServer()), startNode(t, cfg, false, AsServer())
+	for _, s := range []string{"m1", "m2"} {
+		a.want(t, "POST", "/-/api/blobstores", `{"name":"`+s+`"}`, ok(201))
+	}
+	a.want(t, "POST", "/-/api/blobstores", `{"name":"g","type":"group","members":["m1","m2"],"fillPolicy":"writeToFirst"}`, ok(201))
+	a.want(t, "POST", "/-/api/repositories", `{"name":"raw-g","format":"raw","type":"hosted","blobStore":"g"}`, ok(201))
+	b.want(t, "PUT", "/repository/raw-g/x.txt", "ex", ok(201)) // B opens the group on the registry miss
+	if !a.inStore("m1", "ex") {
+		t.Fatal("writeToFirst did not write to m1")
+	}
+	ctx := context.Background()
+	task, err := a.Tasks.Create(ctx, tasks.Def{Name: "rm", Type: tasks.TypeGroupRemove, Schedule: tasks.Manual,
+		Params: json.RawMessage(`{"group":"g","member":"m1"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Tasks.RunAsync(task.ID, "root"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if a.Tasks.Running() != task.ID {
+		t.Fatal("the removal did not wait for B")
+	}
+	b.want(t, "PUT", "/repository/raw-g/y.txt", "why", ok(201))
+	if !a.inStore("m1", "why") {
+		t.Fatal("B, not following, did not write to m1 (its stale group)")
+	}
+	fctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { defer close(done); b.follow(fctx) }()
+	t.Cleanup(func() { stop(); <-done })
+	a.Tasks.Wait()
+	if got, err := a.DB.GetTask(ctx, task.ID); err != nil || got.LastResult != tasks.ResultOK {
+		t.Fatalf("task: %+v %v", got, err)
+	}
+	for _, n := range []*node{a, b} {
+		if !eventually(time.Second, func() bool {
+			cfg, _ := n.Store.StoreByName("g").Group()
+			return len(cfg.Members) == 1 && cfg.Members[0].Name == "m2"
+		}) {
+			cfg, _ := n.Store.StoreByName("g").Group()
+			t.Fatalf("node %s: group members %+v", n.Node, cfg.Members)
+		}
+		for p, body := range map[string]string{"x.txt": "ex", "y.txt": "why"} {
+			if !n.inStore("m2", body) {
+				t.Fatalf("%s is not in m2", p)
+			}
+			if got := n.want(t, "GET", "/repository/raw-g/"+p, nil, ok(200)); got != body {
+				t.Fatalf("node %s reads %s: %q", n.Node, p, got)
+			}
+		}
 	}
 }

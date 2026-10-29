@@ -28,7 +28,7 @@ func (u *UI) infoRoutes(mux *http.ServeMux) {
 }
 
 // GET /-/api/nodes (admin): the server nodes registered on the database,
-// oldest first, and which one answered. One until high availability.
+// oldest first, and which one answered.
 func (u *UI) listNodes(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
@@ -49,7 +49,8 @@ func (u *UI) listNodes(w http.ResponseWriter, r *http.Request) {
 
 // checkCluster lists the live nodes and fails when this node is not ready
 // (draining, an incompatible schema, the lock connection or the listener
-// down) or when more than one node is alive: one instance per database.
+// down) or when more than one node is alive on SQLite, which takes one
+// (high availability needs PostgreSQL).
 func (u *UI) checkCluster(rctx context.Context) func() (bool, string) {
 	return func() (bool, string) {
 		ctx, cancel := context.WithTimeout(rctx, 2*time.Second)
@@ -79,8 +80,8 @@ func (u *UI) checkCluster(rctx context.Context) func() (bool, string) {
 		if err := u.DB.Ready(ctx); err != nil {
 			return false, msg + "; this node is not ready: " + err.Error()
 		}
-		if len(live) > 1 {
-			return false, msg + ": this version runs one instance per database"
+		if len(live) > 1 && u.DB.Driver() != "postgresql" {
+			return false, msg + ": SQLite takes one instance; several need PostgreSQL (high availability)"
 		}
 		return true, msg
 	}

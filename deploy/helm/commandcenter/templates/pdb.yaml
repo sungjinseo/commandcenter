@@ -1,0 +1,14 @@
+{{- if include "commandcenter.ha" . }}
+# A node drain or cluster upgrade takes one pod at a time; the others keep serving.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "commandcenter.fullname" . }}
+  labels:
+    {{- include "commandcenter.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "commandcenter.selectorLabels" . | nindent 6 }}
+{{- end }}

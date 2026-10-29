@@ -23,8 +23,9 @@
 # The Service speaks plain HTTP. Publish it through your Ingress or Gateway with TLS, a request body
 # limit of at least maxUploadMiB and body/read timeouts (guide: "TLS와 리버스 프록시").
 #
-# Exactly one replica: all locking is in-process, and every extra replica would get its own empty
-# volume. Do not force-delete the pod while its node may still be running it.
+# Exactly one replica: meta.db is SQLite on the pod's own volume, and every extra replica would get
+# its own empty volume. Do not force-delete the pod while its node may still be running it. Several
+# pods (high availability) need PostgreSQL and a ReadWriteMany volume: the Helm chart's replicaCount.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -119,8 +120,9 @@ spec:
             capabilities:
               drop: ["ALL"]
           # httpGet rather than exec "commandcenter healthcheck": the kubelet sends the request, so no
-          # second process runs inside the 128 MiB limit. 200 means the HTTP server answers; it does
-          # not check the database or the disks (the admin UI's System status does).
+          # second process runs inside the 128 MiB limit. The startup probe's 200 means the HTTP
+          # server answers; readiness (status/writable) also needs the database to answer and the
+          # server not to be shutting down. Neither checks the disks (the admin UI's System status does).
           startupProbe:
             httpGet:
               path: /service/rest/v1/status
@@ -130,7 +132,7 @@ spec:
             failureThreshold: 60 # 5 minutes for a first start or a database upgrade
           readinessProbe:
             httpGet:
-              path: /service/rest/v1/status
+              path: /service/rest/v1/status/writable
               port: http
             periodSeconds: 10
             timeoutSeconds: 5

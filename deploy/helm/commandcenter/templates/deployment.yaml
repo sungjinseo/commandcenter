@@ -1,0 +1,23 @@
+{{- if include "commandcenter.ha" . }}
+{{- include "commandcenter.validate" . }}
+# More than one pod (high availability): every pod serves on the same PostgreSQL database and the
+# same ReadWriteMany volume (pvc.yaml), so a rolling update starts a new pod before it stops an old
+# one. The StatefulSet of replicaCount 1 is not rendered.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "commandcenter.fullname" . }}
+  labels:
+    {{- include "commandcenter.labels" . | nindent 4 }}
+spec:
+  replicas: {{ int .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "commandcenter.selectorLabels" . | nindent 6 }}
+  {{- include "commandcenter.podTemplate" . | nindent 2 }}
+{{- end }}

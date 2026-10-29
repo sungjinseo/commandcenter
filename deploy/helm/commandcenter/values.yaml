@@ -1,7 +1,15 @@
 # Command Center chart. Read README.md (next to this file) and "Kubernetes" in docs/guide.md first.
 #
-# One pod, always: all locking is in-process, and meta.db is SQLite in WAL mode on the pod's
-# volume. The chart has no replicas setting on purpose. values.schema.json rejects unknown keys.
+# One pod by default: a StatefulSet with its own volume, and meta.db SQLite in WAL mode on it.
+# replicaCount above 1 runs the pods active-active (high availability) and needs PostgreSQL
+# (database) and a ReadWriteMany volume (persistence). values.schema.json rejects unknown keys.
+
+# 1 renders the single-pod StatefulSet. Above 1: a Deployment (rolling updates start a new pod
+# before they stop an old one), one shared ReadWriteMany claim, a PodDisruptionBudget of one pod
+# and, unless affinity is set, pods preferably on different nodes. Every pod needs the same config
+# and secret key; the nodes' clocks must be in sync (NTP). Going from 1 to more is a maintenance
+# window: README.md, "High availability".
+replicaCount: 1
 
 image:
   repository: ghcr.io/sungjinseo/commandcenter
@@ -46,13 +54,13 @@ secretKey:
   existingSecret: ""
   key: key
 
-# Metadata database. Empty uses SQLite in /data/meta.db, which needs block storage. On NFS
-# (or for more than a small team) point it at PostgreSQL: the volume then holds only blobs,
-# which may be on NFS. The URL goes in a Secret (it carries the password):
+# Metadata database. Empty uses SQLite in /data/meta.db, which needs block storage. On NFS, for
+# more than a small team, and always with replicaCount above 1, point it at PostgreSQL: the volume
+# then holds only blobs, which may be on NFS. The URL goes in a Secret (it carries the password):
 #   kubectl create secret generic commandcenter-database \
 #     --from-literal=url='postgres://cc:PASSWORD@db:5432/commandcenter?sslmode=require'
-# The database must exist; tables are created on the first start. There is no tool that moves
-# an existing meta.db into PostgreSQL.
+# The database must exist; tables are created on the first start. "commandcenter migrate-db"
+# copies an existing meta.db into it (docs/guide.md).
 database:
   existingSecret: ""
   key: url
@@ -82,19 +90,23 @@ resources:
     memory: 128Mi
 
 persistence:
-  # Block storage only: a cloud disk, iSCSI or a local volume. Never NFS or SMB, since SQLite's
-  # WAL mode needs local file locking. Empty uses the cluster's default StorageClass; "-" sets
-  # storageClassName "" (pre-bound volumes).
+  # With SQLite, block storage only: a cloud disk, iSCSI or a local volume. Never NFS or SMB, since
+  # SQLite's WAL mode needs local file locking. With replicaCount above 1, a ReadWriteMany class
+  # (NFS, CephFS, EFS, ...) that every pod mounts. Empty uses the cluster's default StorageClass;
+  # "-" sets storageClassName "" (pre-bound volumes).
   storageClass: ""
-  # meta.db and the default blob store. Proxy caches grow until cleanup policies remove them.
-  # storageClass, size, accessModes and annotations are fixed at install: README.md says how to
-  # resize.
+  # meta.db (SQLite), the default blob store and every store's temp and upload session files.
+  # Proxy caches grow until cleanup policies remove them. storageClass, size, accessModes and
+  # annotations are fixed at install: README.md says how to resize.
   size: 50Gi
-  # ReadWriteOnce or ReadWriteOncePod.
+  # ReadWriteOnce or ReadWriteOncePod with one pod; ReadWriteMany (needs PostgreSQL) with more.
   accessModes: [ReadWriteOnce]
+  # On the claim; with replicaCount above 1 the chart adds helm.sh/resource-policy: keep, so an
+  # uninstall leaves the shared claim, as it leaves the StatefulSet's.
   annotations: {}
-  # A PVC you made, such as a restored snapshot. It replaces the claim above, whose settings are
-  # then not used. Install time only.
+  # A PVC you made, such as a restored snapshot or, with replicaCount above 1, a ReadWriteMany
+  # claim holding the blobs copied from the single pod's volume. It replaces the claim above, whose
+  # settings are then not used.
   existingClaim: ""
 
 service:
@@ -142,6 +154,8 @@ podAnnotations: {}
 podLabels: {}
 nodeSelector: {}
 tolerations: []
+# Empty with replicaCount above 1: a preferred podAntiAffinity on kubernetes.io/hostname, so a
+# node failure takes one pod. Anything set here replaces it.
 affinity: {}
 priorityClassName: ""
 
@@ -164,7 +178,8 @@ securityContext:
 
 # On SIGTERM the server turns unready (on PostgreSQL it keeps serving for 5 s more, so the
 # endpoints drop it first), drains requests for up to 30 s, then writes the download counters,
-# queued e-mail and activity events and closes the database.
+# queued e-mail and activity events and closes the database. The other pods keep serving; a task
+# the pod was running stops and runs again later.
 terminationGracePeriodSeconds: 60
 
 startupProbe:
@@ -175,7 +190,9 @@ startupProbe:
   timeoutSeconds: 5
   failureThreshold: 60 # 5 minutes for a first start or a database upgrade
 # 200 while the node should take requests: the database answers, the node is not shutting down,
-# its schema is compatible and (PostgreSQL) its lock connection and change listener are up.
+# its schema is compatible and (PostgreSQL) its lock connection and change listener are up. Keep
+# it on status/writable with replicaCount above 1: the Service then drops a pod that lost the
+# database or is draining while the others serve.
 readinessProbe:
   httpGet:
     path: /service/rest/v1/status/writable
@@ -191,6 +208,7 @@ livenessProbe:
   timeoutSeconds: 5
 
 # More volumes, for example an NFS claim for a named blob store created in the web UI with that
-# path (blobs may live on NFS; meta.db may not).
+# path (blobs may live on NFS; meta.db may not). With replicaCount above 1 every pod mounts them
+# at the same path, so they must be ReadWriteMany too.
 extraVolumes: []
 extraVolumeMounts: []

@@ -209,7 +209,8 @@ func TestHTTPServerBoundsHeaders(t *testing.T) {
 // While all maxConns slots are busy, an HTTP probe waits like any client: a
 // failing liveness probe would restart the pod and cut every transfer. The
 // kernel completes a TCP probe without the server accepting it; readiness
-// and startup still ask the HTTP server.
+// (status/writable: the database answers and the node is not draining) and
+// startup still ask the HTTP server.
 func TestKubernetesLivenessBypassesConnCap(t *testing.T) {
 	f, err := os.Open(filepath.Join("..", "..", "deploy", "kubernetes", "commandcenter.yaml"))
 	if err != nil {
@@ -251,9 +252,13 @@ func TestKubernetesLivenessBypassesConnCap(t *testing.T) {
 	if c.Liveness.TCPSocket == nil || c.Liveness.TCPSocket.Port != "http" || c.Liveness.HTTPGet != nil {
 		t.Errorf("livenessProbe %+v, want only tcpSocket on port http", c.Liveness)
 	}
-	for name, p := range map[string]probe{"startupProbe": c.Startup, "readinessProbe": c.Readiness} {
-		if p.HTTPGet == nil || p.HTTPGet.Path != "/service/rest/v1/status" {
-			t.Errorf("%s %+v, want httpGet /service/rest/v1/status", name, p)
+	// Readiness also checks the database and drain (status/writable).
+	for name, c := range map[string]struct {
+		p    probe
+		path string
+	}{"startupProbe": {c.Startup, "/service/rest/v1/status"}, "readinessProbe": {c.Readiness, "/service/rest/v1/status/writable"}} {
+		if c.p.HTTPGet == nil || c.p.HTTPGet.Path != c.path {
+			t.Errorf("%s %+v, want httpGet %s", name, c.p, c.path)
 		}
 	}
 }

@@ -84,6 +84,13 @@ type App struct {
 	Node   string
 	member *meta.Member // the node's registration: Join (AsServer, or Serve) until Serve returns
 	log    *slog.Logger
+
+	// syncNodes's requests waiting for answers, by id, and answerSync's
+	// in progress (nodesync.go).
+	syncMu      sync.Mutex
+	syncWait    map[string]chan string
+	syncAnswers sync.Once
+	syncing     sync.Map
 }
 
 // Version is reported by the UI; cmd/commandcenter sets it before New.
@@ -115,9 +122,10 @@ type options struct {
 
 // AsServer registers the process as a node in New, right after the
 // database upgrade and before anything starts (the webhook poller among
-// them): on PostgreSQL New then refuses to run beside another live server
-// (meta.GuardError). The serve command passes it; Serve registers when New
-// did not, and the CLI commands that run beside a server do not register.
+// them), beside the other servers on the database (on PostgreSQL, high
+// availability; SQLite takes one). The serve command passes it; Serve
+// registers when New did not, and the CLI commands that run beside a
+// server do not register.
 func AsServer() Option { return func(o *options) { o.serve = true } }
 
 // WithLogLevel lets the UI's logging API change level, the root logger's
@@ -547,6 +555,9 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		} else if err == nil {
 			storeErr = ""
 		}
+		if err := store.SyncMoves(ctx); err != nil { // after the repositories: a move that ended has its target
+			return err
+		}
 		return authn.Reload(ctx)
 	}
 	store.Lookup = registry.Get // contentDisposition on downloads
@@ -598,12 +609,20 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	taskSvc.Repos, taskSvc.Events = registry, hooks
 	taskSvc.Transfer.Repos, taskSvc.Transfer.Events = registry, hooks
 	taskSvc.GC = func(ctx context.Context, store string) (int, int64, error) {
+		// The scope is the stores, groups, moves and repositories every
+		// node left, not a few seconds old.
+		if err := registry.Resync(ctx); err != nil {
+			return 0, 0, err
+		}
 		if store == "" {
 			return a.GC(ctx, time.Hour)
 		}
 		return a.GCStore(ctx, store, time.Hour)
 	}
 	a.Tasks = taskSvc
+	if db.Driver() == "postgresql" {
+		store.SyncNodes = a.syncNodes
+	}
 	// Vulnerability data and the proxy firewall, asked before every file a
 	// format handler serves.
 	vulnSvc := &vuln.Service{DB: db, Repos: registry, Events: hooks, TempDir: cfg.DataDir, Log: log}
@@ -920,19 +939,21 @@ var accessReloadEvery = 5 * time.Second
 
 // The cache topics of meta.DB.Notify: a node that changed what the others
 // cache sends one after the commit, and every node re-reads it.
-var followTopics = []string{"access", "registry", "routing", "blobstores", "webhooks"}
+var followTopics = []string{"access", "registry", "routing", "blobstores", "moves", "webhooks"}
 
 // follow keeps this node's caches in step with the database until ctx
 // ends: every accessReloadEvery, and on PostgreSQL also at once when a
 // node sends a topic's notification. A failed reload keeps what is loaded
-// and is logged once per run of failures. (The log level, cleanup policy,
-// flush and task stop notifications have their own subscribers.)
+// and is logged once per run of failures. It answers the other nodes'
+// Store.Sync too (answerSync). (The log level, cleanup policy, flush and
+// task stop notifications have their own subscribers.)
 func (a *App) follow(ctx context.Context) {
 	cluster := a.DB.Driver() == "postgresql"
 	var mu sync.Mutex
 	pending := map[string]bool{}
 	kick := make(chan struct{}, 1)
 	if cluster {
+		a.DB.Subscribe("storesync", a.answerSync)
 		for _, topic := range followTopics {
 			a.DB.Subscribe(topic, func(string) {
 				mu.Lock()
@@ -967,11 +988,11 @@ func (a *App) follow(ctx context.Context) {
 			run        func(context.Context) error
 		}{
 			{"access", "users, roles and settings", a.Auth.Reload},
-			// one Resync re-reads the repositories, routing rules and blob stores
-			{"registry", "repositories, routing rules and blob stores", a.Registry.Resync},
+			// one Resync re-reads the repositories, routing rules, blob stores and moves
+			{"registry", "repositories, routing rules, blob stores and moves", a.Registry.Resync},
 			{"webhooks", "webhooks", a.Webhooks.Reload},
 		} {
-			if !todo[job.name] && (job.name != "registry" || !todo["routing"] && !todo["blobstores"]) {
+			if !todo[job.name] && (job.name != "registry" || !todo["routing"] && !todo["blobstores"] && !todo["moves"]) {
 				continue
 			}
 			jctx, cancel := context.WithTimeout(ctx, accessReloadEvery)

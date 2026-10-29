@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"commandcenter/internal/blob"
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/tasks"
@@ -144,8 +145,9 @@ func groupDetail(cfg blob.GroupConfig) string {
 
 // setGroupMembers (PUT /-/api/blobstores/{name} with members/fillPolicy) replaces a
 // group's members and fill policy (an empty fillPolicy keeps it). A file or
-// S3 store's settings cannot change. When it answers, no write is still
-// going to a member it made read-only or dropped.
+// S3 store's settings cannot change. When it returns, no write on this node
+// is still going to a member it made read-only or dropped; syncNodes then
+// waits for the other nodes.
 func (u *UI) setGroupMembers(ctx context.Context, name string, body blobStoreRequest) (blob.GroupConfig, error) {
 	var cfg blob.GroupConfig
 	err := u.Repos.WithWriteLock(ctx, func(snap *repo.Snapshot) error {
@@ -292,4 +294,22 @@ func (u *UI) writeBlobStore(w http.ResponseWriter, r *http.Request, name string,
 		return
 	}
 	writeJSON(w, status, v)
+}
+
+// syncWait bounds how long a group change waits for the other nodes to
+// apply it (syncNodes); a var for tests.
+var syncWait = 30 * time.Second
+
+// syncNodes waits, at most syncWait, until every node applied the blob
+// store change to name and finished the writes it began to a member it
+// made read-only or dropped (repo.Store.Sync). A node that does not answer
+// in time is logged; it applies the change within seconds unless it is
+// cut off from the database.
+func (u *UI) syncNodes(ctx context.Context, name string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), syncWait)
+	defer cancel()
+	if err := u.Store.Sync(ctx); err != nil && u.Log != nil {
+		u.Log.Warn("not every node confirmed a blob store group change in time; writes on a node that has not applied it may still go to a member it made read-only or dropped",
+			"blobStore", name, "err", logsafe.Err(err))
+	}
 }

@@ -129,6 +129,18 @@ func (s *Service) StartBlobStoreMove(ctx context.Context, name, target, actor st
 	return t, s.RunAsync(t.ID, actor)
 }
 
+// MoveRunning reports whether repository name's repository.change-blobstore
+// task is running, on this node or (PostgreSQL) another live one.
+func (s *Service) MoveRunning(name string) bool {
+	id := s.Running()
+	if id == "" {
+		return false
+	}
+	t, err := s.DB.GetTask(context.Background(), id)
+	var p moveParams
+	return err == nil && t.Type == TypeChangeBlobStore && json.Unmarshal([]byte(t.Params), &p) == nil && p.Repo == name
+}
+
 func runMove(ctx context.Context, s *Service, t meta.Task, actor string, log *RunLog) (summary, error) {
 	var p moveParams
 	if err := json.Unmarshal([]byte(t.Params), &p); err != nil {
@@ -140,23 +152,35 @@ func runMove(ctx context.Context, s *Service, t meta.Task, actor string, log *Ru
 	if err := s.checkMove(p.Repo, p.Target); err != nil {
 		return summary{msg: err.Error()}, err
 	}
-	source := repo.StoreOf(s.Repos.Get(p.Repo).Repository)
-	if m, ok := s.Store.MoveOf(p.Repo); ok {
-		source = m.Source
-		log.Infof("%s: continuing the unfinished move from %q to %q", p.Repo, source, p.Target)
-	} else if err := s.Repos.WithWriteLock(ctx, func(*repo.Snapshot) error { // blob store deletes take it too
-		if !s.Store.HasStore(p.Target) {
+	// Under the registry lock (blob store deletes take it too), after it
+	// re-read the moves another node may have begun (PostgreSQL).
+	var source string
+	if err := s.Repos.WithWriteLock(ctx, func(snap *repo.Snapshot) error {
+		rp := snap.ByName[p.Repo]
+		switch m, ok := s.Store.MoveOf(p.Repo); {
+		case rp == nil:
+			return fmt.Errorf("repository %q does not exist", p.Repo)
+		case ok && m.Target != p.Target:
+			return fmt.Errorf("repository %q has an unfinished move to blob store %q: finish that one first", p.Repo, m.Target)
+		case ok:
+			source = m.Source
+			s.Store.SetMoveState(p.Repo, "copying", 0, 0)
+			log.Infof("%s: continuing the unfinished move from %q to %q", p.Repo, source, p.Target)
+			return nil
+		case !s.Store.HasStore(p.Target):
 			return fmt.Errorf("blob store %q does not exist", p.Target)
 		}
+		source = repo.StoreOf(rp.Repository)
 		if err := s.DB.PutBlobStoreMove(ctx, meta.BlobStoreMove{Repo: p.Repo, Source: source, Target: p.Target, Started: s.now()}); err != nil {
 			return err
 		}
 		s.Store.BeginMove(p.Repo, source, p.Target, "copying")
+		log.Infof("%s: moving its blobs from %q to %q; until the move ends it reads from both and writes to %q", p.Repo, source, p.Target, p.Target)
 		return nil
 	}); err != nil {
 		return summary{msg: err.Error()}, err
 	}
-	log.Infof("%s: moving its blobs from %q to %q; until the move ends it reads from both and writes to %q", p.Repo, source, p.Target, p.Target)
+	s.notify("moves") // the other nodes route its writes to the target too
 
 	var copied, kept, missing, total int64
 	sum := func() summary {
@@ -167,12 +191,13 @@ func runMove(ctx context.Context, s *Service, t meta.Task, actor string, log *Ru
 		log.Warnf("%s: the move stays unfinished: it reads from both stores and writes to %q until the task runs again and finishes", p.Repo, p.Target)
 		return sum(), err
 	}
-	// Writes that resolved to the source before the move began are waited
-	// for, and then their asset rows, so the copy sees them.
+	// Writes that resolved to the source before the move began, on any
+	// node, are waited for (every live node applied the move and finished
+	// them: Store.Sync), and then their asset rows, so the copy sees them.
 	// ponytail: a write whose row is recorded later than the settle time
 	// and the final check could reference a blob left in the source; track
 	// whole uploads if that ever shows.
-	if err := s.Store.WaitWrites(ctx, p.Repo); err != nil {
+	if err := s.Store.Sync(ctx); err != nil {
 		return fail(err)
 	}
 	settle := s.MoveSettle

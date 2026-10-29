@@ -58,8 +58,7 @@ func signedIn(t *testing.T, base, id string) bool {
 }
 
 // twoApps starts two nodes on one PostgreSQL database, as an HA cluster
-// behind a load balancer would run them (without Serve, so without the
-// single-writer guard).
+// behind a load balancer would run them (without Serve: not registered).
 func twoApps(t *testing.T) (a, b *App, ua, ub string) {
 	t.Helper()
 	if !metatest.Postgres() {

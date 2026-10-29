@@ -17,11 +17,12 @@ import (
 
 // TypeGroupRemove removes a member from a blob store group without losing a
 // blob: the member is made read-only in the group (no write goes to it once
-// that is stored), each of its blobs that no other member holds is copied
-// through the group to the writable members and its SHA-256 checked, and then
-// it leaves the group. Reads go through the group all along, from the member
-// until the copy is made. The store itself is kept, outside the group: no
-// repository names it, so its next compaction deletes its copies.
+// every node applied that: repo.Store.Sync), each of its blobs that no other
+// member holds is copied through the group to the writable members and its
+// SHA-256 checked, and then it leaves the group. Reads go through the group
+// all along, from the member until the copy is made. The store itself is
+// kept, outside the group: no repository names it, so its next compaction
+// deletes its copies.
 const TypeGroupRemove = "blobstore.group-remove-member"
 
 func init() {
@@ -134,7 +135,15 @@ func runGroupRemove(ctx context.Context, s *Service, t meta.Task, _ string, log 
 	if err != nil {
 		return summary{msg: err.Error()}, err
 	}
-	log.Infof("%s: %s is read-only in the group: new blobs go to the other members", p.Group, p.Member)
+	// Every node applies it, and finishes the writes it began to the
+	// member, before the copy: else a blob a node writes there meanwhile
+	// would be left behind.
+	if err := s.Store.Sync(ctx); err != nil {
+		err = fmt.Errorf("wait for every node to make %q read-only: %w", p.Member, err)
+		log.Errorf("%v; %s stays read-only in the group, run the task again", err, p.Member)
+		return summary{msg: err.Error()}, err
+	}
+	log.Infof("%s: %s is read-only in the group on every node: new blobs go to the other members", p.Group, p.Member)
 
 	// 2. Copy what only the member holds.
 	g, ms := s.Store.StoreByName(p.Group), s.Store.StoreByName(p.Member)

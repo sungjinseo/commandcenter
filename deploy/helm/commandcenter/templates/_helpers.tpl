@@ -48,6 +48,33 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- default (printf "%s-config" (include "commandcenter.fullname" .)) .Values.config.existingSecret }}
 {{- end }}
 
+{{/* "true" when replicaCount asks for more than one pod: a Deployment on one shared claim. */}}
+{{- define "commandcenter.ha" -}}
+{{- if gt (int .Values.replicaCount) 1 }}true{{ end }}
+{{- end }}
+
+{{/* The claim the pod mounts at /data: existingClaim, or with more than one pod the shared one. */}}
+{{- define "commandcenter.claim" -}}
+{{- if .Values.persistence.existingClaim }}{{ .Values.persistence.existingClaim }}
+{{- else if include "commandcenter.ha" . }}{{ include "commandcenter.fullname" . }}-data{{ end }}
+{{- end }}
+
+{{/* affinity, or with more than one pod and none set: pods preferably on different nodes. */}}
+{{- define "commandcenter.affinity" -}}
+{{- if .Values.affinity }}
+{{- toYaml .Values.affinity }}
+{{- else if include "commandcenter.ha" . -}}
+podAntiAffinity:
+  preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels:
+            {{- include "commandcenter.selectorLabels" . | nindent 12 }}
+{{- end }}
+{{- end }}
+
 {{/* Settings that would otherwise be ignored without a word, or fail only after the install. */}}
 {{- define "commandcenter.validate" -}}
 {{- with .Values.config }}
@@ -57,6 +84,19 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and $.Values.secretKey.existingSecret (hasKey (.extra | default dict) "secretKeyFile") }}
 {{- fail "set secretKey.existingSecret or config.extra.secretKeyFile, not both: the server refuses to start with two keys" }}
 {{- end }}
+{{- end }}
+{{- /* PostgreSQL: database.existingSecret, a URL in config.extra or COMMANDCENTER_DATABASE_URL in extraEnv. */}}
+{{- $postgres := or .Values.database.existingSecret (dig "database" "url" "" (.Values.config.extra | default dict)) }}
+{{- range .Values.extraEnv }}{{ if eq (.name | default "") "COMMANDCENTER_DATABASE_URL" }}{{ $postgres = true }}{{ end }}{{ end }}
+{{- $rwx := has "ReadWriteMany" .Values.persistence.accessModes }}
+{{- if and (include "commandcenter.ha" .) (not $postgres) }}
+{{- fail "replicaCount above 1 needs PostgreSQL, which every pod shares (SQLite takes one instance): set database.existingSecret to a Secret with the URL (or config.extra.database.url, or COMMANDCENTER_DATABASE_URL in extraEnv)" }}
+{{- end }}
+{{- if and (include "commandcenter.ha" .) (not $rwx) (not .Values.persistence.existingClaim) }}
+{{- fail "replicaCount above 1 needs one volume every pod mounts: set persistence.accessModes to [ReadWriteMany] (NFS, CephFS, EFS, ...) or persistence.existingClaim to such a claim" }}
+{{- end }}
+{{- if and $rwx (not $postgres) }}
+{{- fail "persistence.accessModes ReadWriteMany is a network file system, where SQLite (meta.db) breaks: set database.existingSecret to use PostgreSQL" }}
 {{- end }}
 {{- /* The pods' controller-revision-hash label is the StatefulSet's name plus 11 characters. */}}
 {{- if gt (len (include "commandcenter.fullname" .)) 52 }}

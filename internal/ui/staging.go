@@ -621,6 +621,9 @@ func (u *UI) blobStoreMove(name string) *moveJSON {
 	if !ok {
 		return nil
 	}
+	if m.State == "interrupted" && u.Tasks != nil && u.Tasks.MoveRunning(name) {
+		m.State = "copying" // on another node, whose counts these are not
+	}
 	return &moveJSON{Source: m.Source, Target: m.Target, State: m.State, Copied: m.Copied, Total: m.Total}
 }
 

@@ -17,8 +17,9 @@ import (
 )
 
 // The node registry: every serving process has a row in nodes, renewed
-// from the database clock, and the live nodes compete for leases. Until
-// high availability a database takes one node: Join refuses a second.
+// from the database clock, and the live nodes compete for leases. On
+// PostgreSQL any number of nodes serve one database (high availability);
+// SQLite is one process's file.
 
 // HeartbeatEvery is how often a node renews its row; it counts as alive for
 // NodeTTL after the last renewal, and a lease lasts NodeTTL too. Vars for
@@ -27,11 +28,6 @@ var (
 	HeartbeatEvery = 10 * time.Second
 	NodeTTL        = 30 * time.Second
 )
-
-// SingleWriter makes Join refuse a second live node on PostgreSQL (the
-// guard). Tests of several nodes on one database turn it off; high
-// availability removes it.
-var SingleWriter = true
 
 // nodePrune is the age of a heartbeat after which the leader deletes the row.
 const nodePrune = 24 * time.Hour
@@ -85,49 +81,16 @@ type Member struct {
 	leave sync.Once
 }
 
-// GuardError is Join's refusal: another live node is registered.
-type GuardError struct {
-	Other     Node
-	Age       time.Duration // since its last heartbeat
-	ExpiresIn time.Duration // until it stops counting as alive
-}
-
-func (e *GuardError) Error() string {
-	return fmt.Sprintf("another Command Center node is serving on this database: %s on host %s (version %s, last heartbeat %s ago, "+
-		"renewed every %s; it expires %s from now if that node has stopped). This version runs one instance per database, and a "+
-		"second one would lose updates (high availability is not available yet): stop the other instance first",
-		e.Other.ID, e.Other.Hostname, e.Other.Version, e.Age.Round(time.Second), HeartbeatEvery, e.ExpiresIn.Round(time.Second))
-}
-
-// Join registers this process as node id and renews its row every
-// HeartbeatEvery until Leave. On PostgreSQL it refuses to share the
-// database with another live node (*GuardError): a node that crashed keeps
-// its row for NodeTTL after its last heartbeat, so Join first waits that
-// long once, with a log line, and only refuses when the other heartbeat was
-// renewed meanwhile. It then opens the lock connection and the listener.
-// SQLite needs no guard: one process opens the file. ctx bounds the wait
-// only: a server stopped while it starts still registers, then leaves.
+// Join registers this process as node id beside any others on the
+// database and renews its row every HeartbeatEvery until Leave; on
+// PostgreSQL it then opens the lock connection and the listener. A server
+// stopped while it starts still registers, then leaves.
 func (d *DB) Join(ctx context.Context, id, hostname, version string, log *slog.Logger) (*Member, error) {
 	m := &Member{d: d, id: id, hostname: hostname, version: version, log: log}
-	dbctx := context.WithoutCancel(ctx)
-	for waited := false; ; waited = true {
-		other, err := m.register(dbctx)
-		if err != nil {
-			return nil, fmt.Errorf("register node %s: %w", id, err)
-		}
-		if other == nil {
-			break
-		}
-		if waited {
-			return nil, other
-		}
-		log.Warn("another node is registered on this database; waiting for its heartbeat to expire, as it does after a crash",
-			"other", other.Other.ID, "otherHost", other.Other.Hostname, "wait", other.ExpiresIn.Round(time.Millisecond).String())
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(other.ExpiresIn + 100*time.Millisecond):
-		}
+	dbctx, now := context.WithoutCancel(ctx), dbNow(d.sql)
+	if _, err := d.sql.execFree(dbctx, `INSERT INTO nodes(id, hostname, version, schema, started_at, heartbeat_at, draining)
+VALUES(?, ?, ?, ?, `+now+`, `+now+`, 0)`, id, hostname, version, schemaVersion); err != nil {
+		return nil, fmt.Errorf("register node %s: %w", id, err)
 	}
 	if d.cl != nil {
 		if err := d.cl.pingLock(); err != nil {
@@ -144,35 +107,6 @@ func (d *DB) Join(ctx context.Context, id, hostname, version string, log *slog.L
 	go m.run(hctx)
 	d.self.Store(m)
 	return m, nil
-}
-
-// register inserts this node's row, unless (PostgreSQL) another live node
-// has one: then it returns that node. The check and the insert run under
-// the write lock, so two nodes starting at once cannot both pass.
-func (m *Member) register(ctx context.Context) (*GuardError, error) {
-	var other *GuardError
-	err := m.d.Tx(ctx, func(tx *Tx) error {
-		now := dbNow(tx.q)
-		if tx.q.pg && SingleWriter {
-			var n Node
-			var hb, at int64
-			err := tx.q.QueryRowContext(ctx, `SELECT id, hostname, version, heartbeat_at, `+now+` FROM nodes
-WHERE id <> ? AND heartbeat_at > `+now+` - ? ORDER BY heartbeat_at DESC LIMIT 1`, m.id, NodeTTL.Milliseconds()).Scan(&n.ID, &n.Hostname, &n.Version, &hb, &at)
-			if err == nil {
-				n.HeartbeatAt, n.Alive = fromMs(hb), true
-				age := time.Duration(at-hb) * time.Millisecond
-				other = &GuardError{Other: n, Age: age, ExpiresIn: max(NodeTTL-age, 0)}
-				return nil
-			}
-			if !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
-		}
-		_, err := tx.q.ExecContext(ctx, `INSERT INTO nodes(id, hostname, version, schema, started_at, heartbeat_at, draining)
-VALUES(?, ?, ?, ?, `+now+`, `+now+`, 0)`, m.id, m.hostname, m.version, schemaVersion)
-		return err
-	})
-	return other, err
 }
 
 // run renews the registration every HeartbeatEvery until ctx ends. A

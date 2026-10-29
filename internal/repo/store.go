@@ -68,6 +68,9 @@ type Store struct {
 	moveMu sync.Mutex
 	moves  map[string]*Move
 	writes map[string]int
+	// SyncNodes, if set, is Sync across the nodes of a PostgreSQL
+	// database (the app's).
+	SyncNodes func(ctx context.Context) error
 	// Firewall, if set, is asked before ServeAsset serves a file of a
 	// repository (vuln.Service.Firewall): an error, a 403 naming the
 	// advisories, is answered instead, whether the file was just fetched or

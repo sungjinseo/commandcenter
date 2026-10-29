@@ -1,7 +1,6 @@
 package meta
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -525,67 +524,54 @@ func TestCompatRefusals(t *testing.T) {
 	}
 }
 
-// The guard: a second node is refused while the first is alive, after
-// waiting once for its heartbeat to expire; it starts at once after the
-// first left, and after the wait when the first crashed. SQLite: no guard.
-func TestJoinGuard(t *testing.T) {
+// Nodes join beside each other at once (high availability; SQLite, one
+// process per file, registers them too): both alive, one the leader; a
+// node that crashed stops counting as alive after NodeTTL and keeps no one
+// waiting.
+func TestJoinBesideOthers(t *testing.T) {
 	shortNodeTimes(t, 100*time.Millisecond, 700*time.Millisecond)
 	a, b, _ := twoNodes(t)
+	start := time.Now()
 	first, err := a.Join(ctx, "first", "host-a", "1", discard())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !metatest.Postgres() {
-		second, err := b.Join(ctx, "second", "host-a", "1", discard())
-		if err != nil {
-			t.Fatalf("SQLite has no guard: %v", err)
-		}
-		second.Leave(ctx)
-		first.Leave(ctx)
-		return
-	}
-	start := time.Now()
-	_, err = b.Join(ctx, "second", "host-b", "1", discard())
-	var guard *GuardError
-	if !errors.As(err, &guard) || guard.Other.ID != "first" || guard.Other.Hostname != "host-a" ||
-		!strings.Contains(err.Error(), "high availability") || !strings.Contains(err.Error(), "first") {
-		t.Fatalf("second Join beside a live node: %v", err)
-	}
-	if d := time.Since(start); d < NodeTTL/2 || d > 2*NodeTTL+time.Second {
-		t.Fatalf("refused after %v; want it to wait for the heartbeat once (%v)", d, NodeTTL)
-	}
-
-	first.Leave(ctx)
-	start = time.Now()
 	second, err := b.Join(ctx, "second", "host-b", "1", discard())
 	if err != nil {
-		t.Fatalf("Join after the first node left: %v", err)
+		t.Fatalf("second Join beside a live node: %v", err)
 	}
 	if d := time.Since(start); d > NodeTTL/2 {
-		t.Fatalf("Join after a graceful stop waited %v", d)
+		t.Fatalf("the joins took %v", d)
 	}
-
+	alive := func() (map[string]bool, int) {
+		t.Helper()
+		nodes, err := a.Nodes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, leaders := map[string]bool{}, 0
+		for _, n := range nodes {
+			out[n.ID] = n.Alive
+			if n.Leader {
+				leaders++
+			}
+		}
+		return out, leaders
+	}
+	if live, leaders := alive(); !live["first"] || !live["second"] || leaders != 1 || first.Leader() == second.Leader() {
+		t.Fatalf("nodes %v with %d leaders (first %v, second %v)", live, leaders, first.Leader(), second.Leader())
+	}
 	second.stopHeartbeat() // a crash: the row stays
-	var logs bytes.Buffer
-	third, err := a.Join(ctx, "third", "host-a", "1", slog.New(slog.NewTextHandler(&logs, nil)))
-	if err != nil {
-		t.Fatalf("Join after a crash: %v", err)
+	time.Sleep(NodeTTL + 2*HeartbeatEvery)
+	if live, _ := alive(); !live["first"] || live["second"] {
+		t.Fatalf("nodes after the crash: %v", live)
 	}
-	defer third.Leave(ctx)
-	if !strings.Contains(logs.String(), "waiting for its heartbeat to expire") || !strings.Contains(logs.String(), "second") {
-		t.Fatalf("log: %s", logs.String())
-	}
-	nodes, err := a.Nodes(ctx)
+	third, err := b.Join(ctx, "third", "host-b", "1", discard())
 	if err != nil {
 		t.Fatal(err)
 	}
-	alive := map[string]bool{}
-	for _, n := range nodes {
-		alive[n.ID] = n.Alive
-	}
-	if !alive["third"] || alive["second"] || len(nodes) != 2 {
-		t.Fatalf("nodes after the crash: %+v", nodes)
-	}
+	first.Leave(ctx)
+	third.Leave(ctx)
 }
 
 // Ready follows the node: ready once joined (the lock connection and the
@@ -637,13 +623,10 @@ func TestReadyDrainLeave(t *testing.T) {
 	}
 }
 
-// joinAll joins each handle as a node, the single-writer guard off (two
-// servers on one database, as high availability runs them); the first
-// handle takes the scheduler lease.
+// joinAll joins each handle as a node (servers on one database, as high
+// availability runs them); the first handle takes the scheduler lease.
 func joinAll(t *testing.T, dbs ...*DB) {
 	t.Helper()
-	SingleWriter = false
-	t.Cleanup(func() { SingleWriter = true })
 	for i, d := range dbs {
 		if _, err := d.Join(ctx, "node-"+string(rune('a'+i)), "host", "1", discard()); err != nil {
 			t.Fatal(err)

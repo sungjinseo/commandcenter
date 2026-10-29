@@ -1,0 +1,24 @@
+{{- if and (include "commandcenter.ha" .) (not .Values.persistence.existingClaim) }}
+# The volume every pod mounts at /data (replicaCount above 1): the default blob store and the temp
+# and upload session files of every store. It outlives the release, like the StatefulSet's claim.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "commandcenter.claim" . }}
+  labels:
+    {{- include "commandcenter.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- with .Values.persistence.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  accessModes:
+    {{- toYaml .Values.persistence.accessModes | nindent 4 }}
+  {{- with .Values.persistence.storageClass }}
+  storageClassName: {{ if eq "-" . }}""{{ else }}{{ . }}{{ end }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}

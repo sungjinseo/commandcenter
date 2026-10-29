@@ -80,8 +80,9 @@ jobs:
           tar -xzf kubeconform.tgz -C bin kubeconform
           echo "$PWD/bin" >>"$GITHUB_PATH"
       - name: helm lint, helm template, kubeconform
-        # Three sets of test values: the required ones, the same with every optional value set,
-        # and config.yaml from an existing Secret. -strict fails on unknown and duplicate fields.
+        # Test values: the required ones, the same with every optional value set, config.yaml
+        # from an existing Secret, and both of the first with several pods (high availability).
+        # -strict fails on unknown and duplicate fields.
         run: |
           chart=deploy/helm/commandcenter out="$RUNNER_TEMP/rendered.yaml"
           cat >"$RUNNER_TEMP/required.yaml" <<'EOF'
@@ -114,6 +115,11 @@ jobs:
           extraVolumes: [{name: blobs, persistentVolumeClaim: {claimName: commandcenter-blobs}}]
           extraVolumeMounts: [{name: blobs, mountPath: /blobs}]
           EOF
+          cat >"$RUNNER_TEMP/ha.yaml" <<'EOF'
+          replicaCount: 3
+          database: {existingSecret: commandcenter-database}
+          persistence: {accessModes: [ReadWriteMany]}
+          EOF
           check() { # check <helm flags>: lint and render the chart with these values
             helm lint --strict "$chart" "$@"
             helm template cc "$chart" "$@" >>"$out"
@@ -121,6 +127,8 @@ jobs:
           check -f "$RUNNER_TEMP/required.yaml"
           check -f "$RUNNER_TEMP/required.yaml" -f "$RUNNER_TEMP/full.yaml"
           check --set config.existingSecret=commandcenter-config --set serviceAccount.create=false --set persistence.storageClass=fast
+          check -f "$RUNNER_TEMP/required.yaml" -f "$RUNNER_TEMP/ha.yaml"
+          check -f "$RUNNER_TEMP/required.yaml" -f "$RUNNER_TEMP/full.yaml" -f "$RUNNER_TEMP/ha.yaml"
           for k8s in $KUBERNETES_VERSIONS; do
             kubeconform -strict -summary -kubernetes-version "$k8s" "$out" deploy/kubernetes/commandcenter.yaml
           done

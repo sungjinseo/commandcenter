@@ -366,6 +366,7 @@ func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		u.notify(r.Context(), "blobstores")
+		u.syncNodes(r.Context(), name)
 		u.emit(r, "blobstore.update", "", name, groupDetail(cfg))
 	}
 	if setQuota {
