@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/format/gitlfs"
 	"commandcenter/internal/format/golang"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/format/pypi"
@@ -35,6 +36,8 @@ type componentMetadata struct {
 	Collected     bool           `json:"collected"`
 	Dependencies  []dependencyJS `json:"dependencies"`
 	Resolved      bool           `json:"resolved"`
+	Size          *int64         `json:"size,omitempty"`   // gitlfs only: the object's size
+	SHA256        *string        `json:"sha256,omitempty"` // gitlfs only: the object's oid
 }
 
 type dependencyJS struct {
@@ -60,7 +63,7 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	group, name, version := strings.TrimSpace(q.Get("group")), strings.TrimSpace(q.Get("name")), strings.TrimSpace(q.Get("version"))
-	if name == "" || version == "" || (rp.Format == "maven" && group == "") {
+	if name == "" || (version == "" && rp.Format != "gitlfs") || (rp.Format == "maven" && group == "") {
 		writeError(w, http.StatusBadRequest, "give name and version (and group for maven)")
 		return
 	}
@@ -94,6 +97,16 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.condaMetadata(r.Context(), rp, group, name, version, &m)
 	case "rubygems":
 		found, err = u.rubygemsMetadata(r.Context(), rp, name, version, &m)
+	case "gitlfs": // an object has no manifest: its size and sha256 (the oid) are all there is
+		if gitlfs.ValidOID(name) {
+			var a meta.Asset
+			a, err = u.DB.GetAsset(r.Context(), rp.Name, gitlfs.ObjectPath(name))
+			if found = err == nil; found {
+				m.Collected, m.Size, m.SHA256 = true, &a.Size, &a.BlobSHA256
+			} else if errors.Is(err, meta.ErrNotFound) {
+				err = nil
+			}
+		}
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return

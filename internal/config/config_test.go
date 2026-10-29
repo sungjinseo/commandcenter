@@ -269,6 +269,8 @@ func TestValidateRepositoriesCatchesEveryRule(t *testing.T) {
 		"depth on yum proxy":  {[]Repository{{Name: "a", Format: "yum", Type: "proxy", Remote: "https://x.example/", Depth: 1}}, `repository "a": depth is only valid for yum hosted repositories`},
 		"bad depth":           {[]Repository{{Name: "a", Format: "yum", Type: "hosted", Depth: 2}}, `repository "a": depth must be 0 or 1`},
 		"missing member":      {[]Repository{{Name: "g", Format: "maven", Type: "group", Members: []string{"x"}}}, `repository "g": unknown member "x"`},
+		"gitlfs proxy":        {[]Repository{{Name: "a", Format: "gitlfs", Type: "proxy", Remote: "https://x.example/"}}, `repository "a": gitlfs supports hosted repositories only`},
+		"gitlfs group":        {[]Repository{{Name: "h", Format: "gitlfs", Type: "hosted"}, {Name: "g", Format: "gitlfs", Type: "group", Members: []string{"h"}}}, `repository "g": gitlfs supports hosted repositories only`},
 		"cross format member": {[]Repository{{Name: "n", Format: "npm", Type: "hosted"}, {Name: "g", Format: "maven", Type: "group", Members: []string{"n"}}}, `repository "g": member "n" has format npm`},
 		"bad writeMember": {[]Repository{{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/"},
 			{Name: "g", Format: "maven", Type: "group", Members: []string{"p"}, WriteMember: "p"}}, `repository "g": writeMember "p" must be a hosted member`},

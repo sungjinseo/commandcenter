@@ -387,9 +387,10 @@ func (u *UI) deleteComponent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "repository is offline")
 	case rp.WritePolicy == "deny":
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("repository %q is read-only", rp.Name))
-	case c.Name == "" || (c.Version == "") != (rp.Format == "raw") || (rp.Format == "maven" && c.Group == ""):
-		// A raw component is a file: its name is the path and it has no version.
-		writeError(w, http.StatusBadRequest, "give name and version (and group for maven; a raw file has no version)")
+	case c.Name == "" || (c.Version == "") != (rp.Format == "raw" || rp.Format == "gitlfs") || (rp.Format == "maven" && c.Group == ""):
+		// A raw component is a file: its name is the path and it has no
+		// version; a gitlfs component is an object named by its oid.
+		writeError(w, http.StatusBadRequest, "give name and version (and group for maven; a raw file or gitlfs object has no version)")
 	default:
 		res, err := u.Deleters.Delete(r.Context(), rp, c, p.Owner())
 		var he *repo.Error

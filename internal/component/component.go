@@ -296,8 +296,22 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		}
 		name, version, ok = SplitGem(file)
 		return "", name, version, ok
+	case "gitlfs": // objects/<aa>/<bb>/<oid>: the object is a component named by its oid, without a version
+		name, ok = SplitLFS(p)
+		return "", name, "", ok
 	}
 	return "", "", "", false
+}
+
+// SplitLFS maps a Git LFS object path, objects/<aa>/<bb>/<oid> with oid a
+// lower-case hex sha256, to the oid.
+func SplitLFS(p string) (oid string, ok bool) {
+	segs := strings.Split(p, "/")
+	if len(segs) != 4 || segs[0] != "objects" || len(segs[3]) != 64 || strings.Trim(segs[3], "0123456789abcdef") != "" {
+		return "", false
+	}
+	oid = segs[3]
+	return oid, segs[1] == oid[:2] && segs[2] == oid[2:4]
 }
 
 // condaSubdirRE is a conda subdir (platform directory): noarch, linux-64,

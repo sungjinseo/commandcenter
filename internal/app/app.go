@@ -26,6 +26,7 @@ import (
 	"commandcenter/internal/format/composer"
 	"commandcenter/internal/format/conda"
 	"commandcenter/internal/format/docker"
+	"commandcenter/internal/format/gitlfs"
 	"commandcenter/internal/format/golang"
 	"commandcenter/internal/format/helm"
 	"commandcenter/internal/format/maven"
@@ -321,11 +322,12 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	composerH := composer.New(store, fetcher, authn, baseURL)
 	condaH := conda.New(store, resolver, authn)
 	gemsH := rubygems.New(store, fetcher, authn)
+	gitlfsH := gitlfs.New(store, authn, baseURL)
 	dockerKey := make([]byte, 32)
 	rand.Read(dockerKey)
 	dockerH := docker.New(store, docker.NewFetcher(store, maxConcurrentFetches), authn, nil, baseURL, dockerKey) // Repos: the registry, below
 	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
-	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH}
+	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH, "gitlfs": gitlfsH}
 	// Hosted deletes go through the format handlers, which share their locks
 	// with uploads; proxies of every format use the generic deleter.
 	deleters := cleanup.NewRegistry(store)
@@ -343,6 +345,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("composer", "hosted", composerH)
 	deleters.Register("conda", "hosted", condaH)
 	deleters.Register("rubygems", "hosted", gemsH)
+	deleters.Register("gitlfs", "hosted", gitlfsH)
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)
