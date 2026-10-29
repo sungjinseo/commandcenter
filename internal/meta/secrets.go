@@ -17,7 +17,8 @@ import (
 
 // The stored secrets are the SMTP password, the LDAP bind password, the
 // OIDC client secret, a proxy's remoteAuth password and bearer token, an S3 blob store's
-// secret key, a webhook's signing secret and the Crowd application password.
+// secret key, a webhook's signing secret, the Crowd application password and the
+// SAML service provider key.
 // They must be sent as they are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
 // with AES-256-GCM on write and opened on read, so a copy of meta.db or of a
 // backup does not give them away (QA N-29). A sealed value is sealedPrefix
@@ -130,6 +131,13 @@ func (s sealer) sealValue(v any) (any, error) {
 	case Crowd:
 		c.ApplicationPassword, err = s.seal(c.ApplicationPassword)
 		return c, err
+	case *SAML:
+		if c != nil {
+			return s.sealValue(*c)
+		}
+	case SAML:
+		c.SPPrivateKey, err = s.seal(c.SPPrivateKey)
+		return c, err
 	case SMTP:
 		c.Password, err = s.seal(c.Password)
 		return c, err
@@ -156,6 +164,8 @@ func (s sealer) openValue(key string, v any) (err error) {
 		c.Proxy.Password, err = s.open(c.Proxy.Password)
 	case *Crowd:
 		c.ApplicationPassword, err = s.open(c.ApplicationPassword)
+	case *SAML:
+		c.SPPrivateKey, err = s.open(c.SPPrivateKey)
 	}
 	if err != nil {
 		return fmt.Errorf("setting %q: %w", key, err)
@@ -174,6 +184,9 @@ func (s sealer) openSettings(set *Settings) error {
 		return err
 	}
 	if err := s.openValue(SettingCrowd, &set.Crowd); err != nil {
+		return err
+	}
+	if err := s.openValue(SettingSAML, &set.SAML); err != nil {
 		return err
 	}
 	return s.openValue(SettingHTTP, &set.HTTP)
@@ -292,12 +305,14 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 		oidc := DefaultOIDC()
 		httpc := DefaultHTTP()
 		crowd := DefaultCrowd()
+		samlc := DefaultSAML()
 		for _, st := range []struct {
 			key    string
 			v      any
 			secret *string
 		}{{SettingSMTP, &smtp, &smtp.Password}, {SettingLDAP, &ldap, &ldap.BindPassword}, {SettingOIDC, &oidc, &oidc.ClientSecret},
-			{SettingHTTP, &httpc, &httpc.Proxy.Password}, {SettingCrowd, &crowd, &crowd.ApplicationPassword}} {
+			{SettingHTTP, &httpc, &httpc.Proxy.Password}, {SettingCrowd, &crowd, &crowd.ApplicationPassword},
+			{SettingSAML, &samlc, &samlc.SPPrivateKey}} {
 			found, err := getSettingJSON(ctx, tx.q, st.key, st.v)
 			if err != nil {
 				return err

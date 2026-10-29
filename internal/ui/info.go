@@ -117,6 +117,8 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 			realm = "Crowd"
 		case meta.SourceRUT:
 			realm = "RUT"
+		case meta.SourceSAML:
+			realm = "SAML"
 		}
 		st := stored[su.ID]
 		users = append(users, map[string]any{
@@ -154,6 +156,15 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 			"userId": cu.ID, "realm": "Crowd", "roles": cu.Roles,
 			"admin": isAdmin, "status": meta.StatusActive, "writeRepositories": wl, "privileges": privs,
 			"id": cu.ID, "name": cu.Name, "email": cu.Email, "source": meta.SourceCrowd, "hasPassword": false,
+			"createdAt": "", "updatedAt": "", "directory": true,
+		})
+	}
+	for _, su := range u.Auth.SAMLUsers() {
+		isAdmin, wl, privs := summarize(su.Roles)
+		users = append(users, map[string]any{
+			"userId": su.ID, "realm": "SAML", "roles": su.Roles,
+			"admin": isAdmin, "status": meta.StatusActive, "writeRepositories": wl, "privileges": privs,
+			"id": su.ID, "name": su.Name, "email": su.Email, "source": meta.SourceSAML, "hasPassword": false,
 			"createdAt": "", "updatedAt": "", "directory": true,
 		})
 	}

@@ -118,6 +118,9 @@ func (u *UI) ssoProviders(w http.ResponseWriter, r *http.Request) {
 		}
 		providers = append(providers, map[string]string{"id": meta.RealmOIDC, "name": name, "url": "/-/sso/oidc/start"})
 	}
+	if p := u.samlProvider(); p != nil {
+		providers = append(providers, p)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": providers})
 }
 

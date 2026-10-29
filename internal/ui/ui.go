@@ -84,6 +84,7 @@ type UI struct {
 	oidcMu   sync.Mutex
 	oidcCfg  meta.OIDC
 	oidcProv *oidc.Provider
+	saml     samlRealm // SAML login (saml.go)
 
 	// Heavy queries (search, stats) share heavySlots slots and the stats are
 	// cached; the function fields and now are test hooks.
@@ -115,6 +116,7 @@ func (u *UI) Routes(mux *http.ServeMux) {
 	mux.Handle("/-/api/", u.apiHandler())
 	mux.HandleFunc("GET /-/metrics/prometheus", u.prometheus)
 	u.ssoRoutes(mux)
+	u.samlRoutes(mux)
 }
 
 // root redirects to the UI. Only GET and HEAD are redirected; other methods

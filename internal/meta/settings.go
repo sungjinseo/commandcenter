@@ -38,9 +38,10 @@ const (
 	RealmLDAP  = "ldap"  // password login against LDAP (plan 12 Task 6)
 	RealmOIDC  = "oidc"  // browser login through an OpenID Connect provider
 	RealmCrowd = "crowd" // password login against Atlassian Crowd
+	RealmSAML  = "saml"  // browser login through a SAML 2.0 identity provider
 )
 
-var knownRealms = map[string]bool{RealmLocal: true, RealmToken: true, RealmLDAP: true, RealmOIDC: true, RealmCrowd: true, RealmRUT: true}
+var knownRealms = map[string]bool{RealmLocal: true, RealmToken: true, RealmLDAP: true, RealmOIDC: true, RealmCrowd: true, RealmRUT: true, RealmSAML: true}
 
 // Realm is one entry of the ordered realm list.
 type Realm struct {
@@ -129,6 +130,7 @@ type Settings struct {
 	Crowd                      Crowd
 	RUT                        RUT
 	DefaultRoles               []string // granted to every signed-in principal in addition to its own roles
+	SAML                       SAML
 }
 
 // DefaultSettings returns the values used for missing keys: today's behaviour.
@@ -147,6 +149,7 @@ func DefaultSettings() Settings {
 		TrustedCerts:       []string{},
 		Crowd:              DefaultCrowd(),
 		DefaultRoles:       []string{},
+		SAML:               DefaultSAML(),
 	}
 }
 
@@ -266,6 +269,7 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 		{SettingUserTokens, &s.UserTokens},
 		{SettingCrowd, &s.Crowd},
 		{SettingDefaultRoles, &s.DefaultRoles},
+		{SettingSAML, &s.SAML},
 	} {
 		if _, err := getSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return Settings{}, err
@@ -307,6 +311,9 @@ func (d *DB) SaveSettings(ctx context.Context, s Settings) error {
 	if s.Crowd.ApplicationPassword, err = d.box.seal(s.Crowd.ApplicationPassword); err != nil {
 		return err
 	}
+	if s.SAML.SPPrivateKey, err = d.box.seal(s.SAML.SPPrivateKey); err != nil {
+		return err
+	}
 	return d.Tx(ctx, func(tx *Tx) error { return saveSettings(ctx, tx.q, s) })
 }
 
@@ -338,6 +345,7 @@ func saveSettings(ctx context.Context, q querier, s Settings) error {
 		{SettingUserTokens, s.UserTokens},
 		{SettingCrowd, s.Crowd},
 		{SettingDefaultRoles, s.DefaultRoles},
+		{SettingSAML, s.SAML},
 	} {
 		if err := setSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return err
@@ -493,6 +501,12 @@ func validateSettingValue(key string, b []byte) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		return ValidateCrowd(v)
+	case SettingSAML:
+		v := DefaultSAML()
+		if err := json.Unmarshal(b, &v); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		return ValidateSAML(v)
 	}
 	return nil
 }

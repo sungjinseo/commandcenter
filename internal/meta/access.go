@@ -22,6 +22,7 @@ const (
 	SourceOIDC  = "oidc"
 	SourceCrowd = "crowd"
 	SourceRUT   = "rutauth" // an override row for a user the trusted proxy names (RUT realm)
+	SourceSAML  = "saml"
 
 	StatusActive   = "active"
 	StatusDisabled = "disabled"

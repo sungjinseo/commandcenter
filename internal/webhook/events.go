@@ -37,7 +37,7 @@ var Kinds = []Kind{
 	{"role.deleted", "A role was deleted"},
 	{"token.created", "An API token was created"},
 	{"token.revoked", "An API token was revoked"},
-	{"realm.updated", "An authentication realm (local, LDAP, OIDC) changed"},
+	{"realm.updated", "An authentication realm (local, LDAP, OIDC, SAML) changed"},
 	{"realm.tested", "An LDAP or OIDC connection test ran"},
 	{"settings.updated", "Server or e-mail settings changed"},
 	{"settings.tested", "A test e-mail was sent"},
@@ -88,6 +88,7 @@ var renamed = map[string]string{
 	"settings.defaultRoles": "settings.updated", "realms.rutauth.update": "realm.updated",
 	"blobstore.update": "blobstore.updated", "blobstore.convert": "blobstore.updated",
 	"firewall.release": "firewall.released", "vulnerability.import": "vulnerability.updated", "vulnerability.settings": "vulnerability.updated",
+	"realms.saml.update": "realm.updated",
 }
 
 // event is one activity event as the dispatcher received it, with the

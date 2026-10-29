@@ -81,6 +81,11 @@ var requestIDRE = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // request with neither Sec-Fetch-Site nor Origin (every CLI client) passes.
 var crossOrigin http.CrossOriginProtection
 
+// The SAML assertion consumer service is a cross-site form post by design
+// (the HTTP-POST binding): the signed response and the login state cookie
+// protect it (ui/saml.go).
+func init() { crossOrigin.AddInsecureBypassPattern("POST /-/sso/saml/acs") }
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /service/rest/v1/status", func(w http.ResponseWriter, r *http.Request) {

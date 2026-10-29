@@ -88,6 +88,8 @@ func (p Principal) Owner() string {
 		return crowdOwnerPrefix + p.User
 	case p.IsRUT():
 		return rutOwnerPrefix + p.User
+	case p.IsSAML():
+		return samlOwnerPrefix + p.User
 	}
 	return p.User
 }
@@ -379,6 +381,12 @@ func (a *Authenticator) CreateTokenFor(ctx context.Context, p Principal) (id, to
 	}
 	if p.IsRUT() {
 		if _, ok := a.rutLookup(ctx, p.User); !ok {
+			return "", "", fmt.Errorf("%w: %q", ErrUserDisabled, p.User)
+		}
+		return a.storeToken(ctx, p.Owner())
+	}
+	if p.IsSAML() {
+		if _, ok := a.samlLookup(ctx, p.User); !ok {
 			return "", "", fmt.Errorf("%w: %q", ErrUserDisabled, p.User)
 		}
 		return a.storeToken(ctx, p.Owner())

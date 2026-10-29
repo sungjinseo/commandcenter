@@ -142,6 +142,7 @@ func NewSnapshotWith(users []meta.User, roles []meta.Role, settings meta.Setting
 	settings.Crowd = settings.Crowd.Copy()
 	settings.RUT = settings.RUT.Copy()
 	settings.DefaultRoles = append([]string{}, settings.DefaultRoles...)
+	settings.SAML = settings.SAML.Copy()
 	s.settings = settings
 	for _, r := range settings.Realms {
 		if r.Enabled {
@@ -215,6 +216,7 @@ func (s *Snapshot) Settings() meta.Settings {
 	out.TrustedCerts = append([]string{}, s.settings.TrustedCerts...)
 	out.Crowd = s.settings.Crowd.Copy()
 	out.DefaultRoles = append([]string{}, s.settings.DefaultRoles...)
+	out.SAML = s.settings.SAML.Copy()
 	return out
 }
 

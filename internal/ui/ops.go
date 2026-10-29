@@ -362,6 +362,7 @@ func (u *UI) supportZip(w http.ResponseWriter, r *http.Request) {
 		"realms":   u.apiJSON(r, "/-/api/realms"),
 		"ldap":     u.apiJSON(r, "/-/api/realms/ldap"),
 		"oidc":     u.apiJSON(r, "/-/api/realms/oidc"),
+		"saml":     u.apiJSON(r, "/-/api/realms/saml"),
 		"ssl":      u.apiJSON(r, "/-/api/ssl/certificates"),
 	})
 	addJSON("repositories.json", u.apiJSON(r, "/-/api/repositories"))

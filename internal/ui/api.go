@@ -68,6 +68,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.stagingRoutes(mux)
 	u.transferRoutes(mux)
 	u.vulnerabilityRoutes(mux)
+	u.samlRealmRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }
@@ -95,6 +96,8 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 			out["realm"] = "Crowd"
 		case p.IsRUT():
 			out["realm"] = "RUT"
+		case p.IsSAML():
+			out["realm"] = "SAML"
 		}
 		// Signed-in users see the version in the sidebar footer (plan 10);
 		// anonymous callers do not learn it.

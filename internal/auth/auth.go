@@ -195,6 +195,9 @@ type Authenticator struct {
 	crowdFlight  singleflight.Group
 	rutMu        sync.Mutex
 	rutUsers     map[string][]string // RUT id -> groups of its last trusted request (rutauth.go)
+
+	samlMu    sync.Mutex
+	samlUsers map[string]oidcEntry // SAML id -> identity (saml.go)
 }
 
 const (
@@ -282,6 +285,9 @@ func (a *Authenticator) setSnapshot(s *Snapshot) {
 	if old != nil && rutChanged(old, s) {
 		a.clearRUT()
 	}
+	if old != nil && samlChanged(old, s) {
+		a.clearSAML()
+	}
 }
 
 // Snapshot returns the live snapshot. It is immutable.
@@ -301,11 +307,13 @@ func (a *Authenticator) OnUserChanged(id string) {
 		a.Sessions.DeleteUser(oidcOwnerPrefix + id)
 		a.Sessions.DeleteUser(crowdOwnerPrefix + id)
 		a.Sessions.DeleteUser(rutOwnerPrefix + id)
+		a.Sessions.DeleteUser(samlOwnerPrefix + id)
 	}
 	a.dropLDAP(id)
 	a.dropOIDC(id)
 	a.dropCrowd(id)
 	a.dropRUT(id)
+	a.dropSAML(id)
 	prefix := id + "\x00"
 	a.mu.Lock()
 	for k := range a.cache {
@@ -459,6 +467,9 @@ func (a *Authenticator) lookup(ctx context.Context, name string) (Principal, boo
 	}
 	if id, ok := splitRUTOwner(name); ok {
 		return a.rutLookup(ctx, id)
+	}
+	if id, ok := splitSAMLOwner(name); ok {
+		return a.samlLookup(ctx, id)
 	}
 	s := a.snap.Load()
 	u, ok := s.users[name]
@@ -632,6 +643,17 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 			return Principal{}, ErrBadCredentials
 		}
 		p = rp
+	} else if id, isSAML := splitSAMLOwner(user); isSAML {
+		// A SAML user's token: the saml realm must be on and the user in
+		// the cache (signed in since the last restart), as for OIDC.
+		if owner != "" && id != owner {
+			return Principal{}, ErrBadCredentials
+		}
+		sp, ok := a.samlLookup(ctx, id)
+		if !ok {
+			return Principal{}, ErrBadCredentials
+		}
+		p = sp
 	} else {
 		u, ok := s.users[user]
 		if !ok || u.Status != meta.StatusActive || u.Source != meta.SourceLocal {
@@ -769,7 +791,7 @@ func (a *Authenticator) RevokeUserTokens(ctx context.Context, id string) (int64,
 	if !ok {
 		return 0, errors.New("auth: the token store cannot revoke tokens")
 	}
-	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id, crowdOwnerPrefix+id, rutOwnerPrefix+id)
+	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id, crowdOwnerPrefix+id, rutOwnerPrefix+id, samlOwnerPrefix+id)
 }
 
 // RevokeToken deletes token when p owns it (npm logout). A token that does not
@@ -792,7 +814,7 @@ func (a *Authenticator) RevokeToken(ctx context.Context, token string, p Princip
 }
 
 // ErrLDAPUser reports a token requested for an LDAP or OIDC override row.
-var ErrLDAPUser = errors.New("tokens of LDAP and OIDC users are created by the user")
+var ErrLDAPUser = errors.New("tokens of LDAP, OIDC, Crowd and SAML users are created by the user")
 
 func (a *Authenticator) storeToken(ctx context.Context, owner string) (id, token string, err error) {
 	id, token = randomHex(8), tokenPrefix+randomHex(32)
