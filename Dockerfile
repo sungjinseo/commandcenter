@@ -3,7 +3,7 @@
 # changes, set go-version in .github/workflows/ci.yml to it and rerun
 # scripts/third-party-licenses.sh; CI fails until both are done.
 # The build stage runs on the build machine and cross-compiles for the target.
-FROM --platform=$BUILDPLATFORM golang:1.26.10@sha256:672c944cfd07599b5f1bb179869270cdc94c6254e41db4d431259693cb286b82 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.2@sha256:820153096fda4de6ac1b7194d12e416b7dd8f4e9a33d17e0345b111b945162d8 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
