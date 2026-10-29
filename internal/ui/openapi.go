@@ -76,6 +76,7 @@ var apiDocs = []openapi.Route{
 	{Pattern: "PUT /-/api/cleanup/policies/{name}", Summary: "Updates a cleanup policy", Tag: "cleanup", Auth: docAdminUI, Request: "Policy", Reply: "Policy"},
 	{Pattern: "DELETE /-/api/cleanup/policies/{name}", Summary: "Deletes a cleanup policy", Tag: "cleanup", Auth: docAdminUI, Replies: map[int]string{204: "deleted", 409: "Error"}},
 	{Pattern: "GET /-/api/cleanup/policies/{name}/preview", Summary: "What the policy would delete", Tag: "cleanup", Auth: docAdmin, Query: []string{"repo"}, Reply: "PolicyPreview"},
+	{Pattern: "POST /-/api/cleanup/preview", Summary: "Previews an unsaved policy on a repository with the cleanup task's own evaluation (up to 1000 components with reasons, or every candidate as CSV)", Tag: "cleanup", Auth: docAdmin, Query: []string{"format"}, Request: "CleanupPreviewRequest", Reply: "CleanupPreview", Replies: map[int]string{400: "Error", 404: "Error"}},
 	{Pattern: "GET /-/api/tokens", Summary: "The caller's API tokens", Tag: "access", Auth: docUser, Reply: "TokenList"},
 	{Pattern: "POST /-/api/tokens", Summary: "Creates an API token (the value is shown once)", Tag: "access", Auth: docUser, Reply: "NewToken"},
 	{Pattern: "DELETE /-/api/tokens/{id}", Summary: "Revokes one of the caller's tokens", Tag: "access", Auth: docUser, Replies: map[int]string{204: "revoked"}},

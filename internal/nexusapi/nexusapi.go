@@ -100,6 +100,7 @@ func (h *Handler) init() {
 	h.userTokenRoutes(m, p)
 	h.blobGroupRoutes(m, p)
 	m.HandleFunc(p+"/", func(w http.ResponseWriter, r *http.Request) { writeMessage(w, http.StatusNotFound, "not found") })
+	h.proRoutes(m, p)
 	h.mux = m
 }
 
@@ -1436,22 +1437,12 @@ func (h *Handler) tasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var res struct {
-		Tasks []struct {
-			ID, Name, Type, Status, LastMessage, LastResult, NextRun, LastRun string
-		} `json:"tasks"`
+		Tasks []uiTask `json:"tasks"`
 	}
 	json.Unmarshal(body, &res)
 	items := []map[string]any{}
 	for _, t := range res.Tasks {
-		var result any
-		switch t.LastResult {
-		case "OK":
-			result = "OK"
-		case "Failed":
-			result = "FAILED"
-		}
-		items = append(items, map[string]any{"id": t.ID, "name": t.Name, "type": nexusTaskType(t.Type), "message": t.LastMessage,
-			"currentState": strings.ToUpper(t.Status), "lastRunResult": result, "nextRun": nullable(t.NextRun), "lastRun": nullable(t.LastRun)})
+		items = append(items, nexusTaskItem(t))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "continuationToken": nil})
 }

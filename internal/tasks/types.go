@@ -174,7 +174,6 @@ func runCleanup(ctx context.Context, s *Service, t meta.Task, actor string, log 
 	if limit <= 0 {
 		limit = DefaultMaxComponents
 	}
-	eval := &cleanup.Evaluator{DB: s.DB, Now: s.now}
 
 	var comps, assets, bytes int64
 	var failures, cleaned int
@@ -231,7 +230,7 @@ func runCleanup(ctx context.Context, s *Service, t meta.Task, actor string, log 
 			log.Errorf("%s: reading the scan cursor: %v", name, err)
 			continue
 		}
-		ev, err := eval.EvaluateFrom(ctx, rp, policy, s.ScanBudget, from)
+		ev, err := s.evaluate(ctx, rp, policy, from)
 		if errors.Is(err, cleanup.ErrNotSupported) {
 			log.Warnf("%s: skipped: %v", name, err)
 			continue
@@ -332,6 +331,41 @@ func runCleanup(ctx context.Context, s *Service, t meta.Task, actor string, log 
 		return sum, fmt.Errorf("%d cleanup steps failed (see the log)", failures)
 	}
 	return sum, nil
+}
+
+// evaluate is the one cleanup evaluation: what a cleanup run deletes and
+// what PreviewCleanup lists, one scan budget of rp from from.
+func (s *Service) evaluate(ctx context.Context, rp *repo.Repository, p cleanup.Policy, from string) (cleanup.Evaluation, error) {
+	return (&cleanup.Evaluator{DB: s.DB, Now: s.now}).EvaluateFrom(ctx, rp, p, s.ScanBudget, from)
+}
+
+// PreviewCleanup calls visit with every component policy p would delete
+// from rp now, deleting nothing: the evaluation cleanup runs make, scan
+// after scan from the start of the repository to its end, as successive
+// runs cover it. Pending download counts are written first, as a run does;
+// when that fails and p uses lastDownloadedDays, the preview fails.
+func (s *Service) PreviewCleanup(ctx context.Context, rp *repo.Repository, p cleanup.Policy, visit func(cleanup.Candidate) error) error {
+	if s.Metrics != nil {
+		if err := s.Metrics.Flush(ctx); err != nil && p.LastDownloadedDays > 0 {
+			return fmt.Errorf("write the pending download counts: %w", err)
+		}
+	}
+	from := ""
+	for {
+		ev, err := s.evaluate(ctx, rp, p, from)
+		if err != nil {
+			return err
+		}
+		for _, c := range ev.Candidates {
+			if err := visit(c); err != nil {
+				return err
+			}
+		}
+		if ev.Next == "" {
+			return nil
+		}
+		from = ev.Next
+	}
 }
 
 func cleanupSummary(comps, assets, bytes int64, repos int) summary {

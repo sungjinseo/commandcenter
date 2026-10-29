@@ -2,9 +2,11 @@ package ui
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -53,36 +55,54 @@ func (u *UI) cleanupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /-/api/cleanup/policies/{name}", u.updatePolicy)
 	mux.HandleFunc("DELETE /-/api/cleanup/policies/{name}", u.deletePolicy)
 	mux.HandleFunc("GET /-/api/cleanup/policies/{name}/preview", u.previewPolicy)
+	mux.HandleFunc("POST /-/api/cleanup/preview", u.previewDraft)
 }
 
 // policyRequest is the body of POST and PUT. On PUT, name may be omitted
 // and must otherwise be the policy's own.
 type policyRequest struct {
-	Name               string `json:"name"`
-	Format             string `json:"format"`
-	ComponentAgeDays   int    `json:"componentAgeDays"`
-	LastDownloadedDays int    `json:"lastDownloadedDays"`
-	ReleaseType        string `json:"releaseType"`
-	NamePattern        string `json:"namePattern"`
+	Name               string        `json:"name"`
+	Format             string        `json:"format"`
+	ComponentAgeDays   int           `json:"componentAgeDays"`
+	LastDownloadedDays int           `json:"lastDownloadedDays"`
+	ReleaseType        string        `json:"releaseType"`
+	NamePattern        string        `json:"namePattern"`
+	PathPattern        string        `json:"pathPattern"`
+	Retain             int           `json:"retain"`
+	RetainSortBy       string        `json:"retainSortBy"`
+	Exclude            exclusionJSON `json:"exclude"`
+	Notes              string        `json:"notes"`
+}
+
+type exclusionJSON struct {
+	NamePattern    string `json:"namePattern"`
+	VersionPattern string `json:"versionPattern"`
 }
 
 func (b policyRequest) policy() cleanup.Policy {
-	return cleanup.Policy{Name: b.Name, Format: b.Format, Criteria: cleanup.Criteria{
+	return cleanup.Policy{Name: b.Name, Format: b.Format, Notes: b.Notes, Criteria: cleanup.Criteria{
 		ComponentAgeDays: b.ComponentAgeDays, LastDownloadedDays: b.LastDownloadedDays,
-		ReleaseType: b.ReleaseType, NamePattern: b.NamePattern,
+		ReleaseType: b.ReleaseType, NamePattern: b.NamePattern, PathPattern: b.PathPattern,
+		Retain: b.Retain, RetainSortBy: b.RetainSortBy,
+		Exclude: cleanup.Exclusion{NamePattern: b.Exclude.NamePattern, VersionPattern: b.Exclude.VersionPattern},
 	}}
 }
 
 type policyJSON struct {
-	Name               string   `json:"name"`
-	Format             string   `json:"format"`
-	ComponentAgeDays   int      `json:"componentAgeDays"`
-	LastDownloadedDays int      `json:"lastDownloadedDays"`
-	ReleaseType        string   `json:"releaseType"`
-	NamePattern        string   `json:"namePattern"`
-	Created            string   `json:"created"`
-	Updated            string   `json:"updated"`
-	Repositories       []string `json:"repositories"` // connected repositories, sorted
+	Name               string        `json:"name"`
+	Format             string        `json:"format"`
+	ComponentAgeDays   int           `json:"componentAgeDays"`
+	LastDownloadedDays int           `json:"lastDownloadedDays"`
+	ReleaseType        string        `json:"releaseType"`
+	NamePattern        string        `json:"namePattern"`
+	PathPattern        string        `json:"pathPattern"`
+	Retain             int           `json:"retain"`
+	RetainSortBy       string        `json:"retainSortBy"` // "" when retain is 0
+	Exclude            exclusionJSON `json:"exclude"`
+	Notes              string        `json:"notes"`
+	Created            string        `json:"created"`
+	Updated            string        `json:"updated"`
+	Repositories       []string      `json:"repositories"` // connected repositories, sorted
 }
 
 // policyUsers maps each policy name to the repositories using it, from s.
@@ -100,8 +120,10 @@ func toPolicyJSON(p cleanup.Policy, users []string) policyJSON {
 	return policyJSON{
 		Name: p.Name, Format: p.Format,
 		ComponentAgeDays: p.ComponentAgeDays, LastDownloadedDays: p.LastDownloadedDays,
-		ReleaseType: p.ReleaseType, NamePattern: p.NamePattern,
-		Created: rfc3339(p.Created), Updated: rfc3339(p.Updated),
+		ReleaseType: p.ReleaseType, NamePattern: p.NamePattern, PathPattern: p.PathPattern,
+		Retain: p.Retain, RetainSortBy: p.RetainSortBy,
+		Exclude: exclusionJSON{NamePattern: p.Exclude.NamePattern, VersionPattern: p.Exclude.VersionPattern},
+		Notes:   p.Notes, Created: rfc3339(p.Created), Updated: rfc3339(p.Updated),
 		Repositories: append([]string{}, users...),
 	}
 }
@@ -262,8 +284,14 @@ func (u *UI) deletePolicy(w http.ResponseWriter, r *http.Request) {
 func policySummary(p cleanup.Policy) string {
 	s := fmt.Sprintf("format=%s componentAgeDays=%d lastDownloadedDays=%d releaseType=%s",
 		p.Format, p.ComponentAgeDays, p.LastDownloadedDays, p.ReleaseType)
-	if p.NamePattern != "" {
-		s += " namePattern=" + p.NamePattern
+	for _, f := range [][2]string{{"namePattern", p.NamePattern}, {"pathPattern", p.PathPattern},
+		{"exclude.namePattern", p.Exclude.NamePattern}, {"exclude.versionPattern", p.Exclude.VersionPattern}} {
+		if f[1] != "" {
+			s += " " + f[0] + "=" + f[1]
+		}
+	}
+	if p.Retain > 0 {
+		s += fmt.Sprintf(" retain=%d retainSortBy=%s", p.Retain, p.RetainSortBy)
 	}
 	return s
 }
@@ -303,22 +331,7 @@ func (u *UI) previewPolicy(w http.ResponseWriter, r *http.Request) {
 	var targets []*repo.Repository
 	if name := r.URL.Query().Get("repo"); name != "" {
 		rp := snap.ByName[name]
-		if rp == nil {
-			writeError(w, http.StatusNotFound, "repository \""+name+"\" not found")
-			return
-		}
-		switch {
-		case rp.Type != "hosted" && rp.Type != "proxy":
-			writeError(w, http.StatusBadRequest, "cleanup applies to hosted and proxy repositories only")
-			return
-		case rp.Format == "cargo" && rp.Type == "hosted":
-			writeError(w, http.StatusBadRequest, "cleanup is not supported for cargo hosted repositories (yank crates, or delete versions in the web UI)")
-			return
-		case rp.Format == "docker":
-			writeError(w, http.StatusBadRequest, "cleanup is not supported for docker repositories (delete manifests in the web UI or with the registry API)")
-			return
-		case !cleanup.FormatMatches(p.Format, rp.Format):
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("cleanup policy %q is for %s repositories", p.Name, p.Format))
+		if !previewable(w, rp, name, p) {
 			return
 		}
 		targets = []*repo.Repository{rp}
@@ -370,4 +383,159 @@ func (u *UI) previewPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"components": out, "count": count, "bytes": bytes, "truncated": truncated})
+}
+
+// previewable answers 404 or 400 when policy p cannot be previewed on rp
+// (named name; nil when there is none).
+func previewable(w http.ResponseWriter, rp *repo.Repository, name string, p cleanup.Policy) bool {
+	msg := ""
+	switch {
+	case rp == nil:
+		writeError(w, http.StatusNotFound, "repository \""+name+"\" not found")
+		return false
+	case rp.Type != "hosted" && rp.Type != "proxy":
+		msg = "cleanup applies to hosted and proxy repositories only"
+	case rp.Format == "cargo" && rp.Type == "hosted":
+		msg = "cleanup is not supported for cargo hosted repositories (yank crates, or delete versions in the web UI)"
+	case rp.Format == "docker":
+		msg = "cleanup is not supported for docker repositories (delete manifests in the web UI or with the registry API)"
+	case !cleanup.FormatMatches(p.Format, rp.Format):
+		msg = fmt.Sprintf("cleanup policy %q is for %s repositories", p.Name, p.Format)
+	}
+	if msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return false
+	}
+	return true
+}
+
+// previewDraftLimit caps the components a JSON draft preview lists; a
+// variable so tests can lower it.
+var previewDraftLimit = 1000
+
+// previewDraftRequest is the body of POST /-/api/cleanup/preview: a policy
+// as POST /-/api/cleanup/policies takes it, name optional, and the
+// repository to preview it on.
+type previewDraftRequest struct {
+	policyRequest
+	Repository string `json:"repository"`
+}
+
+type draftComponentJSON struct {
+	Group          string `json:"group"`
+	Name           string `json:"name"`
+	Version        string `json:"version"`
+	LastUpdated    string `json:"lastUpdated"`
+	LastDownloaded string `json:"lastDownloaded"`
+	Assets         int    `json:"assets"`
+	Bytes          int64  `json:"bytes"`
+	Reason         string `json:"reason"`
+}
+
+// csvCell keeps a cell from being read as a formula by spreadsheets.
+func csvCell(s string) string {
+	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
+		return "'" + s
+	}
+	return s
+}
+
+// wroteWriter records whether anything reached the client.
+type wroteWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *wroteWriter) Write(b []byte) (int, error) { w.wrote = true; return w.ResponseWriter.Write(b) }
+
+// previewDraft answers POST /-/api/cleanup/preview: the components the
+// policy in the body, saved or not, would delete from the repository now,
+// without deleting anything. It runs the cleanup task's own evaluation
+// (tasks.Service.PreviewCleanup) over the whole repository, so a run of
+// the policy deletes exactly these (unless they change first). The JSON
+// lists at most previewDraftLimit components, with total and bytes over
+// all of them; ?format=csv streams every one, with a header row.
+func (u *UI) previewDraft(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok || !u.tasksAvailable(w) {
+		return
+	}
+	asCSV := false
+	switch r.URL.Query().Get("format") {
+	case "", "json":
+	case "csv":
+		asCSV = true
+	default:
+		writeError(w, http.StatusBadRequest, "format must be json or csv")
+		return
+	}
+	var body previewDraftRequest
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	p := body.policy()
+	if p.Name == "" {
+		p.Name = "preview"
+	}
+	if err := p.Validate(); err != nil {
+		u.writePolicyError(w, r, err)
+		return
+	}
+	if body.Repository == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "repository is required", "errors": []string{"repository is required"}})
+		return
+	}
+	rp := u.Repos.Get(body.Repository)
+	if !previewable(w, rp, body.Repository, p) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), previewTimeout)
+	defer cancel()
+	release, err := u.acquireHeavy(ctx)
+	if err != nil {
+		u.previewFailed(w, r, ctx, err)
+		return
+	}
+	defer release()
+
+	if asCSV {
+		ww := &wroteWriter{ResponseWriter: w}
+		h := w.Header()
+		h.Set("Content-Type", "text/csv; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="cleanup-preview-`+rp.Name+`.csv"`)
+		cw := csv.NewWriter(ww)
+		cw.Write([]string{"group", "name", "version", "lastUpdated", "lastDownloaded", "assets", "bytes", "reason"})
+		err := u.Tasks.PreviewCleanup(ctx, rp, p, func(c cleanup.Candidate) error {
+			return cw.Write([]string{csvCell(c.Group), csvCell(c.Name), csvCell(c.Version), rfc3339(c.LastUpdated), rfc3339(c.LastDownloaded),
+				strconv.Itoa(len(c.Assets)), strconv.FormatInt(c.Bytes, 10), csvCell(c.Reason)})
+		})
+		if err == nil {
+			cw.Flush()
+			err = cw.Error()
+		}
+		if err != nil {
+			if !ww.wrote {
+				h.Del("Content-Disposition")
+				u.previewFailed(w, r, ctx, err)
+				return
+			}
+			panic(http.ErrAbortHandler) // cut the download: a short CSV must not look complete
+		}
+		return
+	}
+	out := []draftComponentJSON{}
+	total, bytes := 0, int64(0)
+	err = u.Tasks.PreviewCleanup(ctx, rp, p, func(c cleanup.Candidate) error {
+		total++
+		bytes += c.Bytes
+		if len(out) < previewDraftLimit {
+			out = append(out, draftComponentJSON{Group: c.Group, Name: c.Name, Version: c.Version, LastUpdated: rfc3339(c.LastUpdated),
+				LastDownloaded: rfc3339(c.LastDownloaded), Assets: len(c.Assets), Bytes: c.Bytes, Reason: c.Reason})
+		}
+		return nil
+	})
+	if err != nil {
+		u.previewFailed(w, r, ctx, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"components": out, "total": total, "bytes": bytes, "truncated": total > len(out)})
 }

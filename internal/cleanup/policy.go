@@ -22,6 +22,7 @@ type Policy struct {
 	Name   string
 	Format string // "all" or one of the five formats
 	Criteria
+	Notes            string    // free text for the administrators
 	Created, Updated time.Time // set when read from the database
 }
 
@@ -40,6 +41,35 @@ type Criteria struct {
 	// NamePattern is an optional RE2 regular expression that must match the
 	// whole of "group:name" ("name" for components without a group).
 	NamePattern string `json:"namePattern"`
+	// PathPattern is an optional RE2 regular expression that must match the
+	// whole path of at least one asset of the component (Nexus's
+	// criteriaAssetRegex; a leading "/" in the pattern's paths is allowed).
+	PathPattern string `json:"pathPattern,omitempty"`
+	// Retain (0 = off, at most MaxRetain) keeps the newest Retain versions of
+	// every component (same group and name in the repository) whatever the
+	// other criteria say: only older versions can be selected. Versions are
+	// ranked by RetainSortBy among all versions of the component, excluded
+	// ones included; equal versions share a rank and are kept together.
+	Retain int `json:"retain,omitempty"`
+	// RetainSortBy is "version" (CompareVersions; formats without a version
+	// order use the date) or "date" (the newest asset's creation time); set
+	// with Retain only, "version" by default.
+	RetainSortBy string `json:"retainSortBy,omitempty"`
+	// Exclude names components that are never selected.
+	Exclude Exclusion `json:"exclude,omitzero"`
+}
+
+// Exclusion lists RE2 regular expressions, each matching a whole string: a
+// component that matches either is never selected.
+type Exclusion struct {
+	NamePattern    string `json:"namePattern,omitempty"`    // "group:name", or "name"
+	VersionPattern string `json:"versionPattern,omitempty"` // the version
+}
+
+// storedPolicy is the JSON of cleanup_policies.config.
+type storedPolicy struct {
+	Criteria
+	Notes string `json:"notes,omitempty"`
 }
 
 const (
@@ -47,6 +77,10 @@ const (
 	MaxPatternLen = 200
 	// maxDays bounds the ages (100 years).
 	maxDays = 36500
+	// MaxRetain bounds Retain.
+	MaxRetain = 1000
+	// MaxNotesLen bounds Notes, in characters.
+	MaxNotesLen = 1000
 )
 
 var (
@@ -76,8 +110,22 @@ func (p *Policy) Validate() error {
 			add("%s must be between 0 and %d", d.field, maxDays)
 		}
 	}
-	if p.ComponentAgeDays <= 0 && p.LastDownloadedDays <= 0 {
-		add("set componentAgeDays or lastDownloadedDays (or both)")
+	if p.Retain < 0 || p.Retain > MaxRetain {
+		add("retain must be between 0 and %d", MaxRetain)
+	}
+	if p.ComponentAgeDays <= 0 && p.LastDownloadedDays <= 0 && p.Retain <= 0 {
+		add("set componentAgeDays, lastDownloadedDays or retain (or several)")
+	}
+	switch {
+	case p.Retain <= 0:
+		p.RetainSortBy = ""
+	case p.RetainSortBy == "":
+		p.RetainSortBy = "version"
+	case p.RetainSortBy != "version" && p.RetainSortBy != "date":
+		add("unknown retainSortBy %q: use version or date", p.RetainSortBy)
+	}
+	if utf8.RuneCountInString(p.Notes) > MaxNotesLen {
+		add("notes must be at most %d characters", MaxNotesLen)
 	}
 	if p.ReleaseType == "" {
 		p.ReleaseType = "any"
@@ -85,8 +133,11 @@ func (p *Policy) Validate() error {
 	if !releaseTypes[p.ReleaseType] {
 		add("unknown releaseType %q: use any, release or prerelease", p.ReleaseType)
 	}
-	if _, err := compilePattern(p.NamePattern); err != nil {
-		add("namePattern: %v", err)
+	for _, f := range []struct{ field, pattern string }{{"namePattern", p.NamePattern}, {"pathPattern", p.PathPattern},
+		{"exclude.namePattern", p.Exclude.NamePattern}, {"exclude.versionPattern", p.Exclude.VersionPattern}} {
+		if _, err := compilePattern(f.pattern); err != nil {
+			add("%s: %v", f.field, err)
+		}
 	}
 	if len(errs) > 0 {
 		return &repo.ValidationError{Errors: errs}
@@ -161,10 +212,11 @@ func pypiPrerelease(version string) bool {
 
 // policyFromMeta decodes a stored policy.
 func policyFromMeta(m meta.CleanupPolicy) (Policy, error) {
-	p := Policy{Name: m.Name, Format: m.Format, Created: m.Created, Updated: m.Updated}
-	if err := json.Unmarshal([]byte(m.Config), &p.Criteria); err != nil {
+	var st storedPolicy
+	if err := json.Unmarshal([]byte(m.Config), &st); err != nil {
 		return Policy{}, fmt.Errorf("cleanup policy %q: decode stored config: %w", m.Name, err)
 	}
+	p := Policy{Name: m.Name, Format: m.Format, Criteria: st.Criteria, Notes: st.Notes, Created: m.Created, Updated: m.Updated}
 	if p.ReleaseType == "" {
 		p.ReleaseType = "any"
 	}
@@ -172,7 +224,7 @@ func policyFromMeta(m meta.CleanupPolicy) (Policy, error) {
 }
 
 func policyToMeta(p Policy) (meta.CleanupPolicy, error) {
-	js, err := json.Marshal(p.Criteria)
+	js, err := json.Marshal(storedPolicy{Criteria: p.Criteria, Notes: p.Notes})
 	if err != nil {
 		return meta.CleanupPolicy{}, err
 	}

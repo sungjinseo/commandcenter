@@ -142,6 +142,8 @@ CREATE TABLE IF NOT EXISTS user_tokens(
 //	4: blob_stores rows of type "group" (blob store groups): an older build
 //	   would open a group as an empty directory and compact its members as
 //	   stores no repository uses, deleting every blob they hold.
+//	4: cleanup_policies.config retain, exclude and pathPattern: an older
+//	   build would ignore them and delete the versions they keep.
 const schemaVersion = 4
 
 // Open opens the metadata database and creates or upgrades its tables:

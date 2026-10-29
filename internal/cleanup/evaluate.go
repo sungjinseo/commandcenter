@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ type Candidate struct {
 	Created        time.Time // the oldest asset's creation time
 	LastDownloaded time.Time // the newest download of any asset; zero if never downloaded
 	Bytes          int64     // the assets' total size
+	Reason         string    // why the policy selects it, for previews
 }
 
 // Evaluator finds the components a policy selects.
@@ -49,6 +51,9 @@ type compAgg struct {
 	lastUsed      time.Time // max over assets of last_downloaded, or created if never downloaded
 	unknownCreate bool      // an asset has no creation time
 	unit          string    // a path prefix every asset of the component has (unitPrefix)
+	home          string    // a path prefix every asset of every version of the component has (namePrefix)
+	rank          int       // with Retain: the version's place, newest first (1-based); 0 when not ranked
+	ranked        int       // with Retain: how many versions were ranked
 }
 
 // Evaluation is the result of one bounded scan (EvaluateFrom).
@@ -102,7 +107,7 @@ func (e *Evaluator) EvaluateFrom(ctx context.Context, rp *repo.Repository, p Pol
 	if err := p.Validate(); err != nil {
 		return Evaluation{}, fmt.Errorf("cleanup policy %q: %w", p.Name, err)
 	}
-	pattern, err := compilePattern(p.NamePattern)
+	m, err := p.matchers()
 	if err != nil {
 		return Evaluation{}, err
 	}
@@ -146,36 +151,50 @@ scan:
 		now = e.Now
 	}
 	t := now()
+	// Every asset of a component has its unit prefix, and paths sharing a
+	// prefix are contiguous in path order: only the components whose unit
+	// holds the first unread path, or the start of the scan, may be partial.
+	// With Retain the unit is the component's home, which holds all its
+	// versions: the version set must be complete to be ranked.
+	cutPrefix := func(c *compAgg) string {
+		if p.Retain > 0 {
+			return c.home
+		}
+		return c.unit
+	}
+	partial := func(prefix string) bool {
+		return truncated && strings.HasPrefix(next, prefix) || from != "" && from != prefix && strings.HasPrefix(from, prefix)
+	}
 	res := Evaluation{Scanned: scanned, Truncated: truncated}
 	if truncated {
 		// Resume at the start of the first component cut by the budget, else
 		// of the first unread component; never at or before this scan's
 		// start, so scans advance.
 		res.Next = next
-		if _, _, _, ok := component.DeriveAsset(rp.Format, next); ok {
+		if g, n, _, ok := component.DeriveAsset(rp.Format, next); ok {
 			res.Next = unitPrefix(rp.Format, next)
+			if p.Retain > 0 {
+				res.Next = namePrefix(rp.Format, next, g, n)
+			}
 		}
 		for _, c := range comps {
-			if strings.HasPrefix(next, c.unit) && c.unit < res.Next {
-				res.Next = c.unit
+			if u := cutPrefix(c); strings.HasPrefix(next, u) && u < res.Next {
+				res.Next = u
 			}
 		}
 		if res.Next <= from {
 			res.Next = next
 		}
 	}
+	if p.Retain > 0 {
+		rankVersions(rp.Format, p.RetainSortBy, comps)
+	}
 	for k, c := range comps {
-		// Every asset of a component has its unit prefix, and paths sharing
-		// a prefix are contiguous in path order: only the components whose
-		// unit holds the first unread path, or the start of the scan, may be
-		// partial.
-		if truncated && strings.HasPrefix(next, c.unit) {
+		if partial(cutPrefix(c)) {
 			continue
 		}
-		if from != "" && from != c.unit && strings.HasPrefix(from, c.unit) {
-			continue
-		}
-		if !p.selects(rp.Format, k, c, pattern, t) {
+		reason := p.selects(rp.Format, k, c, m, t)
+		if reason == "" {
 			continue
 		}
 		paths := make(map[string]bool, len(c.assets))
@@ -186,7 +205,7 @@ scan:
 			Component: component.Component{Repo: rp.Name, Format: rp.Format, Group: k.group, Name: k.name, Version: k.version,
 				LastUpdated: c.newest, Assets: c.assets,
 				Evaluated: &component.Evaluated{Paths: paths, MaxCreated: c.newest, MaxModified: c.modified, LastDownloaded: c.lastDl}},
-			Created: c.oldest, LastDownloaded: c.lastDl, Bytes: c.bytes,
+			Created: c.oldest, LastDownloaded: c.lastDl, Bytes: c.bytes, Reason: reason,
 		})
 		res.Bytes += c.bytes
 	}
@@ -211,7 +230,7 @@ func addAsset(comps map[compKey]*compAgg, format string, a meta.ScanAsset) {
 	k := compKey{group, name, version}
 	c := comps[k]
 	if c == nil {
-		c = &compAgg{unit: unitPrefix(format, a.Path), oldest: a.Created}
+		c = &compAgg{unit: unitPrefix(format, a.Path), home: namePrefix(format, a.Path, group, name), oldest: a.Created}
 		comps[k] = c
 	}
 	c.assets = append(c.assets, component.Asset{Path: a.Path, Size: a.Size})
@@ -363,41 +382,139 @@ func homePrefix(format, p string) string {
 	return p
 }
 
+// namePrefix returns a path prefix that every asset of every version of
+// the component (group, name) of path p has, so the scan can tell a
+// complete version set: homePrefix where it is one, the name's file prefix
+// for the flat layouts, "pool/" for apt (one package may be in several
+// pool components) and "" for formats without one (raw, gitlfs).
+func namePrefix(format, p, group, name string) string {
+	switch format {
+	case "maven", "npm", "go", "pypi", "cargo", "nuget", "composer", "rubygems", "conan":
+		return homePrefix(format, p)
+	case "helm", "yum": // <name>-<version>..., the yum name directory-qualified
+		return name + "-"
+	case "conda":
+		return group + "/" + name + "-"
+	case "r":
+		return group + "/" + name + "_"
+	case "apt":
+		return "pool/"
+	}
+	return ""
+}
+
+// rankVersions sets rank and ranked on every component: its place among
+// the versions of its group and name, newest first. Versions that compare
+// equal share the place of the first of them.
+func rankVersions(format, sortBy string, comps map[compKey]*compAgg) {
+	type nameKey struct{ group, name string }
+	byName := map[nameKey][]compKey{}
+	for k := range comps {
+		byName[nameKey{k.group, k.name}] = append(byName[nameKey{k.group, k.name}], k)
+	}
+	byDate := sortBy == "date" || !HasVersionOrder(format)
+	newer := func(a, b compKey) int { // > 0: a is newer
+		if byDate {
+			return comps[a].newest.Compare(comps[b].newest) // an unknown time ranks oldest
+		}
+		return CompareVersions(format, a.version, b.version)
+	}
+	for _, keys := range byName {
+		sort.Slice(keys, func(i, j int) bool {
+			if c := newer(keys[i], keys[j]); c != 0 {
+				return c > 0
+			}
+			return keys[i].version < keys[j].version
+		})
+		rank := 1
+		for i, k := range keys {
+			if i > 0 && newer(keys[i-1], k) != 0 {
+				rank = i + 1
+			}
+			comps[k].rank, comps[k].ranked = rank, len(keys)
+		}
+	}
+}
+
+// matchers are a policy's compiled patterns; nil when unset.
+type matchers struct{ name, path, exName, exVersion *regexp.Regexp }
+
+func (p Policy) matchers() (*matchers, error) {
+	var m matchers
+	for _, f := range []struct {
+		re      **regexp.Regexp
+		pattern string
+	}{{&m.name, p.NamePattern}, {&m.path, p.PathPattern}, {&m.exName, p.Exclude.NamePattern}, {&m.exVersion, p.Exclude.VersionPattern}} {
+		re, err := compilePattern(f.pattern)
+		if err != nil {
+			return nil, err
+		}
+		*f.re = re
+	}
+	return &m, nil
+}
+
 // olderThan reports whether t is known and more than days days before now.
 func olderThan(t time.Time, days int, now time.Time) bool {
 	return !t.IsZero() && now.Sub(t) > time.Duration(days)*24*time.Hour
 }
 
-// selects applies the criteria to one component. A component with an asset
-// of unknown creation time has no known age, so the ages never select it.
-func (p Policy) selects(format string, k compKey, c *compAgg, pattern *regexp.Regexp, now time.Time) bool {
+// selects applies the criteria to one component and says why it is
+// selected; "" when it is not. A component with an asset of unknown
+// creation time has no known age, so the ages never select it.
+func (p Policy) selects(format string, k compKey, c *compAgg, m *matchers, now time.Time) string {
 	if c.unknownCreate {
-		return false
+		return ""
 	}
-	if p.ComponentAgeDays > 0 && !olderThan(c.newest, p.ComponentAgeDays, now) {
-		return false
+	subject := k.name
+	if k.group != "" {
+		subject = k.group + ":" + k.name
 	}
-	if p.LastDownloadedDays > 0 && !olderThan(c.lastUsed, p.LastDownloadedDays, now) {
-		return false
+	if m.exName != nil && m.exName.MatchString(subject) || m.exVersion != nil && m.exVersion.MatchString(k.version) {
+		return ""
+	}
+	var why []string
+	if p.Retain > 0 {
+		if c.rank <= p.Retain {
+			return ""
+		}
+		why = append(why, fmt.Sprintf("version %d of %d by %s, retain %d", c.rank, c.ranked, p.RetainSortBy, p.Retain))
+	}
+	if p.ComponentAgeDays > 0 {
+		if !olderThan(c.newest, p.ComponentAgeDays, now) {
+			return ""
+		}
+		why = append(why, fmt.Sprintf("updated %d days ago (componentAgeDays %d)", int(now.Sub(c.newest)/(24*time.Hour)), p.ComponentAgeDays))
+	}
+	if p.LastDownloadedDays > 0 {
+		if !olderThan(c.lastUsed, p.LastDownloadedDays, now) {
+			return ""
+		}
+		why = append(why, fmt.Sprintf("not downloaded for %d days (lastDownloadedDays %d)", int(now.Sub(c.lastUsed)/(24*time.Hour)), p.LastDownloadedDays))
 	}
 	switch p.ReleaseType {
 	case "release":
 		if Prerelease(format, k.version) {
-			return false
+			return ""
 		}
+		why = append(why, "release")
 	case "prerelease":
 		if !Prerelease(format, k.version) {
-			return false
+			return ""
 		}
+		why = append(why, "prerelease")
 	}
-	if pattern != nil {
-		subject := k.name
-		if k.group != "" {
-			subject = k.group + ":" + k.name
+	if m.name != nil {
+		if !m.name.MatchString(subject) {
+			return ""
 		}
-		if !pattern.MatchString(subject) {
-			return false
-		}
+		why = append(why, "name matches namePattern")
 	}
-	return true
+	if m.path != nil {
+		if !slices.ContainsFunc(c.assets, func(a component.Asset) bool { return m.path.MatchString(a.Path) || m.path.MatchString("/"+a.Path) }) {
+			return ""
+		}
+		why = append(why, "an asset path matches pathPattern")
+	}
+	return strings.Join(why, "; ")
 }

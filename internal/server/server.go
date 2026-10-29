@@ -109,6 +109,7 @@ func (s *Server) Handler() http.Handler {
 	if s.Nexus != nil {
 		mux.Handle("/service/rest/v1/", s.Nexus) // the exact status route above stays the plain ping
 		mux.Handle("GET /service/rest/swagger.json", s.Nexus)
+		mux.Handle("GET /service/rest/atlas/system-information", s.Nexus)
 	}
 	return s.wrap(mux)
 }
