@@ -2,18 +2,23 @@
 // /-/api/search/components, filtering live as the criteria change, with a
 // drilldown to component and asset details (plan 10 Decision 8).
 import {
-  h, put, api, apiRepo, enc, APIError, browseLink, componentLink, searchLink, fmtDate, nameCell, FORMATS, FORMAT_NAMES,
+  h, put, api, apiRepo, enc, APIError, browseLink, componentLink, searchLink, fmtDate, nameCell, FORMATS, FORMAT_NAMES, SEARCH_FORMATS,
   tbl, pageHead, loading, truncNote, debounce, handleError, icon, loadRepos, state,
 } from "./util.js";
 import { t } from "./i18n.js";
 import { componentView, assetView, deriveComp, dockerTagView } from "./browse.js";
 
 // kinds holds the per-format criteria (Decision 4): [hash key, label, API
-// parameter]. Coordinates keep their technical names in both languages.
+// parameter]. Coordinates keep their technical names in both languages; a
+// format without its own criteria searches by keyword, group, name and version.
 function kinds() {
   const nv = (nameLabel) => [["name", nameLabel || t("col.name"), "name"], ["version", t("col.version"), "version"]];
   const of = (f) => t("search.fmt", { f });
-  return {
+  const out = {};
+  for (const [f, label] of Object.entries(SEARCH_FORMATS)) {
+    out[f] = { title: of(label), fmt: f, fields: [["keyword", t("search.keyword"), "keyword"], ["group", t("comp.group"), "group"]].concat(nv()) };
+  }
+  return Object.assign(out, {
     generic: { title: t("nav.search") },
     custom: { title: t("nav.searchCustom") },
     maven: { title: of("Maven"), fmt: "maven", fields: [["groupId", "Group ID", "group"], ["artifactId", "Artifact ID", "name"],
@@ -21,10 +26,10 @@ function kinds() {
       ["extension", "Extension", "extension"]] },
     npm: { title: of("npm"), fmt: "npm", fields: [["scope", "Scope", "group"]].concat(nv()) },
     pypi: { title: of("PyPI"), fmt: "pypi", fields: nv() },
-    golang: { title: of("Go"), fmt: "go", fields: nv(t("search.module")) },
+    go: { title: of("Go"), fmt: "go", fields: nv(t("search.module")) },
     cargo: { title: of("Cargo"), fmt: "cargo", fields: nv(t("search.crate")) },
     docker: { title: of("Docker"), fmt: "docker", fields: [["name", t("docker.image"), "name"], ["version", t("docker.tag"), "version"]] },
-  };
+  });
 }
 
 // viewSearch: #browse/search/<kind>[=<urlencoded criteria>].
@@ -255,7 +260,7 @@ export async function viewSearch(view, kind, criteria) {
 export async function viewComponent(view, name, criteria) {
   const r = await api(apiRepo(name));
   const from = criteria.get("from") || "";
-  const returnTo = from.startsWith("#browse/search/") ? from : searchLink("generic", { repo: name });
+  const returnTo = from.startsWith("#browse/search") ? from : searchLink("generic", { repo: name });
   const out = view;
   let seq = 0;
   const live = () => view.isConnected;

@@ -1,16 +1,18 @@
 // Access and system screens (plan 10 Decision 8; the tasks and cleanup
 // policies are in ops.js, users, roles, realms and the account page in
-// access.js): API tokens, status and system information. Admin screens use the routes: the list at "#admin/<screen>",
-// a detail at "#admin/<screen>:<id>".
+// access.js): API tokens, the support screens (status, logs, metrics, support
+// ZIP, system information), nodes, the API view and the trust store. Admin
+// screens use the routes: the list at "#admin/<group>/<screen>", a detail at
+// "#admin/<group>/<screen>:<id>".
 import {
-  state, h, put, api, enc, encSeg, alive, filterBar, row, fmtBytes, fmtNum, fmtDate, fmtUptime,
+  state, h, put, api, enc, encSeg, alive, filterBar, row, fmtBytes, fmtNum, fmtDate, fmtUptime, taskName,
   copyLine, copyButton, pageHead, loading, truncNote, card, kv, stat, tbl, handleError, needLogin, icon, s, markBusy,
 } from "./util.js";
 import { t } from "./i18n.js";
 import { confirmDelete, viewRepos } from "./browse.js";
 import { viewRepoForm, DEFAULT_RECIPE } from "./repoform.js";
-import { viewTasks, viewPolicies, trendCard, logsCard, viewRoutingRules, viewSelectors, viewWebhooks, viewTags, viewStaging } from "./ops.js";
-import { viewUsers, viewRoles, viewRealms, viewUserTokens } from "./access.js";
+import { viewTasks, viewPolicies, trendCard, logsCard, viewRoutingRules, viewSelectors, viewWebhooks, viewStaging } from "./ops.js";
+import { viewUsers, viewRoles, viewRealms, viewRealmConfig, viewPrivileges, viewUserTokens } from "./access.js";
 import { viewBlobStores, viewGeneral, viewVulnerability, viewQuarantine } from "./settings.js";
 import { field, fields, sel, textIn, button, formState, errList } from "./ops.js";
 
@@ -33,7 +35,7 @@ const notFound = (text) => h("section", { class: "card" }, h("div", { class: "em
 
 // ---- API tokens -------------------------------------------------------------------
 
-// viewTokens: admin shows every user's tokens ("#admin/security/usertoken")
+// viewTokens: admin shows every user's tokens ("#admin/security/apitokens")
 // and can create one for another user; otherwise only the caller's own.
 export async function viewTokens(view, admin) {
   if (state.me.anonymous) return needLogin(view, t("nav.tokens"));
@@ -122,10 +124,11 @@ export async function viewTokens(view, admin) {
   await load();
 }
 
-// ---- status --------------------------------------------------------------------------
+// ---- metrics: runtime figures, Prometheus, thread dump ---------------------------------
+//   #admin/support/metrics
 
 const rssSamples = []; // last 60 RSS samples, kept across visits
-let lastStatus = null;
+let lastMetrics = null;
 let statusUser = null; // whose samples these are
 
 function sparkline(values) {
@@ -145,12 +148,12 @@ function sparkline(values) {
   return svg;
 }
 
-// metrics returns the metrics nodes; it polls /-/api/status every 5 s
+// metrics returns the metrics nodes; it polls GET /-/metrics every 5 s
 // while the page is visible, until the route changes.
-function metrics(isLive, onData) {
+function metrics(isLive) {
   if (statusUser !== state.me.user) { // another user signed in: drop the old samples
     rssSamples.length = 0;
-    lastStatus = null;
+    lastMetrics = null;
     statusUser = state.me.user;
   }
   const stats = h("div", { class: "stats" }, loading());
@@ -162,29 +165,27 @@ function metrics(isLive, onData) {
       stat({ label: "RSS", value: st.rssBytes ? fmtBytes(st.rssBytes) : dash, foot: t("st.rssFoot") }),
       stat({ label: "Heap", value: fmtBytes(st.heapAllocBytes), foot: t("st.heapFoot", { n: fmtBytes(st.heapSysBytes) }) }),
       stat({ label: "Goroutines", value: fmtNum(st.goroutines), foot: t("st.gcFoot", { n: fmtNum(st.numGC) }) }),
-      stat({ label: t("st.uptime"), value: fmtUptime(st.uptimeSeconds), foot: st.version ? t("st.version", { v: st.version }) : "", right: t("st.runtime", { n: fmtBytes(st.sysBytes) }) }));
+      stat({ label: "Sys", value: fmtBytes(st.sysBytes), foot: t("met.sysFoot") }));
     put(spark, sparkline(rssSamples),
       h("div", { class: "spark-meta" },
         h("span", null, rssSamples.length ? t("st.min", { n: fmtBytes(Math.min(...rssSamples)) }) : ""),
         h("span", null, last ? t("st.now", { n: fmtBytes(last) }) : t("st.noRss")),
-        h("span", null, rssSamples.length ? t("st.max", { n: fmtBytes(Math.max(...rssSamples)) }) : "")),
-      h("p", { class: "hint" }, t("st.blobs", { n: fmtNum(st.blobs), size: fmtBytes(st.blobBytes) })));
+        h("span", null, rssSamples.length ? t("st.max", { n: fmtBytes(Math.max(...rssSamples)) }) : "")));
   };
   let busy = false, stopped = false;
   async function poll() {
     if (busy || stopped || !isLive()) return;
     busy = true;
     try {
-      const st = await api("status");
+      const st = await api("/-/metrics");
       if (!isLive()) return;
       if (st.rssBytes) {
         rssSamples.push(st.rssBytes);
         if (rssSamples.length > 60) rssSamples.splice(0, rssSamples.length - 60);
       }
-      lastStatus = st;
+      lastMetrics = st;
       render(st);
       updated.textContent = t("st.updated", { time: fmtDate(new Date()) });
-      if (onData) onData();
     } catch (e) {
       if (isLive()) {
         if (e.status === 401 || e.status === 403) stop(); // signed out or not allowed: polling cannot succeed
@@ -199,21 +200,91 @@ function metrics(isLive, onData) {
   document.addEventListener("visibilitychange", onVis);
   const stop = () => { stopped = true; clearInterval(timer); document.removeEventListener("visibilitychange", onVis); };
   state.leaving.push(stop);
-  if (lastStatus) render(lastStatus); // no flash when moving between list and detail
+  if (lastMetrics) render(lastMetrics); // no flash when coming back
   poll();
-  return { stats, card: card(t("st.rssTitle"), t("st.rssSub"), spark, updated), poll };
+  return { stats, card: card(t("st.rssTitle"), t("st.rssSub"), spark, updated) };
 }
+
+// fetchText gets a text/plain API answer (api() expects JSON).
+async function fetchText(path) {
+  const res = await fetch("/-/api/" + path, { credentials: "same-origin", headers: { "X-Command-Center-UI": "1" } });
+  if (!res.ok) {
+    let msg = res.status + " " + res.statusText;
+    try { const d = await res.json(); if (d && d.error) msg = d.error; } catch (e) { /* not JSON */ }
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  return res.text();
+}
+
+async function viewMetrics(view) {
+  const isLive = alive();
+  const st = await api("settings").catch(() => null);
+  if (!isLive()) return;
+  const m = metrics(isLive);
+
+  // thread dump
+  const pre = h("pre", { class: "code threads", tabindex: "0", hidden: true });
+  const tools = h("div", { class: "actions", hidden: true });
+  const load = button(t("sup.threadsLoad"), "primary");
+  let dumpURL = null;
+  state.leaving.push(() => { if (dumpURL) URL.revokeObjectURL(dumpURL); });
+  load.addEventListener("click", async () => {
+    load.disabled = true;
+    try {
+      const text = await fetchText("support/threads");
+      if (!isLive()) return;
+      pre.textContent = text;
+      pre.hidden = false;
+      if (dumpURL) URL.revokeObjectURL(dumpURL);
+      dumpURL = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+      const dl = h("a", { class: "btn small", download: "threads.txt" }, t("sup.threadsSave"));
+      dl.setAttribute("href", dumpURL); // trusted URL created above
+      put(tools, copyButton(text, pre, t("sup.threadsCopy")), dl, h("span", { class: "tiny muted" }, t("sup.threadsSize", { n: fmtNum(text.split("\n").length) })));
+      tools.hidden = false;
+    } catch (e) {
+      if (isLive()) handleError(e);
+    } finally { load.disabled = false; }
+  });
+  const threads = card(t("sup.threadsTitle"), t("sup.threadsSub"), [h("div", { class: "actions" }, load, tools), pre]);
+
+  // Prometheus endpoint and the anonymous-scrape setting
+  const anon = h("input", { type: "checkbox", checked: !!(st && st.metricsAnonymous), disabled: !st });
+  const anonMsg = h("p", { class: "tiny muted", role: "status" });
+  anon.addEventListener("change", async () => {
+    anon.disabled = true;
+    try {
+      await api("settings", { method: "PUT", body: { metricsAnonymous: anon.checked } });
+      if (isLive()) anonMsg.textContent = t("gen.saved");
+    } catch (e) {
+      if (!isLive()) return;
+      anon.checked = !anon.checked;
+      handleError(e);
+    } finally { anon.disabled = false; }
+  });
+  const prom = card(t("sup.metricsTitle"), t("sup.metricsSub"), [
+    copyLine(location.origin + "/-/metrics/prometheus", t("sup.metricsCopy")),
+    h("p", { class: "tiny muted metrics-auth" }, t("sup.metricsAuth")),
+    h("div", { class: "field" }, h("label", { class: "check" }, anon, t("sup.metricsAnon")), h("small", null, t("sup.metricsAnonHelp"))), anonMsg]);
+
+  put(view, pageHead(t("nav.metrics"), sub(t("met.sub"))),
+    m.stats,
+    h("div", { class: "two" }, trendCard(isLive, "24h", t("st.trend"), t("st.trendSub")), m.card),
+    h("div", { class: "two" }, prom, threads));
+}
+
+// ---- status: the health checks ---------------------------------------------------------
+//   #admin/support/status[:<check>]
 
 const statusLink = (name) => "#admin/support/status" + (name ? ":" + enc(name) : "");
 const healthBadge = (ok) => badge([h("span", { class: "dot " + (ok ? "ok" : "err"), "aria-hidden": "true" }), ok ? t("st.ok") : t("st.bad")]);
 
-async function viewStatus(view, name, criteria) {
+async function viewStatus(view, name) {
   const isLive = alive();
-  let checks = null;
-  // Download needs both the metrics and the health checks, so it waits for the first poll.
-  const syncDl = () => { dl.disabled = !(checks && lastStatus); };
-  const m = metrics(isLive, () => syncDl());
+  let checks = null, info = null;
   const box = h("div", null, loading());
+  const about = h("span");
   const refresh = h("button", { type: "button", class: "btn" }, icon("refresh"), t("st.refresh"));
   const dl = h("button", { type: "button", class: "btn", disabled: true }, t("common.download"));
 
@@ -241,10 +312,12 @@ async function viewStatus(view, name, criteria) {
   const load = async () => {
     refresh.disabled = true;
     try {
-      const d = await api("status/checks");
+      const [d, st] = await Promise.all([api("status/checks"), api("status").catch(() => null)]);
       if (!isLive()) return;
       checks = d.checks || [];
-      syncDl();
+      info = st;
+      put(about, st ? " " + [st.version ? t("st.version", { v: st.version }) : "", t("st.uptime") + " " + fmtUptime(st.uptimeSeconds)].filter(Boolean).join(" · ") : null);
+      dl.disabled = false;
       render();
     } catch (e) {
       if (!isLive()) return;
@@ -254,137 +327,26 @@ async function viewStatus(view, name, criteria) {
       refresh.disabled = false;
     }
   };
-  refresh.addEventListener("click", () => { m.poll(); load(); });
-  dl.addEventListener("click", () => downloadJSON("status.json", { generated: new Date().toISOString(), metrics: lastStatus, checks }));
-
-  const ops = name === undefined; // the request chart and the logs belong to the overview
-  put(view, pageHead(t("nav.status"), sub(t("st.sub")), acts(refresh, dl), { eyebrow: t("sys.eyebrow") }),
-    box,
-    ops ? [
-      h("div", { class: "two" }, trendCard(isLive, "24h", t("st.trend"), t("st.trendSub")), m.card),
-      logsCard(isLive, criteria)] : null,
-    h("h2", { class: "section-title" }, t("st.metrics")), m.stats, ops ? null : m.card,
-    ops ? systemInfoDisclosure(isLive) : null);
-  if (criteria && criteria.has("repo")) view.querySelector("#repository-logs").scrollIntoView({ block: "start" });
+  refresh.addEventListener("click", load);
+  dl.addEventListener("click", () => downloadJSON("status.json", { generated: new Date().toISOString(), status: info, checks }));
+  put(view, pageHead(t("nav.status"), h("p", null, t("st.sub"), about), acts(refresh, dl)), box);
   await load();
 }
 
-// ---- system information ---------------------------------------------------------------
+// ---- logs and the log level ------------------------------------------------------------
+//   #admin/support/logs[?repo=&range=]   #admin/support/logging
 
-const SYS_SECTIONS = ["commandcenter-status", "commandcenter-configuration", "system-runtime", "system-environment", "system-filestores"];
-// tk looks up "<base>.<k>"; here the known sections ("sys.status", …).
-const tk = (base, k) => t(base + "." + k);
-const BYTE_KEY = /bytes$|^heap|^sys$/i;
-
-function sysValue(k, v) {
-  if (v === "" || v === null || v === undefined) return dash;
-  if (typeof v === "object") return Object.entries(v).map(([a, b]) => a + "=" + b).join(", ") || dash;
-  if (typeof v === "number" && BYTE_KEY.test(k) && v >= 1024) return fmtNum(v) + " (" + fmtBytes(v) + ")";
-  return String(v);
-}
-
-function systemInfoTable(d) {
-  const names = SYS_SECTIONS.filter((n) => d[n]).concat(Object.keys(d).filter((n) => !SYS_SECTIONS.includes(n)).sort());
-  return tbl([t("sys.section"), t("col.name"), t("sys.value")], names.flatMap((n) =>
-    Object.entries(d[n] || {}).map(([k, v]) => row([
-      [SYS_SECTIONS.includes(n) ? tk("sys", n.replace(/^[a-z]+-/, "")) : n],
-      [k], [sysValue(k, v)],
-    ]))));
-}
-
-function systemInfoDisclosure(isLive) {
-  const body = h("div", null);
-  const details = h("details", { class: "card system-info" },
-    h("summary", { class: "card-head" }, t("nav.sysinfo")), body);
-  let loaded = false, busy = false;
-  details.addEventListener("toggle", async () => {
-    if (!details.open || loaded || busy) return;
-    busy = true;
-    put(body, loading());
-    try {
-      const d = await api("systeminformation");
-      if (!isLive()) return;
-      const dl = h("button", { type: "button", class: "btn small", onclick: () => downloadJSON("sysinfo.json", d) }, t("common.download"));
-      put(body, h("div", { class: "toolbar" }, h("span", { class: "grow" }, t("sys.sub")), dl), systemInfoTable(d));
-      loaded = true;
-    } catch (e) {
-      if (isLive()) { put(body, h("div", { class: "empty" }, e.message)); handleError(e); }
-    } finally { busy = false; }
-  });
-  return details;
-}
-
-async function viewSysInfo(view) {
+async function viewLogs(view, criteria) {
   const isLive = alive();
-  const d = await api("systeminformation");
-  if (!isLive()) return;
-  const dl = h("button", { type: "button", class: "btn" }, t("common.download"));
-  dl.addEventListener("click", () => downloadJSON("sysinfo.json", d));
-  const panel = card(t("nav.sysinfo"), t("sys.sub"), null);
-  panel.appendChild(systemInfoTable(d));
-  put(view,
-    pageHead(t("nav.sysinfo"), sub(t("sys.sub")), acts(dl), { eyebrow: t("sys.eyebrow") }),
-    panel);
+  put(view, pageHead(t("nav.logs")), logsCard(isLive, criteria));
 }
 
-// ---- support: bundle, thread dump, log level, metrics ---------------------------------
-//   #admin/system/support
-
-const ZIP_ENTRIES = ["info.json", "config.json", "repositories.json", "blobstores.json", "status.json", "sysinfo.json", "tasks.json", "webhooks.json", "request-stats.json", "events.json", "logs.txt", "threads.txt", "metrics.txt"];
 const LOG_LEVELS = ["debug", "info", "warn", "error"]; // what PUT /-/api/logging accepts
 
-// fetchText gets a text/plain API answer (api() expects JSON).
-async function fetchText(path) {
-  const res = await fetch("/-/api/" + path, { credentials: "same-origin", headers: { "X-Command-Center-UI": "1" } });
-  if (!res.ok) {
-    let msg = res.status + " " + res.statusText;
-    try { const d = await res.json(); if (d && d.error) msg = d.error; } catch (e) { /* not JSON */ }
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
-  return res.text();
-}
-
-async function viewSupport(view) {
+async function viewLogging(view) {
   const isLive = alive();
-  const eb = { eyebrow: t("sys.eyebrow") };
-  const [lg, st] = await Promise.all([api("logging").catch((e) => ({ error: e })), api("settings").catch(() => null)]);
+  const lg = await api("logging").catch((e) => ({ error: e }));
   if (!isLive()) return;
-
-  // support bundle: a plain link, so the browser saves the zip
-  const zip = card(t("sup.zipTitle"), t("sup.zipSub"), [
-    h("p", { class: "tiny" }, t("sup.zipContains")),
-    h("p", { class: "tiny mono zip-entries" }, ZIP_ENTRIES.join(" · ")),
-    h("div", { class: "notice" }, t("sup.zipRedacted")),
-    h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/-/api/support/zip", download: "" }, t("sup.zipDownload")))]);
-
-  // thread dump
-  const pre = h("pre", { class: "code threads", tabindex: "0", hidden: true });
-  const tools = h("div", { class: "actions", hidden: true });
-  const load = button(t("sup.threadsLoad"), "primary");
-  let dumpURL = null;
-  state.leaving.push(() => { if (dumpURL) URL.revokeObjectURL(dumpURL); });
-  load.addEventListener("click", async () => {
-    load.disabled = true;
-    try {
-      const text = await fetchText("support/threads");
-      if (!isLive()) return;
-      pre.textContent = text;
-      pre.hidden = false;
-      if (dumpURL) URL.revokeObjectURL(dumpURL);
-      dumpURL = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
-      const dl = h("a", { class: "btn small", download: "threads.txt" }, t("sup.threadsSave"));
-      dl.setAttribute("href", dumpURL); // trusted URL created above
-      put(tools, copyButton(text, pre, t("sup.threadsCopy")), dl, h("span", { class: "tiny muted" }, t("sup.threadsSize", { n: fmtNum(text.split("\n").length) })));
-      tools.hidden = false;
-    } catch (e) {
-      if (isLive()) handleError(e);
-    } finally { load.disabled = false; }
-  });
-  const threads = card(t("sup.threadsTitle"), t("sup.threadsSub"), [h("div", { class: "actions" }, load, tools), pre]);
-
-  // runtime log level
   const level = sel(LOG_LEVELS.map((l) => [l, l.toUpperCase()]), lg && LOG_LEVELS.includes(lg.level) ? lg.level : "info", { "aria-label": t("sup.level") });
   const levelMsg = h("p", { class: "tiny muted", role: "status" });
   const unavailable = lg && lg.error;
@@ -405,35 +367,135 @@ async function viewSupport(view) {
       handleError(e);
     } finally { level.disabled = !!unavailable; }
   });
-  const logging = card(t("sup.levelTitle"), t("sup.levelSub"), [
-    fields(field(t("sup.level"), level, t("sup.levelHelp"), { full: true })), levelMsg,
-    h("div", { class: "notice amber" }, t("sup.levelNote"))]);
+  put(view, pageHead(t("nav.logging"), sub(t("sup.levelSub"))),
+    card(t("sup.levelTitle"), null, [
+      fields(field(t("sup.level"), level, t("sup.levelHelp"), { full: true })), levelMsg,
+      h("div", { class: "notice amber" }, t("sup.levelNote"))]));
+}
 
-  // Prometheus endpoint and the anonymous-scrape setting
-  const anon = h("input", { type: "checkbox", checked: !!(st && st.metricsAnonymous), disabled: !st });
-  const anonMsg = h("p", { class: "tiny muted", role: "status" });
-  anon.addEventListener("change", async () => {
-    anon.disabled = true;
-    try {
-      await api("settings", { method: "PUT", body: { metricsAnonymous: anon.checked } });
-      if (isLive()) anonMsg.textContent = t("gen.saved");
-    } catch (e) {
-      if (!isLive()) return;
-      anon.checked = !anon.checked;
-      handleError(e);
-    } finally { anon.disabled = false; }
+// ---- support ZIP -----------------------------------------------------------------------
+//   #admin/support/supportzip
+
+const ZIP_ENTRIES = ["info.json", "config.json", "repositories.json", "blobstores.json", "status.json", "sysinfo.json", "tasks.json", "webhooks.json", "request-stats.json", "events.json", "logs.txt", "threads.txt", "metrics.txt"];
+
+async function viewSupportZip(view) {
+  // a plain link, so the browser saves the zip
+  put(view, pageHead(t("nav.supportzip"), sub(t("sup.zipSub"))),
+    card(t("sup.zipTitle"), null, [
+      h("p", { class: "tiny" }, t("sup.zipContains")),
+      h("p", { class: "tiny mono zip-entries" }, ZIP_ENTRIES.join(" · ")),
+      h("div", { class: "notice" }, t("sup.zipRedacted")),
+      h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/-/api/support/zip", download: "" }, t("sup.zipDownload")))]));
+}
+
+// ---- system information ---------------------------------------------------------------
+//   #admin/support/systeminformation: Nexus's sections (GET /service/rest/atlas/system-information)
+
+const BYTE_KEY = /bytes$|^heap|^sys$|memory$|space$/i;
+const SYS_ORDER = ["nexus-status", "nexus-node", "nexus-configuration", "nexus-properties", "system-time", "system-runtime", "system-filestores"]; // Nexus's order
+
+function sysValue(k, v) {
+  if (v === "" || v === null || v === undefined) return dash;
+  if (typeof v === "object") return Object.entries(v).map(([a, b]) => a + "=" + (b === null ? dash : b)).join(", ") || dash;
+  if (typeof v === "number" && BYTE_KEY.test(k) && v >= 1024) return fmtNum(v) + " (" + fmtBytes(v) + ")";
+  return String(v);
+}
+
+async function viewSysInfo(view) {
+  const isLive = alive();
+  const d = await api("/service/rest/atlas/system-information");
+  if (!isLive()) return;
+  const dl = h("button", { type: "button", class: "btn" }, t("common.download"));
+  dl.addEventListener("click", () => downloadJSON("sysinfo.json", d));
+  const copy = copyButton(JSON.stringify(d, null, 2), null, t("sys.copy"), t("sys.copy"));
+  copy.classList.remove("small");
+  put(view, pageHead(t("nav.sysinfo"), sub(t("sys.sub")), acts(copy, dl)),
+    h("div", { class: "stack sysinfo" }, SYS_ORDER.filter((n) => d[n]).concat(Object.keys(d).filter((n) => !SYS_ORDER.includes(n))).map((n) => {
+      const c = card(n, null, null);
+      c.appendChild(tbl([t("col.name"), t("sys.value")], Object.entries(d[n] || {}).map(([k, v]) => row([[k, "mono"], [sysValue(k, v)]])), t("common.noItems")));
+      return c;
+    })));
+}
+
+// ---- nodes ----------------------------------------------------------------------------
+//   #admin/system/nodes
+
+async function viewNodes(view) {
+  const isLive = alive();
+  const [d, td] = await Promise.all([api("nodes"), api("tasks").catch(() => null)]);
+  if (!isLive()) return;
+  const tasks = new Map(((td && td.tasks) || []).map((x) => [x.id, x]));
+  const taskCell = (id) => (!id ? dash : tasks.has(id) ? h("a", { href: "#admin/system/tasks:" + enc(id) }, taskName(tasks.get(id))) : h("code", null, id));
+  const yes = (on, cls) => (on ? dotBadge(t("nodes.yes"), cls) : h("span", { class: "muted" }, t("nodes.no")));
+  const c = card(t("nav.nodes"), t("nodes.cardSub"), null);
+  c.appendChild(tbl([t("nodes.id"), t("nodes.host"), t("col.version"), t("nodes.schema"), t("nodes.started"), t("nodes.heartbeat"), t("nodes.alive"), t("nodes.draining"), t("nodes.leader"), t("nodes.task")],
+    (d.nodes || []).map((n) => row([
+      [[h("code", null, n.id), n.id === d.self ? [" ", badge(t("nodes.self"), "blue")] : null], "name"],
+      [n.hostname || dash], [n.version || dash], [String(n.schema), "num"],
+      [fmtDate(n.startedAt), "nowrap"], [fmtDate(n.heartbeatAt), "nowrap"],
+      [yes(n.alive, "green")], [yes(n.draining, "amber")], [yes(n.leader, null)],
+      [taskCell(n.runningTask)],
+    ])), t("nodes.none")));
+  put(view, pageHead(t("nav.nodes"), sub(t("nodes.sub"))), c);
+}
+
+// ---- API: a readable view of the OpenAPI document ---------------------------------------
+//   #admin/system/api
+
+const METHODS = ["get", "post", "put", "delete"];
+
+async function viewApi(view) {
+  const isLive = alive();
+  const doc = await api("openapi.json");
+  if (!isLive()) return;
+  const groups = new Map();
+  for (const [path, ops] of Object.entries(doc.paths || {})) {
+    for (const [method, op] of Object.entries(ops || {})) {
+      const tag = (op.tags && op.tags[0]) || "other";
+      if (!groups.has(tag)) groups.set(tag, []);
+      groups.get(tag).push({ path, method, op });
+    }
+  }
+  const items = [];
+  const ref = (o) => { const r = o && o.content && o.content["application/json"] && o.content["application/json"].schema; return r && r.$ref ? r.$ref.split("/").pop() : ""; };
+  const cards = [...groups.keys()].sort().map((tag) => {
+    const list = groups.get(tag).sort((a, b) => a.path.localeCompare(b.path) || METHODS.indexOf(a.method) - METHODS.indexOf(b.method));
+    const els = list.map(({ path, method, op }) => {
+      const query = (op.parameters || []).filter((p) => p.in === "query").map((p) => p.name);
+      const body = ref(op.requestBody);
+      const el = h("div", { class: "api-op" },
+        h("div", { class: "api-line" }, h("span", { class: "api-m m-" + method }, method.toUpperCase()), h("code", null, path)),
+        h("p", null, op.summary || dash),
+        h("p", { class: "tiny muted" }, [
+          op.description ? op.description.replace(/^Requires: /, t("api.auth") + ": ").replace(/\.$/, "") : t("api.public"),
+          query.length ? t("api.query") + ": " + query.join(", ") : "",
+          body ? t("api.body") + ": " + body : "",
+          t("api.replies") + ": " + Object.keys(op.responses || {}).join(", "),
+        ].filter(Boolean).join(" · ")));
+      el.dataset.key = (method + " " + path + " " + (op.summary || "") + " " + tag).toLowerCase();
+      items.push(el);
+      return el;
+    });
+    // a group opens on a click, or by itself while a filter matches in it
+    return h("details", { class: "card system-info api-group" },
+      h("summary", { class: "card-head" }, h("div", null, h("h2", null, tag), h("p", null, t("api.count", { n: fmtNum(els.length) }))), icon("chevron", "api-chev")),
+      h("div", { class: "card-body" }, els));
   });
-  const metrics = card(t("sup.metricsTitle"), t("sup.metricsSub"), [
-    copyLine(location.origin + "/-/metrics/prometheus", t("sup.metricsCopy")),
-    h("p", { class: "tiny muted metrics-auth" }, t("sup.metricsAuth")),
-    h("div", { class: "field" }, h("label", { class: "check" }, anon, t("sup.metricsAnon")), h("small", null, t("sup.metricsAnonHelp"))), anonMsg]);
-
-  put(view, pageHead(t("nav.support"), sub(t("sup.sub")), null, eb),
-    h("div", { class: "two" }, h("div", { class: "stack" }, zip, threads), h("div", { class: "stack" }, logging, metrics)));
+  const f = filterBar(items, t("api.filter"), "api.shown");
+  f.bar.addEventListener("input", (ev) => {
+    const q = ev.target.value.trim();
+    for (const c of cards) {
+      c.hidden = ![...c.querySelectorAll(".api-op")].some((x) => !x.hidden);
+      c.open = !!q && !c.hidden;
+    }
+  });
+  put(view, pageHead(t("nav.api"), sub(t("api.sub", { v: (doc.info && doc.info.version) || "" })),
+    acts(h("a", { class: "btn", href: "/-/api/openapi.json", download: "openapi.json" }, t("api.download")))),
+    h("section", { class: "card" }, f.bar), f.none, h("div", { class: "stack api-list" }, cards));
 }
 
 // ---- SSL certificates (the trust store) ------------------------------------------------
-//   #admin/security/certificates
+//   #admin/security/sslcertificates
 
 const certName = (c) => c.subjectCommonName || c.subject || c.id;
 const fp = (id) => h("code", { class: "fp", title: id }, String(id || "").replace(/(.{2})(?=.)/g, "$1:"));
@@ -567,26 +629,42 @@ export function showSettings(view, key, p0, p1, criteria) {
       if (p0 === undefined) return viewRepos(view, true);
       if (p0 === "create") return viewRepoForm(view, { recipe: p1 === undefined ? DEFAULT_RECIPE : p1 });
       return viewRepoForm(view, { name: p0 });
-    case "admin/security/users": return viewUsers(view, p0);
-    case "admin/security/roles": return viewRoles(view, p0);
-    case "admin/security/realms": return viewRealms(view);
-    case "admin/security/usertoken": return viewTokens(view, true);
-    case "admin/support/status": return viewStatus(view, p0, criteria);
-    case "admin/support/systeminformation": return viewSysInfo(view);
-    case "admin/system/tasks": return viewTasks(view, p0);
-    case "admin/repository/cleanuppolicies": return viewPolicies(view, p0);
     case "admin/repository/blobstores": return viewBlobStores(view, p0);
-    case "admin/system/general": return viewGeneral(view);
+    case "admin/repository/selectors": return viewSelectors(view, p0);
+    case "admin/repository/cleanuppolicies": return viewPolicies(view, p0);
     case "admin/repository/routingrules": return viewRoutingRules(view, p0);
-    case "admin/security/contentselectors": return viewSelectors(view, p0);
-    case "admin/system/webhooks": return viewWebhooks(view, p0);
-    case "admin/system/support": return viewSupport(view);
-    case "admin/security/certificates": return viewCertificates(view);
-    case "admin/repository/tags": return viewTags(view, p0);
     case "admin/repository/staging": return viewStaging(view);
-    case "admin/repository/quarantine": return viewQuarantine(view);
-    case "admin/security/user-tokens": return viewUserTokens(view, true);
-    case "admin/system/vulnerability": return viewVulnerability(view);
+    case "admin/security/privileges": return viewPrivileges(view);
+    case "admin/security/roles": return viewRoles(view, p0);
+    case "admin/security/users": return viewUsers(view, p0);
+    case "admin/security/anonymous": return viewGeneral(view, "anonymous");
+    case "admin/security/ldap": return viewRealmConfig(view, "ldap");
+    case "admin/security/realms": return viewRealms(view);
+    case "admin/security/sslcertificates": return viewCertificates(view);
+    case "admin/security/oidc": return viewRealmConfig(view, "oidc");
+    case "admin/security/atlassiancrowd": return viewRealmConfig(view, "crowd");
+    case "admin/security/saml": return viewRealmConfig(view, "saml");
+    case "admin/security/rutauth": return viewRealmConfig(view, "rutauth");
+    case "admin/security/usertoken": { // every user's token, then the user token settings
+      const settings = h("div", { class: "ut-settings" });
+      return Promise.all([viewUserTokens(view, true, settings), viewGeneral(settings, "usertoken")]);
+    }
+    case "admin/security/apitokens": return viewTokens(view, true);
+    case "admin/firewall/settings": return viewVulnerability(view);
+    case "admin/firewall/quarantine": return viewQuarantine(view);
+    case "admin/support/logs": return viewLogs(view, criteria);
+    case "admin/support/logging": return viewLogging(view);
+    case "admin/support/metrics": return viewMetrics(view);
+    case "admin/support/supportzip": return viewSupportZip(view);
+    case "admin/support/systeminformation": return viewSysInfo(view);
+    case "admin/support/status": return viewStatus(view, p0);
+    case "admin/system/api": return viewApi(view);
+    case "admin/system/emailserver": return viewGeneral(view, "email");
+    case "admin/system/http": return viewGeneral(view, "http");
+    case "admin/system/nodes": return viewNodes(view);
+    case "admin/system/tasks": return viewTasks(view, p0);
+    case "admin/system/webhooks": return viewWebhooks(view, p0);
+    case "admin/system/general": return viewGeneral(view, "general");
   }
   return null;
 }

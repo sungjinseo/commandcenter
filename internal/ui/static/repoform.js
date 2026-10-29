@@ -568,7 +568,7 @@ export async function viewRepoForm(view, o) {
           h("div", { class: "field full" }, autoBlock.el, h("small", null, t("rf.autoBlockHelp"))),
           h("div", { class: "field full" }, blocked.el, h("small", null, t("rf.blockedHelp"))))) : null,
         hasFw ? card(t("rf.fw"), t("rf.fwSub"), fields(
-          h("div", { class: "field full" }, fwOn.el, h("small", null, t("rf.fwEnabledHelp"), " ", h("a", { href: "#admin/system/vulnerability" }, t("nav.vulnerability")))),
+          h("div", { class: "field full" }, fwOn.el, h("small", null, t("rf.fwEnabledHelp"), " ", h("a", { href: "#admin/firewall/settings" }, t("nav.vulnerability")))),
           h("div", { class: "field full" }, fwMal.el, h("small", null, t("rf.fwMaliciousHelp"))),
           field(t("rf.fwSev"), fwSev, t("rf.fwSevHelp"), { full: true }),
           field(t("rf.fwAllow"), fwAllow, t("rf.fwAllowHelp"), { full: true }))) : null,

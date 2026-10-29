@@ -1,9 +1,9 @@
 // Command Center web UI: a dependency-free single-page app in the Command
 // Center design (plan 10), with "#browse/..." and "#admin/..." hash routes.
 import {
-  state, h, put, badSeg, browseLink, searchLink, loading, pageHead, needAdmin, hideBanner, handleError, setAuthLostHook,
+  state, h, put, badSeg, browseLink, searchLink, loading, pageHead, needAdmin, needLogin, hideBanner, handleError, setAuthLostHook, SEARCH_FORMATS,
 } from "./util.js";
-import { initShell, renderChrome, openLogin, refreshMe } from "./shell.js";
+import { initShell, renderChrome, openLogin, refreshMe, screenTitle } from "./shell.js";
 import { t } from "./i18n.js";
 import { viewTokens, showSettings } from "./admin.js";
 import { viewAccount, viewUserTokens } from "./access.js";
@@ -11,33 +11,61 @@ import { viewWelcome } from "./dash.js";
 import { viewRepos, viewTree } from "./browse.js";
 import { viewSearch, viewComponent } from "./search.js";
 import { dropFlash } from "./repoform.js";
+import { viewTags } from "./ops.js";
 import { viewUploadList, viewUpload } from "./upload.js";
 
-const SEARCH_KINDS = ["generic", "custom", "cargo", "golang", "maven", "npm", "pypi", "docker"];
-
+// ADMIN_SCREENS: value is whether the screen takes a ":<id>" parameter.
 const ADMIN_SCREENS = {
   "admin/repository/repositories": true,
-  "admin/security/users": true,
-  "admin/security/roles": true,
-  "admin/security/realms": false,
-  "admin/security/usertoken": false,
-  "admin/support/status": true,
-  "admin/support/systeminformation": false,
-  "admin/system/tasks": true,
-  "admin/repository/cleanuppolicies": true,
   "admin/repository/blobstores": true,
-  "admin/system/general": false,
+  "admin/repository/selectors": true,
+  "admin/repository/cleanuppolicies": true,
   "admin/repository/routingrules": true,
-  "admin/security/contentselectors": true,
-  "admin/system/webhooks": true,
-  "admin/system/support": false,
-  "admin/security/certificates": false,
-  "admin/repository/tags": true,
   "admin/repository/staging": false,
-  "admin/repository/quarantine": false,
-  "admin/security/user-tokens": false,
-  "admin/system/vulnerability": false,
-}; // value: whether the screen takes a ":<id>" parameter
+  "admin/security/privileges": false,
+  "admin/security/roles": true,
+  "admin/security/users": true,
+  "admin/security/anonymous": false,
+  "admin/security/ldap": false,
+  "admin/security/realms": false,
+  "admin/security/sslcertificates": false,
+  "admin/security/oidc": false,
+  "admin/security/atlassiancrowd": false,
+  "admin/security/saml": false,
+  "admin/security/rutauth": false,
+  "admin/security/usertoken": false,
+  "admin/security/apitokens": false,
+  "admin/firewall/settings": false,
+  "admin/firewall/quarantine": false,
+  "admin/support/logs": false,
+  "admin/support/logging": false,
+  "admin/support/metrics": false,
+  "admin/support/supportzip": false,
+  "admin/support/systeminformation": false,
+  "admin/support/status": true,
+  "admin/system/api": false,
+  "admin/system/emailserver": false,
+  "admin/system/http": false,
+  "admin/system/nodes": false,
+  "admin/system/tasks": true,
+  "admin/system/webhooks": true,
+  "admin/system/general": false,
+};
+
+// MOVED maps the route heads of the earlier layout to their homes now; the
+// rest of the hash (":<id>", "=<criteria>", "?<query>") is kept.
+const MOVED = {
+  "admin/security/contentselectors": "admin/repository/selectors",
+  "admin/security/certificates": "admin/security/sslcertificates",
+  "admin/system/vulnerability": "admin/firewall/settings",
+  "admin/repository/quarantine": "admin/firewall/quarantine",
+  "admin/repository/tags": "browse/tags",
+  "admin/system/support": "admin/support/supportzip",
+  "user/user-token": "user/usertoken",
+  "admin/security/user-tokens": "admin/security/usertoken",
+  "browse/search/generic": "browse/search",
+  "browse/search/golang": "browse/search/go",
+};
 
 function dec(x) {
   try { return decodeURIComponent(x); } catch (e) { return null; }
@@ -65,7 +93,7 @@ function legacy(raw) {
     if (p.get("repo")) c.repo = p.get("repo");
     return searchLink("generic", Object.keys(c).length ? c : null);
   }
-  if (a === "tokens") return "#user/usertoken";
+  if (a === "tokens") return "#user/apitokens";
   if (a === "admin") return "#admin/support/status";
   if (a === "login") return "#login";
   return null;
@@ -82,15 +110,19 @@ export function parse(hash) {
   if (raw === "login") return { key: "login" };
   if (raw === "admin") return { redirect: "#admin/repository/repositories" };
   if (raw === "browse") return { redirect: "#browse/welcome" };
-  if (raw === "browse/search") return { redirect: "#browse/search/generic" };
+  if (raw === "user") return { redirect: "#user/account" };
+  let m = /^([a-z/-]+)([:=?].*)?$/.exec(raw);
+  if (m && Object.prototype.hasOwnProperty.call(MOVED, m[1])) return { redirect: "#" + MOVED[m[1]] + (m[2] || "") };
+  // The logs moved off the status screen with their filter links.
+  if (raw.startsWith("admin/support/status?")) return { redirect: "#admin/support/logs" + raw.slice("admin/support/status".length) };
 
-  // Search: browse/search/<kind>[=<urlencoded querystring>]
-  let m = /^browse\/search\/([a-z]+)(?:=(.*))?$/.exec(raw);
+  // Search: browse/search[/<custom|format>][=<urlencoded querystring>]
+  m = /^browse\/search(?:\/([a-z0-9]+))?(?:=(.*))?$/.exec(raw);
   if (m) {
-    if (!SEARCH_KINDS.includes(m[1])) return { notFound: true };
+    if (m[1] !== undefined && m[1] !== "custom" && !Object.prototype.hasOwnProperty.call(SEARCH_FORMATS, m[1])) return { notFound: true };
     const q = m[2] === undefined ? "" : dec(m[2]);
     if (q === null) return { notFound: true };
-    return { key: "browse/search/" + m[1], criteria: new URLSearchParams(q) };
+    return { key: "browse/search" + (m[1] ? "/" + m[1] : ""), criteria: new URLSearchParams(q) };
   }
 
   // Upload: browse/upload[/<repo>].
@@ -112,8 +144,8 @@ export function parse(hash) {
   }
 
   // Repository operations links carry log filters in the hash query.
-  m = /^admin\/support\/status\?(.*)$/.exec(raw);
-  if (m) return { key: "admin/support/status", params: [], criteria: new URLSearchParams(m[1]) };
+  m = /^admin\/support\/logs\?(.*)$/.exec(raw);
+  if (m) return { key: "admin/support/logs", params: [], criteria: new URLSearchParams(m[1]) };
 
   // Accept slash-form repository edit deep links alongside existing colon URLs.
   m = /^admin\/repository\/repositories\/([^/:]+)$/.exec(raw);
@@ -131,6 +163,7 @@ export function parse(hash) {
   if (params.some((x) => x === null || x === "" || badSeg(x))) return { notFound: true };
 
   if (head === "browse/welcome" && !params.length) return { key: head, params };
+  if (head === "browse/tags" && params.length < 2) return { key: head, params };
   if (head === "browse/browse") {
     if (params.length > 2) params.splice(1, params.length, params.slice(1).join(":"));
     // A path may hold "/" but no "." or ".." segment.
@@ -143,7 +176,7 @@ export function parse(hash) {
     if (params.length > max) return { notFound: true };
     return { key: head, params };
   }
-  if ((head === "user/account" || head === "user/usertoken" || head === "user/user-token") && !params.length) return { key: head, params };
+  if ((head === "user/account" || head === "user/usertoken" || head === "user/apitokens") && !params.length) return { key: head, params };
   return { notFound: true };
 }
 
@@ -169,21 +202,17 @@ async function show(view, r) {
       return viewTree(view, p0, p1);
     case "browse/component": return viewComponent(view, p0, r.criteria);
     case "browse/upload": return p0 === undefined ? viewUploadList(view) : viewUpload(view, p0);
+    case "browse/tags":
+      if (state.me.anonymous) return needLogin(view, t("nav.tags"));
+      if (p0 === "create" && !state.me.admin) return needAdmin(view, t("nav.tags"));
+      return viewTags(view, p0);
+    case "browse/search": return viewSearch(view, "generic", r.criteria);
     case "user/account": return viewAccount(view);
-    case "user/usertoken": return viewTokens(view, false);
-    case "user/user-token": return viewUserTokens(view, false);
+    case "user/usertoken": return viewUserTokens(view, false);
+    case "user/apitokens": return viewTokens(view, false);
   }
   if (r.key.startsWith("browse/search/")) return viewSearch(view, r.key.slice("browse/search/".length), r.criteria);
-  if (!state.me.admin) {
-    const titles = { "admin/repository/repositories": t("nav.repositories"), "admin/security/users": t("nav.users"), "admin/security/roles": t("nav.roles"), "admin/security/realms": t("nav.realms"), "admin/security/usertoken": t("nav.tokens"),
-      "admin/support/status": t("nav.status"), "admin/support/systeminformation": t("nav.sysinfo"), "admin/system/tasks": t("nav.tasks"),
-      "admin/repository/cleanuppolicies": t("nav.cleanup"), "admin/repository/blobstores": t("nav.blobstores"), "admin/system/general": t("nav.general"),
-      "admin/repository/routingrules": t("nav.routingrules"), "admin/security/contentselectors": t("nav.selectors"), "admin/system/webhooks": t("nav.webhooks"),
-      "admin/system/support": t("nav.support"), "admin/security/certificates": t("nav.certificates"),
-      "admin/repository/tags": t("nav.tags"), "admin/repository/staging": t("nav.staging"), "admin/repository/quarantine": t("nav.quarantine"),
-      "admin/security/user-tokens": t("nav.userTokens"), "admin/system/vulnerability": t("nav.vulnerability") };
-    return needAdmin(view, titles[r.key] || t("need.admin"));
-  }
+  if (!state.me.admin) return needAdmin(view, screenTitle(r.key));
   const out = showSettings(view, r.key, p0, p1, r.criteria);
   if (out) return out;
   return viewNotFound(view);
@@ -203,8 +232,8 @@ async function route() {
   dropFlash();
   const r = parse(location.hash);
   if (r.redirect) {
-    location.replace(r.redirect);
-    return;
+    history.replaceState(null, "", r.redirect); // no history entry and no hashchange: route the new hash now
+    return route();
   }
   hideBanner();
   renderChrome(chromeOf(r));

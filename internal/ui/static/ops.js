@@ -195,7 +195,7 @@ export function repositoryStatsCard(isLive) {
           t("repoOps.cache"), t("repoOps.bytesIn"), t("repoOps.bytesOut"), t("repoOps.latency"),
         ].map((label) => ({ t: label, cls: "num" })),
       ], d.repositories.map((r) => {
-        const href = "#admin/support/status?" + new URLSearchParams({ repo: r.name, range: selected });
+        const href = "#admin/support/logs?" + new URLSearchParams({ repo: r.name, range: selected });
         const cell = (v, format = fmtNum) => h("td", { class: "num" }, metric(v)
           ? v === 0 ? h("span", { class: "muted" }, format(v))
             : h("a", { class: "metric-link", href, title: t("repoOps.openLogs", { repo: r.name }) }, format(v)) : dash);
@@ -1145,13 +1145,13 @@ async function taskForm(view, id) {
 
 // ---- routing rules, content selectors and webhooks ---------------------------------
 //   #admin/repository/routingrules[:create|:<name>]
-//   #admin/security/contentselectors[:create|:<name>]
+//   #admin/repository/selectors[:create|:<name>]
 //   #admin/system/webhooks[:create|:<id>]
 // Each screen is a list, a create/edit form and a "try it" box that sends the
 // form's current values (unsaved) to the server's test or preview endpoint.
 
 const rrLink = (name) => "#admin/repository/routingrules" + (name ? ":" + enc(name) : "");
-const csLink = (name) => "#admin/security/contentselectors" + (name ? ":" + enc(name) : "");
+const csLink = (name) => "#admin/repository/selectors" + (name ? ":" + enc(name) : "");
 const whLink = (id) => "#admin/system/webhooks" + (id ? ":" + enc(id) : "");
 const lines = (ta) => ta.value.split("\n").map((x) => x.trim()).filter(Boolean);
 const MODE_KEYS = { BLOCK: "rr.block", ALLOW: "rr.allow" };
@@ -1472,11 +1472,11 @@ export async function viewWebhooks(view, id) {
 }
 
 // ---- tags and staging ----------------------------------------------------------------
-//   #admin/repository/tags[:create|:<name>]
+//   #browse/tags[:create|:<name>]   (signed-in users; editing a tag is for admins)
 //   #admin/repository/staging
 // Components are selected by the Nexus search parameters (exact, "*" wildcards).
 
-const tagLink = (name) => "#admin/repository/tags" + (name ? ":" + enc(name) : "");
+const tagLink = (name) => "#browse/tags" + (name ? ":" + enc(name) : "");
 const coordOf = (c) => (c.group ? c.group + ":" : "") + c.name;
 const attrsText = (a) => { const s = JSON.stringify(a || {}); return s === "{}" ? dash : s.length > 120 ? s.slice(0, 117) + "…" : s; };
 
@@ -1517,6 +1517,7 @@ function compTable(list, emptyText, noResult) {
 
 export async function viewTags(view, name) {
   const isLive = alive();
+  const admin = state.me.admin; // the API lets only admins create, edit and delete tags
   const eb = polEyebrow();
   const back = h("a", { class: "btn", href: tagLink() }, t("tag.back"));
   if (name === undefined) {
@@ -1543,7 +1544,7 @@ export async function viewTags(view, name) {
         more.hidden = !token;
       } catch (e) { handleError(e); } finally { more.disabled = false; }
     });
-    put(view, pageHead(t("nav.tags"), sub(t("tag.sub")), acts(h("a", { class: "btn", href: "#admin/repository/staging" }, t("nav.staging")), h("a", { class: "btn primary", href: tagLink("create") }, t("tag.create"))), eb),
+    put(view, pageHead(t("nav.tags"), sub(t("tag.sub")), admin ? acts(h("a", { class: "btn", href: "#admin/repository/staging" }, t("nav.staging")), h("a", { class: "btn primary", href: tagLink("create") }, t("tag.create"))) : null, eb),
       h("section", { class: "card" }, list.length ? h("div", { class: "tablewrap" }, h("table", null,
         h("thead", null, h("tr", null, [t("col.name"), t("tag.attrs"), t("col.updated")].map((x) => h("th", { scope: "col" }, x)), h("th", { scope: "col", class: "act" }, h("span", { class: "sr-only" }, t("col.actions"))))),
         body)) : h("div", { class: "empty" }, t("tag.none"))),
@@ -1564,8 +1565,8 @@ export async function viewTags(view, name) {
   const repos = await loadRepos(true);
   if (!isLive()) return;
   const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 256, class: "mono" });
-  const attrs = h("textarea", { class: "mono", rows: 8, spellcheck: "false", placeholder: '{"build": "1234", "stage": "qa"}' }, JSON.stringify(cur.attributes || {}, null, 2));
-  const save = h("button", { type: "submit", class: "btn primary" }, creating ? t("tag.createBtn") : t("roles.save"));
+  const attrs = h("textarea", { class: "mono", rows: 8, spellcheck: "false", readonly: !admin, placeholder: '{"build": "1234", "stage": "qa"}' }, JSON.stringify(cur.attributes || {}, null, 2));
+  const save = h("button", { type: "submit", class: "btn primary", hidden: !admin }, creating ? t("tag.createBtn") : t("roles.save"));
   const form = h("form", { novalidate: true });
   const fs = formState(form);
   put(form, fs.err, fields(
@@ -1623,7 +1624,7 @@ export async function viewTags(view, name) {
   assoc.addEventListener("click", runAssoc("POST"));
   dis.addEventListener("click", runAssoc("DELETE"));
   loadTagged();
-  const del = deleter(isLive, "tags", cur.name, t("tag.delText", { name: cur.name }), t("tag.delTitle"), tagLink(), () => "");
+  const del = admin ? deleter(isLive, "tags", cur.name, t("tag.delText", { name: cur.name }), t("tag.delTitle"), tagLink(), () => "") : null;
   put(view, pageHead(cur.name, sub(t("tag.detailSub", { time: fmtDate(cur.firstCreated) })), acts(back, del), eb), fs.ok,
     h("div", { class: "two" },
       h("div", { class: "stack" }, formCard, card(t("tag.tagged"), t("tag.taggedSub"), tagged)),

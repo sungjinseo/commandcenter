@@ -3,7 +3,8 @@
 // screens collect input and show its answers. The SMTP password is cleared
 // from its input as soon as it is read.
 //   #admin/repository/blobstores[:create|:<name>]
-//   #admin/system/general
+//   #admin/system/general, emailserver and http, #admin/security/anonymous and
+//   the user token settings of #admin/security/usertoken: one form, split by part
 import {
   h, put, adminRepoLink, api, enc, alive, pageHead, loading, card, kv, bar, tbl, handleError, loadRepos, fmtBytes, fmtNum, fmtDate, typeBadge,
   OSV_FORMATS, FORMAT_NAMES, sevBadge, osvLink, icon,
@@ -407,9 +408,14 @@ const intOf = (el) => (/^\s*\d+\s*$/.test(el.value) ? Number(el.value) : NaN);
 const numIn = (value, min, max) => h("input", { type: "number", inputmode: "numeric", min, max, step: 1, value: String(value) });
 const checkRow = (box, label, help) => h("div", { class: "field full" }, h("label", { class: "check" }, box, label), help ? h("small", null, help) : null);
 
-export async function viewGeneral(view) {
+// viewGeneral renders one part of the settings ("general", "anonymous", "http",
+// "email" or "usertoken"); a save sends only that part's changed fields, and
+// PUT /-/api/settings keeps every field the body leaves out.
+export async function viewGeneral(view, part) {
   const isLive = alive();
-  const [g0, sm0, repos, rl] = await Promise.all([api("settings"), api("settings/smtp"), loadRepos(true), api("roles").catch(() => null)]);
+  const on = (p) => part === p;
+  const [g0, sm0, repos, rl] = await Promise.all([api("settings"), on("email") ? api("settings/smtp") : {},
+    on("general") ? loadRepos(true) : [], on("general") ? api("roles").catch(() => null) : null]);
   if (!isLive()) return;
   let g = Object.assign({}, g0), sm = Object.assign({}, sm0); // what the server holds now
   const hp = () => Object.assign({ host: "", port: 0, username: "", passwordSet: false, nonProxyHosts: [] }, (g.http || {}).proxy || {});
@@ -545,12 +551,14 @@ export async function viewGeneral(view) {
     pwErr.hidden = true;
     const errs = [];
     const idleN = intOf(idle), upN = intOf(maxUp);
-    if (isNaN(idleN) || idleN < 5 || idleN > 10080) errs.push(t("gen.e.idle"));
-    if (isNaN(upN) || upN < 1 || upN > 1048576) errs.push(t("gen.e.upload"));
-    if (!baseURL.value.trim()) errs.push(t("gen.e.base"));
+    if (on("general")) {
+      if (isNaN(idleN) || idleN < 5 || idleN > 10080) errs.push(t("gen.e.idle"));
+      if (isNaN(upN) || upN < 1 || upN > 1048576) errs.push(t("gen.e.upload"));
+      if (!baseURL.value.trim()) errs.push(t("gen.e.base"));
+    }
     const ut = utBody();
-    if (!(ut.expirationDays >= 0 && ut.expirationDays <= 3650)) errs.push(t("gen.e.utDays"));
-    const hb = httpBody(), httpChanged = httpDirty();
+    if (on("usertoken") && !(ut.expirationDays >= 0 && ut.expirationDays <= 3650)) errs.push(t("gen.e.utDays"));
+    const hb = httpBody(), httpChanged = on("http") && httpDirty();
     if (httpChanged) {
       if (!(hb.connectTimeoutSeconds >= 1 && hb.connectTimeoutSeconds <= 600) || !(hb.timeoutSeconds >= 1 && hb.timeoutSeconds <= 600)) errs.push(t("http.e.timeout"));
       if (!(hb.retries >= 0 && hb.retries <= 10)) errs.push(t("http.e.retries"));
@@ -558,19 +566,21 @@ export async function viewGeneral(view) {
     }
     pxPw.value = ""; // the secret never stays in the page
     const body = {};
-    if (!errs.length) {
+    if (!errs.length && on("general")) {
       if (baseURL.value.trim().replace(/\/+$/, "") !== g.baseURL) body.baseURL = baseURL.value.trim();
-      if (anon.checked !== !!g.anonymousRead) body.anonymousRead = anon.checked;
-      if (authRead.checked !== !!g.authenticatedRead) body.authenticatedRead = authRead.checked;
       if (lang.value !== g.defaultLanguage) body.defaultLanguage = lang.value;
       if (idleN !== g.sessionIdleMinutes) body.sessionIdleMinutes = idleN;
       if (upN !== g.maxUploadMiB) body.maxUploadMiB = upN;
       if (tfRepo && tfRepo.value !== (g.terraformDefaultRepository || "")) body.terraformDefaultRepository = tfRepo.value;
-      if (httpChanged) body.http = hb;
       if (rolesDirty()) body.defaultRoles = defRoles.values();
-      if (utDirty()) body.userTokens = ut;
     }
-    const mailChanged = smtpDirty();
+    if (!errs.length && on("anonymous")) {
+      if (anon.checked !== !!g.anonymousRead) body.anonymousRead = anon.checked;
+      if (authRead.checked !== !!g.authenticatedRead) body.authenticatedRead = authRead.checked;
+    }
+    if (!errs.length && httpChanged) body.http = hb;
+    if (!errs.length && on("usertoken") && utDirty()) body.userTokens = ut;
+    const mailChanged = on("email") && smtpDirty();
     const mail = { host: host.value.trim(), port: Number(port.value) || 0, security: secure.value, username: user.value, from: sender.value.trim(),
       enabled: enabled.checked, password: pw.value, clearPassword: clearBox.checked };
     pw.value = ""; // the secret never stays in the page
@@ -622,41 +632,46 @@ export async function viewGeneral(view) {
     }
     if (reenter) { put(pwErr, t("smtp.reenter")); pwErr.hidden = false; pw.focus(); }
     if (failed.length) fs.show(failed, t("gen.errOne"));
-    if (saved.length) { put(fs.ok, t("gen.saved") + " " + saved.join(" · ")); fs.ok.hidden = false; }
+    if (saved.length) { put(fs.ok, t("gen.saved")); fs.ok.hidden = false; } // one screen saves one part
     syncHint();
     if (!failed.length && !reenter) fs.clean();
   }
   save.addEventListener("click", run);
   form.addEventListener("submit", (ev) => { ev.preventDefault(); run(); });
 
-  put(form, fs.err, h("div", { class: "stack" },
-    card(t("gen.access"), t("gen.accessSub"), fields(
-      field(t("gen.baseURL"), baseURL, t("gen.baseURLHelp"), { full: true }),
+  const cards = {
+    general: [
+      card(t("gen.access"), t("gen.accessSub"), fields(
+        field(t("gen.baseURL"), baseURL, t("gen.baseURLHelp"), { full: true }),
+        field(t("gen.lang"), lang, t("gen.langHelp")))),
+      card(t("gen.session"), t("gen.sessionSub"), fields(field(t("gen.idle"), idle, t("gen.idleHelp")))),
+      card(t("gen.upload"), t("gen.uploadSub"), fields(field(t("gen.maxUpload"), maxUp, t("gen.maxUploadHelp")))),
+      defRoles ? card(t("gen.defRoles"), t("gen.defRolesSub"), fields(h("div", { class: "field full" }, roleIds.length ? defRoles.el : h("p", { class: "hint" }, t("gen.defRolesNone")), h("small", null, t("gen.defRolesHelp"))))) : null,
+      tfRepo ? card("Terraform", t("gen.tfSub"), fields(field(t("gen.tfRepo"), tfRepo, t("gen.tfRepoHelp"), { full: true }))) : null],
+    anonymous: [card(t("anon.title"), null, fields(
       checkRow(anon, t("gen.anon"), t("gen.anonHelp")),
-      checkRow(authRead, t("gen.authRead"), t("gen.authReadHelp")),
-      field(t("gen.lang"), lang, t("gen.langHelp")))),
-    card(t("gen.session"), t("gen.sessionSub"), fields(field(t("gen.idle"), idle, t("gen.idleHelp")))),
-    card(t("gen.upload"), t("gen.uploadSub"), fields(field(t("gen.maxUpload"), maxUp, t("gen.maxUploadHelp")))),
-    defRoles ? card(t("gen.defRoles"), t("gen.defRolesSub"), fields(h("div", { class: "field full" }, roleIds.length ? defRoles.el : h("p", { class: "hint" }, t("gen.defRolesNone")), h("small", null, t("gen.defRolesHelp"))))) : null,
-    card(t("nav.userTokens"), t("gen.utSub"), fields(
+      checkRow(authRead, t("gen.authRead"), t("gen.authReadHelp"))))],
+    usertoken: [card(t("ut.settings"), t("gen.utSub"), fields(
       checkRow(utOn, t("gen.utEnabled"), t("gen.utEnabledHelp")),
       checkRow(utReq, t("gen.utRequired"), t("gen.utRequiredHelp")),
-      field(t("gen.utDays"), utDays, t("gen.utDaysHelp")),
-      h("div", { class: "field full" }, h("small", null, h("a", { href: "#admin/security/user-tokens" }, t("gen.utList")))))),
-    tfRepo ? card("Terraform", t("gen.tfSub"), fields(field(t("gen.tfRepo"), tfRepo, t("gen.tfRepoHelp"), { full: true }))) : null,
-    card(t("http.title"), t("http.sub"), httpBox),
-    card(t("smtp.title"), t("smtp.sub"), mailBox)), h("div", { class: "savebar" }, save));
+      field(t("gen.utDays"), utDays, t("gen.utDaysHelp"))))],
+    http: [card(t("http.title"), null, httpBox)],
+    email: [card(t("smtp.title"), null, mailBox)],
+  }[part];
+  put(form, fs.err, h("div", { class: "stack" }, cards), h("div", { class: "savebar" }, save));
+  if (on("usertoken")) { put(view, fs.ok, form); return; } // a part of the user tokens screen
 
-  const help = h("aside", { class: "form-help" }, h("h3", null, t("gen.helpTitle")), h("p", null, t("gen.helpLive")), h("p", null, t("gen.helpHttp")), h("p", null, t("gen.helpMail")));
+  const head = { general: ["nav.general", "gen.sub"], anonymous: ["nav.anonymous", "anon.sub"], http: ["nav.http", "http.sub"], email: ["nav.email", "smtp.sub"] }[part];
+  const help = h("aside", { class: "form-help" }, h("h3", null, t("gen.helpTitle")), h("p", null, t(on("http") ? "gen.helpHttp" : on("email") ? "gen.helpMail" : "gen.helpLive")));
   put(view,
-    pageHead(t("nav.general"), sub(t("gen.sub")), null, { eyebrow: t("gen.eyebrow") }),
+    pageHead(t(head[0]), sub(t(head[1])), null, { eyebrow: t("gen.eyebrow") }),
     fs.ok,
     h("div", { class: "form-layout" }, form, help));
 }
 
 // ---- vulnerability data (OSV) and the firewall quarantine ---------------------------
-//   #admin/system/vulnerability
-//   #admin/repository/quarantine
+//   #admin/firewall/settings
+//   #admin/firewall/quarantine
 
 const ECOSYSTEMS = ["npm", "PyPI", "Maven", "Go", "crates.io", "NuGet", "RubyGems", "Packagist", "ConanCenter", "CRAN"]; // OSV's names
 
@@ -791,7 +806,7 @@ export async function viewVulnerability(view) {
     } finally { go.disabled = file.disabled = false; }
   });
 
-  put(view, pageHead(t("nav.vulnerability"), sub(t("vs.sub")), acts(h("a", { class: "btn", href: "#admin/repository/quarantine" }, t("nav.quarantine"))), eb), fs.ok,
+  put(view, pageHead(t("nav.vulnerability"), sub(t("vs.sub")), acts(h("a", { class: "btn", href: "#admin/firewall/quarantine" }, t("nav.quarantine"))), eb), fs.ok,
     h("div", { class: "two" },
       h("div", { class: "stack" }, card(t("vs.settings"), t("vs.settingsSub"), form)),
       h("div", { class: "stack" },
@@ -849,7 +864,7 @@ export async function viewQuarantine(view) {
   const refresh = button([icon("refresh"), t("st.refresh")], "small");
   refresh.addEventListener("click", load);
   const c = h("section", { class: "card" }, h("div", { class: "toolbar" }, filter, h("span", { class: "grow" }), refresh), box);
-  put(view, pageHead(t("nav.quarantine"), sub(t("q.sub")), acts(h("a", { class: "btn", href: "#admin/system/vulnerability" }, t("nav.vulnerability"))), { eyebrow: t("task.eyebrow") }),
+  put(view, pageHead(t("nav.quarantine"), sub(t("q.sub")), acts(h("a", { class: "btn", href: "#admin/firewall/settings" }, t("nav.vulnerability"))), { eyebrow: t("task.eyebrow") }),
     ok, c, fw.length ? null : notice(t("q.noFirewall"), "amber"), notice(t("q.note")));
   load();
 }

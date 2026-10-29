@@ -841,3 +841,33 @@ td .params { overflow-wrap: anywhere; }
 .fields.more { margin-top: 14px; }
 .subtabs { overflow-x: auto; scrollbar-width: none; }
 .subtab { flex: none; white-space: nowrap; }
+
+/* Nexus-style navigation: the mode switch, the header crumb path, the API view */
+.mode-switch { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; padding: 2px; margin: 0 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); }
+.mode-btn { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 26px; padding: 0 8px; border-radius: 3px; color: var(--text-2); font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.mode-btn .ico { width: 14px; height: 14px; flex: none; }
+.mode-btn:hover { background: var(--surface-2); color: var(--text); text-decoration: none; }
+.mode-btn.active, .mode-btn.active:hover { background: var(--text); color: var(--surface); }
+.crumb .crumb-up { color: var(--text-3); }
+@media (max-width: 600px) { .crumb .crumb-up { display: none; } }
+.about .brand { padding: 0 0 12px; }
+.ut-settings { margin-top: 18px; }
+.api-op { padding: 10px 0; border-top: 1px solid var(--border); }
+.api-op:first-child { border-top: 0; padding-top: 0; }
+.api-op:last-child { padding-bottom: 0; }
+.api-op[hidden] + .api-op { border-top: 0; }
+.api-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.api-line code { font: 500 13px var(--mono); overflow-wrap: anywhere; min-width: 0; }
+.api-op p { margin: 4px 0 0; font-size: 13px; }
+.api-op p.tiny { font-size: 12px; }
+.api-m { flex: none; min-width: 54px; text-align: center; font: 600 11px/18px var(--mono); border: 1px solid var(--border-strong); border-radius: 3px; color: var(--text-2); }
+.api-m.m-post, .api-m.m-put { color: var(--accent-ink); border-color: var(--accent); background: var(--accent-soft); }
+.api-m.m-delete { color: var(--err); border-color: var(--err); background: var(--err-soft); }
+.sysinfo table { table-layout: fixed; }
+.sysinfo th:first-child { width: 30%; }
+.sysinfo td { overflow-wrap: anywhere; }
+.api-group summary { list-style: none; }
+.api-group summary::-webkit-details-marker { display: none; }
+.api-chev { width: 16px; height: 16px; color: var(--text-3); transition: transform .15s; }
+.api-group[open] .api-chev { transform: rotate(90deg); }
+@media (max-width: 600px) { .sysinfo th:first-child { width: 42%; } }

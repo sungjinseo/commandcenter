@@ -123,6 +123,9 @@ const ICONS = {
   move: ["M4 12h14", "M14 7l5 5l-5 5", "M4 5v14"],
   shield: ["M12 3l8 3v6c0 5-4 8-8 9c-4-1-8-4-8-9V6z", "M12 8v5", "M12 16v.5"],
   key: ["M3 15a4 4 0 1 0 8 0a4 4 0 1 0-8 0z", "M10 12l9-9", "M16 6l2 2", "M14 8l2 2"],
+  lock: ["M5 11h14v10H5z", "M8 11V8a4 4 0 0 1 8 0v3"],
+  mail: ["M3 6h18v12H3z", "M3 7l9 6l9-6"],
+  globe: ["M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", "M3 12h18", "M12 3c3 3.5 3 14.5 0 18", "M12 3c-3 3.5-3 14.5 0 18"],
   lifebuoy: ["M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8z", "M5.6 5.6l3.6 3.6", "M14.8 14.8l3.6 3.6", "M18.4 5.6l-3.6 3.6", "M9.2 14.8l-3.6 3.6"],
 };
 
@@ -171,6 +174,8 @@ export const fmtTile = (f) => h("span", { class: "format" + (FORMATS.includes(f)
 export const nameCell = (f, main, sub) => h("div", { class: "namecell" }, fmtTile(f), h("span", null, main, sub ? h("small", null, sub) : null));
 export const onlineBadge = (online) => (online === false ? h("span", { class: "badge red" }, h("span", { class: "dot", "aria-hidden": "true" }), t("repo.down")) : h("span", { class: "badge green" }, h("span", { class: "dot", "aria-hidden": "true" }), t("repo.up")));
 
+// SEARCH_FORMATS: the per-format searches, in the sidebar's order and names.
+export const SEARCH_FORMATS = { apt: "Apt", cargo: "Cargo", cocoapods: "Cocoapods", composer: "Composer", conan: "Conan", conda: "Conda", docker: "Docker", gitlfs: "Git LFS", go: "Go", helm: "Helm", huggingface: "Hugging Face", maven: "Maven", npm: "npm", nuget: "NuGet", p2: "p2", pypi: "PyPI", r: "R", raw: "Raw", rubygems: "RubyGems", swift: "Swift", terraform: "Terraform", yum: "Yum" };
 // OSV_FORMATS have vulnerability data (the server's config.FirewallFormats).
 export const OSV_FORMATS = ["npm", "pypi", "maven", "go", "cargo", "nuget", "rubygems", "composer", "conan", "r"];
 // Severities from worst; "none" and "unknown" are the OSV extremes.
@@ -257,7 +262,7 @@ export function repoBase(r) {
   try { return new URL(r.url, location.href).pathname; } catch (e) { return "/repository/" + enc(r.name) + "/"; }
 }
 // osvLink opens an advisory on osv.dev; the URL is built here from the id,
-// never taken from the API, so it is the only off-site link the UI makes.
+// never taken from the API (the help menu's guide link is the other off-site link).
 export function osvLink(id) {
   const a = h("a", { target: "_blank", rel: "noopener noreferrer" }, id);
   a.setAttribute("href", "https://osv.dev/vulnerability/" + encodeURIComponent(id));
@@ -266,7 +271,7 @@ export function osvLink(id) {
 export const adminRepoLink = (repo) => "#admin/repository/repositories" + (repo ? ":" + enc(repo) : "");
 export const searchLink = (kind, params) => {
   const q = params ? new URLSearchParams(params).toString() : "";
-  return "#browse/search/" + kind + (q ? "=" + enc(q) : "");
+  return "#browse/search" + (kind === "generic" ? "" : "/" + kind) + (q ? "=" + enc(q) : "");
 };
 
 // ---- API -----------------------------------------------------------------
@@ -288,7 +293,7 @@ export async function api(path, opts) {
   }
   let res;
   try {
-    res = await fetch("/-/api/" + path, init);
+    res = await fetch(path.startsWith("/") ? path : "/-/api/" + path, init); // "/…": another API (/-/metrics, /service/rest)
   } catch (e) {
     throw new APIError(0, t("err.connect"));
   }

@@ -1,6 +1,6 @@
 // The Command Center console shell (plan 10 Decisions 3, 4, 6 and 7): the
 // sidebar, the topbar, menus and dialogs, the theme and the language.
-import { state, ANON, h, put, api, icon, s, loadRepos, hideBanner, showError, canUpload, isBusy } from "./util.js";
+import { state, ANON, h, put, api, icon, s, loadRepos, hideBanner, showError, canUpload, isBusy, kv, SEARCH_FORMATS } from "./util.js";
 import { t, getLang, setLang, onLangChange, applyServerDefault } from "./i18n.js";
 
 const hooks = { rerender: () => {} };
@@ -217,7 +217,15 @@ function menuButton(label, ico, onclick) {
 
 // ---- topbar -----------------------------------------------------------------
 
-const SEARCH_HASH = "#browse/search/generic";
+const SEARCH_HASH = "#browse/search";
+const GUIDE_URL = "https://github.com/sungjinseo/commandcenter/blob/main/docs/guide.md";
+
+// openAbout shows the product name, version and host.
+function openAbout() {
+  modal(t("help.about"), h("div", { class: "about" },
+    h("div", { class: "brand" }, h("div", { class: "brandmark" }, brandMark()), h("div", { class: "brandtext" }, h("strong", null, "Command Center"), h("small", null, t("brand.foot")))),
+    kv(t("help.version"), state.me.version || "—"), kv(t("help.host"), instanceHost())), null, { cls: "modal-small", returnFocus: els.help });
+}
 
 function buildTopbar() {
   const hdr = document.getElementById("hdr");
@@ -241,9 +249,19 @@ function buildTopbar() {
   els.lang = h("button", { type: "button", class: "btn small ghost lang-btn" });
   els.lang.addEventListener("click", () => setLang(getLang() === "ko" ? "en" : "ko"));
   els.who = h("div", { class: "who" });
+  els.refresh = h("button", { type: "button", class: "icon-btn", onclick: () => hooks.rerender() }, icon("refresh"));
+  els.help = h("button", { type: "button", class: "icon-btn" }, icon("help"));
+  const helpMenu = dropdown(els.help, () => {
+    const guide = menuLink("#", t("help.guide"), "guide");
+    guide.setAttribute("href", GUIDE_URL); // a fixed off-site URL (h() keeps links same-origin)
+    guide.target = "_blank";
+    guide.rel = "noopener noreferrer";
+    return [menuButton(t("help.about"), "info", openAbout), guide,
+      state.me.admin ? menuLink("#admin/system/api", t("nav.api"), "custom") : null];
+  });
 
   put(hdr, els.drawerToggle, els.crumb,
-    h("div", { class: "top-actions" }, form, els.lang, els.who));
+    h("div", { class: "top-actions" }, form, els.refresh, helpMenu, els.lang, els.who));
   applyTheme();
 }
 
@@ -256,6 +274,7 @@ function applyTexts() {
   els.search.placeholder = t("top.search");
   els.search.setAttribute("aria-label", t("top.search"));
   els.searchForm.title = t("top.searchHint");
+  for (const [el, k] of [[els.refresh, "top.refresh"], [els.help, "help.menu"]]) { el.title = t(k); el.setAttribute("aria-label", t(k)); }
   els.lang.textContent = getLang().toUpperCase();
   els.lang.title = t("lang.title");
   els.lang.setAttribute("aria-label", t("lang.title"));
@@ -280,8 +299,6 @@ function renderWho() {
   put(els.who, dropdown(btn, () => [
     h("div", { class: "menu-head", role: "presentation" }, h("strong", null, me.user), h("span", { class: "sub" }, role)),
     menuLink("#user/account", t("nav.account"), "user"),
-    menuLink(me.admin ? "#admin/security/usertoken" : "#user/usertoken", t("nav.tokens"), "token"),
-    menuLink(me.admin ? "#admin/security/user-tokens" : "#user/user-token", t("nav.userTokens"), "key"),
     h("div", { class: "menu-sep", role: "separator" }),
     ...THEMES.map((mode) => menuButton((themePref() === mode ? "✓ " : "") + themeLabel(mode), THEME_ICON[mode], () => {
       setPref("theme", mode === "system" ? null : mode);
@@ -315,68 +332,115 @@ export async function signOut() {
   else hooks.rerender();
 }
 
-// ---- breadcrumb (Decision 7): 커맨드센터 / <page> / <id> --------------------
+// ---- navigation: modes, trees, breadcrumb ---------------------------------------
 
-const FORMAT_LABELS = { maven: "Maven", npm: "npm", pypi: "PyPI", golang: "Go", cargo: "Cargo", docker: "Docker" };
+// The sidebar trees follow Nexus Repository's information architecture
+// (modes, groups, item names and hash routes). A tree is a list of
+// [group title | null, items]; an item is [href, label, icon]. They are
+// built on every render, in the current language.
+const BROWSE = () => [[null, [
+  ["#browse/welcome", t("nav.welcome"), "dashboard"],
+  ["#browse/search", t("nav.search"), "search"],
+  ["#browse/browse", t("nav.browse"), "repos"],
+  ["#browse/upload", t("nav.upload"), "upload"],
+  ["#browse/tags", t("nav.tags"), "tag"],
+]]];
+const USER = () => [[null, [
+  ["#user/account", t("nav.account"), "user"],
+  ["#user/usertoken", t("nav.userToken"), "key"],
+  ["#user/apitokens", t("nav.tokens"), "token"],
+]]];
+const ADMIN = () => [
+  [t("nav.g.repository"), [
+    ["#admin/repository/repositories", t("nav.repositories"), "repository"],
+    ["#admin/repository/blobstores", t("nav.blobstores"), "blob"],
+    ["#admin/repository/selectors", t("nav.selectors"), "browse"],
+    ["#admin/repository/cleanuppolicies", t("nav.cleanup"), "cleanup"],
+    ["#admin/repository/routingrules", t("nav.routingrules"), "custom"],
+    ["#admin/repository/staging", t("nav.staging"), "move"],
+  ]],
+  [t("nav.g.security"), [
+    ["#admin/security/privileges", t("nav.privileges"), "lock"],
+    ["#admin/security/roles", t("nav.roles"), "roles"],
+    ["#admin/security/users", t("nav.users"), "users"],
+    ["#admin/security/anonymous", t("nav.anonymous"), "user"],
+    ["#admin/security/ldap", t("nav.ldap"), "realms"],
+    ["#admin/security/realms", t("nav.realms"), "realms"],
+    ["#admin/security/sslcertificates", t("nav.certificates"), "cert"],
+    ["#admin/security/oidc", t("nav.oidc"), "realms"],
+    ["#admin/security/atlassiancrowd", t("nav.crowd"), "realms"],
+    ["#admin/security/saml", t("nav.saml"), "realms"],
+    ["#admin/security/rutauth", t("nav.rutauth"), "realms"],
+    ["#admin/security/usertoken", t("nav.userTokens"), "key"],
+    ["#admin/security/apitokens", t("nav.tokens"), "token"],
+  ]],
+  [t("nav.g.firewall"), [
+    ["#admin/firewall/settings", t("nav.vulnerability"), "shield"],
+    ["#admin/firewall/quarantine", t("nav.quarantine"), "shield"],
+  ]],
+  [t("nav.g.support"), [
+    ["#admin/support/logs", t("nav.logs"), "file"],
+    ["#admin/support/logging", t("nav.logging"), "settings"],
+    ["#admin/support/metrics", t("nav.metrics"), "health"],
+    ["#admin/support/supportzip", t("nav.supportzip"), "lifebuoy"],
+    ["#admin/support/systeminformation", t("nav.sysinfo"), "info"],
+    ["#admin/support/status", t("nav.status"), "ok"],
+  ]],
+  [t("nav.g.system"), [
+    ["#admin/system/api", t("nav.api"), "custom"],
+    ["#admin/system/emailserver", t("nav.email"), "mail"],
+    ["#admin/system/http", t("nav.http"), "globe"],
+    ["#admin/system/nodes", t("nav.nodes"), "box"],
+    ["#admin/system/tasks", t("nav.tasks"), "tasks"],
+    ["#admin/system/webhooks", t("nav.webhooks"), "upload"],
+    ["#admin/system/general", t("nav.general"), "settings"],
+  ]],
+];
 
-function pageTitle(key) {
-  if (key.startsWith("browse/search/")) return t("nav.search");
-  switch (key) {
-    case "browse/welcome": return t("nav.dashboard");
-    case "browse/component": return t("comp.component");
-    case "browse/browse": return t("nav.browse");
-    case "browse/upload": return t("nav.upload");
-    case "admin/repository/repositories": return t("nav.repositories");
-    case "admin/system/tasks": return t("nav.tasks");
-    case "admin/repository/cleanuppolicies": return t("nav.cleanup");
-    case "admin/repository/blobstores": return t("nav.blobstores");
-    case "admin/system/general": return t("nav.general");
-    case "admin/repository/routingrules": return t("nav.routingrules");
-    case "admin/security/contentselectors": return t("nav.selectors");
-    case "admin/system/webhooks": return t("nav.webhooks");
-    case "admin/system/support": return t("nav.support");
-    case "admin/security/certificates": return t("nav.certificates");
-    case "admin/security/users": return t("nav.users");
-    case "admin/security/roles": return t("nav.roles");
-    case "admin/security/realms": return t("nav.realms");
-    case "admin/security/usertoken": case "user/usertoken": return t("nav.tokens");
-    case "admin/security/user-tokens": case "user/user-token": return t("nav.userTokens");
-    case "admin/repository/tags": return t("nav.tags");
-    case "admin/repository/staging": return t("nav.staging");
-    case "admin/repository/quarantine": return t("nav.quarantine");
-    case "admin/system/vulnerability": return t("nav.vulnerability");
-    case "admin/support/status": return t("nav.status");
-    case "admin/support/systeminformation": return t("nav.sysinfo");
-    case "user/account": return t("nav.account");
-    case "login": return t("nav.login");
+// modeOf: the mode a route belongs to, from its prefix.
+const modeOf = (key) => (key.startsWith("admin/") ? "admin" : key.startsWith("user/") ? "user" : "browse");
+const modeLabel = (m) => (m === "admin" ? t("mode.admin") : m === "user" ? t("mode.user") : t("mode.browse"));
+
+// findItem returns [group title, item] for a route, or null.
+function findItem(key) {
+  if (key === "browse/component") key = "browse/browse";
+  if (key.startsWith("browse/search/")) key = "browse/search";
+  for (const [group, items] of [...BROWSE(), ...USER(), ...ADMIN()]) {
+    const it = items.find((x) => x[0] === "#" + key);
+    if (it) return [group, it];
   }
-  return t("notFound.title");
+  return null;
 }
 
+// screenTitle is a screen's name, as its menu item shows it.
+export function screenTitle(key) {
+  if (key === "browse/component") return t("comp.component");
+  if (key === "login") return t("nav.login");
+  const f = findItem(key);
+  return f ? f[1][1] : t("notFound.title");
+}
+
+// renderCrumb draws "<mode> › <group> › <item> › <id>".
 function renderCrumb(route) {
   const key = route.key || "";
   let id = route.params && route.params.length ? route.params[0] : null;
   if (key.startsWith("browse/search/")) {
     const kind = key.slice("browse/search/".length);
-    id = kind === "custom" ? t("nav.searchCustom") : FORMAT_LABELS[kind] || null;
-  } else if (key === "admin/repository/repositories" && id === "create") {
-    id = t("rf.createTitle");
-  } else if (key === "admin/repository/cleanuppolicies" && id === "create") {
-    id = t("pol.createTitle");
-  } else if (key === "admin/repository/blobstores" && id === "create") {
-    id = t("blob.createTitle");
-  } else if (key === "admin/repository/tags" && id === "create") {
-    id = t("tag.createTitle");
-  } else if (key === "admin/system/tasks" && id === "create") {
-    id = t("task.createTitle");
-  } else if ((key === "admin/security/users" || key === "admin/security/roles") && id === "create") {
-    id = t("access.createCrumb");
+    id = kind === "custom" ? t("nav.searchCustom") : SEARCH_FORMATS[kind] || null;
+  } else if (id === "create") {
+    id = { "admin/repository/repositories": t("rf.createTitle"), "admin/repository/cleanuppolicies": t("pol.createTitle"), "admin/repository/blobstores": t("blob.createTitle"),
+      "browse/tags": t("tag.createTitle"), "admin/system/tasks": t("task.createTitle"), "admin/security/users": t("access.createCrumb"), "admin/security/roles": t("access.createCrumb") }[key] || id;
   } else if (key === "admin/system/tasks" && id === "compact-blobstore") {
     id = t("task.compact");
   }
-  const sep = () => h("span", { class: "sep", "aria-hidden": "true" }, "/");
+  const f = key ? findItem(key) : null;
+  const sep = () => h("span", { class: "sep", "aria-hidden": "true" }, "›");
+  const up = (text) => [h("span", { class: "crumb-up" }, text), h("span", { class: "sep crumb-up", "aria-hidden": "true" }, "›")];
+  const title = screenTitle(key);
   put(els.crumb,
-    id ? h("a", { href: "#" + key }, pageTitle(key)) : h("strong", { "aria-current": "page" }, pageTitle(key)),
+    f ? up(modeLabel(modeOf(key))) : null,
+    f && f[0] ? up(f[0]) : null,
+    id ? h("a", { href: "#" + key }, title) : h("strong", { "aria-current": "page" }, title),
     id ? [sep(), h("span", { class: "crumb-id", "aria-current": "page" }, id)] : null);
 }
 
@@ -401,52 +465,16 @@ function brandMark() {
   return svg;
 }
 
-const SEARCH_SUB = [["cargo", "cargo"], ["docker", "docker"], ["go", "golang"], ["maven", "maven"], ["npm", "npm"], ["pypi", "pypi"]];
-
-// navSections lists [title, items]; an item is [href, label, icon, active(key)].
-function navSections() {
+// treeOf picks the tree the sidebar shows: a non-admin on an admin route,
+// or a visitor on a user route, sees the browse tree.
+function treeOf(mode) {
   const me = state.me;
-  const repos = state.repos || [];
-  const is = (...keys) => (k) => keys.includes(k);
-  const out = [[null, [
-    ["#browse/welcome", t("nav.dashboard"), "dashboard", is("browse/welcome", "login")],
-    ["#browse/browse", t("nav.browse"), "repos", is("browse/browse", "browse/component")],
-    ["#browse/search/generic", t("nav.search"), "search", (k) => k.startsWith("browse/search/")],
-    repos.some(canUpload) ? ["#browse/upload", t("nav.upload"), "upload", is("browse/upload")] : null,
-  ]]];
-  if (me.admin) {
-    out.push([t("nav.sec.operations"), [
-      ["#admin/repository/repositories", t("nav.repositories"), "settings", is("admin/repository/repositories")],
-      ["#admin/repository/blobstores", t("nav.blobstores"), "blob", is("admin/repository/blobstores")],
-      ["#admin/repository/cleanuppolicies", t("nav.cleanup"), "cleanup", is("admin/repository/cleanuppolicies")],
-      ["#admin/repository/routingrules", t("nav.routingrules"), "custom", is("admin/repository/routingrules")],
-      ["#admin/repository/tags", t("nav.tags"), "tag", is("admin/repository/tags")],
-      ["#admin/repository/staging", t("nav.staging"), "move", is("admin/repository/staging")],
-      ["#admin/repository/quarantine", t("nav.quarantine"), "shield", is("admin/repository/quarantine")],
-      ["#admin/system/tasks", t("nav.tasks"), "tasks", is("admin/system/tasks")],
-    ]]);
-  }
-  if (!me.anonymous) {
-    out.push([t("nav.sec.access"), [
-      me.admin ? ["#admin/security/users", t("nav.users"), "users", is("admin/security/users")] : null,
-      me.admin ? ["#admin/security/roles", t("nav.roles"), "roles", is("admin/security/roles")] : null,
-      me.admin ? ["#admin/security/realms", t("nav.realms"), "realms", is("admin/security/realms")] : null,
-      me.admin ? ["#admin/security/contentselectors", t("nav.selectors"), "browse", is("admin/security/contentselectors")] : null,
-      me.admin ? ["#admin/security/certificates", t("nav.certificates"), "cert", is("admin/security/certificates")] : null,
-      [me.admin ? "#admin/security/usertoken" : "#user/usertoken", t("nav.tokens"), "token", is("admin/security/usertoken", "user/usertoken")],
-      [me.admin ? "#admin/security/user-tokens" : "#user/user-token", t("nav.userTokens"), "key", is("admin/security/user-tokens", "user/user-token")],
-    ]]);
-  }
-  if (me.admin) {
-    out.push([t("nav.sec.system"), [
-      ["#admin/system/general", t("nav.general"), "settings", is("admin/system/general")],
-      ["#admin/system/webhooks", t("nav.webhooks"), "upload", is("admin/system/webhooks")],
-      ["#admin/system/vulnerability", t("nav.vulnerability"), "shield", is("admin/system/vulnerability")],
-      ["#admin/support/status", t("nav.status"), "health", is("admin/support/status", "admin/support/systeminformation")],
-      ["#admin/system/support", t("nav.support"), "lifebuoy", is("admin/system/support")],
-    ]]);
-  }
-  return out;
+  if (mode === "admin" && me.admin) return ADMIN();
+  if (mode === "user" && !me.anonymous) return USER();
+  const hide = new Set();
+  if (!(state.repos || []).some(canUpload)) hide.add("#browse/upload");
+  if (me.anonymous) hide.add("#browse/tags"); // the tags API needs a signed-in user
+  return [[null, BROWSE()[0][1].filter(([href]) => !hide.has(href))]];
 }
 
 function navLink(href, label, ico, active, cls) {
@@ -454,28 +482,43 @@ function navLink(href, label, ico, active, cls) {
     h("span", { class: "ico-wrap" }, icon(ico)), h("span", { class: "navtext" }, label));
 }
 
-// searchChildren: the per-format searches, shown under Search while a
-// search screen is open.
+// searchChildren: Custom and the searches of the formats present, shown
+// under Search while a search screen is open.
 function searchChildren(key) {
-  if (!key.startsWith("browse/search/")) return null;
+  if (!key.startsWith("browse/search")) return null;
   const formats = new Set((state.repos || []).map((r) => r.format));
-  const items = [["#browse/search/custom", t("nav.searchCustom"), key === "browse/search/custom"]]
-    .concat(SEARCH_SUB.filter(([f]) => formats.has(f)).map(([, kind]) =>
-      ["#browse/search/" + kind, FORMAT_LABELS[kind], key === "browse/search/" + kind]));
-  return h("div", { class: "nav-sub" }, items.map(([href, label, active]) =>
-    h("a", { href, class: "nav-sublink" + (active ? " active" : ""), "aria-current": active ? "page" : null }, label)));
+  const items = [["custom", t("nav.searchCustom")]].concat(Object.entries(SEARCH_FORMATS).filter(([f]) => formats.has(f)));
+  return h("div", { class: "nav-sub" }, items.map(([kind, label]) => {
+    const active = key === "browse/search/" + kind;
+    return h("a", { href: "#browse/search/" + kind, class: "nav-sublink" + (active ? " active" : ""), "aria-current": active ? "page" : null }, label);
+  }));
+}
+
+// modeSwitch: Browse and, for admins, Administration. A non-admin sees it
+// only on a user screen, as the way back to browsing.
+function modeSwitch(mode) {
+  if (!state.me.admin && mode !== "user") return null;
+  const btn = (m, href, ico) => h("a", { href, class: "mode-btn" + (mode === m ? " active" : ""), "aria-current": mode === m ? "true" : null }, icon(ico), h("span", null, modeLabel(m)));
+  return h("nav", { class: "mode-switch", "aria-label": t("mode.aria") }, btn("browse", "#browse/welcome", "repos"),
+    state.me.admin ? btn("admin", "#admin/repository/repositories", "settings") : null);
 }
 
 function renderSidebar(route) {
   const side = document.getElementById("side");
   const key = route.key || "";
+  const mode = modeOf(key);
   const focused = side.contains(document.activeElement) ? document.activeElement.getAttribute("href") : null;
+  const old = side.querySelector(".nav-scroll");
+  const top = old ? old.scrollTop : 0; // the admin tree is long: keep its scroll position
   const host = instanceHost();
+  const at = "#" + key;
+  const on = (href) => href === at || (href === "#browse/browse" && key === "browse/component") || (href === "#browse/welcome" && key === "login") ||
+    (href === SEARCH_HASH && key.startsWith("browse/search"));
   const nav = h("nav", { class: "nav-scroll", "aria-label": t("nav.aria") },
-    navSections().map(([title, items]) => [
+    treeOf(mode).map(([title, items]) => [
       title ? h("div", { class: "nav-label" }, title) : null,
-      h("div", { class: "nav-commands" }, items.filter(Boolean).map(([href, label, ico, active]) => [
-        navLink(href, label, ico, active(key)),
+      h("div", { class: "nav-commands" }, items.map(([href, label, ico]) => [
+        navLink(href, label, ico, on(href)),
         href === SEARCH_HASH ? searchChildren(key) : null,
       ])),
     ]));
@@ -483,8 +526,13 @@ function renderSidebar(route) {
     h("a", { class: "brand", href: "#browse/welcome", "aria-label": t("brand.name") },
       h("div", { class: "brandmark" }, brandMark()),
       h("div", { class: "brandtext" }, h("strong", null, "Command Center"), h("small", { title: host }, host))),
-    h("button", { type: "button", class: "icon-btn drawer-close", "aria-label": t("dialog.close"), onclick: () => setDrawer(false) }, icon("close")), nav,
+    h("button", { type: "button", class: "icon-btn drawer-close", "aria-label": t("dialog.close"), onclick: () => setDrawer(false) }, icon("close")),
+    modeSwitch(mode), nav,
     state.me.version ? h("div", { class: "nav-foot" }, h("span", null, "v" + state.me.version), h("span", null, t("brand.foot"))) : null);
+  nav.scrollTop = top;
+  const act = nav.querySelector(".nav-link.active");
+  const y = act ? act.offsetTop - nav.offsetTop : 0; // both are laid out in the (fixed) sidebar
+  if (act && (y < nav.scrollTop || y + act.offsetHeight > nav.scrollTop + nav.clientHeight)) nav.scrollTop = y - nav.clientHeight / 2;
   if (focused) {
     const again = [...side.querySelectorAll("a[href]")].find((a) => a.getAttribute("href") === focused);
     if (again) again.focus();
@@ -517,8 +565,8 @@ function focusSearch() {
     return;
   }
   const field = () => document.getElementById("sc-keyword");
-  if (location.hash.startsWith(SEARCH_HASH) && field()) { field().focus(); return; }
-  if (!location.hash.startsWith(SEARCH_HASH)) location.hash = SEARCH_HASH;
+  if (field()) { field().focus(); return; } // the keyword search (or Custom) is open
+  location.hash = SEARCH_HASH;
   let tries = 0;
   const wait = () => {
     const f = field();
@@ -604,5 +652,5 @@ export function renderChrome(route) {
   renderWho();
   renderSidebar(route);
   renderCrumb(route);
-  if (route.key === "browse/search/generic" && route.criteria) els.search.value = route.criteria.get("keyword") || "";
+  if (route.key === "browse/search" && route.criteria) els.search.value = route.criteria.get("keyword") || "";
 }

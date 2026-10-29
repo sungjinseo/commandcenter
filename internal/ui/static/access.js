@@ -1,10 +1,13 @@
-// Access control screens (plan 12 Task 7): users, roles, realms with the
-// LDAP settings, and the account page with the password change. The server
-// enforces every rule; these screens only collect input and show its answers.
-// Passwords are cleared from their inputs as soon as they are read.
+// Access control screens (plan 12 Task 7): privileges, users, roles, the
+// realm list and each realm's settings, user tokens and the account page with
+// the password change. The server enforces every rule; these screens only
+// collect input and show its answers. Passwords are cleared from their inputs
+// as soon as they are read.
+//   #admin/security/privileges
 //   #admin/security/users[:create|:<id>|:ldap%3A<id>]
 //   #admin/security/roles[:create|:<id>]
 //   #admin/security/realms
+//   #admin/security/ldap|oidc|atlassiancrowd|saml|rutauth
 //   #user/account
 import {
   state, h, put, api, enc, encSeg, alive, filterBar, row, pageHead, loading, card, kv, tbl, handleError, needLogin, icon,
@@ -37,6 +40,9 @@ const ACTIONS = ["browse", "read", "add", "edit", "delete"];
 
 const userLink = (id) => "#admin/security/users" + (id ? ":" + enc(id) : "");
 const roleLink = (id) => "#admin/security/roles" + (id ? ":" + enc(id) : "");
+// REALM_SCREENS: the settings screen of each configurable realm, and its title.
+const REALM_SCREENS = { ldap: ["#admin/security/ldap", "nav.ldap"], oidc: ["#admin/security/oidc", "nav.oidc"], crowd: ["#admin/security/atlassiancrowd", "nav.crowd"],
+  saml: ["#admin/security/saml", "nav.saml"], rutauth: ["#admin/security/rutauth", "nav.rutauth"] };
 // dynamic keys go through tables, so every key stays a literal for the i18n test
 const REALM_KEYS = { local: ["realms.name.local", "realms.desc.local"], token: ["realms.name.token", "realms.desc.token"], ldap: ["realms.name.ldap", "realms.desc.ldap"], oidc: ["realms.name.oidc", "realms.desc.oidc"],
   crowd: ["realms.name.crowd", "realms.desc.crowd"], rutauth: ["realms.name.rutauth", "realms.desc.rutauth"], saml: ["realms.name.saml", "realms.desc.saml"] };
@@ -483,6 +489,37 @@ export async function viewRoles(view, id) {
     h("div", { class: "role-grid" }, aside, main));
 }
 
+// ---- privileges: every privilege the roles define (edited inside the roles) ---------
+
+export async function viewPrivileges(view) {
+  const isLive = alive();
+  const rd = await api("roles");
+  if (!isLive()) return;
+  const byKey = new Map(); // one row per target, repositories and actions
+  for (const r of rd.roles || []) {
+    for (const p of r.privileges || []) {
+      const k = [p.target, (p.repos || []).join(","), (p.actions || []).join(",")].join("|");
+      if (!byKey.has(k)) byKey.set(k, { p, roles: [] });
+      byKey.get(k).roles.push(r.id);
+    }
+  }
+  const targetLink = (tg) => {
+    const k = targetKind(tg), v = targetValue(tg);
+    const href = k === "repo" ? "#admin/repository/repositories:" + enc(v) : k === "selector" ? "#admin/repository/selectors:" + enc(v) : null;
+    return href ? h("a", { href }, h("code", null, tg)) : h("code", null, tg);
+  };
+  const rows = [...byKey.values()].sort((a, b) => a.p.target.localeCompare(b.p.target)).map(({ p, roles }) => row([
+    [[targetLink(p.target), p.repos ? h("div", { class: "tiny muted" }, p.repos.join(", ")) : null]],
+    [scopeText(p.target)],
+    [(p.actions || []).join(" · ") || dash],
+    [roles.map((id, i) => [i ? ", " : "", h("a", { href: roleLink(id) }, id)])],
+  ], p.target + " " + (p.repos || []).join(" ") + " " + (p.actions || []).join(" ") + " " + roles.join(" ")));
+  const f = filterBar(rows, t("privs.filter"), "privs.count");
+  const c = card(t("nav.privileges"), null, null);
+  c.append(f.bar, tbl([t("roles.target"), t("roles.scope"), t("roles.actions"), t("privs.roles")], rows, t("privs.none")), f.none);
+  put(view, pageHead(t("nav.privileges"), sub(t("privs.sub"))), c, notice([t("privs.note"), " ", h("a", { href: roleLink() }, t("nav.roles"))]));
+}
+
 // ---- realms and LDAP -------------------------------------------------------------
 
 const STEPS = { name: "ldap.step.name", connect: "ldap.step.connect", starttls: "ldap.step.starttls", bind: "ldap.step.bind", search: "ldap.step.search", userBind: "ldap.step.userBind", groups: "ldap.step.groups" };
@@ -494,8 +531,9 @@ export async function viewRealms(view) {
   const avail = rd.available && rd.available.length ? rd.available : ["local", "token", "ldap"];
   let active = (rd.realms || []).filter((r) => r.enabled).map((r) => r.id);
   const realmBox = h("div", { class: "stack" });
-  const fsR = formState(realmBox); // the realm lists and the LDAP form each keep their own edits
+  const fsR = formState(realmBox);
   const activeBox = h("div"), availBox = h("div"), noLocal = notice(t("realms.noLocal"), "amber");
+  const name = (r) => h("strong", null, REALM_SCREENS[r] ? h("a", { href: REALM_SCREENS[r][0] }, realmName(r)) : realmName(r)); // links to the realm's settings
 
   const draw = () => {
     put(activeBox, active.length ? active.map((r, i) => {
@@ -508,14 +546,14 @@ export async function viewRealms(view) {
       up.addEventListener("click", move(-1));
       down.addEventListener("click", move(1));
       off.addEventListener("click", () => { active.splice(i, 1); fsR.dirty(); draw(); });
-      return h("div", { class: "listrow" }, h("span", null, badge(String(i + 1), "blue"), " ", h("strong", null, realmName(r)), h("small", null, realmDesc(r))),
+      return h("div", { class: "listrow" }, h("span", null, badge(String(i + 1), "blue"), " ", name(r), h("small", null, realmDesc(r))),
         h("span", { class: "actions" }, up, down, off));
     }) : h("div", { class: "empty" }, t("realms.noneActive")));
     const rest = avail.filter((r) => !active.includes(r));
     put(availBox, rest.length ? rest.map((r) => {
       const on = button(t("realms.enable"), "small");
       on.addEventListener("click", () => { active.push(r); fsR.dirty(); draw(); });
-      return h("div", { class: "listrow" }, h("span", null, h("strong", null, realmName(r)), h("small", null, realmDesc(r))), on);
+      return h("div", { class: "listrow" }, h("span", null, name(r), h("small", null, realmDesc(r))), on);
     }) : h("div", { class: "empty" }, t("realms.noneAvail")));
     noLocal.hidden = active.includes("local");
   };
@@ -544,58 +582,30 @@ export async function viewRealms(view) {
   put(realmBox, fsR.err, fsR.ok,
     h("div", { class: "equal" }, card(t("realms.active"), t("realms.activeSub"), activeBox), card(t("realms.available"), t("realms.availableSub"), availBox)),
     noLocal, notice(t("realms.lockNote"), "amber"), h("div", { class: "savebar" }, saveR));
-  // Each type owns its API, fields and dirty state. OIDC can register its
-  // editor when the server's field contract is available.
-  const editors = {
-    ldap: async () => {
-      const [ld, rl] = await Promise.all([api("realms/ldap"), api("roles")]);
-      if (!isLive()) return [];
-      return ldapSettings(ld, rl, isLive);
-    },
-    oidc: async () => {
-      const [od, rl] = await Promise.all([api("realms/oidc"), api("roles")]);
-      if (!isLive()) return [];
-      return oidcSettings(od, rl, isLive);
-    },
-    crowd: async () => {
-      const [cd, rl] = await Promise.all([api("realms/crowd"), api("roles")]);
-      if (!isLive()) return [];
-      return crowdSettings(cd, rl, isLive);
-    },
-    rutauth: async () => {
-      const [rd, rl] = await Promise.all([api("realms/rutauth"), api("roles")]);
-      if (!isLive()) return [];
-      return rutSettings(rd, rl, isLive);
-    },
-    saml: async () => {
-      const [sd, rl] = await Promise.all([api("realms/saml"), api("roles")]);
-      if (!isLive()) return [];
-      return samlSettings(sd, rl, isLive);
-    },
-  };
-  const types = avail.filter((id) => editors[id]);
-  const panels = new Map();
-  const config = h("div", { class: "stack" });
-  const type = sel(types.map((id) => [id, realmName(id)]), types[0]);
-  const showType = async () => {
-    const id = type.value;
-    if (!editors[id]) return;
-    if (!panels.has(id)) {
-      const panel = h("div", { class: "stack", "data-realm-type": id }, loading());
-      panels.set(id, panel);
-      config.appendChild(panel);
-      editors[id]().then((nodes) => { if (isLive()) put(panel, nodes); }, (e) => {
-        panels.delete(id);
-        panel.remove();
-        if (isLive()) handleError(e);
-      });
-    }
-    for (const [key, panel] of panels) panel.hidden = key !== id;
-  };
-  type.addEventListener("change", showType);
-  put(view, pageHead(t("nav.realms"), sub(t("realms.sub")), null, eyebrow()), realmBox,
-    types.length ? card(t("realms.settings"), null, fields(field(t("col.type"), type))) : null, config);
-  await showType();
+  put(view, pageHead(t("nav.realms"), sub(t("realms.sub")), null, eyebrow()), realmBox);
+}
+
+// Each realm type owns its API, fields and dirty state.
+const EDITORS = {
+  ldap: (rl, isLive) => api("realms/ldap").then((x) => ldapSettings(x, rl, isLive)),
+  oidc: (rl, isLive) => api("realms/oidc").then((x) => oidcSettings(x, rl, isLive)),
+  crowd: (rl, isLive) => api("realms/crowd").then((x) => crowdSettings(x, rl, isLive)),
+  rutauth: (rl, isLive) => api("realms/rutauth").then((x) => rutSettings(x, rl, isLive)),
+  saml: (rl, isLive) => api("realms/saml").then((x) => samlSettings(x, rl, isLive)),
+};
+
+// viewRealmConfig: one realm's settings screen (#admin/security/ldap, …);
+// an inactive realm gets a note pointing at the realm list.
+export async function viewRealmConfig(view, id) {
+  const isLive = alive();
+  const [rl, rd] = await Promise.all([api("roles"), api("realms")]);
+  if (!isLive()) return;
+  const nodes = await EDITORS[id](rl, isLive);
+  if (!isLive()) return;
+  const on = (rd.realms || []).some((r) => r.id === id && r.enabled);
+  put(view, pageHead(t(REALM_SCREENS[id][1]), sub(realmDesc(id)), null, eyebrow()),
+    on ? null : notice([t("realms.inactive"), " ", h("a", { href: "#admin/security/realms" }, t("nav.realms"))], "amber"),
+    h("div", { class: "stack" }, nodes));
 }
 
 function ldapSettings(ld, rl, isLive) {
@@ -1117,15 +1127,15 @@ function samlSettings(sd, rl, isLive) {
 }
 
 // ---- user tokens: a name code and pass code that build tools send instead of the password
-//   #user/user-token               the caller's own token
-//   #admin/security/user-tokens    the same, then every user's token
+//   #user/usertoken             the caller's own token
+//   #admin/security/usertoken   the same, every user's token, then extra (the settings)
 
 const XML_ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&apos;" };
 const xmlEsc = (v) => String(v).replace(/[&<>"']/g, (ch) => XML_ESC[ch]);
 const RESET_WORD = "RESET";
 
-export async function viewUserTokens(view, admin) {
-  if (state.me.anonymous) return needLogin(view, t("nav.userTokens"));
+export async function viewUserTokens(view, admin, extra) {
+  if (state.me.anonymous) return needLogin(view, t("nav.userToken"));
   const isLive = alive();
   const me = state.me;
   const shown = h("div");
@@ -1257,11 +1267,10 @@ export async function viewUserTokens(view, admin) {
     });
   };
 
-  put(view, pageHead(t("nav.userTokens"), sub(t("ut.sub", { user: me.user })),
-    admin ? acts(h("a", { class: "btn", href: "#admin/system/general" }, t("ut.settings"))) : null, eyebrow()),
+  put(view, pageHead(admin ? t("nav.userTokens") : t("nav.userToken"), sub(t("ut.sub", { user: me.user })), null, eyebrow()),
     ok, shown,
     h("div", { class: "two" }, card(t("ut.mine"), t("ut.mineSub"), mine), h("div", { class: "notice" }, icon("info", "hint-ico"), t("ut.about"))),
-    list);
+    list, extra);
   await Promise.all([loadMine(), admin ? loadAll() : null]);
 }
 
@@ -1270,7 +1279,6 @@ export async function viewUserTokens(view, admin) {
 export async function viewAccount(view) {
   if (state.me.anonymous) return needLogin(view, t("nav.account"));
   const me = state.me;
-  const tokens = me.admin ? "#admin/security/usertoken" : "#user/usertoken";
   const dirSource = { LDAP: "ldap", OIDC: "oidc", Crowd: "crowd", RUT: "rutauth", SAML: "saml" }[me.realm] || "";
   const ldap = dirSource !== "";
   let pwCard;
@@ -1307,8 +1315,8 @@ export async function viewAccount(view) {
     });
     pwCard = card(t("acct.pwTitle"), t("acct.pwSub"), form);
   }
-  put(view, pageHead(t("nav.account"), sub(me.user), acts(h("a", { class: "btn", href: tokens }, icon("token"), t("nav.tokens")),
-    h("a", { class: "btn", href: me.admin ? "#admin/security/user-tokens" : "#user/user-token" }, icon("key"), t("nav.userTokens"))), eyebrow()),
+  put(view, pageHead(t("nav.account"), sub(me.user), acts(h("a", { class: "btn", href: "#user/apitokens" }, icon("token"), t("nav.tokens")),
+    h("a", { class: "btn", href: "#user/usertoken" }, icon("key"), t("nav.userToken"))), eyebrow()),
     h("div", { class: "two" },
       card(t("users.info"), t("users.infoSub"), [
         kv(t("users.id"), me.user),
