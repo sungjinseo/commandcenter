@@ -125,11 +125,12 @@ func serve(args []string) error {
 	if os.Getenv("GOMEMLIMIT") == "" && cfg.MemoryLimitMiB > 0 {
 		debug.SetMemoryLimit(int64(cfg.MemoryLimitMiB) << 20)
 	}
-	a, err := app.New(cfg, log, app.WithLogRing(ring), app.WithLogLevel(level))
+	a, err := app.New(cfg, log, app.WithLogRing(ring), app.WithLogLevel(level), app.AsServer())
 	if err != nil {
 		return err
 	}
 	defer a.Close()
+	slog.SetDefault(log.With("node", a.Node))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return a.Serve(ctx)

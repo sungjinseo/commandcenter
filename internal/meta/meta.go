@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -35,6 +36,10 @@ type DB struct {
 	sql  *pool
 	path string // the SQLite file; "" on PostgreSQL
 	box  sealer // seals the stored secrets; see SetSecretKey
+
+	keys keyedLocks             // Lock's in-process mutexes (cluster.go)
+	cl   *cluster               // PostgreSQL: the lock connection and the listener; nil on SQLite
+	self atomic.Pointer[Member] // this process's node, once Join ran (nodes.go)
 }
 
 // querier is implemented by *pool and txConn (dialect.go).
@@ -151,6 +156,10 @@ CREATE TABLE IF NOT EXISTS firewall_quarantine(
   severity TEXT NOT NULL DEFAULT '', malicious INTEGER NOT NULL DEFAULT 0,
   first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 1,
   PRIMARY KEY(repo, name, version)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS nodes(
+  id TEXT PRIMARY KEY, hostname TEXT NOT NULL, version TEXT NOT NULL, schema INTEGER NOT NULL,
+  started_at INTEGER NOT NULL, heartbeat_at INTEGER NOT NULL, draining INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in
@@ -183,7 +192,30 @@ CREATE TABLE IF NOT EXISTS firewall_quarantine(
 //	   uploaded during the move).
 //	4: vuln_advisories, vuln_queries, vuln_findings, firewall_quarantine: an
 //	   older build would serve what a proxy's firewall quarantines.
-const schemaVersion = 4
+//	5: nodes, leases, schema_version.compat: an older build would start
+//	   beside a running server without the single-writer guard (nodes.go)
+//	   and ignore compat.
+const schemaVersion = 5
+
+// schemaCompat is the oldest schemaVersion that may run on a database this
+// build upgraded, stamped in PostgreSQL's schema_version.compat (SQLite keeps
+// none: there it is the version itself, so a newer database is refused, as
+// before). A change older builds can ignore ("expand-only": new tables, or
+// new columns with defaults, and no new meaning for stored values) sets it
+// to schemaVersion-1, so the previous release still runs on the upgraded
+// database: a rolling upgrade, or a one-release rollback. Any other change
+// sets it to schemaVersion. The rule (N/N-1):
+//
+//   - Open refuses a database whose version and compat are both above
+//     schemaVersion;
+//   - an upgrade is refused while a live node of a schema below
+//     schemaCompat is registered (the rollout stalls instead of breaking
+//     that node);
+//   - a running node re-reads both with every heartbeat and turns unready
+//     when compat rises above its schemaVersion.
+//
+// TestSchemaCompat pins every version's decision, so a bump needs one.
+const schemaCompat = 5
 
 // Open opens the metadata database and creates or upgrades its tables:
 // PostgreSQL when target is a postgres:// or postgresql:// URL (see
@@ -192,12 +224,13 @@ const schemaVersion = 4
 func Open(target string) (*DB, error) {
 	var p *pool
 	var name string
+	var cl *cluster
 	if IsPostgresURL(target) {
-		db, n, err := openPostgres(target)
+		db, cfg, n, err := openPostgres(target)
 		if err != nil {
 			return nil, err
 		}
-		p, name = &pool{db: db, pg: true}, n
+		p, name, cl = &pool{db: db, pg: true}, n, newCluster(cfg)
 	} else {
 		dsn := "file:" + target +
 			"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-4000)&_txlock=immediate"
@@ -212,7 +245,7 @@ func Open(target string) (*DB, error) {
 		p.db.Close()
 		return nil, err
 	}
-	d := &DB{sql: p}
+	d := &DB{sql: p, cl: cl}
 	if !p.pg {
 		d.path = target
 	}
@@ -252,31 +285,42 @@ func (d *DB) SizeBytes(ctx context.Context) (int64, error) {
 }
 
 // upgrade creates the tables, adds the columns older databases lack and
-// stamps schemaVersion in one transaction, so a crash leaves the database
-// either as it was or migrated and stamped. A database a newer build wrote
-// is refused before anything is written, and one at schemaVersion is left
-// alone: no DDL runs, so a PostgreSQL role with DML rights alone opens it.
-// On PostgreSQL the transaction holds the write lock, so two processes
-// starting at once upgrade in turn.
+// stamps schemaVersion and schemaCompat in one transaction, so a crash
+// leaves the database either as it was or migrated and stamped. A database
+// a newer build wrote is refused before anything is written unless its
+// compat lets this build run on it, and one at or above schemaVersion is
+// left alone: no DDL runs, so a PostgreSQL role with DML rights alone opens
+// it. On PostgreSQL the transaction first takes migrateLock without a lock
+// or statement timeout, so nodes starting at once upgrade one after the
+// other however long the DDL takes (the startup probe bounds the wait), and
+// takes the write lock only for the DDL.
 func upgrade(p *pool, name string) error {
 	ctx := context.Background()
-	tx, err := p.begin(ctx, true)
+	tx, err := beginUpgrade(ctx, p)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	q := txConn{tx: tx, pg: p.pg}
-	version, err := schemaVersionOf(ctx, q)
+	version, compat, err := readSchema(ctx, q)
 	if err != nil {
 		return err
 	}
-	if version > schemaVersion {
-		return fmt.Errorf("%s was written by a newer version of Command Center (database schema %d; this version supports up to %d) "+
-			"and this version would misread it: run the newer version again, or restore the backup taken before the upgrade "+
-			"together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", name, version, schemaVersion)
+	if version > schemaVersion && compat > schemaVersion {
+		return fmt.Errorf("%s was written by a newer version of Command Center (database schema %d, for builds of schema %d and newer; "+
+			"this version supports up to %d) and this version would misread it: run the newer version again, or restore the backup taken "+
+			"before the upgrade together with this version (operations guide, \"업그레이드\" and \"백업과 복원\")", name, version, compat, schemaVersion)
 	}
-	if version == schemaVersion {
+	if version >= schemaVersion {
 		return tx.Commit()
+	}
+	if p.pg {
+		if err := refuseOlderNodes(ctx, q, name); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, writeLock); err != nil {
+			return err
+		}
 	}
 	if _, err := q.ExecContext(ctx, pg(q, schema, pgSchema)); err != nil {
 		return ddlError(err, name)
@@ -286,29 +330,83 @@ func upgrade(p *pool, name string) error {
 			return err
 		}
 	}
-	if err := stampSchemaVersion(ctx, q, schemaVersion); err != nil {
+	if err := stampSchemaVersion(ctx, q, schemaVersion, schemaCompat); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// schemaVersionOf reads the stamped schema version: 0 for a new database or
-// one from before the stamp. It runs no DDL (pgSchema creates the table).
-func schemaVersionOf(ctx context.Context, q querier) (int, error) {
-	var v int
+// beginUpgrade starts upgrade's transaction: SQLite's BEGIN IMMEDIATE, or
+// on PostgreSQL one that holds migrateLock and waits without a timeout.
+func beginUpgrade(ctx context.Context, p *pool) (*sql.Tx, error) {
+	if !p.pg {
+		return p.begin(ctx, true)
+	}
+	tx, err := p.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, q := range []string{`SET LOCAL lock_timeout = 0`, `SET LOCAL statement_timeout = 0`, migrateLock} {
+		if _, err := tx.ExecContext(ctx, q); err != nil {
+			tx.Rollback()
+			return nil, err
+		}
+	}
+	return tx, nil
+}
+
+// refuseOlderNodes refuses an upgrade while a live node runs a build older
+// than schemaCompat: the change would break it.
+func refuseOlderNodes(ctx context.Context, q querier, name string) error {
+	var has bool
+	if err := q.QueryRowContext(ctx, `SELECT to_regclass('nodes') IS NOT NULL`).Scan(&has); err != nil || !has {
+		return err
+	}
+	var id string
+	var s int
+	err := q.QueryRowContext(ctx, `SELECT id, schema FROM nodes WHERE schema < ? AND heartbeat_at > `+dbNow(q)+` - ? ORDER BY id LIMIT 1`,
+		schemaCompat, NodeTTL.Milliseconds()).Scan(&id, &s)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%s cannot be upgraded to schema %d while node %s, a build of schema %d, is running on it (this upgrade needs every node "+
+		"at schema %d or newer): stop the older nodes first (scale them down, or roll out with the Recreate strategy), then start this version",
+		name, schemaVersion, id, s, schemaCompat)
+}
+
+// readSchema reads the stamped schema version and compat: 0 for a new
+// database or one from before the stamp; compat is the version itself on
+// SQLite and on databases stamped before compat existed. It runs no DDL
+// (pgSchema creates the table and the column).
+func readSchema(ctx context.Context, q querier) (version, compat int, err error) {
 	if !q.postgres() {
-		err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&v)
-		return v, err
+		err = q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version)
+		return version, version, err
 	}
-	var stamped bool
-	if err := q.QueryRowContext(ctx, `SELECT to_regclass('schema_version') IS NOT NULL`).Scan(&stamped); err != nil || !stamped {
-		return 0, err
+	var stamped, hasCompat bool
+	if err := q.QueryRowContext(ctx, `SELECT to_regclass('schema_version') IS NOT NULL,
+  EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('schema_version') AND attname = 'compat' AND NOT attisdropped)`).Scan(&stamped, &hasCompat); err != nil || !stamped {
+		return 0, 0, err
 	}
-	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&v)
+	if !hasCompat {
+		err = q.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&version)
+		return version, version, err
+	}
+	err = q.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0), COALESCE(MAX(compat), 0) FROM schema_version`).Scan(&version, &compat)
+	return version, compat, err
+}
+
+// schemaVersionOf reads the stamped schema version (readSchema).
+func schemaVersionOf(ctx context.Context, q querier) (int, error) {
+	v, _, err := readSchema(ctx, q)
 	return v, err
 }
 
-func stampSchemaVersion(ctx context.Context, q querier, v int) error {
+// stampSchemaVersion stamps version v and, on PostgreSQL, compat.
+func stampSchemaVersion(ctx context.Context, q querier, v, compat int) error {
 	if !q.postgres() { // PRAGMA takes no bind parameters
 		_, err := q.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v))
 		return err
@@ -316,7 +414,7 @@ func stampSchemaVersion(ctx context.Context, q querier, v int) error {
 	if _, err := q.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
 		return err
 	}
-	_, err := q.ExecContext(ctx, `INSERT INTO schema_version(version) VALUES(?)`, v)
+	_, err := q.ExecContext(ctx, `INSERT INTO schema_version(version, compat) VALUES(?, ?)`, v, compat)
 	return err
 }
 
@@ -374,7 +472,17 @@ func hasColumn(ctx context.Context, db querier, table, col string) (bool, error)
 	return false, rows.Err()
 }
 
-func (d *DB) Close() error { return d.sql.db.Close() }
+// Close leaves the node registry if Join ran, closes the lock connection and
+// the listener, then the database.
+func (d *DB) Close() error {
+	if m := d.self.Load(); m != nil {
+		m.Leave(context.Background())
+	}
+	if d.cl != nil {
+		d.cl.close()
+	}
+	return d.sql.db.Close()
+}
 
 const assetCols = `repo, path, blob_sha256, size, content_type, sha1, md5, sha512,
   created_at, last_modified, remote_etag, remote_last_modified, checked_at`

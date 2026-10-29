@@ -77,7 +77,11 @@ type App struct {
 	Tasks     *tasks.Service      // scheduled tasks; the scheduler runs while Serve does
 	Webhooks  *webhook.Dispatcher // webhook deliveries; Close stops it before the database closes
 	Vuln      *vuln.Service       // vulnerability data and the firewall; Close waits for its index build
-	log       *slog.Logger
+	// Node is this process's id in the nodes table (hostname-xxxx, new for
+	// every start), in every log record ("node") and in the metrics.
+	Node   string
+	member *meta.Member // the node's registration: Join (AsServer, or Serve) until Serve returns
+	log    *slog.Logger
 }
 
 // Version is reported by the UI; cmd/commandcenter sets it before New.
@@ -104,7 +108,15 @@ type Option func(*options)
 type options struct {
 	logs     *logring.Ring
 	logLevel *slog.LevelVar
+	serve    bool
 }
+
+// AsServer registers the process as a node in New, right after the
+// database upgrade and before anything starts (the webhook poller among
+// them): on PostgreSQL New then refuses to run beside another live server
+// (meta.GuardError). The serve command passes it; Serve registers when New
+// did not, and the CLI commands that run beside a server do not register.
+func AsServer() Option { return func(o *options) { o.serve = true } }
 
 // WithLogLevel lets the UI's logging API change level, the root logger's
 // level, at run time.
@@ -119,6 +131,8 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 	for _, f := range opts {
 		f(&o)
 	}
+	node := meta.NewNodeID()
+	log = log.With("node", node)
 	db, err := OpenDB(cfg)
 	if err != nil {
 		return nil, err
@@ -127,17 +141,31 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 		db.Close()
 		return nil, err
 	}
+	var member *meta.Member
+	if o.serve {
+		if member, err = join(context.Background(), db, node, log); err != nil {
+			db.Close()
+			return nil, err
+		}
+	} // db.Close leaves the registry on the error returns below
 	blobs, err := openBlobStores(cfg, db)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	a, err := build(cfg, log, blobs, db, o.logs, o.logLevel)
+	a, err := build(cfg, log, blobs, db, o.logs, o.logLevel, node)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
+	a.member = member
 	return a, nil
+}
+
+// join registers the process as node in the nodes table (meta.Join).
+func join(ctx context.Context, db *meta.DB, node string, log *slog.Logger) (*meta.Member, error) {
+	host, _ := os.Hostname()
+	return db.Join(ctx, node, host, Version, log)
 }
 
 // databaseEnv holds the URL of the PostgreSQL metadata database, so that it
@@ -320,7 +348,7 @@ func openBlobStores(cfg *config.Config, db *meta.DB) (map[string]*blob.Store, er
 	return stores, nil
 }
 
-func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, db *meta.DB, logs *logring.Ring, logLevel *slog.LevelVar) (*App, error) {
+func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, db *meta.DB, logs *logring.Ring, logLevel *slog.LevelVar, node string) (*App, error) {
 	hasStore := func(name string) bool { return blobs[name] != nil } // before the map is shared
 	defs, err := loadRepositories(cfg, log, db, hasStore)
 	if err != nil {
@@ -506,7 +534,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	authn.CrowdHTTP = func(u *url.URL) *http.Client { return proxy.NewClientFor(u, nil) }
 	authn.Sessions = auth.NewSessions()
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
-	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, Webhooks: hooks, log: log}
+	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, Webhooks: hooks, Node: node, log: log}
 	taskSvc.Repos, taskSvc.Events = registry, hooks
 	taskSvc.Transfer.Repos, taskSvc.Transfer.Events = registry, hooks
 	taskSvc.GC = func(ctx context.Context, store string) (int, int64, error) {
@@ -528,6 +556,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Store:    store,
 		BaseURL:  baseURL,
 		Version:  Version,
+		Node:     node,
 		Started:  time.Now(),
 		Tasks:    a.Tasks,
 		Log:      log,
@@ -716,8 +745,26 @@ func warnUnknownRoleRepos(log *slog.Logger, a *auth.Snapshot, s *repo.Snapshot) 
 // process mid-drain (TestComposeStopGracePeriod).
 const shutdownTimeout = 30 * time.Second
 
-// Serve runs the HTTP server until ctx is cancelled, then drains requests for up to shutdownTimeout.
+// drainDelay is how long a node on PostgreSQL keeps serving after SIGTERM
+// while its readiness (GET /service/rest/v1/status/writable) answers 503,
+// so load balancers and Kubernetes endpoints stop sending it requests
+// before it stops taking connections. The image has no shell for a preStop
+// sleep. SQLite, one instance, does not wait. A var for tests.
+var drainDelay = 5 * time.Second
+
+// Serve runs the HTTP server until ctx is cancelled, then drains requests for
+// up to shutdownTimeout. The node is registered (see AsServer) for as long:
+// on cancel it first turns unready, for drainDelay on PostgreSQL, and its row
+// goes after everything else stopped.
 func (a *App) Serve(ctx context.Context) error {
+	if a.member == nil {
+		m, err := join(ctx, a.DB, a.Node, a.log)
+		if err != nil {
+			return err
+		}
+		a.member = m
+	}
+	defer a.member.Leave(context.Background())
 	srv := newHTTPServer(a.Handler)
 	// The counters are flushed periodically; the final flush runs on every way
 	// out, after the server stopped taking requests.
@@ -772,6 +819,11 @@ func (a *App) Serve(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 	a.log.Info("shutting down")
+	a.member.Drain(context.Background())
+	if a.DB.Driver() == "postgresql" && drainDelay > 0 {
+		a.log.Info("draining: readiness answers 503 so that load balancers stop sending requests here", "delay", drainDelay.String())
+		time.Sleep(drainDelay)
+	}
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(sctx); err != nil {

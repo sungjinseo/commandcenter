@@ -169,7 +169,7 @@ func TestOpenSchemaVersion(t *testing.T) {
 	if v := userVersion(t, db); v != schemaVersion {
 		t.Fatalf("new database: user_version %d, want %d", v, schemaVersion)
 	}
-	if err := stampSchemaVersion(ctx, db.sql, 0); err != nil { // as builds before the guard left it
+	if err := stampSchemaVersion(ctx, db.sql, 0, 0); err != nil { // as builds before the guard left it
 		t.Fatal(err)
 	}
 	db.Close()
@@ -179,7 +179,7 @@ func TestOpenSchemaVersion(t *testing.T) {
 	if v := userVersion(t, db); v != schemaVersion {
 		t.Fatalf("older database: user_version %d, want %d", v, schemaVersion)
 	}
-	if err := stampSchemaVersion(ctx, db.sql, schemaVersion+1); err != nil {
+	if err := stampSchemaVersion(ctx, db.sql, schemaVersion+1, schemaVersion+1); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

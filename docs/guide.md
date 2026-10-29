@@ -334,7 +334,7 @@ kubectl -n commandcenter delete pvc data-commandcenter-0
 - **StatefulSet, Pod 하나**: StatefulSet은 이전 Pod가 완전히 끝난 뒤에 새 Pod를 띄우므로 업데이트 중에도 두 프로세스가 같은 `meta.db`를 열지 않습니다(Deployment의 롤링 업데이트는 겹칠 수 있습니다). `replicas`를 늘리면 Pod마다 빈 볼륨이 따로 생겨, 데이터가 서로 다른 서버가 여러 대 생깁니다. 차트에 Pod 수를 정하는 값이 없는 것도 이 때문입니다.
 - **볼륨**: `/data`는 ReadWriteOnce PVC(`data-commandcenter-0`, 기본 50Gi)이며 블록 스토리지여야 합니다("차트 값"의 `persistence.storageClass`).
 - **노드 장애**: Pod가 `Terminating`이나 `Unknown`에 머물러도 `kubectl delete pod --force --grace-period=0`으로 지우지 마세요. 이전 노드에서 프로세스가 아직 돌고 있으면 같은 볼륨을 두 프로세스가 쓰게 될 수 있습니다.
-- **프로브**: startupProbe와 readinessProbe는 `GET /service/rest/v1/status`(인증 없이 200)입니다. HTTP 서버가 응답하는지만 보고 DB나 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. livenessProbe는 포트에 TCP 연결만 해 봅니다(`tcpSocket`). TCP 연결은 서버의 연결 자리 1024개가 모두 차 있어도 커널이 받아 주므로(커널 대기열이 넘치지 않는 한), 서버가 바쁘거나 공격을 받아 느려졌다고 Pod가 재시작되어 진행 중인 전송이 모두 끊기지는 않습니다. 그동안 readinessProbe가 실패하면 Pod는 Service에서 잠시 빠졌다가 다시 들어옵니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
+- **프로브**: startupProbe는 `GET /service/rest/v1/status`(인증 없이 200)로 HTTP 서버가 응답하는지만 봅니다. readinessProbe는 `GET /service/rest/v1/status/writable`로, DB가 응답하고 노드가 종료 중이 아니며 스키마가 맞고 (PostgreSQL) 잠금·알림 연결이 살아 있을 때만 200입니다("노드와 준비 상태" 참고. 참조 매니페스트는 아직 `/service/rest/v1/status`를 씁니다). 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. livenessProbe는 포트에 TCP 연결만 해 봅니다(`tcpSocket`). TCP 연결은 서버의 연결 자리 1024개가 모두 차 있어도 커널이 받아 주므로(커널 대기열이 넘치지 않는 한), 서버가 바쁘거나 공격을 받아 느려졌다고 Pod가 재시작되어 진행 중인 전송이 모두 끊기지는 않습니다. 그동안 readinessProbe가 실패하면 Pod는 Service에서 잠시 빠졌다가 다시 들어옵니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
 - **보안**: UID 65532(non-root), 읽기 전용 루트 파일시스템, 모든 capability 제거, seccomp `RuntimeDefault`로 Pod Security Standards의 `restricted` 기준에 맞습니다. SQLite 임시 파일은 `/tmp`(emptyDir)에 씁니다. 이름 붙은 blob store는 경로를 비우면 `/data/blobstores/<이름>`에 만들어지고, `/data` 밖의 절대 경로에 두려면 그 경로에 볼륨을 따로 마운트해야 합니다(`extraVolumes`, `extraVolumeMounts`). 루트 파일시스템이 읽기 전용이라 다른 경로에는 만들 수 없고, `/tmp`는 Pod가 다시 만들어지면 비워집니다.
 - **리소스**: 메모리 요청과 한도 128Mi, `GOMEMLIMIT=80MiB`(`goMemLimit`)입니다. CPU는 요청(100m)만 두고 한도는 두지 않습니다.
 - **운영 명령**: "운영"의 `docker compose exec commandcenter …`는 `kubectl -n commandcenter exec commandcenter-0 -- …`로 바꿔 씁니다(예: `kubectl -n commandcenter exec commandcenter-0 -- commandcenter token create -user ci`). 로그는 `kubectl -n commandcenter logs commandcenter-0`입니다.
@@ -413,7 +413,7 @@ nginx는 기본적으로 요청 본문을 끝까지 받은 다음 서버로 넘�
 - **`meta.db`는 로컬 디스크나 블록 스토리지에**: `dataDir`(기본 `/data`)에는 `meta.db`(SQLite, WAL 모드)와 default blob store(`blobs/`)가 있습니다. WAL은 같은 호스트의 공유 메모리 파일(`meta.db-shm`)과 파일 잠금에 기대므로, NFS나 SMB(CIFS) 같은 네트워크 파일시스템에서는 잠금이 보장되지 않고 DB가 깨질 수 있습니다. 로컬 디스크, 클라우드 블록 디스크, iSCSI, Kubernetes의 ReadWriteOnce 블록 볼륨을 쓰세요.
 - **NFS에는 blob만**: blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로, 이름 붙은 blob store("Blob Store" 참고)는 NFS 경로에 둘 수 있습니다. compact 작업이 파일의 수정 시각으로 진행 중인 업로드를 보호하므로 NFS 서버와 시계를 맞춰 두세요(NTP).
 - **blob store 경로는 영구 볼륨에**: 컨테이너 안의 경로(예: `/tmp/…`)에 store를 만들면 컨테이너를 다시 만들 때 blob이 사라지고 DB 기록만 남습니다.
-- **인스턴스는 하나만**: 같은 경로 업로드의 잠금, 예약 작업, 세션, OIDC·SAML 로그인 상태, proxy 자동 차단 상태, 캐시가 모두 프로세스 안에 있습니다. 같은 `dataDir`나 blob store를 두 프로세스가 함께 쓰면 안 되고, 이중화(active-active)나 여러 대로 늘리는 구성은 지원하지 않습니다. 컨테이너를 바꿀 때는 이전 컨테이너가 완전히 멈춘 뒤에 새 컨테이너를 띄우세요. 대신 재시작은 빠릅니다(중지와 기동 모두 보통 1초 안쪽).
+- **인스턴스는 하나만**: 같은 경로 업로드의 잠금, 예약 작업, 세션, OIDC·SAML 로그인 상태, proxy 자동 차단 상태, 캐시가 모두 프로세스 안에 있습니다. 같은 `dataDir`나 blob store를 두 프로세스가 함께 쓰면 안 되고, 이중화(active-active)나 여러 대로 늘리는 구성은 지원하지 않습니다. 컨테이너를 바꿀 때는 이전 컨테이너가 완전히 멈춘 뒤에 새 컨테이너를 띄우세요. 대신 재시작은 빠릅니다(중지와 기동 모두 보통 1초 안쪽). PostgreSQL을 쓰면 두 번째 `serve`는 시작을 거부합니다("노드와 준비 상태" 참고).
 - **디스크 여유**: proxy 캐시는 계속 커집니다. Cleanup 정책과 compact 작업으로 정리하고, Blob Store 화면에서 파일시스템의 남은 용량을 지켜보세요.
 
 ### 리소스
@@ -431,6 +431,15 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
 - compose: 들어 있는 `docker-compose.yml`에 `stop_grace_period: 60s`가 있습니다. 다른 compose 파일을 쓰면 서비스에 넣으세요.
 - `docker run`으로 띄웠다면: `docker run --stop-timeout 60 …`으로 띄우거나 `docker stop -t 60 commandcenter`로 멈춥니다.
 - Kubernetes: `terminationGracePeriodSeconds: 60`(차트의 기본값이고 참조 매니페스트에도 들어 있습니다)
+
+
+### 노드와 준비 상태
+
+- **노드 등록**: `serve`로 띄운 서버는 시작할 때 메타데이터 DB의 `nodes` 테이블에 자신을 노드로 등록합니다. 노드 ID는 `<호스트 이름>-<16진수 4자리>`이며 시작할 때마다 새로 정해집니다. 노드는 10초마다 DB 서버의 시계로 하트비트를 갱신하고, 마지막 하트비트가 30초 안이면 살아 있는 노드로 봅니다. 정상 종료하면 행을 지우고, 비정상 종료로 남은 행은 24시간이 지나면 정리됩니다. 노드 ID는 모든 로그 레코드의 `node` 속성, `/-/metrics/prometheus`의 `commandcenter_node_info{node,version} 1`, 시스템 정보의 `commandcenter-status.node`, 지원 번들의 `info.json`과 `nodes.json`에 들어갑니다. 등록된 노드는 `GET /-/api/nodes`(관리자)로 봅니다. `self`는 응답한 노드이고, 노드마다 `id`, `hostname`, `version`, `schema`(빌드의 스키마 버전), `startedAt`, `heartbeatAt`, `alive`, `draining`, `leader`(예약 작업 임대를 가진 노드)가 있습니다.
+- **두 번째 인스턴스는 시작을 거부합니다; HA는 아직 아닙니다**: PostgreSQL을 쓸 때 같은 DB에 살아 있는 다른 노드가 있으면, `serve`는 그 노드의 ID, 호스트, 버전, 마지막 하트비트를 알리는 오류를 내고 시작하지 않습니다. 같은 경로 업로드의 잠금, 예약 작업, 세션 같은 상태가 아직 프로세스 안에 있어서, 두 프로세스가 한 DB를 함께 쓰면 갱신이 사라지기 때문입니다(이전 버전은 경고 없이 시작했습니다). 이전 프로세스가 비정상 종료해 행이 남아 있으면 그 하트비트가 만료될 때까지(최대 30초) 로그를 남기고 기다린 뒤 시작합니다. 기다리는 동안 하트비트가 갱신되면 다른 서버가 실제로 돌고 있는 것이므로 거부합니다. 컨테이너를 바꿀 때는 이전 서버를 먼저 멈추세요. SQLite는 한 프로세스만 파일을 열므로 이 검사가 없습니다. `token create`, `gc`, `migrate-db` 같은 CLI 명령은 노드로 등록하지 않으므로 실행 중인 서버 옆에서 그대로 쓸 수 있습니다.
+- **준비 상태(readiness)**: `GET /service/rest/v1/status/writable`은 서버가 요청을 받아도 될 때만 200을, 아니면 503을 돌려줍니다. DB가 응답하고, 노드가 종료 중(draining)이 아니며, DB 스키마가 이 버전이 돌 수 있는 것이고, PostgreSQL에서는 잠금 연결과 변경 알림 연결(`LISTEN cc_changed`)도 살아 있어야 200입니다. 더 새 버전이 DB를 업그레이드해 이 버전이 함께 돌 수 없게 되면, 실행 중인 노드는 다음 하트비트에서 이를 알아채고 오류 로그를 남긴 뒤 준비되지 않은 상태가 됩니다. Helm 차트의 readinessProbe가 이 경로를 씁니다(startupProbe는 `/service/rest/v1/status`, livenessProbe는 TCP 연결 그대로입니다). 관리자 화면 시스템 상태의 `Cluster` 항목(`/service/rest/v1/status/check`, `commandcenter_health_check{name="Cluster"}`에도 나옵니다)이 살아 있는 노드와 리더를 보여 주고, 이 노드가 준비되지 않았거나 살아 있는 노드가 둘 이상이면 실패로 표시합니다.
+- **종료 순서(drain)**: SIGTERM을 받으면 먼저 노드를 draining으로 표시해 준비 상태를 503으로 바꿉니다. PostgreSQL에서는 그 뒤 5초 동안 요청을 계속 받으며 Service 엔드포인트와 로드밸런서가 이 Pod를 빼기를 기다립니다(이미지에 셸이 없어 preStop `sleep`을 쓸 수 없으므로 서버가 직접 기다립니다). 이어서 이전과 같이 진행 중인 요청을 최대 30초 기다리고 통계, 메일, 활동 기록을 쓴 다음, 노드 행을 지우고 임대를 내놓습니다. 모두 합쳐 약 45초로 `terminationGracePeriodSeconds: 60` 안에 끝납니다. SQLite는 5초를 기다리지 않습니다.
+- **DB 연결 수**: PostgreSQL에서 노드 하나는 연결 풀(기본 10개) 외에 잠금 연결 1개와 알림 연결 1개를 더 씁니다. 두 연결은 TCP keepalive(30초 뒤 10초 간격으로 3회)를 켜 두므로, DB와 끊긴 노드의 잠금은 약 1분 안에 풀립니다.
 
 ## repolite에서 이전하기
 

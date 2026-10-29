@@ -25,7 +25,7 @@ const (
 var apiDocs = []openapi.Route{
 	{Pattern: "GET /service/rest/swagger.json", Summary: "This document (OpenAPI 3.0, where Nexus serves Swagger 2.0)", Tag: nx},
 	{Pattern: "GET " + Prefix + "/status", Summary: "Liveness: 200", Tag: nx},
-	{Pattern: "GET " + Prefix + "/status/writable", Summary: "Readiness: 200 when the database answers, else 503", Tag: nx},
+	{Pattern: "GET " + Prefix + "/status/writable", Summary: "Readiness: 200 when the database answers and the node is not draining, its schema is compatible and (PostgreSQL) its lock connection and listener are up; else 503", Tag: nx},
 	{Pattern: "GET " + Prefix + "/status/check", Summary: "The health checks in Nexus's shape", Tag: nx, Auth: nxAdmin, Reply: "NexusChecks"},
 	{Pattern: "GET " + Prefix + "/repositories", Summary: "Readable repositories", Tag: nx, Reply: "NexusRepositoryList"},
 	{Pattern: "GET " + Prefix + "/repositories/{name}", Summary: "One repository", Tag: nx, Reply: "NexusRepository"},

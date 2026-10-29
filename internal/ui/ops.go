@@ -104,6 +104,10 @@ func (u *UI) prometheusText(ctx context.Context) ([]byte, error) {
 	runtime.ReadMemStats(&ms)
 	p.family("commandcenter_build_info", "gauge", "Command Center build information.")
 	p.sample("commandcenter_build_info", 1, "version", u.Version, "goversion", runtime.Version())
+	if u.Node != "" {
+		p.family("commandcenter_node_info", "gauge", "The node id of this process in the nodes table (GET /-/api/nodes).")
+		p.sample("commandcenter_node_info", 1, "node", u.Node, "version", u.Version)
+	}
 	p.family("commandcenter_uptime_seconds", "gauge", "Seconds since the process started.")
 	p.sample("commandcenter_uptime_seconds", int64(time.Since(u.Started).Seconds()))
 	p.family("go_goroutines", "gauge", "Number of goroutines.")
@@ -343,7 +347,7 @@ func (u *UI) supportZip(w http.ResponseWriter, r *http.Request) {
 	}
 	info := map[string]any{
 		"version": u.Version, "goVersion": runtime.Version(), "os": runtime.GOOS, "arch": runtime.GOARCH,
-		"pid": os.Getpid(), "hostname": host, "numCPU": runtime.NumCPU(), "gomaxprocs": runtime.GOMAXPROCS(0),
+		"pid": os.Getpid(), "hostname": host, "node": u.Node, "numCPU": runtime.NumCPU(), "gomaxprocs": runtime.GOMAXPROCS(0),
 		"generatedAt": now.Format(time.RFC3339),
 	}
 	if !u.Started.IsZero() {
@@ -369,6 +373,7 @@ func (u *UI) supportZip(w http.ResponseWriter, r *http.Request) {
 	addJSON("blobstores.json", u.apiJSON(r, "/-/api/blobstores"))
 	addJSON("status.json", map[string]any{"checks": u.healthChecks(r.Context())})
 	addJSON("sysinfo.json", u.apiJSON(r, "/-/api/systeminformation"))
+	addJSON("nodes.json", u.apiJSON(r, "/-/api/nodes"))
 	addJSON("tasks.json", u.apiJSON(r, "/-/api/tasks"))
 	addJSON("webhooks.json", u.apiJSON(r, "/-/api/webhooks"))
 	addJSON("request-stats.json", u.apiJSON(r, "/-/api/stats/repositories?range=24h"))

@@ -45,6 +45,7 @@ type UI struct {
 	Store   *repo.Store   // live blob stores (the name→store map) and routing; nil disables the blob-store API
 	BaseURL func() string // the live baseURL setting, without trailing slash; nil reads the auth snapshot
 	Version string
+	Node    string // this process's node id (meta.NewNodeID); "" outside a server
 	Started time.Time
 	Tasks   *tasks.Service // scheduled tasks and runs; nil serves 501
 	Log     *slog.Logger

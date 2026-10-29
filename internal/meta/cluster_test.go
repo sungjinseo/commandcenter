@@ -1,0 +1,591 @@
+package meta
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"commandcenter/internal/meta/metatest"
+)
+
+// twoNodes opens one database twice, as two server processes would. On
+// SQLite, where one process opens the file and Lock is in-process, it is
+// one handle twice.
+func twoNodes(t *testing.T) (a, b *DB, target string) {
+	t.Helper()
+	target = metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	open := func() *DB {
+		db, err := Open(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		return db
+	}
+	a = open()
+	if !metatest.Postgres() {
+		return a, a, target
+	}
+	return a, open(), target
+}
+
+// shortNodeTimes makes heartbeats and leases fast for the test.
+func shortNodeTimes(t *testing.T, heartbeat, ttl time.Duration) {
+	t.Helper()
+	hb, nt := HeartbeatEvery, NodeTTL
+	HeartbeatEvery, NodeTTL = heartbeat, ttl
+	t.Cleanup(func() { HeartbeatEvery, NodeTTL = hb, nt }) // registered first, runs after the handles closed
+}
+
+func discard() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// 50 goroutines on one key, alternating between two nodes: never two at once.
+func TestLockExcludesAcrossNodes(t *testing.T) {
+	a, b, _ := twoNodes(t)
+	var cur, peak atomic.Int32
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d := a
+			if i%2 == 1 {
+				d = b
+			}
+			unlock, err := d.Lock(ctx, "k")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			n := cur.Add(1)
+			for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+			}
+			time.Sleep(time.Millisecond)
+			cur.Add(-1)
+			unlock()
+		}()
+	}
+	wg.Wait()
+	if p := peak.Load(); p != 1 {
+		t.Fatalf("up to %d holders of one key at once, want 1", p)
+	}
+	// Another key does not wait for a held one.
+	unlock, err := a.Lock(ctx, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	tctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	other, err := b.Lock(tctx, "other")
+	if err != nil {
+		t.Fatalf("a free key waited for a held one: %v", err)
+	}
+	other()
+}
+
+// A waiter whose context ends gives up, in the process and across nodes,
+// and leaves the lock usable.
+func TestLockCancelWhileWaiting(t *testing.T) {
+	a, b, _ := twoNodes(t)
+	unlock, err := a.Lock(ctx, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, d := range map[string]*DB{"same process": a, "other node": b} {
+		tctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		start := time.Now()
+		_, err := d.Lock(tctx, "k")
+		cancel()
+		if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 2*time.Second {
+			t.Fatalf("%s: Lock = %v after %v, want the deadline", name, err, time.Since(start))
+		}
+	}
+	unlock()
+	tctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	again, err := b.Lock(tctx, "k")
+	if err != nil {
+		t.Fatalf("after the cancelled waits: %v", err)
+	}
+	again()
+}
+
+// A second unlock does nothing: it does not release the lock of whoever
+// took the key since.
+func TestUnlockTwice(t *testing.T) {
+	a, b, _ := twoNodes(t)
+	first, err := a.Lock(ctx, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first()
+	first()
+	second, err := a.Lock(ctx, "k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second()
+	first()
+	tctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	if _, err := b.Lock(tctx, "k"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Lock after a stale unlock = %v, want it to wait for the holder", err)
+	}
+}
+
+// pgBackendGone waits until pid has left pg_stat_activity.
+func pgBackendGone(t *testing.T, d *DB, pid uint32) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var n int
+		if err := d.sql.QueryRowContext(ctx, `SELECT count(*) FROM pg_stat_activity WHERE pid = ?`, int64(pid)).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("backend %d is still there", pid)
+		}
+	}
+}
+
+func terminate(t *testing.T, d *DB, pid uint32) {
+	t.Helper()
+	var ok bool
+	if err := d.sql.QueryRowContext(ctx, `SELECT pg_terminate_backend(?)`, int64(pid)).Scan(&ok); err != nil || !ok {
+		t.Fatalf("pg_terminate_backend(%d) = %v, %v", pid, ok, err)
+	}
+	pgBackendGone(t, d, pid)
+}
+
+// The server ends the lock connection: its locks go with it (the
+// documented ceiling), the node reconnects for the next Lock, and an unlock
+// from the old connection does not release a lock taken since.
+func TestLockConnectionTerminated(t *testing.T) {
+	if !metatest.Postgres() {
+		t.Skip("PostgreSQL's lock connection")
+	}
+	a, b, _ := twoNodes(t)
+	stale, err := a.Lock(ctx, "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.cl.mu.Lock()
+	pid := a.cl.conn.PgConn().PID()
+	a.cl.mu.Unlock()
+	terminate(t, b, pid)
+
+	tctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	held, err := b.Lock(tctx, "k1") // the session that held it is gone
+	if err != nil {
+		t.Fatalf("k1 after its session ended: %v", err)
+	}
+	unlock, err := a.Lock(tctx, "k2")
+	if err != nil {
+		t.Fatalf("Lock after the lock connection was terminated: %v", err)
+	}
+	unlock()
+	stale() // releases the in-process mutex only
+	short, cancelShort := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancelShort()
+	if _, err := a.Lock(short, "k1"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("k1 while the other node holds it: %v", err)
+	}
+	held()
+	again, err := a.Lock(tctx, "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again()
+}
+
+// The scheduler lease moves to another node within NodeTTL of its holder's
+// last renewal, and the old holder cannot renew it then.
+func TestLeaseFailover(t *testing.T) {
+	shortNodeTimes(t, 50*time.Millisecond, 500*time.Millisecond)
+	a, b, _ := twoNodes(t)
+	for _, c := range []struct {
+		d      *DB
+		holder string
+		want   bool
+	}{{a, "A", true}, {b, "B", false}, {a, "A", true}} {
+		if got, err := c.d.acquireLease(ctx, schedulerLease, c.holder); err != nil || got != c.want {
+			t.Fatalf("%s: %v, %v; want %v", c.holder, got, err, c.want)
+		}
+	}
+	renewed := time.Now()
+	for {
+		got, err := b.acquireLease(ctx, schedulerLease, "B")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got {
+			break
+		}
+		if time.Since(renewed) > NodeTTL+time.Second {
+			t.Fatal("B did not get the lease after A stopped renewing it")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got, err := a.acquireLease(ctx, schedulerLease, "A"); err != nil || got {
+		t.Fatalf("A renewed a lease B holds: %v, %v", got, err)
+	}
+}
+
+// A notification reaches the subscribers of its topic on every node; after
+// the listener is killed it reconnects and calls every subscriber with ""
+// (re-read everything), then delivers again. SQLite: both do nothing.
+func TestNotifyAndResync(t *testing.T) {
+	a, b, _ := twoNodes(t)
+	got := make(chan string, 10)
+	a.Subscribe("t", func(arg string) { got <- arg })
+	if !metatest.Postgres() {
+		if err := b.Notify(ctx, "t:x"); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case arg := <-got:
+			t.Fatalf("SQLite delivered %q", arg)
+		case <-time.After(100 * time.Millisecond):
+		}
+		return
+	}
+	next := func(want string) {
+		t.Helper()
+		select {
+		case arg := <-got:
+			if arg != want {
+				t.Fatalf("subscriber got %q, want %q", arg, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no call, want %q", want)
+		}
+	}
+	next("") // the first connect re-reads too: changes before it are not missed
+	for _, topic := range []string{"other", "t:x"} {
+		if err := b.Notify(ctx, topic); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next("x")
+	terminate(t, b, a.cl.pid.Load())
+	next("")
+	if err := b.Notify(ctx, "t"); err != nil {
+		t.Fatal(err)
+	}
+	next("")
+	if !a.cl.up.Load() {
+		t.Fatal("the listener is not up after the reconnect")
+	}
+}
+
+// makeV4 turns a fresh database into one as schema 4 left it: no nodes,
+// leases or compat.
+func makeV4(t *testing.T, target string) {
+	t.Helper()
+	raw := rawOpen(t, target)
+	stmts := []string{`DROP TABLE nodes`, `DROP TABLE leases`, `PRAGMA user_version = 4`}
+	if raw.pg {
+		stmts = []string{`DROP TABLE nodes`, `DROP TABLE leases`, `ALTER TABLE schema_version DROP COLUMN compat`,
+			`DELETE FROM schema_version`, `INSERT INTO schema_version(version) VALUES(4)`}
+	}
+	for _, q := range stmts {
+		if _, err := raw.db.Exec(q); err != nil {
+			t.Fatal(q, err)
+		}
+	}
+}
+
+// Nodes that start at once on an empty or an older database upgrade it one
+// after the other, and all start.
+func TestConcurrentOpen(t *testing.T) {
+	for _, v4 := range []bool{false, true} {
+		if !v4 && !metatest.Postgres() {
+			continue // SQLite: first opens of a new file race on journal_mode(WAL); one process opens a file anyway
+		}
+		target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+		if v4 {
+			db, err := Open(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+			makeV4(t, target)
+		}
+		const n = 4
+		errs := make(chan error, n)
+		start := make(chan struct{})
+		for range n {
+			go func() {
+				<-start
+				db, err := Open(target)
+				if err == nil {
+					db.Close()
+				}
+				errs <- err
+			}()
+		}
+		close(start)
+		for range n {
+			if err := <-errs; err != nil {
+				t.Fatalf("v4 %v: %v", v4, err)
+			}
+		}
+		version, compat, err := readSchema(ctx, rawOpen(t, target))
+		if err != nil || version != schemaVersion || compat != map[bool]int{true: schemaCompat, false: schemaVersion}[metatest.Postgres()] {
+			t.Fatalf("v4 %v: schema %d compat %d (%v)", v4, version, compat, err)
+		}
+	}
+}
+
+// The upgrade waits for another node's upgrade however long it takes,
+// whatever lock_timeout the URL sets for the server's writes.
+func TestOpenWaitsForTheMigrateLock(t *testing.T) {
+	if !metatest.Postgres() {
+		t.Skip("PostgreSQL's migrate lock")
+	}
+	target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	raw := rawOpen(t, target)
+	tx, err := raw.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(migrateLock); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		db, err := Open(target + "&lock_timeout=100")
+		if err == nil {
+			db.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("Open did not wait for the upgrade in progress: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	tx.Commit()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Every schema version's compat decision (schemaCompat): bumping
+// schemaVersion fails this test until a row says which builds may run on
+// the new version. compat is the version (a full stop: older builds refuse
+// it) or the version - 1 (expand-only: the previous release still runs).
+func TestSchemaCompat(t *testing.T) {
+	decisions := []struct {
+		version, compat int
+		note            string
+	}{
+		{1, 1, "users, roles and settings in the database, named blob stores, sealed secrets"},
+		{2, 2, "S3 blob stores: an older build would read their paths as directories"},
+		{3, 3, "webhooks, routing rules and content selectors"},
+		{4, 4, "user tokens, blob store groups, cleanup criteria, tags, store moves, vulnerability data"},
+		{5, 5, "nodes, leases, compat: a full stop, as the single-writer guard must refuse a second instance, which older builds would not"},
+	}
+	for i, d := range decisions {
+		if d.version != i+1 || d.compat < d.version-1 || d.compat > d.version || d.note == "" {
+			t.Errorf("decision %+v: want version %d, compat version or version-1, and a note", d, i+1)
+		}
+	}
+	if last := decisions[len(decisions)-1]; last.version != schemaVersion || last.compat != schemaCompat {
+		t.Fatalf("the last decision is %+v; schemaVersion %d with schemaCompat %d needs its row", last, schemaVersion, schemaCompat)
+	}
+}
+
+// Compat both ways: a build starts on a newer database only when its compat
+// allows it, an upgrade waits for no live node of a build below compat, and
+// a running node turns unready when compat rises above its build.
+func TestCompatRefusals(t *testing.T) {
+	shortNodeTimes(t, time.Hour, time.Minute) // beat by hand
+	target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	db, err := Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m, err := db.Join(ctx, "n1", "host", "test", discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := rawOpen(t, target)
+	stamp := func(v, c int) {
+		t.Helper()
+		if err := stampSchemaVersion(ctx, raw, v, c); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.beat(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stamp(schemaVersion+1, schemaVersion+1)
+	if err := db.Ready(ctx); err == nil || !strings.Contains(err.Error(), "schema") {
+		t.Fatalf("Ready on a database a newer build may not share: %v", err)
+	}
+	if _, err := Open(target); err == nil {
+		t.Fatal("Open of a database whose compat is above this build")
+	}
+	if !metatest.Postgres() {
+		return // SQLite keeps no compat
+	}
+	stamp(schemaVersion+1, schemaVersion)
+	if err := db.Ready(ctx); err != nil {
+		t.Fatalf("Ready on a newer, expand-only database: %v", err)
+	}
+	newer, err := Open(target)
+	if err != nil {
+		t.Fatalf("Open of a newer, expand-only database: %v", err)
+	}
+	newer.Close()
+	if v, c, err := readSchema(ctx, raw); err != nil || v != schemaVersion+1 || c != schemaVersion {
+		t.Fatalf("the older build changed the stamp: %d %d %v", v, c, err)
+	}
+
+	// An upgrade while a live node of an older build is registered.
+	stamp(schemaCompat-1, schemaCompat-1)
+	if _, err := raw.db.Exec(`INSERT INTO nodes(id, hostname, version, schema, started_at, heartbeat_at) VALUES('old-1', 'h', 'old', $1, 1, `+
+		dbNow(raw)+`)`, schemaCompat-1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(target); err == nil || !strings.Contains(err.Error(), "old-1") || !strings.Contains(err.Error(), "Recreate") {
+		t.Fatalf("upgrade beside an older live node: %v", err)
+	}
+	if _, err := raw.db.Exec(`UPDATE nodes SET heartbeat_at = 1 WHERE id = 'old-1'`); err != nil { // it stopped
+		t.Fatal(err)
+	}
+	up, err := Open(target)
+	if err != nil {
+		t.Fatalf("upgrade after the older node stopped: %v", err)
+	}
+	up.Close()
+	if v, c, err := readSchema(ctx, raw); err != nil || v != schemaVersion || c != schemaCompat {
+		t.Fatalf("after the upgrade: %d %d %v", v, c, err)
+	}
+}
+
+// The guard: a second node is refused while the first is alive, after
+// waiting once for its heartbeat to expire; it starts at once after the
+// first left, and after the wait when the first crashed. SQLite: no guard.
+func TestJoinGuard(t *testing.T) {
+	shortNodeTimes(t, 100*time.Millisecond, 700*time.Millisecond)
+	a, b, _ := twoNodes(t)
+	first, err := a.Join(ctx, "first", "host-a", "1", discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !metatest.Postgres() {
+		second, err := b.Join(ctx, "second", "host-a", "1", discard())
+		if err != nil {
+			t.Fatalf("SQLite has no guard: %v", err)
+		}
+		second.Leave(ctx)
+		first.Leave(ctx)
+		return
+	}
+	start := time.Now()
+	_, err = b.Join(ctx, "second", "host-b", "1", discard())
+	var guard *GuardError
+	if !errors.As(err, &guard) || guard.Other.ID != "first" || guard.Other.Hostname != "host-a" ||
+		!strings.Contains(err.Error(), "high availability") || !strings.Contains(err.Error(), "first") {
+		t.Fatalf("second Join beside a live node: %v", err)
+	}
+	if d := time.Since(start); d < NodeTTL/2 || d > 2*NodeTTL+time.Second {
+		t.Fatalf("refused after %v; want it to wait for the heartbeat once (%v)", d, NodeTTL)
+	}
+
+	first.Leave(ctx)
+	start = time.Now()
+	second, err := b.Join(ctx, "second", "host-b", "1", discard())
+	if err != nil {
+		t.Fatalf("Join after the first node left: %v", err)
+	}
+	if d := time.Since(start); d > NodeTTL/2 {
+		t.Fatalf("Join after a graceful stop waited %v", d)
+	}
+
+	second.stopHeartbeat() // a crash: the row stays
+	var logs bytes.Buffer
+	third, err := a.Join(ctx, "third", "host-a", "1", slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatalf("Join after a crash: %v", err)
+	}
+	defer third.Leave(ctx)
+	if !strings.Contains(logs.String(), "waiting for its heartbeat to expire") || !strings.Contains(logs.String(), "second") {
+		t.Fatalf("log: %s", logs.String())
+	}
+	nodes, err := a.Nodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alive := map[string]bool{}
+	for _, n := range nodes {
+		alive[n.ID] = n.Alive
+	}
+	if !alive["third"] || alive["second"] || len(nodes) != 2 {
+		t.Fatalf("nodes after the crash: %+v", nodes)
+	}
+}
+
+// Ready follows the node: ready once joined (the lock connection and the
+// listener up on PostgreSQL), not ready while draining, and the row and
+// the lease go on Leave.
+func TestReadyDrainLeave(t *testing.T) {
+	shortNodeTimes(t, 50*time.Millisecond, time.Second)
+	db := openTest(t)
+	if err := db.Ready(ctx); err != nil {
+		t.Fatalf("Ready before Join: %v", err)
+	}
+	m, err := db.Join(ctx, "n1", "host", "v9", discard())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); db.Ready(ctx) != nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("not ready after Join: %v", db.Ready(ctx))
+		}
+	}
+	nodes, err := db.Nodes(ctx)
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("nodes %+v, %v", nodes, err)
+	}
+	n := nodes[0]
+	if n.ID != "n1" || n.Hostname != "host" || n.Version != "v9" || n.Schema != schemaVersion || !n.Alive || !n.Leader || n.Draining ||
+		n.StartedAt.IsZero() || n.HeartbeatAt.Before(n.StartedAt) || !m.Leader() {
+		t.Fatalf("node %+v", n)
+	}
+	m.Drain(ctx)
+	if err := db.Ready(ctx); err == nil || !strings.Contains(err.Error(), "draining") {
+		t.Fatalf("Ready while draining: %v", err)
+	}
+	time.Sleep(3 * HeartbeatEvery) // the heartbeat keeps the flag
+	if nodes, _ := db.Nodes(ctx); len(nodes) != 1 || !nodes[0].Draining || !nodes[0].Alive {
+		t.Fatalf("draining node %+v", nodes)
+	}
+	m.Leave(ctx)
+	m.Leave(ctx)
+	var leases int
+	if nodes, err := db.Nodes(ctx); err != nil || len(nodes) != 0 {
+		t.Fatalf("nodes after Leave: %+v, %v", nodes, err)
+	}
+	if err := db.sql.QueryRowContext(ctx, `SELECT count(*) FROM leases`).Scan(&leases); err != nil || leases != 0 {
+		t.Fatalf("%d leases after Leave (%v)", leases, err)
+	}
+	if err := db.Ready(ctx); err == nil {
+		t.Fatal("ready after Leave")
+	}
+}

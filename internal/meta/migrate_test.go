@@ -155,7 +155,7 @@ func TestCopy(t *testing.T) {
 	}
 	// So is a schema version other than the source's.
 	stale := openTest(t)
-	if err := stampSchemaVersion(ctx, stale.sql, schemaVersion+1); err != nil {
+	if err := stampSchemaVersion(ctx, stale.sql, schemaVersion+1, schemaVersion+1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Copy(ctx, src, stale); err == nil || !strings.Contains(err.Error(), "schema version mismatch") {

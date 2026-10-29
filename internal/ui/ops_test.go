@@ -262,7 +262,7 @@ func TestSupportZip(t *testing.T) {
 		rc.Close()
 		got[f.Name] = string(b)
 	}
-	for _, name := range []string{"info.json", "config.json", "repositories.json", "blobstores.json", "status.json", "sysinfo.json",
+	for _, name := range []string{"info.json", "config.json", "repositories.json", "blobstores.json", "status.json", "sysinfo.json", "nodes.json",
 		"tasks.json", "events.json", "logs.txt", "threads.txt", "metrics.txt", "request-stats.json"} {
 		if _, ok := got[name]; !ok {
 			t.Errorf("entry %s missing (have %v)", name, len(got))

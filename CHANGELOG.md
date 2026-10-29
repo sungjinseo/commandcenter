@@ -9,6 +9,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- A node registry: `GET /-/api/nodes`, `commandcenter_node_info`, the `node` log attribute, a `Cluster`
+  status check, and readiness on `/service/rest/v1/status/writable` that covers draining, schema
+  compatibility and, on PostgreSQL, the lock and listener connections.
 - The `rubygems` format: RubyGems repositories at `/repository/<repo>/` for Bundler and `gem` (the
   compact index `versions`, `names` and `info/<gem>` with the md5 `ETag`, `Repr-Digest` and byte
   ranges Bundler uses to fetch increments; the legacy `specs.4.8.gz`, `latest_specs.4.8.gz`,
@@ -351,6 +354,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Webhooks no longer send a delivery twice when a poll read it while a worker was sending it.
 
 ### Upgrade notes
+- The database schema version is now 5: new tables `nodes` and `leases`, and on PostgreSQL the column
+  `schema_version.compat`, created on the first start of this version. From now on the stamp also says
+  which older builds may still run on the database: a build starts on a database of a newer schema only
+  when that database's compat is at or below the build's own schema (an expand-only change keeps compat
+  one below, so the previous release can run beside it or be rolled back to). Schema 5 sets compat 5, so
+  older versions refuse the upgraded database as before: back up before upgrading. On PostgreSQL, nodes
+  that start at once upgrade one after the other with no lock timeout (the startup probe bounds the wait),
+  and an upgrade is refused while a live node of a build older than compat is registered.
+- `serve` on PostgreSQL refuses to start while another live server is registered on the same database
+  (it waits up to 30 s for a crashed predecessor's heartbeat to expire): stop the old instance before
+  starting the new one. The Helm chart's readinessProbe now asks `GET /service/rest/v1/status/writable`,
+  and on PostgreSQL a stopping server stays unready for 5 s before it stops taking connections.
 - The database schema version is now 4 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`,
   `content_selectors`, `user_tokens`, `tags`, `component_tags`, `blob_store_moves`, `vuln_advisories`,
   `vuln_queries`, `vuln_findings` and `firewall_quarantine`, created on the first start of this version

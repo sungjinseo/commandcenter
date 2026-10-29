@@ -24,6 +24,66 @@ func (u *UI) infoRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/users", u.listUsers)
 	mux.HandleFunc("GET /-/api/status/checks", u.statusChecks)
 	mux.HandleFunc("GET /-/api/systeminformation", u.systemInformation)
+	mux.HandleFunc("GET /-/api/nodes", u.listNodes)
+}
+
+// GET /-/api/nodes (admin): the server nodes registered on the database,
+// oldest first, and which one answered. One until high availability.
+func (u *UI) listNodes(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	nodes, err := u.DB.Nodes(r.Context())
+	if err != nil {
+		u.fail(w, r, err)
+		return
+	}
+	out := make([]map[string]any, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, map[string]any{"id": n.ID, "hostname": n.Hostname, "version": n.Version, "schema": n.Schema,
+			"startedAt": rfc3339(n.StartedAt), "heartbeatAt": rfc3339(n.HeartbeatAt),
+			"alive": n.Alive, "draining": n.Draining, "leader": n.Leader})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"self": u.Node, "nodes": out})
+}
+
+// checkCluster lists the live nodes and fails when this node is not ready
+// (draining, an incompatible schema, the lock connection or the listener
+// down) or when more than one node is alive: one instance per database.
+func (u *UI) checkCluster(rctx context.Context) func() (bool, string) {
+	return func() (bool, string) {
+		ctx, cancel := context.WithTimeout(rctx, 2*time.Second)
+		defer cancel()
+		nodes, err := u.DB.Nodes(ctx)
+		if err != nil {
+			return false, "cannot read the nodes: " + err.Error()
+		}
+		var live []string
+		for _, n := range nodes {
+			if !n.Alive {
+				continue
+			}
+			s := n.ID
+			if n.Leader {
+				s += " (leader)"
+			}
+			if n.Draining {
+				s += " (draining)"
+			}
+			live = append(live, s)
+		}
+		msg := "no live node is registered (not serving)"
+		if len(live) > 0 {
+			msg = fmt.Sprintf("%d live node(s): %s", len(live), strings.Join(live, ", "))
+		}
+		if err := u.DB.Ready(ctx); err != nil {
+			return false, msg + "; this node is not ready: " + err.Error()
+		}
+		if len(live) > 1 {
+			return false, msg + ": this version runs one instance per database"
+		}
+		return true, msg
+	}
 }
 
 // formatDuration renders a config duration like the config file does:
@@ -315,6 +375,7 @@ func (u *UI) healthChecks(rctx context.Context) []check {
 			}
 			return true, "responding"
 		}),
+		runCheck("Cluster", u.checkCluster(rctx)),
 		runCheck("Blob store", u.checkBlobStoreTimed),
 		runCheck("Memory", u.checkMemory),
 	}
@@ -348,7 +409,7 @@ func (u *UI) systemInformation(w http.ResponseWriter, r *http.Request) {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 
-	status := map[string]any{"version": u.Version}
+	status := map[string]any{"version": u.Version, "node": u.Node}
 	if !u.Started.IsZero() {
 		status["uptimeSeconds"] = int64(time.Since(u.Started).Seconds())
 		status["started"] = rfc3339(u.Started)

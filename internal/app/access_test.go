@@ -263,7 +263,7 @@ func TestRepositoryDeleteDropsRolePrivileges(t *testing.T) {
 	}
 
 	warns := ring.Snapshot(slog.LevelWarn, "privileges on a deleted repository", 0)
-	if len(warns) != 1 || warns[0].Attrs != `repository=scratch roles="deployer, viewer"` {
+	if len(warns) != 1 || warns[0].Attrs != "node="+a.Node+` repository=scratch roles="deployer, viewer"` {
 		t.Fatalf("warnings = %+v", warns)
 	}
 	var evs []meta.Event

@@ -162,7 +162,8 @@ securityContext:
   capabilities:
     drop: ["ALL"]
 
-# On SIGTERM the server drains requests for up to 30 s, then writes the download counters,
+# On SIGTERM the server turns unready (on PostgreSQL it keeps serving for 5 s more, so the
+# endpoints drop it first), drains requests for up to 30 s, then writes the download counters,
 # queued e-mail and activity events and closes the database.
 terminationGracePeriodSeconds: 60
 
@@ -173,9 +174,11 @@ startupProbe:
   periodSeconds: 5
   timeoutSeconds: 5
   failureThreshold: 60 # 5 minutes for a first start or a database upgrade
+# 200 while the node should take requests: the database answers, the node is not shutting down,
+# its schema is compatible and (PostgreSQL) its lock connection and change listener are up.
 readinessProbe:
   httpGet:
-    path: /service/rest/v1/status
+    path: /service/rest/v1/status/writable
     port: http
   periodSeconds: 10
   timeoutSeconds: 5

@@ -421,7 +421,7 @@ func TestOpenAsLeastPrivilegeRole(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.Close()
-	if err := stampSchemaVersion(ctx, admin, schemaVersion-1); err != nil {
+	if err := stampSchemaVersion(ctx, admin, schemaVersion-1, schemaVersion-1); err != nil {
 		t.Fatal(err)
 	}
 	_, err = Open(u.String())

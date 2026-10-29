@@ -46,6 +46,11 @@ import (
 // writeLock takes the advisory lock of the one writer (key "ccmeta").
 const writeLock = `SELECT pg_advisory_xact_lock(109278688277601)`
 
+// migrateLock takes the advisory lock of the one upgrade (key "ccmigr"):
+// nodes that start at once upgrade in turn, and the later ones find the
+// database upgraded.
+const migrateLock = `SELECT pg_advisory_xact_lock(109278688536434)`
+
 // pool is the database handle; on PostgreSQL it rebinds and locks writes.
 type pool struct {
 	db *sql.DB
@@ -150,6 +155,14 @@ func (p *pool) ExecContext(ctx context.Context, q string, args ...any) (sql.Resu
 	return res, tx.Commit()
 }
 
+// execFree runs a single-statement write without the write lock (on
+// SQLite as ExecContext), for the bookkeeping tables no transaction that
+// checks an invariant reads: nodes, leases. It keeps frequent small writes,
+// such as heartbeats, from queueing behind the one writer.
+func (p *pool) execFree(ctx context.Context, q string, args ...any) (sql.Result, error) {
+	return p.db.ExecContext(ctx, p.bind(q), args...)
+}
+
 // begin starts a write transaction, which holds the write lock, or a read
 // transaction, which sees one snapshot (SQLite's deferred BEGIN in WAL mode;
 // REPEATABLE READ on PostgreSQL) and takes no lock.
@@ -231,12 +244,13 @@ func IsPostgresURL(target string) bool {
 var errBadURL = errors.New("the database URL does not parse: use postgres://user:password@host:5432/database?sslmode=... " +
 	"(percent-encode special characters in the user name and password)")
 
-// openPostgres connects to the database at url. The returned name says
-// which database it is in messages: never the URL, which may hold a password.
-func openPostgres(url string) (*sql.DB, string, error) {
+// openPostgres connects to the database at url and returns its config too,
+// for the cluster connections. The returned name says which database it is
+// in messages: never the URL, which may hold a password.
+func openPostgres(url string) (*sql.DB, *pgx.ConnConfig, string, error) {
 	cfg, err := pgx.ParseConfig(url)
 	if err != nil {
-		return nil, "", errBadURL
+		return nil, nil, "", errBadURL
 	}
 	if _, ok := cfg.RuntimeParams["lock_timeout"]; !ok {
 		cfg.RuntimeParams["lock_timeout"] = "5000" // ms, as SQLite's busy_timeout(5000)
@@ -244,7 +258,7 @@ func openPostgres(url string) (*sql.DB, string, error) {
 	db := stdlib.OpenDB(*cfg)
 	db.SetMaxOpenConns(defaultPostgresConns)
 	db.SetMaxIdleConns(defaultPostgresConns)
-	return db, "PostgreSQL database " + strconv.Quote(cfg.Database) + " on " + cfg.Host, nil
+	return db, cfg, "PostgreSQL database " + strconv.Quote(cfg.Database) + " on " + cfg.Host, nil
 }
 
 // ddlError explains a CREATE or ALTER that PostgreSQL refused for lack of
@@ -348,7 +362,8 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries(
   attempts BIGINT NOT NULL DEFAULT 0, last_error TEXT COLLATE "C" NOT NULL DEFAULT '', created_at BIGINT NOT NULL,
   next_at BIGINT NOT NULL DEFAULT 0, response_code BIGINT NOT NULL DEFAULT 0, payload TEXT COLLATE "C" NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS webhook_deliveries_hook ON webhook_deliveries(webhook_id, created_at);
-CREATE TABLE IF NOT EXISTS schema_version(version BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS schema_version(version BIGINT NOT NULL, compat BIGINT NOT NULL DEFAULT 0);
+ALTER TABLE schema_version ADD COLUMN IF NOT EXISTS compat BIGINT NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS routing_rules(
   name TEXT COLLATE "C" PRIMARY KEY, description TEXT COLLATE "C" NOT NULL DEFAULT '', mode TEXT COLLATE "C" NOT NULL,
   matchers TEXT COLLATE "C" NOT NULL DEFAULT '[]', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
@@ -393,4 +408,8 @@ CREATE TABLE IF NOT EXISTS firewall_quarantine(
   severity TEXT COLLATE "C" NOT NULL DEFAULT '', malicious BIGINT NOT NULL DEFAULT 0,
   first_at BIGINT NOT NULL, last_at BIGINT NOT NULL, hits BIGINT NOT NULL DEFAULT 1,
   PRIMARY KEY(repo, name, version));
+CREATE TABLE IF NOT EXISTS nodes(
+  id TEXT COLLATE "C" PRIMARY KEY, hostname TEXT COLLATE "C" NOT NULL, version TEXT COLLATE "C" NOT NULL,
+  schema BIGINT NOT NULL, started_at BIGINT NOT NULL, heartbeat_at BIGINT NOT NULL, draining BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS leases(name TEXT COLLATE "C" PRIMARY KEY, holder TEXT COLLATE "C" NOT NULL, expires_at BIGINT NOT NULL);
 `

@@ -1229,10 +1229,14 @@ func (h *Handler) searchDownload(w http.ResponseWriter, r *http.Request) {
 
 // ---- status, security, blob stores, tasks ----
 
+// statusWritable is the readiness check (Kubernetes, load balancers): 200
+// while the node should take requests (meta.DB.Ready: the database answers,
+// the node is not draining, its schema is compatible and, on PostgreSQL,
+// its lock connection and listener are up), else 503.
 func (h *Handler) statusWritable(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if err := h.DB.Ping(ctx); err != nil {
+	if err := h.DB.Ready(ctx); err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
