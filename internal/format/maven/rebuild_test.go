@@ -154,6 +154,9 @@ func TestSnapshotMetadataUnchangedIsKept(t *testing.T) {
 // GOMEMLIMIT. The 30000 here (28 MiB that way, 3 MiB streamed) keep the test
 // quick under -race.
 func TestRebuildMetadataMemoryBounded(t *testing.T) {
+	if raceEnabled {
+		t.Skip("heap measurements are not meaningful under the race detector's instrumentation")
+	}
 	e := newEnv(t)
 	ctx := context.Background()
 	sums, err := e.h.Store.WriteBlob("snapshots", strings.NewReader("x"), nil)
