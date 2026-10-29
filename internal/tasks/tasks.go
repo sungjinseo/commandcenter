@@ -29,6 +29,7 @@ import (
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/transfer"
+	"commandcenter/internal/vuln"
 )
 
 // Task types.
@@ -96,6 +97,7 @@ type Service struct {
 	Mail       Mailer         // failure e-mails (SendAsync never blocks); nil: none
 	Metrics    Flusher        // pending download counts, flushed before cleanup evaluates; nil: none
 	Log        *slog.Logger   // run logs go here too (and so to the log ring)
+	Vuln       *vuln.Service  // vulnerability.sync and vulnerability.scan; nil: not available
 
 	Transfer *transfer.Service // repository.export and repository.import; nil: not available
 

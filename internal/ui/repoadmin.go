@@ -83,6 +83,9 @@ type repoRequest struct {
 	// means true.
 	Blocked   bool  `json:"blocked"`
 	AutoBlock *bool `json:"autoBlock"`
+	// Firewall (proxy only): absent (null) keeps the stored one on update
+	// and means none on create.
+	Firewall *config.Firewall `json:"firewall"`
 }
 
 // repoAuthResponse never carries a secret.
@@ -117,10 +120,33 @@ type repoConfigResponse struct {
 	SigningKeySet        bool              `json:"signingKeySet"`
 	GPGPublicKey         string            `json:"gpgPublicKey,omitempty"`
 
-	StrictContentTypeValidation bool   `json:"strictContentTypeValidation"`
-	ContentDisposition          string `json:"contentDisposition"`
-	Blocked                     bool   `json:"blocked"`
-	AutoBlock                   bool   `json:"autoBlock"`
+	StrictContentTypeValidation bool          `json:"strictContentTypeValidation"`
+	ContentDisposition          string        `json:"contentDisposition"`
+	Blocked                     bool          `json:"blocked"`
+	AutoBlock                   bool          `json:"autoBlock"`
+	Firewall                    *firewallJSON `json:"firewall,omitempty"` // proxies of a format with OSV data
+}
+
+// firewallJSON is a proxy's firewall with its defaults applied.
+type firewallJSON struct {
+	Enabled              bool     `json:"enabled"`
+	BlockMalicious       bool     `json:"blockMalicious"`
+	BlockSeverityAtLeast string   `json:"blockSeverityAtLeast"`
+	AllowList            []string `json:"allowList"`
+}
+
+func firewallOf(d config.Repository) *firewallJSON {
+	if d.Type != "proxy" || !config.FirewallFormats[d.Format] {
+		return nil
+	}
+	out := &firewallJSON{BlockMalicious: true, BlockSeverityAtLeast: "none", AllowList: []string{}}
+	if f := d.Firewall; f != nil {
+		out.Enabled, out.BlockMalicious, out.AllowList = f.Enabled, f.MalwareBlocked(), append(out.AllowList, f.AllowList...)
+		if f.BlockSeverityAtLeast != "" {
+			out.BlockSeverityAtLeast = f.BlockSeverityAtLeast
+		}
+	}
+	return out
 }
 
 // publicRemote drops the userinfo, query and fragment of a remote, which may
@@ -165,6 +191,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		ContentDisposition:          d.ContentDisposition,
 		Blocked:                     d.Blocked,
 		AutoBlock:                   d.Type == "proxy" && d.AutoBlocks(),
+		Firewall:                    firewallOf(d),
 	}
 	if d.AnonymousRead != nil {
 		v := *d.AnonymousRead
@@ -188,8 +215,9 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		GPGPublicKey:                strings.TrimSpace(b.GPGPublicKey),
 		StrictContentTypeValidation: b.StrictContentTypeValidation, ContentDisposition: b.ContentDisposition,
 		Blocked: b.Blocked, AutoBlock: b.AutoBlock,
+		Firewall: b.Firewall,
 	}
-	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey}
+	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey, KeepFirewall: b.Firewall == nil}
 	if b.CleanupPolicy != nil {
 		d.CleanupPolicy = *b.CleanupPolicy
 	} else {

@@ -28,6 +28,7 @@ import (
 	"commandcenter/internal/oidc"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/tasks"
+	"commandcenter/internal/vuln"
 	"commandcenter/internal/webhook"
 )
 
@@ -59,6 +60,7 @@ type UI struct {
 	FetchSlots func() (inUse, max int) // nil skips the fetch-slot check
 	Deleters   *cleanup.Registry       // component deletes in hosted repositories; nil serves 501
 	Webhooks   *webhook.Dispatcher     // webhook delivery and reload after a change; nil serves 501
+	Vuln       *vuln.Service           // vulnerability data and the proxy firewall; nil serves 501
 
 	// Remote reports a proxy's live remote state (proxy.Fetcher.Remote);
 	// nil shows none.

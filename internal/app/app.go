@@ -56,6 +56,7 @@ import (
 	"commandcenter/internal/tasks"
 	"commandcenter/internal/transfer"
 	"commandcenter/internal/ui"
+	"commandcenter/internal/vuln"
 	"commandcenter/internal/webhook"
 )
 
@@ -75,6 +76,7 @@ type App struct {
 	DockerKey []byte
 	Tasks     *tasks.Service      // scheduled tasks; the scheduler runs while Serve does
 	Webhooks  *webhook.Dispatcher // webhook deliveries; Close stops it before the database closes
+	Vuln      *vuln.Service       // vulnerability data and the firewall; Close waits for its index build
 	log       *slog.Logger
 }
 
@@ -514,6 +516,11 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		return a.GCStore(ctx, store, time.Hour)
 	}
 	a.Tasks = taskSvc
+	// Vulnerability data and the proxy firewall, asked before every file a
+	// format handler serves.
+	vulnSvc := &vuln.Service{DB: db, Repos: registry, Events: hooks, TempDir: cfg.DataDir, Log: log}
+	store.Firewall = vulnSvc.Firewall
+	taskSvc.Vuln, a.Vuln = vulnSvc, vulnSvc
 	webUI := &ui.UI{
 		Repos:    registry,
 		Auth:     authn,
@@ -536,6 +543,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Remote:     fetcher.Remote,
 		Deleters:   deleters,
 		Webhooks:   hooks,
+		Vuln:       vulnSvc,
 	}
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
@@ -969,6 +977,7 @@ func gcWalk(bs *blob.Store, inUse func(string) (bool, error), cutoff time.Time) 
 func (a *App) Close() error {
 	a.Mail.Close() // may still record a failed send as an event
 	a.Webhooks.Close()
+	a.Vuln.Close()
 	a.Events.Close()
 	return a.DB.Close()
 }

@@ -54,6 +54,9 @@ var Kinds = []Kind{
 	{"blobstore.updated", "A blob store group's members or fill policy changed, or a store was converted to a group"},
 	{"staging.move", "Components were moved to another hosted repository (staging); data.detail names the source and counts"},
 	{"staging.delete", "Components were deleted by a staging delete; data.detail has the counts"},
+	{"firewall.blocked", "A proxy's firewall quarantined a component (data.ids: the advisories)"},
+	{"firewall.released", "A quarantined component was released to the proxy's allow list"},
+	{"vulnerability.updated", "Vulnerability data (OSV) was imported or downloaded, or its settings changed"},
 }
 
 var known = func() map[string]bool {
@@ -84,6 +87,7 @@ var renamed = map[string]string{
 	"webhook.create": "webhook.created", "webhook.update": "webhook.updated", "webhook.delete": "webhook.deleted",
 	"settings.defaultRoles": "settings.updated", "realms.rutauth.update": "realm.updated",
 	"blobstore.update": "blobstore.updated", "blobstore.convert": "blobstore.updated",
+	"firewall.release": "firewall.released", "vulnerability.import": "vulnerability.updated", "vulnerability.settings": "vulnerability.updated",
 }
 
 // event is one activity event as the dispatcher received it, with the
@@ -187,6 +191,13 @@ func (d *Dispatcher) data(ctx context.Context, e event) map[string]any {
 		return map[string]any{"role": e.subject, "detail": e.detail}
 	case "ping":
 		return map[string]any{"webhook": e.subject}
+	case "firewall.blocked", "firewall.released": // subject name@version, detail the advisory ids or the entry
+		out := component(e.format, e.subject)
+		out["detail"] = e.detail
+		if e.kind == "firewall.blocked" {
+			out["ids"] = strings.Split(e.detail, ",")
+		}
+		return out
 	}
 	return map[string]any{"subject": e.subject, "detail": e.detail}
 }

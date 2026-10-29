@@ -59,6 +59,11 @@ type Store struct {
 	moveMu sync.Mutex
 	moves  map[string]*Move
 	writes map[string]int
+	// Firewall, if set, is asked before ServeAsset serves a file of a
+	// repository (vuln.Service.Firewall): an error, a 403 naming the
+	// advisories, is answered instead, whether the file was just fetched or
+	// cached.
+	Firewall func(ctx context.Context, repo, path string) error
 }
 
 // Definition returns the live definition of the named repository, or nil.
@@ -355,6 +360,12 @@ func (s *Store) Delete(ctx context.Context, repo, path string) error {
 
 // ServeAsset streams the asset; it handles HEAD, Range and conditional requests.
 func ServeAsset(w http.ResponseWriter, r *http.Request, s *Store, a meta.Asset) {
+	if s.Firewall != nil {
+		if err := s.Firewall(r.Context(), a.Repo, a.Path); err != nil {
+			WriteError(w, r, err)
+			return
+		}
+	}
 	f, err := s.Open(a)
 	if err != nil {
 		WriteError(w, r, err)

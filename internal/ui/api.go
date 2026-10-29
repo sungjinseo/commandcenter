@@ -67,6 +67,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.crowdRealmRoutes(mux)
 	u.stagingRoutes(mux)
 	u.transferRoutes(mux)
+	u.vulnerabilityRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }
@@ -287,6 +288,8 @@ type repoJSON struct {
 	Blocked      *bool             `json:"blocked,omitempty"`
 	AutoBlock    *bool             `json:"autoBlock,omitempty"`
 	RemoteStatus *remoteStatusJSON `json:"remoteStatus,omitempty"`
+	// Vulnerabilities is the last vulnerability.scan; absent before one.
+	Vulnerabilities *vulnCountsJSON `json:"vulnerabilities,omitempty"`
 }
 
 type remoteStatusJSON struct {
@@ -362,8 +365,11 @@ func (u *UI) repositories(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
+	vc := u.vulnCounts(r.Context(), "")
 	for _, rp := range repos {
-		list = append(list, u.describe(p, rp, stats[rp.Name]))
+		j := u.describe(p, rp, stats[rp.Name])
+		j.Vulnerabilities = countsJSON(vc[rp.Name])
+		list = append(list, j)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"repositories": list})
 }
@@ -390,7 +396,9 @@ func (u *UI) repository(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, u.describe(principal(r), rp, stats[rp.Name]))
+	j := u.describe(principal(r), rp, stats[rp.Name])
+	j.Vulnerabilities = countsJSON(u.vulnCounts(r.Context(), rp.Name)[rp.Name])
+	writeJSON(w, http.StatusOK, j)
 }
 
 // validSegments reports whether every "/"-separated segment of p is a

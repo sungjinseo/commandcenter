@@ -33,6 +33,10 @@ var copyTables = []struct{ name, cols string }{
 	{"tags", "name, attributes, created_at, updated_at"},
 	{"component_tags", "tag, repo, grp, name, version"},
 	{"blob_store_moves", "repo, source, target, started_at"},
+	{"vuln_advisories", vulnCols},
+	{"vuln_queries", "ecosystem, pkg, version, ids, checked_at"},
+	{"vuln_findings", "repo, ecosystem, pkg, version, name, ids, vulns, severity, sev_rank, malicious, unchecked, scanned_at"},
+	{"firewall_quarantine", "repo, name, version, ecosystem, path, ids, severity, malicious, first_at, last_at, hits"},
 }
 
 // copyBatchParams bounds the bind parameters of one INSERT (SQLite's

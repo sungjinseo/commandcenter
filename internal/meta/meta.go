@@ -127,6 +127,30 @@ CREATE TABLE IF NOT EXISTS component_tags(
 CREATE INDEX IF NOT EXISTS component_tags_component ON component_tags(repo, grp, name, version);
 CREATE TABLE IF NOT EXISTS blob_store_moves(
   repo TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL, started_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS vuln_advisories(
+  ecosystem TEXT NOT NULL, pkg TEXT NOT NULL, id TEXT NOT NULL,
+  aliases TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', severity TEXT NOT NULL DEFAULT '',
+  score INTEGER NOT NULL DEFAULT -1, vector TEXT NOT NULL DEFAULT '', malicious INTEGER NOT NULL DEFAULT 0,
+  affected TEXT NOT NULL DEFAULT '[]', published INTEGER NOT NULL DEFAULT 0, modified INTEGER NOT NULL DEFAULT 0,
+  withdrawn INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(ecosystem, pkg, id)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS vuln_advisories_id ON vuln_advisories(id);
+CREATE TABLE IF NOT EXISTS vuln_queries(
+  ecosystem TEXT NOT NULL, pkg TEXT NOT NULL, version TEXT NOT NULL,
+  ids TEXT NOT NULL DEFAULT '[]', checked_at INTEGER NOT NULL,
+  PRIMARY KEY(ecosystem, pkg, version)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS vuln_findings(
+  repo TEXT NOT NULL, ecosystem TEXT NOT NULL, pkg TEXT NOT NULL, version TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '', ids TEXT NOT NULL DEFAULT '[]', vulns INTEGER NOT NULL DEFAULT 0,
+  severity TEXT NOT NULL DEFAULT '', sev_rank INTEGER NOT NULL DEFAULT 0, malicious INTEGER NOT NULL DEFAULT 0,
+  unchecked INTEGER NOT NULL DEFAULT 0, scanned_at INTEGER NOT NULL,
+  PRIMARY KEY(repo, ecosystem, pkg, version)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS firewall_quarantine(
+  repo TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL,
+  ecosystem TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', ids TEXT NOT NULL DEFAULT '[]',
+  severity TEXT NOT NULL DEFAULT '', malicious INTEGER NOT NULL DEFAULT 0,
+  first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(repo, name, version)) WITHOUT ROWID;
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in
@@ -157,6 +181,8 @@ CREATE TABLE IF NOT EXISTS blob_store_moves(
 //	   the tags of deleted components and read a repository that is moving
 //	   to another blob store from its old store only (404 for what was
 //	   uploaded during the move).
+//	4: vuln_advisories, vuln_queries, vuln_findings, firewall_quarantine: an
+//	   older build would serve what a proxy's firewall quarantines.
 const schemaVersion = 4
 
 // Open opens the metadata database and creates or upgrades its tables:

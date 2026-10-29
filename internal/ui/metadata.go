@@ -43,6 +43,9 @@ type componentMetadata struct {
 	SHA256        *string        `json:"sha256,omitempty"`    // gitlfs only: the object's oid
 	Platforms     []string       `json:"platforms,omitempty"` // terraform providers only: "<os>_<arch>" of the stored zips
 	Protocols     []string       `json:"protocols,omitempty"` // terraform providers only: the plugin protocol versions
+	// Vulnerabilities summarizes the OSV advisories of a covered format's
+	// component (GET .../components/vulnerabilities has them all).
+	Vulnerabilities *vulnBriefJSON `json:"vulnerabilities,omitempty"`
 }
 
 type dependencyJS struct {
@@ -138,6 +141,7 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "component not found")
 		return
 	}
+	m.Vulnerabilities = u.vulnBrief(r.Context(), rp.Format, group, name, version)
 	writeJSON(w, http.StatusOK, m)
 }
 

@@ -202,6 +202,9 @@ type Repository struct {
 	// RoutingRule names the routing rule applied to remote requests (proxy
 	// only; "" is none). The registry checks the rule exists.
 	RoutingRule string `yaml:"routingRule,omitempty" json:"routingRule,omitempty"`
+	// Firewall quarantines what the proxy serves by its known
+	// vulnerabilities (proxy only; nil is none).
+	Firewall *Firewall `yaml:"firewall,omitempty" json:"firewall,omitempty"`
 
 	// group
 	Members     []string `yaml:"members" json:"members,omitempty"`
@@ -270,6 +273,62 @@ type Repository struct {
 
 // AutoBlocks reports whether a proxy auto-blocks; unset means yes.
 func (r Repository) AutoBlocks() bool { return r.AutoBlock == nil || *r.AutoBlock }
+
+// Firewall is a proxy's quarantine policy (internal/vuln, OSV data): the
+// files of a component with a malicious-package advisory, or with an
+// advisory rated at least BlockSeverityAtLeast ("none", "low", "medium",
+// "high", "critical"; "" is "none"), are refused unless the component's
+// name@version matches an AllowList entry (an RE2 expression).
+// BlockMalicious nil means true.
+type Firewall struct {
+	Enabled              bool     `yaml:"enabled" json:"enabled"`
+	BlockMalicious       *bool    `yaml:"blockMalicious,omitempty" json:"blockMalicious,omitempty"`
+	BlockSeverityAtLeast string   `yaml:"blockSeverityAtLeast,omitempty" json:"blockSeverityAtLeast,omitempty"`
+	AllowList            []string `yaml:"allowList,omitempty" json:"allowList,omitempty"`
+}
+
+// MalwareBlocked reports whether malicious packages are refused: unless
+// blockMalicious is false.
+func (f *Firewall) MalwareBlocked() bool { return f.BlockMalicious == nil || *f.BlockMalicious }
+
+// FirewallFormats are the formats with vulnerability data, the keys of
+// vuln.Ecosystems (TestFirewallFormats keeps them equal).
+var FirewallFormats = map[string]bool{"npm": true, "pypi": true, "maven": true, "go": true, "cargo": true, "nuget": true,
+	"rubygems": true, "composer": true, "conan": true, "r": true}
+
+// Limits of a firewall's allow list.
+const (
+	MaxFirewallAllowList = 1000
+	MaxFirewallEntryLen  = 512
+)
+
+var firewallSeverities = map[string]bool{"": true, "none": true, "low": true, "medium": true, "high": true, "critical": true}
+
+// validateFirewall checks r's firewall: a proxy of a format with data, a
+// known severity, an allow list of RE2 expressions within the limits. A
+// disabled, empty one is accepted anywhere (a form sends it).
+func validateFirewall(r Repository) error {
+	f := r.Firewall
+	if f == nil || (!f.Enabled && len(f.AllowList) == 0 && r.Type != "proxy") {
+		return nil
+	}
+	switch {
+	case r.Type != "proxy":
+		return fmt.Errorf("repository %q: firewall is only valid for proxy repositories", r.Name)
+	case !FirewallFormats[r.Format]:
+		return fmt.Errorf("repository %q: firewall: %s repositories have no vulnerability data (OSV)", r.Name, r.Format)
+	case !firewallSeverities[f.BlockSeverityAtLeast]:
+		return fmt.Errorf("repository %q: firewall.blockSeverityAtLeast must be none, low, medium, high or critical", r.Name)
+	case len(f.AllowList) > MaxFirewallAllowList:
+		return fmt.Errorf("repository %q: firewall.allowList holds at most %d entries", r.Name, MaxFirewallAllowList)
+	}
+	for _, e := range f.AllowList {
+		if _, err := regexp.Compile(e); err != nil || e == "" || len(e) > MaxFirewallEntryLen {
+			return fmt.Errorf("repository %q: firewall.allowList: %q is not a regular expression of 1 to %d characters", r.Name, e, MaxFirewallEntryLen)
+		}
+	}
+	return nil
+}
 
 // IsOnline reports whether the repository serves requests; unset means online.
 func (r Repository) IsOnline() bool { return r.Online == nil || *r.Online }
@@ -548,6 +607,9 @@ func ValidateDefinition(r Repository) error {
 	}
 	if r.Type != "proxy" && r.RoutingRule != "" {
 		errs = append(errs, fmt.Errorf("repository %q: routingRule is only valid for proxy repositories", r.Name))
+	}
+	if err := validateFirewall(r); err != nil {
+		errs = append(errs, err)
 	}
 	if (r.Distribution != "" || r.Component != "" || r.SigningKey != "") && (r.Format != "apt" || r.Type != "hosted") {
 		errs = append(errs, fmt.Errorf("repository %q: distribution, component and signingKey are only valid for apt hosted repositories", r.Name))
