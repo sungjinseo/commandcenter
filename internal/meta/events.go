@@ -29,8 +29,16 @@ func (d *DB) InsertEvents(ctx context.Context, evs []Event) error {
 }
 
 // PruneEvents deletes everything but the newest keep events and returns how
-// many rows it removed.
+// many rows it removed. Only the leader prunes (Leader): elsewhere it does
+// nothing.
+//
+// ponytail: the leader prunes after its own inserts, so while it records
+// no events the table grows past keep with the other nodes' ones; prune
+// on a timer there if that shows up.
 func (d *DB) PruneEvents(ctx context.Context, keep int) (int64, error) {
+	if !d.Leader() {
+		return 0, nil
+	}
 	res, err := d.sql.ExecContext(ctx, `DELETE FROM events WHERE id <= (SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?)`, keep)
 	if err != nil {
 		return 0, err

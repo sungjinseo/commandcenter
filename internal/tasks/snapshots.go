@@ -134,6 +134,7 @@ func runPurge(ctx context.Context, s *Service, t meta.Task, actor string, log *R
 		return summary{}, fmt.Errorf("repository %q is read-only (writePolicy deny): nothing removed", p.Repository)
 	}
 	if s.Metrics != nil && p.LastDownloadedDays > 0 {
+		s.flushOthers(ctx)
 		if err := s.Metrics.Flush(ctx); err != nil {
 			return summary{}, fmt.Errorf("could not write the pending download counts: %w", err)
 		}

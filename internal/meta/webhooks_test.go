@@ -130,22 +130,42 @@ func TestWebhookDeliveries(t *testing.T) {
 	if err := db.InsertDeliveries(ctx, []WebhookDelivery{{ID: "big", WebhookID: "on", Payload: strings.Repeat("x", MaxDeliveryPayload+1)}}); err == nil {
 		t.Fatal("an oversized payload was stored")
 	}
-	due, err := db.DueDeliveries(ctx, t0.Add(time.Hour), 10)
-	if err != nil || len(due) != 2 || due[0].ID != "d1" || due[1].ID != "d2" || due[0].Payload != `{"id":"d1"}` {
-		t.Fatalf("due (disabled hook excluded): %+v, %v", due, err)
+	claim := func(node string, now time.Time) []WebhookDelivery {
+		t.Helper()
+		list, err := db.ClaimDeliveries(ctx, node, now, now.Add(time.Minute), 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return list
 	}
-	if due, _ = db.DueDeliveries(ctx, t0, 10); len(due) != 1 || due[0].ID != "d1" {
-		t.Fatalf("due at t0: %+v", due)
+	if due := claim("n1", t0); len(due) != 1 || due[0].ID != "d1" || due[0].ClaimedBy != "n1" || !due[0].ClaimUntil.Equal(t0.Add(time.Minute)) {
+		t.Fatalf("claimed at t0: %+v", due)
 	}
-	if err := db.RecordDeliveryAttempt(ctx, "d1", DeliveryPending, 1, 500, "HTTP 500", t0.Add(30*time.Second)); err != nil {
+	if due := claim("n2", t0.Add(30*time.Second)); len(due) != 0 { // d1 is n1's; d2 is not due
+		t.Fatalf("claimed under a claim: %+v", due)
+	}
+	// Once the claim ended both are due again; the disabled hook's d3 never is.
+	later := t0.Add(time.Hour)
+	due := claim("n2", later)
+	if len(due) != 2 || due[0].ID != "d1" || due[1].ID != "d2" || due[0].Payload != `{"id":"d1"}` || due[1].ClaimedBy != "n2" {
+		t.Fatalf("due (disabled hook excluded): %+v", due)
+	}
+	if err := db.RecordDeliveryAttempt(ctx, "d1", DeliveryPending, 1, 500, "HTTP 500", later.Add(30*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	d, err := db.GetDelivery(ctx, "d1")
-	if err != nil || d.Attempts != 1 || d.ResponseCode != 500 || d.LastError != "HTTP 500" || !d.NextAt.Equal(t0.Add(30*time.Second)) || d.Status != DeliveryPending {
-		t.Fatalf("after attempt: %+v, %v", d, err)
+	if err != nil || d.Attempts != 1 || d.ResponseCode != 500 || d.LastError != "HTTP 500" || !d.NextAt.Equal(later.Add(30*time.Second)) ||
+		d.Status != DeliveryPending || d.ClaimedBy != "" || !d.ClaimUntil.IsZero() {
+		t.Fatalf("after attempt (claim ended): %+v, %v", d, err)
 	}
-	if due, _ = db.DueDeliveries(ctx, t0.Add(10*time.Second), 10); len(due) != 0 {
+	if due := claim("n3", later.Add(10*time.Second)); len(due) != 0 { // d1 not yet due, d2 n2's
 		t.Fatalf("not yet due: %+v", due)
+	}
+	if err := db.ReleaseDeliveries(ctx, "n2"); err != nil {
+		t.Fatal(err)
+	}
+	if due := claim("n3", later.Add(10*time.Second)); len(due) != 1 || due[0].ID != "d2" {
+		t.Fatalf("after n2 released its claims: %+v", due)
 	}
 	if err := db.RecordDeliveryAttempt(ctx, "d1", DeliveryOK, 2, 200, "", time.Time{}); err != nil {
 		t.Fatal(err)

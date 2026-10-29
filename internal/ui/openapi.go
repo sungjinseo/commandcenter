@@ -51,7 +51,7 @@ var apiDocs = []openapi.Route{
 	{Pattern: "GET /-/api/users", Summary: "Every user with roles and privileges", Tag: "access", Auth: docAdmin, Reply: "UserList"},
 	{Pattern: "GET /-/api/status/checks", Summary: "Health checks: Database, Cluster, Blob store, Blob store quota (one per store), Memory, Remote fetch slots, Repositories", Tag: "ops", Auth: docAdmin, Reply: "Checks"},
 	{Pattern: "GET /-/api/systeminformation", Summary: "System information", Tag: "ops", Auth: docAdmin, Reply: "SystemInformation"},
-	{Pattern: "GET /-/api/nodes", Summary: "The server nodes registered on the database (self, nodes: id, hostname, version, schema, startedAt, heartbeatAt, alive, draining, leader); one until high availability", Tag: "ops", Auth: docAdmin, Reply: "Nodes"},
+	{Pattern: "GET /-/api/nodes", Summary: "The server nodes registered on the database (self, nodes: id, hostname, version, schema, startedAt, heartbeatAt, alive, draining, leader, runningTask: the task it runs, empty if none); one until high availability", Tag: "ops", Auth: docAdmin, Reply: "Nodes"},
 	{Pattern: "GET /-/api/status", Summary: "Version, uptime and repository and blob totals", Tag: "ops", Auth: docAdmin, Reply: "Status"},
 	{Pattern: "GET /-/api/stats/requests", Summary: "Request counts per hour", Tag: "ops", Auth: docAdmin, Query: []string{"repo", "hours"}, Reply: "RequestStats"},
 	{Pattern: "GET /-/api/stats/repositories", Summary: "Per-repository totals", Tag: "ops", Auth: docAdmin, Reply: "RepositoryStats"},

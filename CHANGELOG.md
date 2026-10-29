@@ -9,6 +9,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Scheduling on several nodes (PostgreSQL, ahead of high availability):
+  - Only the scheduler lease holder runs due tasks and prunes request statistics, the negative cache
+    and events.
+  - One task run at a time across all nodes (cluster lock `tasks.run`). The run shows as running on
+    every node (`runningTask` in `GET /-/api/nodes`), can be stopped from any node, and is run again
+    by the next leader when its node died.
+  - Cleanups first ask the other nodes for their pending download counts.
+  - Cleanup policy edits and `PUT /-/api/logging` reach every node.
+  - Webhook deliveries are claimed by one node for 60 s and sent once (at least once after a crash).
 - A node registry: `GET /-/api/nodes`, `commandcenter_node_info`, the `node` log attribute, a `Cluster`
   status check, and readiness on `/service/rest/v1/status/writable` that covers draining, schema
   compatibility and, on PostgreSQL, the lock and listener connections.
@@ -336,6 +345,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `vulnerability.scan` task and repository vulnerability summaries: counts by severity in the repository
   list, top components per repository, advisories on the component view.
 
+### Changed
+
+- Webhook deliveries are sent only by `serve`. CLI commands store the deliveries their events make and
+  leave them to the running server, or to the next one started. Before, a CLI command beside a server
+  sent them too, sometimes twice.
+- On PostgreSQL, `commandcenter gc` takes the task run lock. It fails with `task "<id>" is running`
+  while a task runs on any node, and task runs wait while it collects (run now answers 409).
+
 ### Fixed
 - APT hosted: `.deb` packages whose control archive is `control.tar.xz` (Debian's `dpkg-deb` default),
   `control.tar.zst` (Ubuntu 21.10 and later), `control.tar.bz2` or `control.tar.lzma` are accepted.
@@ -354,6 +371,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Webhooks no longer send a delivery twice when a poll read it while a worker was sending it.
 
 ### Upgrade notes
+- The database schema version is now 6. It adds the columns `tasks.running_node`,
+  `tasks.running_since`, `webhook_deliveries.claimed_by` and `webhook_deliveries.claim_until`, and the
+  index `webhook_deliveries_due`, on the first start of this version. The change only adds: on
+  PostgreSQL compat stays 5, so version 5 still starts on the upgraded database and you can roll
+  back to it without a restore. On SQLite an older version refuses the upgraded database, as
+  before.
 - The database schema version is now 5: new tables `nodes` and `leases`, and on PostgreSQL the column
   `schema_version.compat`, created on the first start of this version. From now on the stamp also says
   which older builds may still run on the database: a build starts on a database of a newer schema only

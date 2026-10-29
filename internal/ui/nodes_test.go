@@ -9,10 +9,12 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"commandcenter/internal/tasks"
 )
 
-// GET /-/api/nodes and the node in the Cluster check, the metrics and the
-// system information.
+// GET /-/api/nodes (with the task a node runs) and the node in the Cluster
+// check, the metrics and the system information.
 func TestNodesAPI(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	ctx := context.Background()
@@ -36,14 +38,21 @@ func TestNodesAPI(t *testing.T) {
 			t.Fatalf("not ready: %v", e.db.Ready(ctx))
 		}
 	}
+	release := make(chan struct{})
+	e.ui.Tasks.GC = func(context.Context, string) (int, int64, error) { <-release; return 0, 0, nil }
+	if err := e.ui.Tasks.RunAsync(tasks.SeedID, "admin"); err != nil {
+		t.Fatal(err)
+	}
 	r := e.get(t, "/-/api/nodes", "admin")
+	close(release)
+	e.ui.Tasks.Wait()
 	wantStatus(t, r, http.StatusOK)
 	var got struct {
 		Self  string
 		Nodes []struct {
-			ID, Hostname, Version, StartedAt, HeartbeatAt string
-			Schema                                        int
-			Alive, Draining, Leader                       bool
+			ID, Hostname, Version, StartedAt, HeartbeatAt, RunningTask string
+			Schema                                                     int
+			Alive, Draining, Leader                                    bool
 		}
 	}
 	if err := json.Unmarshal([]byte(r.body), &got); err != nil {
@@ -53,7 +62,8 @@ func TestNodesAPI(t *testing.T) {
 		t.Fatalf("nodes: %s", r.body)
 	}
 	n := got.Nodes[0]
-	if n.ID != "host-1a2b" || n.Hostname != "host" || n.Version != "test" || n.Schema == 0 || !n.Alive || n.Draining || !n.Leader {
+	if n.ID != "host-1a2b" || n.Hostname != "host" || n.Version != "test" || n.Schema == 0 || !n.Alive || n.Draining || !n.Leader ||
+		n.RunningTask != tasks.SeedID {
 		t.Fatalf("node: %s", r.body)
 	}
 	if _, err := time.Parse(time.RFC3339, n.StartedAt); err != nil {

@@ -179,7 +179,7 @@ func runCleanup(ctx context.Context, s *Service, t meta.Task, actor string, log 
 
 	var comps, assets, bytes int64
 	var failures, cleaned int
-	limited := false
+	limited, othersFlushed := false, false
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return cleanupSummary(comps, assets, bytes, cleaned), err
@@ -214,7 +214,12 @@ func runCleanup(ctx context.Context, s *Service, t meta.Task, actor string, log 
 			log.Warnf("%s: skipped: cleanup policy %q is for %s repositories, not %s", name, policy.Name, policy.Format, rp.Format)
 			continue
 		}
-		// Downloads still pending in memory count: write them first.
+		// Downloads still pending in memory count: write them first, on
+		// the other nodes too (once a run).
+		if policy.LastDownloadedDays > 0 && !othersFlushed {
+			s.flushOthers(ctx)
+			othersFlushed = true
+		}
 		if s.Metrics != nil {
 			if err := s.Metrics.Flush(ctx); err != nil {
 				if policy.LastDownloadedDays > 0 {
@@ -347,6 +352,9 @@ func (s *Service) evaluate(ctx context.Context, rp *repo.Repository, p cleanup.P
 // runs cover it. Pending download counts are written first, as a run does;
 // when that fails and p uses lastDownloadedDays, the preview fails.
 func (s *Service) PreviewCleanup(ctx context.Context, rp *repo.Repository, p cleanup.Policy, visit func(cleanup.Candidate) error) error {
+	if p.LastDownloadedDays > 0 {
+		s.flushOthers(ctx)
+	}
 	if s.Metrics != nil {
 		if err := s.Metrics.Flush(ctx); err != nil && p.LastDownloadedDays > 0 {
 			return fmt.Errorf("write the pending download counts: %w", err)

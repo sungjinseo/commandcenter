@@ -437,7 +437,7 @@ func (u *UI) getLogging(w http.ResponseWriter, r *http.Request) {
 }
 
 // PUT /-/api/logging {"level": "debug|info|warn|error"} (interactive admin):
-// changes the level at once, until the next start.
+// changes the level at once, on every node, until the next start.
 func (u *UI) putLogging(w http.ResponseWriter, r *http.Request) {
 	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
 		return
@@ -459,6 +459,9 @@ func (u *UI) putLogging(w http.ResponseWriter, r *http.Request) {
 	}
 	was := u.LogLevel.Level()
 	u.LogLevel.Set(lvl)
+	if err := u.DB.Notify(r.Context(), "loglevel:"+levelName(lvl)); err != nil && u.Log != nil { // the other nodes too
+		u.Log.Warn("could not tell the other nodes the new log level", "err", logsafe.Err(err))
+	}
 	if was != lvl {
 		u.emit(r, "logging.level", "", levelName(lvl), levelName(was)+" -> "+levelName(lvl))
 	}

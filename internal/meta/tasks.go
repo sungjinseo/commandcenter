@@ -224,3 +224,25 @@ func (d *DB) SeedTask(ctx context.Context, flag string, t Task) (bool, error) {
 	})
 	return seeded && err == nil, err
 }
+
+// SetTaskRunning marks task id as running on node since since, or with
+// node "" as not running (tasks.running_node and running_since). A missing
+// task is no error.
+func (d *DB) SetTaskRunning(ctx context.Context, id, node string, since time.Time) error {
+	_, err := d.sql.ExecContext(ctx, `UPDATE tasks SET running_node = ?, running_since = ? WHERE id = ?`, node, toMs(since), id)
+	return err
+}
+
+// RunningTask returns the task a live node other than except marks as
+// running, "" if none: the mark of a node whose heartbeat expired (it died
+// mid-run) is stale and ignored.
+func (d *DB) RunningTask(ctx context.Context, except string) (string, error) {
+	var id string
+	err := d.sql.QueryRowContext(ctx, `SELECT t.id FROM tasks t JOIN nodes n ON n.id = t.running_node
+WHERE t.running_node <> '' AND t.running_node <> ? AND n.heartbeat_at > `+dbNow(d.sql)+` - ?
+ORDER BY t.running_since DESC, t.id LIMIT 1`, except, NodeTTL.Milliseconds()).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}

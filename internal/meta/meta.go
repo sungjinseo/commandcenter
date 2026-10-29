@@ -112,8 +112,10 @@ CREATE TABLE IF NOT EXISTS webhooks(
 CREATE TABLE IF NOT EXISTS webhook_deliveries(
   id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
-  next_at INTEGER NOT NULL DEFAULT 0, response_code INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '');
+  next_at INTEGER NOT NULL DEFAULT 0, response_code INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '',
+  claimed_by TEXT NOT NULL DEFAULT '', claim_until INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS webhook_deliveries_hook ON webhook_deliveries(webhook_id, created_at);
+CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status, next_at);
 CREATE TABLE IF NOT EXISTS routing_rules(
   name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL,
   matchers TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
@@ -195,7 +197,11 @@ CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY, holder TEXT NOT NULL, e
 //	5: nodes, leases, schema_version.compat: an older build would start
 //	   beside a running server without the single-writer guard (nodes.go)
 //	   and ignore compat.
-const schemaVersion = 5
+//	6: tasks.running_node and running_since, webhook_deliveries.claimed_by
+//	   and claim_until (high availability, scheduling): expand-only, an older
+//	   build ignores them and, alone on the database (the single-writer
+//	   guard), needs neither the claims nor the marks.
+const schemaVersion = 6
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
 // build upgraded, stamped in PostgreSQL's schema_version.compat (SQLite keeps
@@ -425,6 +431,10 @@ func migrate(ctx context.Context, db querier) error {
 		{"assets", "downloads", "downloads INTEGER NOT NULL DEFAULT 0"},
 		{"assets", "last_downloaded", "last_downloaded INTEGER NOT NULL DEFAULT 0"},
 		{"tasks", "notify_email", "notify_email TEXT NOT NULL DEFAULT '[]'"},
+		{"tasks", "running_node", "running_node TEXT NOT NULL DEFAULT ''"},
+		{"tasks", "running_since", "running_since INTEGER NOT NULL DEFAULT 0"},
+		{"webhook_deliveries", "claimed_by", "claimed_by TEXT NOT NULL DEFAULT ''"},
+		{"webhook_deliveries", "claim_until", "claim_until INTEGER NOT NULL DEFAULT 0"},
 		{"blob_stores", "type", "type TEXT NOT NULL DEFAULT 'file'"},
 		{"blob_stores", "config", "config TEXT NOT NULL DEFAULT '{}'"},
 		{"request_stats", "errors", "errors INTEGER NOT NULL DEFAULT 0"},
@@ -608,8 +618,12 @@ func (d *DB) ClearNegative(ctx context.Context, repo, path string) error {
 }
 
 // PruneNegative deletes the negative-cache entries that can no longer be a
-// hit at now (see NegativeHit) and returns how many rows went.
+// hit at now (see NegativeHit) and returns how many rows went. Only the
+// leader prunes (Leader): elsewhere it does nothing.
 func (d *DB) PruneNegative(ctx context.Context, now time.Time) (int64, error) {
+	if !d.Leader() {
+		return 0, nil
+	}
 	res, err := d.sql.ExecContext(ctx, `DELETE FROM negative_cache WHERE expires_at <= ?`, toMs(now))
 	if err != nil {
 		return 0, err

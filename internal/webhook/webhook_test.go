@@ -102,6 +102,7 @@ func (e *env) open(t *testing.T) {
 	if err := e.d.Start(); err != nil {
 		t.Fatal(err)
 	}
+	e.d.Deliver()
 	t.Cleanup(e.d.Close)
 }
 
@@ -470,5 +471,84 @@ func TestStaleDeliveryNotResent(t *testing.T) {
 	e.d.attempt(stale)
 	if n := len(rc.requests()); n != 1 {
 		t.Fatalf("stale copy sent again: %d requests", n)
+	}
+}
+
+// Two nodes' dispatchers on one database (high availability) send every
+// delivery exactly once: each sends only what it claimed.
+func TestTwoDispatchersSendOnce(t *testing.T) {
+	if !metatest.Postgres() {
+		t.Skip("several nodes need PostgreSQL")
+	}
+	e := newEnv(t)
+	dbB, err := meta.Open(e.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { dbB.Close() })
+	b := &Dispatcher{DB: dbB, Now: e.clock, Log: slog.New(slog.DiscardHandler)}
+	if err := b.Start(); err != nil {
+		t.Fatal(err)
+	}
+	b.Deliver()
+	t.Cleanup(b.Close)
+	rc := newReceiver(t)
+	e.hook(t, meta.Webhook{Name: "h", URL: rc.URL, Events: []string{"*"}, Enabled: true})
+	if err := b.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	const n = 40
+	for i := range n {
+		d := e.d
+		if i%2 == 1 {
+			d = b
+		}
+		d.Emit("upload", "u", "r", "a@1", "")
+		e.d.Kick()
+		b.Kick()
+	}
+	waitFor(t, "every delivery", func() bool { return len(rc.requests()) >= n })
+	e.d.Kick()
+	b.Kick()
+	time.Sleep(100 * time.Millisecond)
+	seen := map[string]int{}
+	for _, r := range rc.requests() {
+		seen[r.header.Get("X-Nexus-Webhook-Delivery")]++
+	}
+	if len(seen) != n || len(rc.requests()) != n {
+		t.Fatalf("%d requests for %d deliveries, want %d once each", len(rc.requests()), len(seen), n)
+	}
+}
+
+// A node that died holding a claim (after sending, before recording) leaves
+// the delivery alone until the claim ends; then another node sends it once
+// more: at least once.
+func TestDeadNodesClaimEnds(t *testing.T) {
+	e := newEnv(t)
+	rc := newReceiver(t)
+	e.hook(t, meta.Webhook{Name: "h", URL: rc.URL, Events: []string{"*"}, Enabled: true})
+	due := e.clock().Add(time.Second) // not due for the dispatcher before the claim exists
+	if err := e.db.InsertDeliveries(ctx, []meta.WebhookDelivery{{ID: "d1", WebhookID: "h", Event: "component.created",
+		Status: meta.DeliveryPending, Created: due, NextAt: due, Payload: `{}`}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := e.db.ClaimDeliveries(ctx, "dead-node", due, due.Add(ClaimFor), 10); err != nil || len(got) != 1 {
+		t.Fatalf("dead node's claim: %+v, %v", got, err)
+	}
+	e.advance(2 * time.Second)
+	e.d.Kick()
+	time.Sleep(100 * time.Millisecond)
+	if n := len(rc.requests()); n != 0 {
+		t.Fatalf("sent under another node's claim: %d requests", n)
+	}
+	e.advance(ClaimFor)
+	e.d.Kick()
+	if d := e.delivery(t, "h", 1); d.Status != meta.DeliveryOK || d.ClaimedBy != "" {
+		t.Fatalf("after the claim ended: %+v", d)
+	}
+	e.d.Kick()
+	time.Sleep(50 * time.Millisecond)
+	if n := len(rc.requests()); n != 1 {
+		t.Fatalf("%d requests, want 1", n)
 	}
 }

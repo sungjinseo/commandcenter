@@ -28,6 +28,11 @@ var (
 	NodeTTL        = 30 * time.Second
 )
 
+// SingleWriter makes Join refuse a second live node on PostgreSQL (the
+// guard). Tests of several nodes on one database turn it off; high
+// availability removes it.
+var SingleWriter = true
+
 // nodePrune is the age of a heartbeat after which the leader deletes the row.
 const nodePrune = 24 * time.Hour
 
@@ -40,9 +45,10 @@ type Node struct {
 	ID, Hostname, Version  string
 	Schema                 int // the schemaVersion of its build
 	StartedAt, HeartbeatAt time.Time
-	Alive                  bool // the heartbeat is newer than NodeTTL
-	Draining               bool // shutting down: readiness answers 503
-	Leader                 bool // holds the scheduler lease
+	Alive                  bool   // the heartbeat is newer than NodeTTL
+	Draining               bool   // shutting down: readiness answers 503
+	Leader                 bool   // holds the scheduler lease
+	RunningTask            string // the task it marks as running (tasks.running_node), "" if none
 }
 
 // NewNodeID returns a node id: the host name and 4 random hex digits, new
@@ -146,7 +152,7 @@ func (m *Member) register(ctx context.Context) (*GuardError, error) {
 	var other *GuardError
 	err := m.d.Tx(ctx, func(tx *Tx) error {
 		now := dbNow(tx.q)
-		if tx.q.pg {
+		if tx.q.pg && SingleWriter {
 			var n Node
 			var hb, at int64
 			err := tx.q.QueryRowContext(ctx, `SELECT id, hostname, version, heartbeat_at, `+now+` FROM nodes
@@ -249,6 +255,23 @@ RETURNING holder`, name, holder, NodeTTL.Milliseconds()).Scan(&got) // a free wr
 // Leader reports whether this node holds the scheduler lease.
 func (m *Member) Leader() bool { return m.leader.Load() }
 
+// Leader reports whether this process does the work one node does for all
+// (scheduled task runs, prunes): on PostgreSQL, once it joined, while it
+// holds the scheduler lease; always on SQLite (one process) and in a
+// process that did not join (a CLI command, a test).
+func (d *DB) Leader() bool {
+	m := d.self.Load()
+	return d.cl == nil || m == nil || m.Leader()
+}
+
+// NodeID is this process's node id once it joined, else "".
+func (d *DB) NodeID() string {
+	if m := d.self.Load(); m != nil {
+		return m.id
+	}
+	return ""
+}
+
 // Drain marks the node as shutting down: Ready fails from now on, and the
 // row says draining.
 func (m *Member) Drain(ctx context.Context) {
@@ -320,7 +343,8 @@ func (d *DB) Ready(ctx context.Context) error {
 func (d *DB) Nodes(ctx context.Context) ([]Node, error) {
 	now := dbNow(d.sql)
 	rows, err := d.sql.QueryContext(ctx, `SELECT id, hostname, version, schema, started_at, heartbeat_at, draining, `+now+`,
-  COALESCE((SELECT holder FROM leases WHERE name = ? AND expires_at > `+now+`), '')
+  COALESCE((SELECT holder FROM leases WHERE name = ? AND expires_at > `+now+`), ''),
+  COALESCE((SELECT t.id FROM tasks t WHERE t.running_node = nodes.id ORDER BY t.running_since DESC, t.id LIMIT 1), '')
 FROM nodes ORDER BY started_at, id`, schedulerLease)
 	if err != nil {
 		return nil, err
@@ -332,7 +356,7 @@ FROM nodes ORDER BY started_at, id`, schedulerLease)
 		var started, hb, at int64
 		var draining int
 		var leader string
-		if err := rows.Scan(&n.ID, &n.Hostname, &n.Version, &n.Schema, &started, &hb, &draining, &at, &leader); err != nil {
+		if err := rows.Scan(&n.ID, &n.Hostname, &n.Version, &n.Schema, &started, &hb, &draining, &at, &leader, &n.RunningTask); err != nil {
 			return nil, err
 		}
 		n.StartedAt, n.HeartbeatAt = fromMs(started), fromMs(hb)

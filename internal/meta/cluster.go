@@ -287,6 +287,32 @@ func (d *DB) Lock(ctx context.Context, key string) (unlock func(), err error) {
 	}
 }
 
+// TryLock is Lock without the wait: ok is false (and unlock nil) while
+// another holder, on this node or another, has key.
+func (d *DB) TryLock(key string) (unlock func(), ok bool, err error) {
+	local, ok := d.keys.try(key)
+	if !ok {
+		return nil, false, nil
+	}
+	if d.cl == nil {
+		var once sync.Once
+		return func() { once.Do(local) }, true, nil
+	}
+	h := hash32(key)
+	ok, gen, err := d.cl.tryLock(h)
+	if err != nil || !ok {
+		local()
+		return nil, false, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			d.cl.unlock(gen, h)
+			local()
+		})
+	}, true, nil
+}
+
 func hash32(key string) int32 {
 	h := fnv.New32a()
 	h.Write([]byte(key))
@@ -333,7 +359,32 @@ type keyedLock struct {
 }
 
 func (k *keyedLocks) lock(ctx context.Context, key string) (func(), error) {
+	e, release := k.ref(key)
+	select {
+	case e.ch <- struct{}{}:
+		return func() { <-e.ch; release() }, nil
+	case <-ctx.Done():
+		release()
+		return nil, ctx.Err()
+	}
+}
+
+// try takes key's mutex if it is free.
+func (k *keyedLocks) try(key string) (func(), bool) {
+	e, release := k.ref(key)
+	select {
+	case e.ch <- struct{}{}:
+		return func() { <-e.ch; release() }, true
+	default:
+		release()
+		return nil, false
+	}
+}
+
+// ref returns key's entry, counted until release.
+func (k *keyedLocks) ref(key string) (*keyedLock, func()) {
 	k.mu.Lock()
+	defer k.mu.Unlock()
 	if k.m == nil {
 		k.m = map[string]*keyedLock{}
 	}
@@ -343,19 +394,11 @@ func (k *keyedLocks) lock(ctx context.Context, key string) (func(), error) {
 		k.m[key] = e
 	}
 	e.refs++
-	k.mu.Unlock()
-	release := func() {
+	return e, func() {
 		k.mu.Lock()
 		if e.refs--; e.refs == 0 {
 			delete(k.m, key)
 		}
 		k.mu.Unlock()
-	}
-	select {
-	case e.ch <- struct{}{}:
-		return func() { <-e.ch; release() }, nil
-	case <-ctx.Done():
-		release()
-		return nil, ctx.Err()
 	}
 }

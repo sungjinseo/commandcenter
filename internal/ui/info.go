@@ -42,7 +42,7 @@ func (u *UI) listNodes(w http.ResponseWriter, r *http.Request) {
 	for _, n := range nodes {
 		out = append(out, map[string]any{"id": n.ID, "hostname": n.Hostname, "version": n.Version, "schema": n.Schema,
 			"startedAt": rfc3339(n.StartedAt), "heartbeatAt": rfc3339(n.HeartbeatAt),
-			"alive": n.Alive, "draining": n.Draining, "leader": n.Leader})
+			"alive": n.Alive, "draining": n.Draining, "leader": n.Leader, "runningTask": n.RunningTask})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"self": u.Node, "nodes": out})
 }

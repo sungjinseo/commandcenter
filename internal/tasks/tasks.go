@@ -2,7 +2,9 @@
 // blob store compaction, repository cleanup and Maven metadata rebuilds.
 // Tasks are rows of the tasks table; a scheduler goroutine checks for due
 // tasks every 30 s and runs at most one task at a time, which "run now"
-// shares.
+// shares. With several nodes on one PostgreSQL database the one at a time
+// holds across them (the cluster lock tasks.run), only the leader (the
+// scheduler lease) runs the due tasks, and a run shows on every node.
 package tasks
 
 import (
@@ -15,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/mail"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -116,8 +119,6 @@ type Service struct {
 	MoveSettle    time.Duration
 	AfterMoveCopy func(repo, sha string)
 
-	runMu sync.Mutex // held for the whole of a run: one task at a time
-
 	// recordRun stores a run (DB.RecordTaskRun); a field so tests can fail it.
 	recordRun func(ctx context.Context, id string, r meta.TaskRun, next func(meta.Task) (time.Time, bool)) error
 	policySig atomic.Uint64 // bumped by PolicyChanged
@@ -131,6 +132,7 @@ type Service struct {
 	runDone  chan struct{}           // closed when the run in progress has finished; nil if none
 	runCtx   context.Context         // the run in progress's context, before its timeout
 	runStop  context.CancelCauseFunc // cancels runCtx with ErrStopped (StopRun)
+	unlock   func()                  // releases runLock, which the run in progress holds
 	// deferred holds, per task, the next run kept in memory when a
 	// scheduled run could not be recorded (the stored next_run is stale):
 	// the task is not due before it. The zero time: not due again.
@@ -150,9 +152,13 @@ type Flusher interface {
 // ErrStopped is the cause of a run stopped with StopRun.
 var ErrStopped = errors.New("stopped on request")
 
-// PolicyChanged tells a running cleanup that a cleanup policy was edited, so
-// it reads its policy again before the next component.
-func (s *Service) PolicyChanged() { s.policySig.Add(1) }
+// PolicyChanged tells a running cleanup, on this node or another, that a
+// cleanup policy was edited, so it reads its policy again before the next
+// component.
+func (s *Service) PolicyChanged() {
+	s.policySig.Add(1)
+	s.notify("policies")
+}
 
 func (s *Service) now() time.Time {
 	if s.Now != nil {
@@ -175,11 +181,71 @@ func (s *Service) log() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// Running returns the id of the task being run, "" if none.
+// Running returns the id of the task being run, on this node or (on
+// PostgreSQL) another live one, "" if none.
 func (s *Service) Running() string {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.running
+	id := s.running
+	s.mu.Unlock()
+	if id != "" || !s.clustered() {
+		return id
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	id, err := s.DB.RunningTask(ctx, s.DB.NodeID())
+	if err != nil {
+		s.log().Warn("could not read which task another node runs", "err", logsafe.Err(err))
+	}
+	return id
+}
+
+// FlushWait is how long a cleanup gives the other nodes to write their
+// pending download counts after asking them; a variable for tests.
+var FlushWait = 2 * time.Second
+
+// flushOthers asks the other live nodes to write their pending download
+// counts (Notify "flush") and waits FlushWait, so that lastDownloadedDays
+// sees their downloads too. Only on PostgreSQL with another live node.
+func (s *Service) flushOthers(ctx context.Context) {
+	if s.Metrics == nil || !s.clustered() {
+		return
+	}
+	nodes, err := s.DB.Nodes(ctx)
+	if err != nil {
+		s.log().Warn("could not list the nodes whose download counts cleanup needs", "err", logsafe.Err(err))
+		return
+	}
+	if !slices.ContainsFunc(nodes, func(n meta.Node) bool { return n.Alive && n.ID != s.DB.NodeID() }) || s.notify("flush") != nil {
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(FlushWait):
+	}
+}
+
+// flushLocal writes this node's pending download counts for a cleanup on
+// another node, within its FlushWait.
+func (s *Service) flushLocal() {
+	ctx, cancel := context.WithTimeout(context.Background(), FlushWait)
+	defer cancel()
+	if err := s.Metrics.Flush(ctx); err != nil {
+		s.log().Warn("could not write the pending download counts a cleanup on another node asked for", "err", logsafe.Err(err))
+	}
+}
+
+// clustered reports whether other nodes may share the database.
+func (s *Service) clustered() bool { return s.DB.Driver() == "postgresql" }
+
+// notify sends topic to every node (meta.DB.Notify), logging a failure.
+func (s *Service) notify(topic string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := s.DB.Notify(ctx, topic)
+	if err != nil {
+		s.log().Warn("could not notify the other nodes", "topic", topic, "err", logsafe.Err(err))
+	}
+	return err
 }
 
 // TypeName is the English display name of a task type.
@@ -330,10 +396,7 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 	if id == SeedID {
 		return ErrSeedTask
 	}
-	s.mu.Lock()
-	running := s.running
-	s.mu.Unlock()
-	if running == id {
+	if s.Running() == id {
 		return &BusyError{Running: id}
 	}
 	if err := s.DB.DeleteTask(ctx, id); err != nil {

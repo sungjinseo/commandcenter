@@ -161,8 +161,12 @@ WHERE hour >= ? AND hour < ? GROUP BY repo, t ORDER BY repo, t`, step, step, fro
 }
 
 // PruneRequestStats deletes the statistics of hours before the cutoff (unix
-// seconds) and returns how many rows went.
+// seconds) and returns how many rows went. Only the leader prunes (Leader):
+// elsewhere it does nothing.
 func (d *DB) PruneRequestStats(ctx context.Context, before int64) (int64, error) {
+	if !d.Leader() {
+		return 0, nil
+	}
 	res, err := d.sql.ExecContext(ctx, `DELETE FROM request_stats WHERE hour < ?`, before)
 	if err != nil {
 		return 0, err

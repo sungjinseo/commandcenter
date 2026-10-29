@@ -183,6 +183,11 @@ func gc(args []string, stdout io.Writer) error {
 		return err
 	}
 	defer a.Close()
+	unlock, err := a.Tasks.Acquire() // not beside a compact or cleanup on any node
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	n, _, err := a.GC(context.Background(), time.Hour)
 	if err != nil {
 		return err

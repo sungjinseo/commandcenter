@@ -40,8 +40,18 @@ const (
 	recordScheduled                   // a due run: next_run is recomputed
 )
 
+// runLock is the cluster lock (meta.DB.TryLock) a run holds from before it
+// reads its task until after its outcome is recorded: one run at a time on
+// every node, and the next one reads the next run its record stored. A
+// node that dies mid-run releases it with its database session; the task
+// stays due, so the leader runs it again (at least once).
+const runLock = "tasks.run"
+
 // Start runs the scheduler until ctx is cancelled or Stop is called. Runs
 // get contexts derived from ctx, so a shutdown cancels a run in progress.
+// It also answers the other nodes: a stop of the run in progress (StopRun
+// there), an edited cleanup policy (PolicyChanged) and the pending
+// download counts a cleanup there needs (Notify "flush").
 func (s *Service) Start(ctx context.Context) {
 	s.mu.Lock()
 	if s.started {
@@ -49,6 +59,11 @@ func (s *Service) Start(ctx context.Context) {
 		return
 	}
 	s.started = true
+	s.DB.Subscribe("task.stop", func(id string) { s.stopLocal(id) })
+	s.DB.Subscribe("policies", func(string) { s.policySig.Add(1) })
+	if s.Metrics != nil {
+		s.DB.Subscribe("flush", func(string) { go s.flushLocal() })
+	}
 	s.base, s.cancel = context.WithCancel(ctx)
 	base := s.base
 	loopDone := make(chan struct{})
@@ -116,10 +131,31 @@ func (s *Service) Stop() {
 	}
 }
 
-// Wait blocks until no run is in progress.
+// Wait blocks until no run is in progress on this node.
 func (s *Service) Wait() {
-	s.runMu.Lock()
-	s.runMu.Unlock()
+	for {
+		s.mu.Lock()
+		done := s.runDone
+		s.mu.Unlock()
+		if done == nil {
+			return
+		}
+		<-done
+	}
+}
+
+// Acquire takes runLock, as a run does, or answers *BusyError naming the
+// running task. The gc command holds it, so that it never collects beside a
+// run on any node.
+func (s *Service) Acquire() (func(), error) {
+	unlock, ok, err := s.DB.TryLock(runLock)
+	if err != nil {
+		return nil, fmt.Errorf("take the task run lock: %w", err)
+	}
+	if !ok {
+		return nil, &BusyError{Running: s.Running()}
+	}
+	return unlock, nil
 }
 
 // baseContext is the parent of run contexts: the scheduler's, or
@@ -134,9 +170,13 @@ func (s *Service) baseContext() context.Context {
 }
 
 // RunDue runs the enabled tasks whose next run has come, one after the
-// other, as the system. When a run is already going (a "run now"), it
-// returns: the tasks are still due at the next tick.
+// other, as the system, on the leader only (meta.DB.Leader). When a run is
+// already going (a "run now", or on another node), it returns: the tasks
+// are still due at the next tick.
 func (s *Service) RunDue(ctx context.Context) {
+	if !s.DB.Leader() {
+		return
+	}
 	due, err := s.DB.DueTasks(ctx, s.now())
 	if err != nil {
 		if ctx.Err() == nil {
@@ -165,19 +205,16 @@ func (s *Service) RunNow(id, actor string) (Outcome, error) { return s.run(id, a
 // is not changed. The task shows as running when it returns. A *BusyError
 // when a task is running, ErrNotFound for an unknown id.
 func (s *Service) RunAsync(id, actor string) error {
-	if !s.runMu.TryLock() {
-		return &BusyError{Running: s.Running()}
+	unlock, err := s.Acquire()
+	if err != nil {
+		return err
 	}
 	t, err := s.DB.GetTask(context.Background(), id)
 	if err != nil {
-		s.runMu.Unlock()
+		unlock()
 		return err
 	}
-	done := s.begin(t.ID)
-	go func() {
-		defer s.runMu.Unlock()
-		s.execute(t, actor, recordManual, done)
-	}()
+	go s.execute(t, actor, recordManual, s.begin(t.ID, unlock))
 	return nil
 }
 
@@ -199,30 +236,32 @@ func (s *Service) RunCompact(actor string) (Outcome, error) {
 			break
 		}
 	}
-	if !s.runMu.TryLock() {
-		return Outcome{}, &BusyError{Running: s.Running()}
+	unlock, err := s.Acquire()
+	if err != nil {
+		return Outcome{}, err
 	}
-	defer s.runMu.Unlock()
 	t := meta.Task{ID: TypeCompact, Type: TypeCompact, Params: "{}"}
-	return s.execute(t, actor, recordNone, s.begin(t.ID)), nil
+	return s.execute(t, actor, recordNone, s.begin(t.ID, unlock)), nil
 }
 
 // run takes the run lock (or answers *BusyError), reads the task and runs
 // it. A scheduled run skips a task that is no longer due (disabled,
 // rescheduled or deleted while another task ran).
 func (s *Service) run(id, actor string, mode recordMode) (Outcome, error) {
-	if !s.runMu.TryLock() {
-		return Outcome{}, &BusyError{Running: s.Running()}
-	}
-	defer s.runMu.Unlock()
-	t, err := s.DB.GetTask(context.Background(), id)
+	unlock, err := s.Acquire()
 	if err != nil {
 		return Outcome{}, err
 	}
+	t, err := s.DB.GetTask(context.Background(), id)
+	if err != nil {
+		unlock()
+		return Outcome{}, err
+	}
 	if mode == recordScheduled && (!t.Enabled || t.NextRun.IsZero() || t.NextRun.After(s.now()) || s.isDeferred(t.ID)) {
+		unlock()
 		return Outcome{}, nil
 	}
-	return s.execute(t, actor, mode, s.begin(t.ID)), nil
+	return s.execute(t, actor, mode, s.begin(t.ID, unlock)), nil
 }
 
 // isDeferred reports whether a scheduled run of id is held back in memory
@@ -234,34 +273,70 @@ func (s *Service) isDeferred(id string) bool {
 	return ok && (until.IsZero() || s.now().Before(until))
 }
 
-// begin marks id as running and creates the run's context, which StopRun
-// cancels; the caller holds runMu. execute ends it by closing the returned
-// channel.
-func (s *Service) begin(id string) chan struct{} {
+// begin marks id as running, here and in its row, and creates the run's
+// context, which StopRun cancels; unlock releases runLock, which the
+// caller took. execute ends it by closing the returned channel.
+func (s *Service) begin(id string, unlock func()) chan struct{} {
 	done := make(chan struct{})
 	ctx, stop := context.WithCancelCause(s.baseContext())
 	s.mu.Lock()
 	s.running, s.runDone = id, done
-	s.runCtx, s.runStop = ctx, stop
+	s.runCtx, s.runStop, s.unlock = ctx, stop, unlock
 	s.mu.Unlock()
+	s.mark(id, s.now())
 	return done
 }
 
+// end clears the run, releases runLock (the outcome is recorded by now)
+// and closes done.
 func (s *Service) end(done chan struct{}) {
 	s.mu.Lock()
-	stop := s.runStop
-	s.running, s.runDone, s.runCtx, s.runStop = "", nil, nil, nil
+	id, stop, unlock := s.running, s.runStop, s.unlock
+	s.running, s.runDone, s.runCtx, s.runStop, s.unlock = "", nil, nil, nil, nil
 	s.mu.Unlock()
 	if stop != nil {
 		stop(nil)
 	}
+	s.mark(id, time.Time{})
+	unlock()
 	close(done)
 }
 
-// StopRun cancels the run of task id if it is the one running and reports
-// whether it was. The run ends at its next cancellation check (a cleanup
-// before its next component) and records ResultStopped.
+// mark stores in task id's row that this node runs it since since, or with
+// the zero time that it does not (tasks.running_node): Running and StopRun
+// on the other nodes and GET /-/api/nodes read it. A process that did not
+// join as a node marks nothing.
+func (s *Service) mark(id string, since time.Time) {
+	node := s.DB.NodeID()
+	if node == "" {
+		return
+	}
+	if since.IsZero() {
+		node = ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.DB.SetTaskRunning(ctx, id, node, since); err != nil {
+		s.log().Warn("could not mark the task run on its row; other nodes may not see it", "task", id, "err", logsafe.Err(err))
+	}
+}
+
+// StopRun cancels the run of task id if it is the one running, on this
+// node or (on PostgreSQL) another live one, and reports whether it was. The
+// run ends at its next cancellation check (a cleanup before its next
+// component) and records ResultStopped.
 func (s *Service) StopRun(id string) bool {
+	if s.stopLocal(id) {
+		return true
+	}
+	if id == "" || !s.clustered() || s.Running() != id {
+		return false
+	}
+	return s.notify("task.stop:"+id) == nil // the node running it stops it (Start)
+}
+
+// stopLocal is StopRun on this node.
+func (s *Service) stopLocal(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if id == "" || s.running != id || s.runStop == nil {
@@ -271,7 +346,7 @@ func (s *Service) StopRun(id string) bool {
 	return true
 }
 
-// execute runs t (begun with begin, under runMu) with the run timeout,
+// execute runs t (begun with begin, under runLock) with the run timeout,
 // records the outcome per mode (when the task still exists), and emits the
 // events. A panic in the task is recovered and recorded as a failure.
 func (s *Service) execute(t meta.Task, actor string, mode recordMode, done chan struct{}) Outcome {

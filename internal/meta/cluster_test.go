@@ -397,6 +397,7 @@ func TestSchemaCompat(t *testing.T) {
 		{3, 3, "webhooks, routing rules and content selectors"},
 		{4, 4, "user tokens, blob store groups, cleanup criteria, tags, store moves, vulnerability data"},
 		{5, 5, "nodes, leases, compat: a full stop, as the single-writer guard must refuse a second instance, which older builds would not"},
+		{6, 5, "tasks.running_node and running_since, webhook delivery claims: expand-only, an older build alone on the database ignores them"},
 	}
 	for i, d := range decisions {
 		if d.version != i+1 || d.compat < d.version-1 || d.compat > d.version || d.note == "" {
@@ -587,5 +588,91 @@ func TestReadyDrainLeave(t *testing.T) {
 	}
 	if err := db.Ready(ctx); err == nil {
 		t.Fatal("ready after Leave")
+	}
+}
+
+// joinAll joins each handle as a node, the single-writer guard off (two
+// servers on one database, as high availability runs them); the first
+// handle takes the scheduler lease.
+func joinAll(t *testing.T, dbs ...*DB) {
+	t.Helper()
+	SingleWriter = false
+	t.Cleanup(func() { SingleWriter = true })
+	for i, d := range dbs {
+		if _, err := d.Join(ctx, "node-"+string(rune('a'+i)), "host", "1", discard()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TryLock never waits: it fails while the key is held in this process or
+// on another node, and succeeds once it is free.
+func TestTryLock(t *testing.T) {
+	a, b, _ := twoNodes(t)
+	unlock, ok, err := a.TryLock("k")
+	if err != nil || !ok {
+		t.Fatalf("free key: %v, %v", ok, err)
+	}
+	for name, d := range map[string]*DB{"same process": a, "other node": b} {
+		if again, ok, err := d.TryLock("k"); err != nil || ok {
+			if again != nil {
+				again()
+			}
+			t.Fatalf("%s took a held key: %v, %v", name, ok, err)
+		}
+	}
+	unlock()
+	unlock()
+	again, ok, err := b.TryLock("k")
+	if err != nil || !ok {
+		t.Fatalf("after unlock: %v, %v", ok, err)
+	}
+	again()
+}
+
+// Only the leader (the scheduler lease) prunes request statistics, the
+// negative cache and events; another node's prunes delete nothing. SQLite:
+// one process, always the leader.
+func TestLeaderAlonePrunes(t *testing.T) {
+	if !metatest.Postgres() {
+		t.Skip("SQLite runs one process, which is the leader")
+	}
+	a, b, _ := twoNodes(t)
+	joinAll(t, a, b)
+	if !a.Leader() || b.Leader() {
+		t.Fatalf("leaders: a %v, b %v; want a only", a.Leader(), b.Leader())
+	}
+	now := time.Now()
+	old := now.Add(-48*time.Hour).Unix() / 3600 * 3600
+	if err := a.FlushRequests(ctx, []RequestDelta{{Hour: old, Repo: "r", Requests: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.PutNegative(ctx, "r", "gone", now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.InsertEvents(ctx, []Event{{At: now, Kind: "k"}, {At: now, Kind: "k"}, {At: now, Kind: "k"}}); err != nil {
+		t.Fatal(err)
+	}
+	prune := func(d *DB) int64 {
+		t.Helper()
+		var total int64
+		for _, f := range []func() (int64, error){
+			func() (int64, error) { return d.PruneRequestStats(ctx, now.Add(-24*time.Hour).Unix()) },
+			func() (int64, error) { return d.PruneNegative(ctx, now) },
+			func() (int64, error) { return d.PruneEvents(ctx, 1) },
+		} {
+			n, err := f()
+			if err != nil {
+				t.Fatal(err)
+			}
+			total += n
+		}
+		return total
+	}
+	if n := prune(b); n != 0 {
+		t.Fatalf("a node that is not the leader pruned %d rows", n)
+	}
+	if n := prune(a); n != 4 { // one statistics hour, one negative entry, two events
+		t.Fatalf("the leader pruned %d rows, want 4", n)
 	}
 }

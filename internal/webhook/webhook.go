@@ -3,7 +3,10 @@
 // EventSink in front of the activity recorder: every event the server
 // records is matched against the enabled webhooks, stored as one delivery
 // per webhook and sent by a pool of workers, with retries persisted in
-// webhook_deliveries so a restart resumes them.
+// webhook_deliveries so a restart resumes them. A worker sends only what
+// its node claimed in the table, so each delivery is sent once however
+// many nodes (and CLI commands, which store but never send) share the
+// database; at least once when a node dies mid-send.
 package webhook
 
 import (
@@ -51,7 +54,6 @@ const (
 	maxSubject = 512
 	maxDetail  = 1024
 	drainBody  = 4 << 10
-	dueBatch   = 100
 	warnEvery  = time.Minute
 )
 
@@ -62,8 +64,19 @@ var Backoff = []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minut
 // kicks the dispatcher; a variable for tests.
 var PollEvery = 10 * time.Second
 
+// ClaimFor is how long a delivery a node claimed stays its own to send
+// (meta.DB.ClaimDeliveries): a node that dies holding claims leaves those
+// deliveries to the others after it. A variable for tests.
+var ClaimFor = time.Minute
+
+// maxClaimed bounds the deliveries a node has claimed and not yet sent, so
+// that each is sent long before its claim ends: three rounds of the workers
+// at RequestTimeout each take 30 s.
+const maxClaimed = 3 * Workers
+
 // Dispatcher matches events against the webhooks and delivers them. Set the
-// fields, then Start; Close stops it. Emit never blocks.
+// fields, then Start, and Deliver in a process that serves; Close stops it.
+// Emit never blocks.
 type Dispatcher struct {
 	DB    *meta.DB
 	Next  repo.EventSink // the activity recorder; nil records nothing
@@ -80,14 +93,15 @@ type Dispatcher struct {
 	work     chan meta.WebhookDelivery
 	kick     chan struct{}
 	stop     chan struct{}
-	inflight sync.Map // delivery id -> struct{}
+	node     string       // the claimer: this node's id, set by Deliver
+	claimed  atomic.Int64 // claimed deliveries not yet attempted
 	wg       sync.WaitGroup
 	dropped  atomic.Int64
 	lastWarn atomic.Int64
 }
 
-// Start loads the enabled webhooks and starts the intake, the poller and
-// the workers.
+// Start loads the enabled webhooks and starts the intake, which stores the
+// events as deliveries.
 func (d *Dispatcher) Start() error {
 	if d.Now == nil {
 		d.Now = time.Now
@@ -103,13 +117,31 @@ func (d *Dispatcher) Start() error {
 	if err := d.Reload(context.Background()); err != nil {
 		return err
 	}
-	d.wg.Add(2 + Workers)
+	d.wg.Add(1)
 	go d.intake()
+	return nil
+}
+
+// Deliver starts the poller and the workers, which claim the due
+// deliveries and send them. Only a serving process calls it (app.Serve):
+// a CLI command beside a server leaves what it stores to the server. Call
+// it once, after Start.
+func (d *Dispatcher) Deliver() {
+	d.node = d.DB.NodeID()
+	if d.node == "" { // a process that did not join as a node (tests)
+		d.node = uuid()
+	}
+	if d.DB.Driver() == "sqlite" { // one process sends: the claims a crash left were its own
+		if err := d.DB.ReleaseDeliveries(context.Background(), ""); err != nil {
+			d.Log.Warn("could not release the webhook delivery claims of the last run", "err", logsafe.Err(err))
+		}
+	}
+	d.wg.Add(1 + Workers)
 	go d.poll()
 	for i := 0; i < Workers; i++ {
 		go d.worker()
 	}
-	return nil
+	d.Kick()
 }
 
 // Reload reads the webhooks again; the admin API calls it after a change.
@@ -238,8 +270,9 @@ func (d *Dispatcher) store(ctx context.Context, e event) {
 	d.Kick()
 }
 
-// poll hands the due deliveries to the workers, on a kick and every
-// PollEvery (a retry's time comes without a kick).
+// poll claims due deliveries for the workers, up to maxClaimed at a time,
+// on a kick (a worker kicks after each attempt) and every PollEvery (a
+// retry's time comes without a kick).
 func (d *Dispatcher) poll() {
 	defer d.wg.Done()
 	t := time.NewTicker(PollEvery)
@@ -251,21 +284,23 @@ func (d *Dispatcher) poll() {
 		case <-d.kick:
 		case <-t.C:
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
-		due, err := d.DB.DueDeliveries(ctx, d.Now(), dueBatch)
-		cancel()
-		if err != nil {
-			d.Log.Warn("could not read pending webhook deliveries", "err", logsafe.Err(err))
+		n := maxClaimed - int(d.claimed.Load())
+		if n <= 0 {
 			continue
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+		now := d.Now()
+		due, err := d.DB.ClaimDeliveries(ctx, d.node, now, now.Add(ClaimFor), n)
+		cancel()
+		if err != nil {
+			d.Log.Warn("could not claim pending webhook deliveries", "err", logsafe.Err(err))
+			continue
+		}
+		d.claimed.Add(int64(len(due)))
 		for _, dl := range due {
-			if _, busy := d.inflight.LoadOrStore(dl.ID, struct{}{}); busy {
-				continue
-			}
 			select {
 			case d.work <- dl:
 			case <-d.stop:
-				d.inflight.Delete(dl.ID)
 				return
 			}
 		}
@@ -280,7 +315,8 @@ func (d *Dispatcher) worker() {
 			return
 		case dl := <-d.work:
 			d.attempt(dl)
-			d.inflight.Delete(dl.ID)
+			d.claimed.Add(-1)
+			d.Kick()
 		}
 	}
 }
@@ -306,10 +342,11 @@ func (d *Dispatcher) attempt(dl meta.WebhookDelivery) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
 	defer cancel()
-	// A poll that read the row just before an earlier attempt was recorded
-	// hands it over again once that attempt's worker is done: send only
-	// while the row is still pending at the attempt count it was read with.
-	if cur, err := d.DB.GetDelivery(ctx, dl.ID); err != nil || cur.Status != meta.DeliveryPending || cur.Attempts != dl.Attempts {
+	// A copy read before an earlier attempt was recorded, or whose claim
+	// ended and was taken again, is not sent: only while the row is still
+	// pending at the attempt count and under the claim it was read with.
+	if cur, err := d.DB.GetDelivery(ctx, dl.ID); err != nil || cur.Status != meta.DeliveryPending || cur.Attempts != dl.Attempts ||
+		cur.ClaimedBy != dl.ClaimedBy || !cur.ClaimUntil.Equal(dl.ClaimUntil) {
 		return
 	}
 	code, err := d.send(ctx, w, dl)
@@ -445,6 +482,13 @@ func (d *Dispatcher) Close() {
 	go func() { d.wg.Wait(); close(done) }()
 	select {
 	case <-done:
+		if d.node != "" { // the other nodes may send what this one claimed at once
+			ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
+			if err := d.DB.ReleaseDeliveries(ctx, d.node); err != nil {
+				d.Log.Warn("could not release this node's webhook delivery claims; they end after "+ClaimFor.String(), "err", logsafe.Err(err))
+			}
+			cancel()
+		}
 	case <-time.After(CloseTimeout):
 		d.Log.Warn("webhook deliveries were still in flight at the shutdown deadline; they stay pending")
 	}

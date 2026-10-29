@@ -75,7 +75,7 @@ type App struct {
 	// process (one instance), so a restart only makes clients fetch new ones.
 	DockerKey []byte
 	Tasks     *tasks.Service      // scheduled tasks; the scheduler runs while Serve does
-	Webhooks  *webhook.Dispatcher // webhook deliveries; Close stops it before the database closes
+	Webhooks  *webhook.Dispatcher // webhook deliveries, sent while Serve runs; Close stops it before the database closes
 	Vuln      *vuln.Service       // vulnerability data and the firewall; Close waits for its index build
 	// Node is this process's id in the nodes table (hostname-xxxx, new for
 	// every start), in every log record ("node") and in the metrics.
@@ -447,7 +447,8 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// never leaves the writer running against a database New is about to close.
 	evts := events.New(db)
 	registry := repo.NewRegistry(db, defs)
-	// Every event goes through the webhook dispatcher to the recorder.
+	// Every event goes through the webhook dispatcher to the recorder; Serve
+	// starts sending the deliveries.
 	hooks := &webhook.Dispatcher{DB: db, Next: evts, Repos: registry, Log: log}
 	if err := hooks.Start(); err != nil {
 		evts.Close()
@@ -532,6 +533,14 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// Crowd goes through the proxy settings and the trust store, and may
 	// reach the class of address its URL resolves to.
 	authn.CrowdHTTP = func(u *url.URL) *http.Client { return proxy.NewClientFor(u, nil) }
+	if logLevel != nil { // PUT /-/api/logging on another node
+		db.Subscribe("loglevel", func(arg string) {
+			var l slog.Level
+			if l.UnmarshalText([]byte(arg)) == nil {
+				logLevel.Set(l)
+			}
+		})
+	}
 	authn.Sessions = auth.NewSessions()
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, Webhooks: hooks, Node: node, log: log}
@@ -800,9 +809,12 @@ func (a *App) Serve(ctx context.Context) error {
 		<-reloadDone
 	}()
 	// The scheduler stops (cancelling a run in progress) before the final
-	// metrics flush and before Close closes the database.
+	// metrics flush and before Close closes the database. Webhook
+	// deliveries are sent by a serving process only: a CLI command beside
+	// it stores the ones its events make, and the server sends them.
 	a.Tasks.Start(ctx)
 	defer a.Tasks.Stop()
+	a.Webhooks.Deliver()
 	ln, err := net.Listen("tcp", a.Config.Listen)
 	if err != nil {
 		return err

@@ -25,6 +25,7 @@ func withWebhooks(t *testing.T, e *env) *webhook.Dispatcher {
 	if err := d.Start(); err != nil {
 		t.Fatal(err)
 	}
+	d.Deliver()
 	t.Cleanup(d.Close)
 	e.ui.Webhooks = d
 	return d

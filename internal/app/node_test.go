@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"commandcenter/internal/meta"
 	"commandcenter/internal/meta/metatest"
+	"commandcenter/internal/webhook"
 )
 
 func TestMain(m *testing.M) {
@@ -155,5 +157,66 @@ func TestServeReadinessAndDrain(t *testing.T) {
 	}
 	if code := writable(); code != http.StatusServiceUnavailable {
 		t.Fatalf("writable after Serve returned: %d", code)
+	}
+}
+
+// A process that does not serve (a CLI command such as gc beside a server)
+// stores the webhook deliveries its events make and sends none; a server on
+// the database sends them, once.
+func TestCLIStoresWebhookDeliveriesWithoutSending(t *testing.T) {
+	var sent atomic.Int32
+	rc := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { sent.Add(1) }))
+	defer rc.Close()
+	poll := webhook.PollEvery
+	webhook.PollEvery = 20 * time.Millisecond
+	t.Cleanup(func() { webhook.PollEvery = poll })
+	ctx := context.Background()
+	cfg := testConfig(t, "")
+	cfg.Listen = "127.0.0.1:0"
+	cli, err := New(cfg, quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+	if err := cli.DB.CreateWebhook(ctx, meta.Webhook{ID: "h", Name: "h", URL: rc.URL, Events: []string{"*"}, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cli.Webhooks.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cli.Webhooks.Emit("upload", "cli", "r", "a@1", "")
+	waitDelivery := func(status string) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			list, err := cli.DB.ListDeliveries(ctx, "h", 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(list) == 1 && list[0].Status == status {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("deliveries %+v, want one %s", list, status)
+			}
+		}
+	}
+	waitDelivery(meta.DeliveryPending)
+	cli.Webhooks.Kick()
+	time.Sleep(200 * time.Millisecond)
+	if n := sent.Load(); n != 0 {
+		t.Fatalf("the CLI process sent %d requests", n)
+	}
+	srv, err := New(cfg, quiet(), AsServer())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	stop := serveBackground(t, srv)
+	waitDelivery(meta.DeliveryOK)
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if n := sent.Load(); n != 1 {
+		t.Fatalf("%d requests, want 1", n)
 	}
 }

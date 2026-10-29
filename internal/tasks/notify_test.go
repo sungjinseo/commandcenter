@@ -192,17 +192,13 @@ func TestNoMailForOKStoppedDisabledOrNoRecipients(t *testing.T) {
 
 func waitIdle(t *testing.T, s *Service) {
 	t.Helper()
-	for i := 0; i < 200; i++ {
-		if s.Running() == "" {
-			// execute holds runMu a moment longer than running is set
-			if s.runMu.TryLock() {
-				s.runMu.Unlock()
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	done := make(chan struct{})
+	go func() { s.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not finish")
 	}
-	t.Fatal("run did not finish")
 }
 
 type blockingMailer struct{ release chan struct{} }
