@@ -240,6 +240,9 @@ function usageTools(format, c) {
     case "cargo": return [["Cargo", "cargo add " + c.name + "@" + c.version + " --registry commandcenter"]];
     case "conan": return [["Conan", "conan install --requires=" + c.name + "/" + String(c.version).split("#")[0] + (c.group ? "@" + c.group : "") + " -r commandcenter"]];
     case "r": return [["R", 'install.packages("' + c.name + '")']];
+    case "swift": return [["Package.swift", '.package(id: "' + c.name + '", exact: "' + c.version + '")']];
+    case "cocoapods": return [["Podfile", "pod '" + c.name + "', '" + c.version + "'"]];
+    case "huggingface": return [["hf download", "hf download " + c.name + (c.group ? " --repo-type " + c.group.replace(/s$/, "") : "") + " --revision " + c.version]];
   }
   return [];
 }
@@ -380,6 +383,10 @@ async function versionList(r, c) {
     case "composer":
     case "yum": return pkgVersions(c.name);
     case "r": return pkgVersions((c.group ? c.group + "/" : "") + c.name); // the package name is directory-qualified
+    case "swift": { // c.name is scope.name; the archive is <scope>/<name>/<version>/source-archive.zip
+      const d = await pkgVersions(c.name);
+      return { truncated: d.truncated, list: d.list.map((v) => Object.assign({}, v, { path: c.name.replace(".", "/") + "/" + v.version + "/source-archive.zip" })) };
+    }
     case "maven": {
       const dir = (c.group ? c.group.split(".").join("/") + "/" : "") + c.name + "/";
       const d = await listDir(dir);
@@ -656,6 +663,41 @@ function setupSnippets(r) {
         ["git credential", "printf 'protocol=" + (url.startsWith("https:") ? "https" : "http") + "\\nhost=" + authority + "\\nusername=ci\\npassword=<" + t("setup.token") + ">\\n' | git credential approve"],
         ["git lfs push", "git lfs push origin <branch>\n# " + t("setup.lfsNote")]];
     }
+    case "p2":
+      return [["Eclipse — Install New Software", "Help > Install New Software… > Add… > Location: " + url],
+        ["Tycho — pom.xml", "<repository>\n  <id>commandcenter</id>\n  <url>" + xml(url) + "</url>\n  <layout>p2</layout>\n</repository>"],
+        ["curl", "curl " + url + "p2.index"]];
+    case "swift": {
+      const base = url.replace(/\/$/, "");
+      const out = [["swift package-registry set", "swift package-registry set " + base + (base.startsWith("http:") ? " --allow-insecure-http" : "")]];
+      if (!local) out.push(["swift package-registry login", "swift package-registry login " + base + "/login --username ci --password <" + t("setup.password") + ">"]);
+      out.push(["Package.swift", '.package(id: "<scope>.<name>", from: "1.0.0")']);
+      if (hosted || r.writeMember) out.push(["swift package-registry publish", "swift package-registry publish <scope>.<name> <version> --url " + base]);
+      return out;
+    }
+    case "cocoapods":
+      return [["Podfile", "source '" + url + "'\n# " + t("setup.podsGitNote")],
+        ["~/.netrc", "# " + t("setup.netrcNote") + "\nmachine " + host + " login ci password <" + t("setup.password") + ">"]];
+    case "huggingface":
+      return [["HF_ENDPOINT", "export HF_ENDPOINT=" + url.replace(/\/$/, "") + "\n# " + t("setup.hfTimeoutNote") + "\nexport HF_HUB_DOWNLOAD_TIMEOUT=600"],
+        ["HF_TOKEN", "# " + t("setup.hfTokenNote") + "\nexport HF_TOKEN=<" + t("setup.token") + ">"], ["hf download", "hf download <repo id>"]];
+    case "terraform": {
+      let authority = host; // host[:port]: what source addresses and credentials name
+      try { authority = new URL(url).host; } catch (e) { /* keep the host name */ }
+      const tok = "<" + t("setup.token") + ">";
+      const out = [["~/.terraformrc", 'credentials "' + authority + '" {\n  token = "' + tok + '"\n}'],
+        ["TF_TOKEN", "export TF_TOKEN_" + host.replace(/-/g, "__").replace(/\./g, "_") + "=" + tok],
+        ["module", 'module "<name>" {\n  source  = "' + authority + '/<namespace>/<name>/<provider>"\n  version = "1.0.0"\n}'],
+        ["required_providers", 'terraform {\n  required_providers {\n    <type> = {\n      source  = "' + authority + '/<namespace>/<type>"\n      version = "1.0.0"\n    }\n  }\n}'],
+        ["~/.netrc", "# " + t("setup.tfNetrcNote") + "\nmachine " + host + " login ci password " + tok]];
+      if (hosted || r.writeMember) {
+        const auth = '-H "Authorization: Bearer $TOKEN"';
+        out.push(["upload — module", "curl -fsS -X PUT " + auth + " --data-binary @<name>-<version>.tgz \\\n  " + url + "v1/modules/<namespace>/<name>/<provider>/<version>"],
+          ["upload — provider", "B=" + url + "v1/providers/<namespace>/<type>/<version>\n" +
+            ["_linux_amd64.zip $B/linux/amd64", "_SHA256SUMS $B/shasums", "_SHA256SUMS.sig $B/shasums.sig"].map((x) => "curl -fsS -X PUT " + auth + " --data-binary @terraform-provider-<type>_<version>" + x).join("\n")]);
+      }
+      return out;
+    }
     case "composer": {
       const out = [["composer config", "composer config repositories.commandcenter composer " + url + (local ? "" : "\ncomposer config -g http-basic." + host + " ci <" + t("setup.password") + ">")]];
       if (hosted || r.writeMember) out.push(["upload", "curl -u ci:<" + t("setup.password") + "> -T <package>.zip " + url + "packages/upload/<vendor>/<package>/<version>"]);
@@ -668,10 +710,10 @@ function setupSnippets(r) {
 function setupCard(r) {
   const list = setupSnippets(r);
   if (!list.length) return null;
-  return card(t("setup.title"), t("setup.sub"), list.map(([title, text]) => {
+  return card(t("setup.title"), t("setup.sub"), [r.format === "terraform" ? h("div", { class: "notice" }, t("setup.tfNote")) : null, list.map(([title, text]) => {
     const pre = h("pre", { class: "code" }, text);
     return h("div", { class: "snippet" }, h("div", { class: "codebar" }, h("span", null, title), copyButton(text, pre, t("setup.copy", { name: title }))), pre);
-  }));
+  })]);
 }
 
 // Docker references use the registry authority (including its port), without

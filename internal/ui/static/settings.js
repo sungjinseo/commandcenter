@@ -193,7 +193,7 @@ const checkRow = (box, label, help) => h("div", { class: "field full" }, h("labe
 
 export async function viewGeneral(view) {
   const isLive = alive();
-  const [g0, sm0] = await Promise.all([api("settings"), api("settings/smtp")]);
+  const [g0, sm0, repos] = await Promise.all([api("settings"), api("settings/smtp"), loadRepos(true)]);
   if (!isLive()) return;
   let g = Object.assign({}, g0), sm = Object.assign({}, sm0); // what the server holds now
   const hp = () => Object.assign({ host: "", port: 0, username: "", passwordSet: false, nonProxyHosts: [] }, (g.http || {}).proxy || {});
@@ -208,6 +208,10 @@ export async function viewGeneral(view) {
   const lang = sel([["ko", "한국어"], ["en", "English"]], g.defaultLanguage === "en" ? "en" : "ko");
   const idle = numIn(g.sessionIdleMinutes, 5, 10080);
   const maxUp = numIn(g.maxUploadMiB, 1, 1048576);
+  // Terraform: the repository the host root's discovery document points at; "" is the first by name
+  const tfNames = repos.filter((r) => r.format === "terraform").map((r) => r.name).sort();
+  if (g.terraformDefaultRepository && !tfNames.includes(g.terraformDefaultRepository)) tfNames.unshift(g.terraformDefaultRepository);
+  const tfRepo = tfNames.length ? sel([["", t("gen.tfFirst")]].concat(tfNames.map((n) => [n, n])), g.terraformDefaultRepository || "") : null;
 
   // e-mail
   const enabled = h("input", { type: "checkbox", checked: !!sm.enabled });
@@ -331,6 +335,7 @@ export async function viewGeneral(view) {
       if (lang.value !== g.defaultLanguage) body.defaultLanguage = lang.value;
       if (idleN !== g.sessionIdleMinutes) body.sessionIdleMinutes = idleN;
       if (upN !== g.maxUploadMiB) body.maxUploadMiB = upN;
+      if (tfRepo && tfRepo.value !== (g.terraformDefaultRepository || "")) body.terraformDefaultRepository = tfRepo.value;
       if (httpChanged) body.http = hb;
     }
     const mailChanged = smtpDirty();
@@ -400,6 +405,7 @@ export async function viewGeneral(view) {
       field(t("gen.lang"), lang, t("gen.langHelp")))),
     card(t("gen.session"), t("gen.sessionSub"), fields(field(t("gen.idle"), idle, t("gen.idleHelp")))),
     card(t("gen.upload"), t("gen.uploadSub"), fields(field(t("gen.maxUpload"), maxUp, t("gen.maxUploadHelp")))),
+    tfRepo ? card("Terraform", t("gen.tfSub"), fields(field(t("gen.tfRepo"), tfRepo, t("gen.tfRepoHelp"), { full: true }))) : null,
     card(t("http.title"), t("http.sub"), httpBox),
     card(t("smtp.title"), t("smtp.sub"), mailBox)), h("div", { class: "savebar" }, save));
 

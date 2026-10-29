@@ -18,11 +18,13 @@ const tk = (base, k) => t(base + "." + k);
 const createLink = (recipe) => adminRepoLink("create") + (recipe ? ":" + encodeURIComponent(recipe) : "");
 
 // Recipe names: "maven2" is our "maven" format.
-const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"], ["rubygems", "rubygems"], ["conda", "conda"], ["composer", "composer"], ["conan", "conan"], ["r", "r"], ["gitlfs", "gitlfs"]];
+const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"], ["rubygems", "rubygems"], ["conda", "conda"], ["composer", "composer"], ["conan", "conan"], ["r", "r"], ["gitlfs", "gitlfs"], ["p2", "p2"], ["swift", "swift"], ["cocoapods", "cocoapods"], ["huggingface", "huggingface"], ["terraform", "terraform"]];
 const TYPES = ["hosted", "proxy", "group"];
-// Formats the server stores only as hosted (a proxy or group is refused with 400).
-const HOSTED_ONLY = ["gitlfs"];
-const typesOf = (format) => (HOSTED_ONLY.includes(format) ? ["hosted"] : TYPES);
+// Formats the server stores only as some types (the others are refused with
+// 400): [types, the notice shown on the create form].
+const TYPE_LIMITS = { gitlfs: [["hosted"], "rf.hostedOnly"], p2: [["proxy", "group"], "rf.noHosted"],
+  cocoapods: [["proxy"], "rf.proxyOnly"], huggingface: [["proxy"], "rf.proxyOnly"] };
+const typesOf = (format) => (TYPE_LIMITS[format] ? TYPE_LIMITS[format][0] : TYPES);
 const RECIPES = RECIPE_FORMATS.flatMap(([label, format]) => typesOf(format).map((type) => ({ id: label + "-" + type, format, type })));
 const recipeOf = (format, type) => RECIPES.find((r) => r.format === format && r.type === type);
 export const DEFAULT_RECIPE = "maven2-hosted";
@@ -38,7 +40,8 @@ const REMOTE_EXAMPLE = {
   go: "https://proxy.golang.org/", cargo: "https://index.crates.io/", docker: "https://registry-1.docker.io", helm: "https://charts.helm.sh/stable/",
   nuget: "https://api.nuget.org/v3/index.json", apt: "https://deb.debian.org/debian/", yum: "https://dl.rockylinux.org/pub/",
   rubygems: "https://rubygems.org/", conda: "https://conda.anaconda.org/conda-forge/", composer: "https://repo.packagist.org/",
-  conan: "https://center.conan.io/", r: "https://cloud.r-project.org/",
+  conan: "https://center.conan.io/", r: "https://cloud.r-project.org/", p2: "https://download.eclipse.org/releases/2024-09/",
+  cocoapods: "https://cdn.cocoapods.org/", huggingface: "https://huggingface.co/", terraform: "https://registry.terraform.io/", // swift: no public registry, so no example
 };
 const ANON = [["", "rf.anonInherit"], ["true", "rf.anonAllow"], ["false", "rf.anonDeny"]];
 
@@ -288,7 +291,7 @@ export async function viewRepoForm(view, o) {
   const format = editing ? textInput(FORMAT_NAMES[cfg.format] || cfg.format, { readonly: true }) : select(fmtNames, cfg.format);
   // switchTo re-runs the create route for another recipe, keeping the name.
   const switchTo = (fmt, type, focus) => {
-    const r = recipeOf(fmt, type) || recipeOf(fmt, "hosted");
+    const r = recipeOf(fmt, type) || recipeOf(fmt, typesOf(fmt)[0]);
     if (!r) return;
     carry = { name: name.value, focus, blobStore: bstore ? bstore.value : "" };
     location.replace(createLink(r.id));
@@ -313,6 +316,9 @@ export async function viewRepoForm(view, o) {
     placeholder: cfg.signingKeySet ? t("rf.unchanged") : "-----BEGIN PGP PRIVATE KEY BLOCK-----" }) : null;
   const clrKey = isApt && cfg.signingKeySet ? checkbox(t("rf.clearSigningKey"), false) : null;
   if (clrKey) clrKey.box.addEventListener("change", () => { signingKey.disabled = clrKey.box.checked; if (clrKey.box.checked) signingKey.value = ""; });
+  // Terraform hosted: the provider signing public key (not a secret: shown, and sent back as is; "" clears it)
+  const gpgKey = cfg.format === "terraform" && isHosted ? h("textarea", { id: uid("gk"), class: "mono", rows: 5, spellcheck: "false", autocomplete: "off",
+    placeholder: "-----BEGIN PGP PUBLIC KEY BLOCK-----" }, cfg.gpgPublicKey || "") : null;
   const depth = isYum ? select([["0", t("rf.depth0")], ["1", t("rf.depth1")]], String(cfg.depth || 0)) : null;
 
   // Proxy
@@ -379,7 +385,7 @@ export async function viewRepoForm(view, o) {
   const authCard = isProxy ? card(t("rf.authTitle"), t("rf.authSub"), fields(
     field(t("rf.username"), user, null, { full: true }),
     field(t("rf.password"), pass, setHelp(auth.passwordSet, "rf.passSet")),
-    field(t("rf.bearer"), bearer, setHelp(auth.bearerTokenSet, "rf.bearerSet")),
+    field(t("rf.bearer"), bearer, setHelp(auth.bearerTokenSet, "rf.bearerSet") || (cfg.format === "huggingface" ? t("rf.bearerHf") : null)),
     clrPass ? h("div", { class: "field" }, clrPass.el) : null,
     clrBearer ? h("div", { class: "field" }, clrBearer.el) : null)) : null;
   const authErr = h("div", { class: "form-errors", hidden: true }, t("rf.hostChanged"));
@@ -416,9 +422,10 @@ export async function viewRepoForm(view, o) {
           component ? field(t("rf.component"), component, t("rf.componentHelp")) : null,
           signingKey ? field(t("rf.signingKey"), signingKey, cfg.signingKeySet ? [h("span", { class: "rf-set" }, t("rf.signingKeySet")), " — ", t("rf.keepEmpty")] : t("rf.signingKeyHelp"), { full: true }) : null,
           clrKey ? h("div", { class: "field full" }, clrKey.el) : null,
-          depth ? field(t("rf.depth"), depth, t("rf.depthHelp")) : null)) : null,
+          depth ? field(t("rf.depth"), depth, t("rf.depthHelp")) : null,
+          gpgKey ? field(t("rf.gpgKey"), gpgKey, t("rf.gpgKeyHelp"), { full: true }) : null)) : null,
         isProxy ? card(t("rf.proxy"), t("rf.proxySub"), fields(
-          field(t("rf.remote"), remote, t("rf.remoteHelp"), { req: true, full: true }),
+          field(t("rf.remote"), remote, cfg.format === "swift" ? t("rf.remoteSwift") : t("rf.remoteHelp"), { req: true, full: true }),
           hidden ? h("div", { class: "field full" }, hidden.el, h("small", null, t("rf.hiddenHelp"))) : null,
           field(t("rf.ctAge"), ctAge, t("rf.ageHelp")),
           field(t("rf.mdAge"), mdAge, t("rf.ageHelp")),
@@ -495,6 +502,7 @@ export async function viewRepoForm(view, o) {
       if (clrKey && clrKey.box.checked) b.clearSigningKey = true;
     }
     if (depth) b.depth = Number(depth.value);
+    if (gpgKey) b.gpgPublicKey = gpgKey.value.trim();
     return b;
   }
 
@@ -567,7 +575,7 @@ export async function viewRepoForm(view, o) {
     pageHead(editing ? t("rf.editTitle", { name: cfg.name }) : t("rf.createTitle"),
       h("p", null, editing ? [typeBadge(cfg.type), " ", t("rf.editSub")] : t("rf.createSub")),
       h("div", { class: "actions" }, acts), eyebrow),
-    okBox, typecards, !editing && HOSTED_ONLY.includes(cfg.format) ? h("div", { class: "notice" }, t("rf.hostedOnly", { format: FORMAT_NAMES[cfg.format] || cfg.format })) : null, form);
+    okBox, typecards, !editing && TYPE_LIMITS[cfg.format] ? h("div", { class: "notice" }, t(TYPE_LIMITS[cfg.format][1], { format: FORMAT_NAMES[cfg.format] || cfg.format })) : null, form);
   if (kept && kept.focus === "type") typecards.querySelector(".selected").focus();
   else if (kept && kept.focus === "format") format.focus();
   else if (!editing) name.focus();

@@ -154,12 +154,12 @@ export function fmtUptime(sec) {
   return t("time.ms", { m: mm, s: sec % 60 });
 }
 
-export const FORMATS = ["maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm", "nuget", "apt", "yum", "rubygems", "conda", "composer", "conan", "r", "gitlfs"];
+export const FORMATS = ["maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm", "nuget", "apt", "yum", "rubygems", "conda", "composer", "conan", "r", "gitlfs", "p2", "swift", "cocoapods", "huggingface", "terraform"];
 const TYPES = { hosted: "hosted", proxy: "proxy", group: "group" };
 export const fmtBadge = (f) => h("span", { class: "badge" + (FORMATS.includes(f) ? " f-" + f : "") }, f);
 export const typeBadge = (ty) => h("span", { class: "badge" + (TYPES[ty] ? " t-" + ty : "") }, ty);
-export const FORMAT_NAMES = { maven: "Maven", npm: "npm", pypi: "PyPI", go: "Go", cargo: "Cargo", docker: "Docker", raw: "Raw", helm: "Helm", nuget: "NuGet", apt: "APT", yum: "Yum", rubygems: "RubyGems", conda: "Conda", composer: "Composer", conan: "Conan", r: "R", gitlfs: "Git LFS" };
-const TILES = { maven: "M", npm: "npm", pypi: "py", go: "go", cargo: "rs", docker: "dk", raw: "raw", helm: "hm", nuget: "nu", apt: "deb", yum: "rpm", rubygems: "gem", conda: "cn", composer: "php", conan: "co", r: "R", gitlfs: "lfs" };
+export const FORMAT_NAMES = { maven: "Maven", npm: "npm", pypi: "PyPI", go: "Go", cargo: "Cargo", docker: "Docker", raw: "Raw", helm: "Helm", nuget: "NuGet", apt: "APT", yum: "Yum", rubygems: "RubyGems", conda: "Conda", composer: "Composer", conan: "Conan", r: "R", gitlfs: "Git LFS", p2: "p2", swift: "Swift", cocoapods: "CocoaPods", huggingface: "Hugging Face", terraform: "Terraform" };
+const TILES = { maven: "M", npm: "npm", pypi: "py", go: "go", cargo: "rs", docker: "dk", raw: "raw", helm: "hm", nuget: "nu", apt: "deb", yum: "rpm", rubygems: "gem", conda: "cn", composer: "php", conan: "co", r: "R", gitlfs: "lfs", p2: "p2", swift: "sw", cocoapods: "pod", huggingface: "hf", terraform: "tf" };
 // fmtTile is the concept's coloured format tile.
 export const fmtTile = (f) => h("span", { class: "format" + (FORMATS.includes(f) ? " " + f : ""), "aria-hidden": "true" },
   FORMATS.includes(f) ? TILES[f] : String(f || "?").slice(0, 1));

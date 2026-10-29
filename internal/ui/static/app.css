@@ -826,3 +826,6 @@ td .params { overflow-wrap: anywhere; }
 .task-params { margin-bottom: 16px; }
 .listrow > div > .fp { display: block; margin-top: 4px; }
 .chain:not(:empty) { margin-top: 14px; }
+
+/* a Hugging Face version is a 40-hex commit sha: the hero badge wraps instead of leaving the card */
+.componenthero h2 .badge { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
