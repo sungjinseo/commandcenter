@@ -308,6 +308,11 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "swift": // <scope>/<name>/<version>/<file>: every file of the version directory (archive, manifests, a proxy's release.json)
 		name, version, ok = SplitSwift(p)
 		return "", name, version, ok
+	case "cocoapods": // Specs/<a>/<b>/<c>/<Pod>/<version>/<file>: the podspec and the archives cached beside it
+		name, version, ok = SplitPod(p)
+		return "", name, version, ok
+	case "huggingface": // [datasets/|spaces/]<repo id>/resolve/<commit sha>/<file>: the kind is the group
+		return SplitHF(p)
 	}
 	return "", "", "", false
 }
@@ -363,6 +368,51 @@ func SplitSwift(p string) (name, version string, ok bool) {
 		return "", "", false
 	}
 	return segs[0] + "." + segs[1], segs[2], true
+}
+
+// SplitPod maps a path of a CocoaPods proxy's cache,
+// Specs/<a>/<b>/<c>/<Pod>/<version>/<file> (the trunk CDN's layout, the
+// shard letters being the first three of the md5 of the pod name), to its
+// component. The file is <Pod>.podspec.json or an archive fetched for the
+// podspec's source.http (<sha1 of its URL>.<ext>). The index files at the
+// root are not components.
+func SplitPod(p string) (name, version string, ok bool) {
+	segs := strings.Split(p, "/")
+	if len(segs) != 7 || segs[0] != "Specs" || segs[4] == "" || segs[5] == "" || segs[6] == "" {
+		return "", "", false
+	}
+	for _, s := range segs[1:4] {
+		if len(s) != 1 || strings.Trim(s, "0123456789abcdef") != "" {
+			return "", "", false
+		}
+	}
+	return segs[4], segs[5], true
+}
+
+// SplitHF maps a path of a Hugging Face proxy's cache,
+// [datasets/|spaces/]<repo id>/resolve/<commit sha>/<file>, to its
+// component: the repository id (org/name, or a bare name) at the commit,
+// with the kind (datasets, spaces; "" for models) as the group. The api/
+// documents and branch names are not components.
+func SplitHF(p string) (kind, repoID, sha string, ok bool) {
+	if strings.HasPrefix(p, "api/") {
+		return "", "", "", false
+	}
+	head, rest, found := strings.Cut(p, "/resolve/")
+	sha, file, hasFile := strings.Cut(rest, "/")
+	if !found || !hasFile || file == "" || len(sha) != 40 || strings.Trim(sha, "0123456789abcdef") != "" {
+		return "", "", "", false
+	}
+	for _, k := range []string{"datasets/", "spaces/"} {
+		if id, cut := strings.CutPrefix(head, k); cut {
+			kind, head = strings.TrimSuffix(k, "/"), id
+			break
+		}
+	}
+	if n := strings.Count(head, "/"); head == "" || n > 1 || strings.HasPrefix(head, "/") || strings.HasSuffix(head, "/") {
+		return "", "", "", false
+	}
+	return kind, head, sha, true
 }
 
 // SplitLFS maps a Git LFS object path, objects/<aa>/<bb>/<oid> with oid a

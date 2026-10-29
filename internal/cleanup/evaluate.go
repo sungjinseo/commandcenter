@@ -282,6 +282,16 @@ func unitPrefix(format, p string) string {
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]
 		}
+	case "cocoapods": // the version directory: the podspec and the archives fetched for it
+		if i := strings.LastIndex(p, "/"); i >= 0 {
+			return p[:i+1]
+		}
+	case "huggingface": // <repo>/resolve/<sha>/: the files of one commit, in subdirectories too
+		if i := strings.Index(p, "/resolve/"); i >= 0 {
+			if j := strings.Index(p[i+9:], "/"); j >= 0 {
+				return p[:i+9+j+1]
+			}
+		}
 	}
 	return homePrefix(format, p)
 }
@@ -332,6 +342,12 @@ func homePrefix(format, p string) string {
 		if segs := strings.SplitN(p, "/", 3); len(segs) == 3 {
 			return segs[0] + "/" + segs[1] + "/"
 		}
+	case "cocoapods": // Specs/<a>/<b>/<c>/<Pod>/
+		if segs := strings.SplitN(p, "/", 6); len(segs) == 6 {
+			return strings.Join(segs[:5], "/") + "/"
+		}
+	case "huggingface": // <repo>/resolve/
+		return cut("/resolve/")
 	}
 	return p
 }

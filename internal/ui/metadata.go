@@ -118,6 +118,10 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.p2Metadata(r.Context(), rp, group, name, version, &m)
 	case "swift":
 		found, err = u.swiftMetadata(r.Context(), rp, name, version, &m)
+	case "cocoapods":
+		found, err = u.cocoapodsMetadata(r.Context(), rp, name, version, &m)
+	case "huggingface":
+		found, err = u.huggingfaceMetadata(r.Context(), rp, group, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return

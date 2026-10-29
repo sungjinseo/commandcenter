@@ -23,6 +23,7 @@ import (
 	"commandcenter/internal/events"
 	"commandcenter/internal/format/apt"
 	"commandcenter/internal/format/cargo"
+	"commandcenter/internal/format/cocoapods"
 	"commandcenter/internal/format/composer"
 	"commandcenter/internal/format/conan"
 	"commandcenter/internal/format/conda"
@@ -30,6 +31,7 @@ import (
 	"commandcenter/internal/format/gitlfs"
 	"commandcenter/internal/format/golang"
 	"commandcenter/internal/format/helm"
+	"commandcenter/internal/format/huggingface"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/nuget"
@@ -341,13 +343,15 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	rH := r.New(store, resolver, authn)
 	p2H := p2.New(store, fetcher, baseURL) // proxy and group only: its proxies use the generic deleter
 	swiftH := swift.New(store, fetcher, authn, baseURL)
+	podsH := cocoapods.New(store, fetcher, baseURL)
+	hfH := huggingface.New(store, fetcher)
 	dockerKey := make([]byte, 32)
 	rand.Read(dockerKey)
 	dockerH := docker.New(store, docker.NewFetcher(store, maxConcurrentFetches), authn, nil, baseURL, dockerKey) // Repos: the registry, below
 	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
 	conanH := conan.New(store, conan.NewFetcher(store, maxConcurrentFetches), authn, baseURL, dockerKey)
 	authn.Bearers = append(authn.Bearers, conanH.VerifyToken) // Conan login tokens
-	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH, "gitlfs": gitlfsH, "r": rH, "conan": conanH, "p2": p2H, "swift": swiftH}
+	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH, "gitlfs": gitlfsH, "r": rH, "conan": conanH, "p2": p2H, "swift": swiftH, "cocoapods": podsH, "huggingface": hfH}
 	// Hosted deletes go through the format handlers, which share their locks
 	// with uploads; proxies of every format use the generic deleter.
 	deleters := cleanup.NewRegistry(store)

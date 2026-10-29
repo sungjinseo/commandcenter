@@ -50,7 +50,7 @@ const (
 )
 
 var (
-	policyFormats = map[string]bool{"all": true, "maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true, "swift": true}
+	policyFormats = map[string]bool{"all": true, "maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true, "swift": true, "cocoapods": true, "huggingface": true}
 	releaseTypes  = map[string]bool{"any": true, "release": true, "prerelease": true}
 )
 
@@ -66,7 +66,7 @@ func (p *Policy) Validate() error {
 		}
 	}
 	if !policyFormats[p.Format] {
-		add("unknown format %q: use all, maven, npm, go, pypi, cargo, raw, helm, yum, nuget, apt, composer, conda, rubygems, gitlfs, r, conan, p2 or swift", p.Format)
+		add("unknown format %q: use all, maven, npm, go, pypi, cargo, raw, helm, yum, nuget, apt, composer, conda, rubygems, gitlfs, r, conan, p2, swift, cocoapods or huggingface", p.Format)
 	}
 	for _, d := range []struct {
 		field string
