@@ -115,6 +115,9 @@ type Settings struct {
 	SMTP               SMTP
 	LDAP               LDAP
 	OIDC               OIDC
+	HTTP               HTTP
+	MetricsAnonymous   bool
+	TrustedCerts       []string // PEM, one certificate each (the SSL trust store)
 }
 
 // DefaultSettings returns the values used for missing keys: today's behaviour.
@@ -128,6 +131,8 @@ func DefaultSettings() Settings {
 		Realms:             []Realm{{ID: RealmLocal, Enabled: true}, {ID: RealmToken, Enabled: true}},
 		LDAP:               DefaultLDAP(),
 		OIDC:               DefaultOIDC(),
+		HTTP:               DefaultHTTP(),
+		TrustedCerts:       []string{},
 	}
 }
 
@@ -239,6 +244,9 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 		{SettingSMTP, &s.SMTP},
 		{SettingLDAP, &s.LDAP},
 		{SettingOIDC, &s.OIDC},
+		{SettingHTTP, &s.HTTP},
+		{SettingMetricsAnonymous, &s.MetricsAnonymous},
+		{SettingTrustedCertificates, &s.TrustedCerts},
 	} {
 		if _, err := getSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return Settings{}, err
@@ -246,6 +254,12 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 	}
 	if s.Realms == nil {
 		s.Realms = []Realm{}
+	}
+	if s.TrustedCerts == nil {
+		s.TrustedCerts = []string{}
+	}
+	if s.HTTP.Proxy.NonProxyHosts == nil {
+		s.HTTP.Proxy.NonProxyHosts = []string{}
 	}
 	if err := ValidateRealms(s.Realms); err != nil {
 		return Settings{}, fmt.Errorf("setting %q: %w", SettingRealms, err)
@@ -263,6 +277,9 @@ func (d *DB) SaveSettings(ctx context.Context, s Settings) error {
 		return err
 	}
 	if s.OIDC.ClientSecret, err = d.box.seal(s.OIDC.ClientSecret); err != nil {
+		return err
+	}
+	if s.HTTP.Proxy.Password, err = d.box.seal(s.HTTP.Proxy.Password); err != nil {
 		return err
 	}
 	return d.Tx(ctx, func(tx *Tx) error { return saveSettings(ctx, tx.q, s) })
@@ -288,6 +305,9 @@ func saveSettings(ctx context.Context, q querier, s Settings) error {
 		{SettingSMTP, s.SMTP},
 		{SettingLDAP, s.LDAP},
 		{SettingOIDC, s.OIDC},
+		{SettingHTTP, s.HTTP},
+		{SettingMetricsAnonymous, s.MetricsAnonymous},
+		{SettingTrustedCertificates, s.TrustedCerts},
 	} {
 		if err := setSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return err
@@ -413,6 +433,18 @@ func validateSettingValue(key string, b []byte) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		return ValidateOIDC(v)
+	case SettingHTTP:
+		v := DefaultHTTP()
+		if err := json.Unmarshal(b, &v); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		return ValidateHTTP(v)
+	case SettingTrustedCertificates:
+		var v []string
+		if err := json.Unmarshal(b, &v); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		return ValidateTrustedCertificates(v)
 	}
 	return nil
 }

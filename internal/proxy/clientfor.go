@@ -13,11 +13,12 @@ import (
 // the classes remote itself resolves to (private hosts too when remote is
 // not public), so a redirect or a discovery document cannot lead it to the
 // cloud metadata address or the loopback. tlsConfig applies to the direct
-// connections; nil keeps the defaults.
+// connections; nil trusts the SSL trust store (the system roots plus the
+// trustedCertificates setting).
 func NewClientFor(remote *url.URL, tlsConfig *tls.Config) *http.Client {
 	c := newClient(http.ProxyFromEnvironment, net.DefaultResolver.LookupNetIP)
 	e := c.Transport.(*egress)
-	e.base.TLSClientConfig = tlsConfig // transport clones it before the first dial
+	e.tls = tlsConfig
 	c.Transport = forRemote{e, remote}
 	return c
 }

@@ -82,6 +82,9 @@ func (h *Handler) init() {
 	m.HandleFunc("GET "+p+"/blobstores", h.blobStores)
 	m.HandleFunc("GET "+p+"/tasks", h.tasks)
 	h.securityRoutes(m, p)
+	m.HandleFunc("GET "+p+"/security/ssl", h.sslList)
+	m.HandleFunc("POST "+p+"/security/ssl/truststore", h.sslAdd)
+	m.HandleFunc("DELETE "+p+"/security/ssl/truststore/{id}", h.sslRemove)
 	m.HandleFunc(p+"/", func(w http.ResponseWriter, r *http.Request) { writeMessage(w, http.StatusNotFound, "not found") })
 	h.mux = m
 }

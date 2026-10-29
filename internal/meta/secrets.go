@@ -116,6 +116,13 @@ func (s sealer) sealValue(v any) (any, error) {
 		if c != nil {
 			return s.sealValue(*c)
 		}
+	case *HTTP:
+		if c != nil {
+			return s.sealValue(*c)
+		}
+	case HTTP:
+		c.Proxy.Password, err = s.seal(c.Proxy.Password)
+		return c, err
 	case SMTP:
 		c.Password, err = s.seal(c.Password)
 		return c, err
@@ -138,6 +145,8 @@ func (s sealer) openValue(key string, v any) (err error) {
 		c.BindPassword, err = s.open(c.BindPassword)
 	case *OIDC:
 		c.ClientSecret, err = s.open(c.ClientSecret)
+	case *HTTP:
+		c.Proxy.Password, err = s.open(c.Proxy.Password)
 	}
 	if err != nil {
 		return fmt.Errorf("setting %q: %w", key, err)
@@ -152,7 +161,10 @@ func (s sealer) openSettings(set *Settings) error {
 	if err := s.openValue(SettingLDAP, &set.LDAP); err != nil {
 		return err
 	}
-	return s.openValue(SettingOIDC, &set.OIDC)
+	if err := s.openValue(SettingOIDC, &set.OIDC); err != nil {
+		return err
+	}
+	return s.openValue(SettingHTTP, &set.HTTP)
 }
 
 // sealRepo returns def with its secrets (the remoteAuth password and
@@ -266,11 +278,13 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 		var smtp SMTP
 		ldap := DefaultLDAP()
 		oidc := DefaultOIDC()
+		httpc := DefaultHTTP()
 		for _, st := range []struct {
 			key    string
 			v      any
 			secret *string
-		}{{SettingSMTP, &smtp, &smtp.Password}, {SettingLDAP, &ldap, &ldap.BindPassword}, {SettingOIDC, &oidc, &oidc.ClientSecret}} {
+		}{{SettingSMTP, &smtp, &smtp.Password}, {SettingLDAP, &ldap, &ldap.BindPassword}, {SettingOIDC, &oidc, &oidc.ClientSecret},
+			{SettingHTTP, &httpc, &httpc.Proxy.Password}} {
 			found, err := getSettingJSON(ctx, tx.q, st.key, st.v)
 			if err != nil {
 				return err

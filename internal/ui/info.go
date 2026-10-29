@@ -270,9 +270,14 @@ func (u *UI) statusChecks(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"checks": u.healthChecks(r.Context())})
+}
+
+// healthChecks runs the status checks.
+func (u *UI) healthChecks(rctx context.Context) []check {
 	checks := []check{
 		runCheck("Database", func() (bool, string) {
-			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(rctx, 2*time.Second)
 			defer cancel()
 			if err := u.DB.Ping(ctx); err != nil {
 				return false, "database not responding: " + err.Error()
@@ -293,7 +298,7 @@ func (u *UI) statusChecks(w http.ResponseWriter, r *http.Request) {
 		}))
 	}
 	checks = append(checks, runCheck("Repositories", u.checkRepositories))
-	writeJSON(w, http.StatusOK, map[string]any{"checks": checks})
+	return checks
 }
 
 func (u *UI) systemInformation(w http.ResponseWriter, r *http.Request) {

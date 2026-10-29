@@ -119,12 +119,13 @@ func serve(args []string) error {
 	}
 	// The ring feeds the log viewer; the JSON handler still writes to stdout.
 	ring := logring.NewRing(logring.DefaultRecords, logring.DefaultBytes)
-	log := slog.New(logring.NewHandler(slog.NewJSONHandler(os.Stdout, nil), ring))
+	level := new(slog.LevelVar) // INFO; PUT /-/api/logging changes it until the next start
+	log := slog.New(logring.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}), ring))
 	slog.SetDefault(log)
 	if os.Getenv("GOMEMLIMIT") == "" && cfg.MemoryLimitMiB > 0 {
 		debug.SetMemoryLimit(int64(cfg.MemoryLimitMiB) << 20)
 	}
-	a, err := app.New(cfg, log, app.WithLogRing(ring))
+	a, err := app.New(cfg, log, app.WithLogRing(ring), app.WithLogLevel(level))
 	if err != nil {
 		return err
 	}

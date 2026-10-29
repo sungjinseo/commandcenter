@@ -207,6 +207,8 @@ func (s *Snapshot) Settings() meta.Settings {
 	out.Realms = append([]meta.Realm{}, s.settings.Realms...)
 	out.LDAP = s.settings.LDAP.Copy()
 	out.OIDC = s.settings.OIDC.Copy()
+	out.HTTP = s.settings.HTTP.Copy()
+	out.TrustedCerts = append([]string{}, s.settings.TrustedCerts...)
 	return out
 }
 

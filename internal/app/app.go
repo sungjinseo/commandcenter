@@ -92,7 +92,14 @@ const maxHeaderBytes = 16 << 10
 // Option adjusts how New builds the App.
 type Option func(*options)
 
-type options struct{ logs *logring.Ring }
+type options struct {
+	logs     *logring.Ring
+	logLevel *slog.LevelVar
+}
+
+// WithLogLevel lets the UI's logging API change level, the root logger's
+// level, at run time.
+func WithLogLevel(level *slog.LevelVar) Option { return func(o *options) { o.logLevel = level } }
 
 // WithLogRing serves the log viewer from ring, which the caller's logger feeds
 // (see logring.NewHandler).
@@ -116,7 +123,7 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 		db.Close()
 		return nil, err
 	}
-	a, err := build(cfg, log, blobs, db, o.logs)
+	a, err := build(cfg, log, blobs, db, o.logs, o.logLevel)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -292,7 +299,7 @@ func openBlobStores(cfg *config.Config, db *meta.DB) (map[string]*blob.Store, er
 	return stores, nil
 }
 
-func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, db *meta.DB, logs *logring.Ring) (*App, error) {
+func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, db *meta.DB, logs *logring.Ring, logLevel *slog.LevelVar) (*App, error) {
 	hasStore := func(name string) bool { return blobs[name] != nil } // before the map is shared
 	defs, err := loadRepositories(cfg, log, db, hasStore)
 	if err != nil {
@@ -311,6 +318,10 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	}
 	// baseURL and maxUploadMiB are read per request from the live snapshot.
 	settings := authn.Snapshot().Settings()
+	// The outbound HTTP settings and the trust store apply to every client
+	// of the proxy package (and LDAP, SMTP) on every settings change.
+	authn.OnSettings = proxy.SetSettings
+	proxy.SetSettings(settings)
 	baseURL := func() string { return strings.TrimRight(authn.Snapshot().Settings().BaseURL, "/") }
 	goH, mavenH, rawH := golang.New(store, resolver), maven.New(store, resolver), raw.New(store, resolver)
 	goH.Auth, mavenH.Auth, rawH.Auth = authn, authn, authn // overwrites need Edit
@@ -451,18 +462,20 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	}
 	a.Tasks = taskSvc
 	webUI := &ui.UI{
-		Repos:   registry,
-		Auth:    authn,
-		DB:      db,
-		Store:   store,
-		BaseURL: baseURL,
-		Version: Version,
-		Started: time.Now(),
-		Tasks:   a.Tasks,
-		Log:     log,
-		Events:  hooks,
-		Mail:    mailer,
-		Logs:    logs,
+		Repos:    registry,
+		Auth:     authn,
+		DB:       db,
+		Store:    store,
+		BaseURL:  baseURL,
+		Version:  Version,
+		Started:  time.Now(),
+		Tasks:    a.Tasks,
+		Log:      log,
+		Events:   hooks,
+		Mail:     mailer,
+		Logs:     logs,
+		Metrics:  recorder,
+		LogLevel: logLevel,
 
 		Config:     cfg,
 		DataDir:    cfg.DataDir,

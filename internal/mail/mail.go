@@ -26,6 +26,7 @@ import (
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
+	"commandcenter/internal/truststore"
 )
 
 const (
@@ -167,7 +168,11 @@ func (s *Sender) SendNow(ctx context.Context, cfg meta.SMTP, to []string, subjec
 	ctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-	tlsConf := &tls.Config{ServerName: cfg.Host, RootCAs: s.rootCAs, MinVersion: tls.VersionTLS12}
+	rootCAs := s.rootCAs
+	if rootCAs == nil {
+		rootCAs = truststore.Pool() // the SSL trust store; nil: the system roots
+	}
+	tlsConf := &tls.Config{ServerName: cfg.Host, RootCAs: rootCAs, MinVersion: tls.VersionTLS12}
 
 	var conn net.Conn
 	d := net.Dialer{}

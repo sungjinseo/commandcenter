@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -154,6 +155,10 @@ type Authenticator struct {
 	fails map[string]failRec   // sign-in throttle (throttle.go)
 	gates map[string]*failGate // names being checked (throttle.go)
 
+	// OnSettings, if set, is called with the settings of every new snapshot
+	// whose settings differ from the previous one's (the outbound HTTP
+	// settings and the trust store apply through it).
+	OnSettings func(meta.Settings)
 	// LDAP is the directory client; nil uses ldap.Client.
 	LDAP Directory
 	// Log receives redacted LDAP failures; nil discards them.
@@ -241,6 +246,9 @@ func (a *Authenticator) Reload(ctx context.Context) error {
 // LDAP users and password successes, so they are looked up again under it.
 func (a *Authenticator) setSnapshot(s *Snapshot) {
 	old := a.snap.Swap(s)
+	if a.OnSettings != nil && (old == nil || !reflect.DeepEqual(old.settings, s.settings)) {
+		a.OnSettings(s.Settings())
+	}
 	if old != nil && ldapChanged(old, s) {
 		a.clearLDAP()
 	}

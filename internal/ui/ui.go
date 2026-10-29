@@ -24,6 +24,7 @@ import (
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/metrics"
 	"commandcenter/internal/oidc"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/tasks"
@@ -49,6 +50,9 @@ type UI struct {
 	Events  repo.EventSink // activity events; nil records none
 	Logs    *logring.Ring  // recent log records for the log viewer; nil serves none
 	Mail    Mailer         // synchronous sender for the SMTP test; nil serves 501
+
+	Metrics  *metrics.Recorder // process-lifetime request counters for /-/metrics/prometheus; nil exports none
+	LogLevel *slog.LevelVar    // the root logger's level (GET/PUT /-/api/logging); nil serves 501
 
 	Config     *config.Config          // read-only; never serialised wholesale
 	DataDir    string                  // blob root, for the health and filestore checks
@@ -80,6 +84,12 @@ type UI struct {
 	repoStatsQuery func(context.Context) (map[string]meta.RepoStat, error)
 	blobStatsQuery func(context.Context) (int64, int64, error)
 	now            func() time.Time
+
+	// ops.go: the per-store totals cache and the in-process API mux of the
+	// support bundle.
+	storeCache   ttlCache[map[string]blobTotals]
+	internalOnce sync.Once
+	internal     http.Handler
 }
 
 // Routes registers "/", "GET /ui/", "/-/api/" and the "/-/sso/" login
@@ -88,6 +98,7 @@ func (u *UI) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("/{$}", u.root)
 	mux.Handle("GET /ui/", u.static())
 	mux.Handle("/-/api/", u.apiHandler())
+	mux.HandleFunc("GET /-/metrics/prometheus", u.prometheus)
 	u.ssoRoutes(mux)
 }
 

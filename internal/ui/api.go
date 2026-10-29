@@ -60,6 +60,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.taskRoutes(mux)
 	u.webhookRoutes(mux)
 	u.securityRoutes(mux)
+	u.opsRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }

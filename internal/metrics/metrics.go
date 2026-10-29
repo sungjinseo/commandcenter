@@ -83,12 +83,35 @@ type Recorder struct {
 
 	dropped atomic.Int64
 	flushMu sync.Mutex // one flush at a time
+
+	totals map[string]rqVal // per repository since the process started; never flushed (Totals)
+}
+
+// Totals is a repository's traffic since the process started, for the
+// Prometheus counters: the fields of RequestDelta without the maxima.
+type Totals struct {
+	Requests, Bytes, Errors, BytesIn, Ms   int64
+	Upstream, UpstreamFailures, UpstreamMs int64
+	CacheHits, CacheMisses                 int64
+}
+
+// Totals returns every repository's process-lifetime counters.
+func (r *Recorder) Totals() map[string]Totals {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]Totals, len(r.totals))
+	for repo, v := range r.totals {
+		out[repo] = Totals{Requests: v.requests, Bytes: v.bytes, Errors: v.errors, BytesIn: v.bytesIn, Ms: v.ms,
+			Upstream: v.upstream, UpstreamFailures: v.upstreamFailures, UpstreamMs: v.upstreamMs,
+			CacheHits: v.cacheHits, CacheMisses: v.cacheMisses}
+	}
+	return out
 }
 
 func New(db Flusher) *Recorder {
 	return &Recorder{db: db, MaxKeys: DefaultMaxKeys, MaxPending: DefaultMaxPending, Now: time.Now,
 		dl: map[dlKey]dlVal{}, rq: map[rqKey]rqVal{}, kick: make(chan struct{}, 1),
-		lastWarn: map[string]time.Time{}}
+		lastWarn: map[string]time.Time{}, totals: map[string]rqVal{}}
 }
 
 // Dropped is the number of counts lost because MaxPending keys were pending.
@@ -171,6 +194,10 @@ func (r *Recorder) Cache(repo string, hit bool) {
 func (r *Recorder) addRequest(repo string, add rqVal) {
 	hour := r.Now().Unix() / 3600 * 3600
 	r.mu.Lock()
+	// The lifetime totals: one key per repository, so never dropped.
+	tv := r.totals[repo]
+	tv.add(add)
+	r.totals[repo] = tv
 	k := rqKey{hour, repo}
 	v, ok := r.rq[k]
 	if !ok && len(r.rq) >= r.MaxPending {

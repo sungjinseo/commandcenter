@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"commandcenter/internal/truststore"
 )
 
 // maxRedirects bounds the redirects one remote request follows.
@@ -115,10 +118,13 @@ func withRemote(ctx context.Context, u *url.URL) context.Context {
 // numericHost or non-ASCII host is refused on either path, whatever the
 // remote.
 type egress struct {
-	base   *http.Transport
+	proxy  func(*http.Request) (*url.URL, error) // the environment's proxy (ProxyFromEnvironment, or a test's)
+	tls    *tls.Config                           // the caller's TLS configuration; nil: the trust store
 	lookup func(ctx context.Context, network, host string) ([]netip.Addr, error)
 
 	mu     sync.Mutex
+	cfg    *Config // the Config base was built under; rebuilt when live changes
+	base   *http.Transport
 	direct map[int]*http.Transport
 	// ponytail: never pruned, one entry per remote host ever configured;
 	// drop expired entries if remotes churn.
@@ -130,7 +136,86 @@ type classified struct {
 	at      time.Time
 }
 
+// current returns the base transport under the live Config, rebuilding it
+// (and dropping the per-policy clones and their idle connections) when
+// the Config changed since the last request.
+func (e *egress) current() *http.Transport {
+	cfg := current()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.base != nil && e.cfg == cfg {
+		return e.base
+	}
+	old := e.base
+	e.cfg = cfg
+	e.base = &http.Transport{
+		Proxy:                 cfg.proxyFunc(e.proxy),
+		DialContext:           newDialer(cfg, nil).DialContext,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: cfg.headerTimeout(),
+		ForceAttemptHTTP2:     true,
+		TLSClientConfig:       e.tlsConfig(),
+	}
+	for _, t := range e.direct {
+		t.CloseIdleConnections()
+	}
+	e.direct = map[int]*http.Transport{}
+	if old != nil {
+		old.CloseIdleConnections()
+	}
+	return e.base
+}
+
+// tlsConfig is the caller's TLS configuration, or one trusting the trust
+// store (nil: the system roots, as before).
+func (e *egress) tlsConfig() *tls.Config {
+	if e.tls != nil {
+		return e.tls.Clone()
+	}
+	if pool := truststore.Pool(); pool != nil {
+		return &tls.Config{RootCAs: pool}
+	}
+	return nil
+}
+
+func (c *Config) connectTimeout() time.Duration {
+	if c.ConnectTimeout > 0 {
+		return c.ConnectTimeout
+	}
+	return 10 * time.Second
+}
+
+func (c *Config) headerTimeout() time.Duration {
+	if c.HeaderTimeout > 0 {
+		return c.HeaderTimeout
+	}
+	return 30 * time.Second
+}
+
 func (e *egress) RoundTrip(req *http.Request) (*http.Response, error) {
+	cfg := current()
+	if cfg.UserAgentSuffix != "" {
+		if ua := req.Header.Get("User-Agent"); ua != "" {
+			req = req.Clone(req.Context())
+			req.Header.Set("User-Agent", ua+" "+cfg.UserAgentSuffix)
+		}
+	}
+	for attempt := 0; ; attempt++ {
+		resp, err := e.roundTrip(req)
+		if err == nil || attempt >= cfg.Retries || !retryable(req, err) {
+			return resp, err
+		}
+		select {
+		case <-time.After(retryWait):
+		case <-req.Context().Done():
+			return nil, err
+		}
+	}
+}
+
+func (e *egress) roundTrip(req *http.Request) (*http.Response, error) {
 	// net/http maps a non-ASCII host with UTS #46 (fullwidth digits and dots
 	// become ASCII ones) for the dial and the CONNECT target, past the checks
 	// here; registries use ASCII or punycode host names.
@@ -141,8 +226,9 @@ func (e *egress) RoundTrip(req *http.Request) (*http.Response, error) {
 	if u, _ := req.Context().Value(remoteKey{}).(*url.URL); u != nil {
 		remote = u.Hostname()
 	}
-	if e.base.Proxy != nil {
-		px, err := e.base.Proxy(req)
+	base := e.current()
+	if base.Proxy != nil {
+		px, err := base.Proxy(req)
 		if err != nil {
 			return nil, err
 		}
@@ -156,7 +242,7 @@ func (e *egress) RoundTrip(req *http.Request) (*http.Response, error) {
 					return nil, err
 				}
 			}
-			return e.base.RoundTrip(req)
+			return base.RoundTrip(req)
 		}
 	}
 	return e.transport(allowedFor(e.classes(req.Context(), remote))).RoundTrip(req)
@@ -190,13 +276,14 @@ func (e *egress) classes(ctx context.Context, host string) int {
 }
 
 func (e *egress) transport(allowed int) *http.Transport {
+	base := e.current()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	t := e.direct[allowed]
 	if t == nil {
-		t = e.base.Clone()
+		t = base.Clone()
 		t.Proxy = nil
-		t.DialContext = newDialer(func(_, address string, _ syscall.RawConn) error {
+		t.DialContext = newDialer(e.cfg, func(_, address string, _ syscall.RawConn) error {
 			ap, err := netip.ParseAddrPort(address)
 			if err != nil {
 				return err
@@ -208,8 +295,8 @@ func (e *egress) transport(allowed int) *http.Transport {
 	return t
 }
 
-func newDialer(control func(network, address string, c syscall.RawConn) error) *net.Dialer {
-	return &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second, Control: control}
+func newDialer(cfg *Config, control func(network, address string, c syscall.RawConn) error) *net.Dialer {
+	return &net.Dialer{Timeout: cfg.connectTimeout(), KeepAlive: 30 * time.Second, Control: control}
 }
 
 // NewClient returns the HTTP client for remote fetches. It follows at most
@@ -218,8 +305,11 @@ func newDialer(control func(network, address string, c syscall.RawConn) error) *
 // link-local, unspecified or multicast address, whether a redirect or an
 // index-supplied URL leads there; an internal remote may also reach other
 // private hosts, and any class the remote itself resolves to. HTTP_PROXY,
-// HTTPS_PROXY and NO_PROXY apply as usual; through a forward proxy only an
-// address-literal destination can be checked. An IPv4 address spelled other
+// HTTPS_PROXY and NO_PROXY apply as usual, unless the http.proxy setting
+// names a forward proxy (SetSettings), which then takes every request but
+// its nonProxyHosts; through a forward proxy only an address-literal
+// destination can be checked. The live Config also sets the timeouts, the
+// User-Agent suffix and the retries, and the trust store the root CAs. An IPv4 address spelled other
 // than in dotted-decimal form (10.1, 167772161), and a host name that is not
 // ASCII (its punycode form works), are refused everywhere.
 func NewClient() *http.Client {
@@ -229,15 +319,7 @@ func NewClient() *http.Client {
 func newClient(proxy func(*http.Request) (*url.URL, error), lookup func(context.Context, string, string) ([]netip.Addr, error)) *http.Client {
 	return &http.Client{
 		Transport: &egress{
-			base: &http.Transport{
-				Proxy:                 proxy,
-				DialContext:           newDialer(nil).DialContext,
-				MaxIdleConnsPerHost:   8,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ResponseHeaderTimeout: 60 * time.Second,
-				ForceAttemptHTTP2:     true,
-			},
+			proxy:  proxy,
 			lookup: lookup,
 			direct: map[int]*http.Transport{},
 			known:  map[string]classified{},

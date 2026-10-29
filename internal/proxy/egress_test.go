@@ -300,7 +300,7 @@ func TestEgressRedirectKeepsCredentialsAtHome(t *testing.T) {
 	c := newClient(nil, resolvesTo("127.0.0.1"))
 	pool := x509.NewCertPool()
 	pool.AddCert(upstream.Certificate())
-	c.Transport.(*egress).base.TLSClientConfig = &tls.Config{RootCAs: pool}
+	c.Transport.(*egress).tls = &tls.Config{RootCAs: pool}
 	f.Client = c
 	cfg := &config.Config{Repositories: []config.Repository{{Name: "a", Type: "proxy", Remote: upstream.URL + "/",
 		RemoteAuth: &config.RemoteAuth{Username: "u", Password: "p"}, ContentMaxAge: config.Never}}}

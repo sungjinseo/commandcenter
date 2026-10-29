@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"commandcenter/internal/meta"
+	"commandcenter/internal/truststore"
 )
 
 // ErrNoSuchUser reports a search without a match.
@@ -47,8 +48,12 @@ func (cl *Client) options(cfg meta.LDAP) DialOptions {
 	if t <= 0 {
 		t = defaultTimeout
 	}
-	return DialOptions{URL: cfg.URL, StartTLS: cfg.StartTLS, InsecureSkipVerify: cfg.InsecureSkipVerify,
+	o := DialOptions{URL: cfg.URL, StartTLS: cfg.StartTLS, InsecureSkipVerify: cfg.InsecureSkipVerify,
 		Timeout: t, RootCAs: cl.rootCAs}
+	if o.RootCAs == nil {
+		o.RootCAs = truststore.Pool() // the SSL trust store; nil: the system roots
+	}
+	return o
 }
 
 // trace records steps when non-nil.
