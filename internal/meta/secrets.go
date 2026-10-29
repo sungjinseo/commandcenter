@@ -16,8 +16,8 @@ import (
 )
 
 // The stored secrets are the SMTP password, the LDAP bind password, the
-// OIDC client secret, a proxy's remoteAuth password and bearer token and an S3 blob store's
-// secret key. They must be sent as they
+// OIDC client secret, a proxy's remoteAuth password and bearer token, an S3 blob store's
+// secret key and a webhook's signing secret. They must be sent as they
 // are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
 // with AES-256-GCM on write and opened on read, so a copy of meta.db or of a
 // backup does not give them away (QA N-29). A sealed value is sealedPrefix
@@ -377,6 +377,36 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 				return err
 			}
 			if _, err := tx.q.ExecContext(ctx, `UPDATE blob_stores SET config = ? WHERE name = ?`, string(b), name); err != nil {
+				return err
+			}
+			n++
+		}
+		rows, err = tx.q.QueryContext(ctx, `SELECT id, secret FROM webhooks WHERE secret <> ''`)
+		if err != nil {
+			return err
+		}
+		hooks := map[string]string{}
+		for rows.Next() {
+			var id, secret string
+			if err := rows.Scan(&id, &secret); err != nil {
+				rows.Close()
+				return err
+			}
+			hooks[id] = secret
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for id, secret := range hooks {
+			changed := false
+			if err := rewrite(&secret, &changed); err != nil {
+				return fmt.Errorf("webhook %q: secret: %w", id, err)
+			}
+			if !changed {
+				continue
+			}
+			if _, err := tx.q.ExecContext(ctx, `UPDATE webhooks SET secret = ? WHERE id = ?`, secret, id); err != nil {
 				return err
 			}
 			n++

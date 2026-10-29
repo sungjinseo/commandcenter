@@ -100,6 +100,15 @@ CREATE TABLE IF NOT EXISTS tasks(
   last_duration_ms INTEGER NOT NULL DEFAULT 0, last_message TEXT NOT NULL DEFAULT '',
   last_log TEXT NOT NULL DEFAULT '', next_run INTEGER NOT NULL DEFAULT 0,
   last_removed INTEGER NOT NULL DEFAULT 0, last_bytes INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS webhooks(
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL DEFAULT '',
+  events TEXT NOT NULL DEFAULT '[]', repo TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS webhook_deliveries(
+  id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+  next_at INTEGER NOT NULL DEFAULT 0, response_code INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS webhook_deliveries_hook ON webhook_deliveries(webhook_id, created_at);
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in
@@ -114,7 +123,10 @@ CREATE TABLE IF NOT EXISTS tasks(
 //	   secrets sealed with the secret key (secrets.go).
 //	2: blob_stores.type and config (S3 stores): an older build would open an
 //	   S3 store's path as a directory and find nothing in it.
-const schemaVersion = 2
+//	3: webhooks and webhook_deliveries. An older build would not misread
+//	   them, but upgrade runs no DDL on a database already at its own
+//	   version, so the tables are only created by a bump.
+const schemaVersion = 3
 
 // Open opens the metadata database and creates or upgrades its tables:
 // PostgreSQL when target is a postgres:// or postgresql:// URL (see

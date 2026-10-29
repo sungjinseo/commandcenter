@@ -27,6 +27,7 @@ import (
 	"commandcenter/internal/oidc"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/tasks"
+	"commandcenter/internal/webhook"
 )
 
 //go:embed static
@@ -53,6 +54,7 @@ type UI struct {
 	DataDir    string                  // blob root, for the health and filestore checks
 	FetchSlots func() (inUse, max int) // nil skips the fetch-slot check
 	Deleters   *cleanup.Registry       // component deletes in hosted repositories; nil serves 501
+	Webhooks   *webhook.Dispatcher     // webhook delivery and reload after a change; nil serves 501
 
 	smtpTest       smtpTestState              // rate limit of the SMTP test send
 	settingsLoaded func()                     // test hook: runs between putSettings' read and its write

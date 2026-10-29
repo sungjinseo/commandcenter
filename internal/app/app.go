@@ -46,6 +46,7 @@ import (
 	"commandcenter/internal/server"
 	"commandcenter/internal/tasks"
 	"commandcenter/internal/ui"
+	"commandcenter/internal/webhook"
 )
 
 type App struct {
@@ -62,7 +63,8 @@ type App struct {
 	// DockerKey signs the Docker registry's bearer tokens: random per
 	// process (one instance), so a restart only makes clients fetch new ones.
 	DockerKey []byte
-	Tasks     *tasks.Service // scheduled tasks; the scheduler runs while Serve does
+	Tasks     *tasks.Service      // scheduled tasks; the scheduler runs while Serve does
+	Webhooks  *webhook.Dispatcher // webhook deliveries; Close stops it before the database closes
 	log       *slog.Logger
 }
 
@@ -351,11 +353,17 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// Started only after the checks above can no longer fail, so an error return
 	// never leaves the writer running against a database New is about to close.
 	evts := events.New(db)
-	store.Events = evts
-	mailer := mail.New(log, evts)
+	registry := repo.NewRegistry(db, defs)
+	// Every event goes through the webhook dispatcher to the recorder.
+	hooks := &webhook.Dispatcher{DB: db, Next: evts, Repos: registry, Log: log}
+	if err := hooks.Start(); err != nil {
+		evts.Close()
+		return nil, err
+	}
+	store.Events = hooks
+	mailer := mail.New(log, hooks)
 	taskSvc.Mail = mailer
 
-	registry := repo.NewRegistry(db, defs)
 	registry.Policies = cleanup.PolicyLookup(db)
 	dockerH.Repos = registry
 	// Route each repository's blob I/O to the store it names; an unknown or
@@ -400,15 +408,15 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		log.Warn("removed the privileges on a deleted repository from roles", "repository", name, "roles", strings.Join(roles, ", "))
 		actor := auth.FromContext(ctx).Owner()
 		for _, id := range roles {
-			evts.Emit("role.update", actor, name, id, "removed repo:"+name)
+			hooks.Emit("role.update", actor, name, id, "removed repo:"+name)
 		}
 	}
 
 	authn.Log = log // redacted LDAP failures, sign-in throttling
 	authn.Sessions = auth.NewSessions()
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
-	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, log: log}
-	taskSvc.Repos, taskSvc.Events = registry, evts
+	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, Webhooks: hooks, log: log}
+	taskSvc.Repos, taskSvc.Events = registry, hooks
 	taskSvc.GC = func(ctx context.Context, store string) (int, int64, error) {
 		if store == "" {
 			return a.GC(ctx, time.Hour)
@@ -426,7 +434,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Started: time.Now(),
 		Tasks:   a.Tasks,
 		Log:     log,
-		Events:  evts,
+		Events:  hooks,
 		Mail:    mailer,
 		Logs:    logs,
 
@@ -434,6 +442,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		DataDir:    cfg.DataDir,
 		FetchSlots: fetcher.Slots,
 		Deleters:   deleters,
+		Webhooks:   hooks,
 	}
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
@@ -802,6 +811,7 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 // Close stops the event writer (it drains its queue first) and closes the database.
 func (a *App) Close() error {
 	a.Mail.Close() // may still record a failed send as an event
+	a.Webhooks.Close()
 	a.Events.Close()
 	return a.DB.Close()
 }
