@@ -32,11 +32,11 @@ func newRegistry(t *testing.T, defs ...config.Repository) (*Registry, *meta.DB) 
 	if _, err := db.ImportRepositories(context.Background(), defs); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := db.ListRepositories(context.Background())
-	if err != nil {
+	reg := NewRegistry(db, nil)
+	if err := reg.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return NewRegistry(db, loaded), db
+	return reg, db
 }
 
 func baseDefs() []config.Repository {
@@ -450,9 +450,12 @@ func TestRegistryDeleteGroupMemberConflicts(t *testing.T) {
 	}
 	var deleted []string
 	reg.OnDelete = func(_ context.Context, name string, roles []string) {
-		if reg.mu.TryLock() { // the app applies the role changes before a create can run
-			reg.mu.Unlock()
-			t.Error("OnDelete ran without the write lock")
+		// the app applies the role changes before a create can run
+		tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		defer cancel()
+		if unlock, err := db.Lock(tctx, registryLock); err == nil {
+			unlock()
+			t.Error("OnDelete ran without the registry lock")
 		}
 		deleted = append(deleted, name+"["+strings.Join(roles, " ")+"]")
 	}
@@ -615,6 +618,47 @@ func TestStoreTxRefusesReplacedRepository(t *testing.T) {
 	err := s.Tx(context.Background(), old, func(*meta.Tx) error { ran = true; return nil })
 	if ran || StatusOf(err) != http.StatusServiceUnavailable {
 		t.Fatalf("replaced repository: ran=%v err=%v", ran, err)
+	}
+}
+
+// With CheckGen, Tx compares the stored gen: a registry that has not seen
+// another one (another node) delete and re-create a repository still
+// refuses the old incarnation's write, and a write for a repository the
+// database no longer has.
+func TestStoreTxChecksStoredGen(t *testing.T) {
+	reg, db := newRegistry(t, baseDefs()...)
+	ctx := context.Background()
+	if err := reg.Create(ctx, config.Repository{Name: "other", Format: "maven", Type: "hosted"}); err != nil {
+		t.Fatal(err)
+	}
+	stale := NewRegistry(db, nil) // the other node
+	if err := stale.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{DB: db, Now: time.Now, CheckGen: true, Live: func(rp *Repository) bool {
+		cur := stale.Get(rp.Name)
+		return cur != nil && cur.Gen == rp.Gen
+	}}
+	old := stale.Get("other")
+	if err := s.Tx(ctx, old, func(*meta.Tx) error { return nil }); err != nil {
+		t.Fatalf("current incarnation: %v", err)
+	}
+	if err := reg.Delete(ctx, "other"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Tx(ctx, old, func(*meta.Tx) error { return nil }); StatusOf(err) != http.StatusServiceUnavailable {
+		t.Fatalf("deleted repository: %v", err)
+	}
+	if err := reg.Create(ctx, config.Repository{Name: "other", Format: "maven", Type: "hosted"}); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	err := s.Tx(ctx, old, func(*meta.Tx) error { ran = true; return nil })
+	if ran || StatusOf(err) != http.StatusServiceUnavailable {
+		t.Fatalf("re-created repository: ran=%v err=%v", ran, err)
+	}
+	if stale.Get("other").Gen == reg.Get("other").Gen {
+		t.Fatal("the re-created repository kept its gen")
 	}
 }
 

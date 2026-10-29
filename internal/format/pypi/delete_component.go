@@ -30,12 +30,15 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		return component.Result{}, fmt.Errorf("pypi component %q is incomplete", c.Label())
 	}
 	project := Normalize(c.Name)
-	unlock := h.locks.Lock(rp.Name + "\x00" + project)
+	unlock, err := h.Store.Lock(ctx, "pypi\x00"+rp.Name+"\x00"+project)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 
 	rows := 0
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rows, res = 0, component.Result{}
 		pkgs, err := tx.ListPackages(ctx, rp.Name, project)
 		if err != nil {

@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 // Repos is the live registry of repositories (repo.Registry).
 type Repos interface {
 	Get(name string) *repo.Repository
+	Lookup(ctx context.Context, name string) *repo.Repository // Get, or a repository another node just created
 	Snapshot() *repo.Snapshot
 }
 
@@ -37,7 +39,6 @@ type Handler struct {
 	Key       []byte
 	MaxUpload func() int64 // bound of one blob, summed over chunks; nil or 0: none
 	Now       func() time.Time
-	locks     repo.KeyedMutex // per image (manifests) and per upload session
 }
 
 func New(store *repo.Store, fetcher *proxy.Fetcher, authn *auth.Authenticator, repos Repos, baseURL func() string, key []byte) *Handler {
@@ -189,7 +190,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request) error {
 	if !h.allowed(c, rt.Name(), action) {
 		return deny(c)
 	}
-	rp := h.Repos.Get(rt.Repo)
+	rp := h.Repos.Lookup(r.Context(), rt.Repo)
 	if rp == nil || rp.Format != "docker" {
 		return errUnknownName(rt.Name())
 	}
@@ -378,7 +379,9 @@ func (h *Handler) catalog(w http.ResponseWriter, r *http.Request, p auth.Princip
 	return nil
 }
 
-func lockKey(rp *repo.Repository, image string) string { return rp.Name + "\x00" + image }
+func lockKey(rp *repo.Repository, image string) string {
+	return "docker\x00" + rp.Name + "\x00" + image
+}
 
 func offline(err error) error {
 	if errors.Is(err, meta.ErrNotFound) {

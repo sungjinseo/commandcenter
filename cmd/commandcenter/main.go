@@ -169,6 +169,7 @@ func token(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	a.DB.Notify(context.Background(), "access") // the servers on PostgreSQL re-read users and tokens at once
 	fmt.Fprintln(stdout, tok)
 	return nil
 }
@@ -303,6 +304,7 @@ func resetPassword(ctx context.Context, cfg *config.Config, name, pw string, adm
 	if err := db.ClearAuthFailures(ctx, strings.ToLower(name)); err != nil {
 		return err
 	}
+	db.Notify(ctx, "access") // the servers on PostgreSQL apply it at once, the others within a few seconds
 	for _, c := range changes {
 		fmt.Fprintln(stdout, c)
 	}

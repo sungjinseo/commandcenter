@@ -24,7 +24,6 @@ type Handler struct {
 	Store    *repo.Store
 	Resolver *resolve.Resolver
 	Now      func() time.Time
-	locks    repo.KeyedMutex // serializes uploads per repository and module version
 
 	// Auth checks overwrites for Edit; nil leaves every check to the server.
 	Auth *auth.Authenticator

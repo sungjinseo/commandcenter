@@ -33,7 +33,6 @@ type Handler struct {
 	Fetcher *proxy.Fetcher
 	Auth    *auth.Authenticator
 	Now     func() time.Time
-	locks   repo.KeyedMutex // serializes the writes of one repository (they all touch its versions file)
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry // a group's merged versions and names, by group name and document
@@ -258,7 +257,10 @@ func (h *Handler) versionsAsset(ctx context.Context, rp *repo.Repository) (proxy
 	case "hosted":
 		a, err := h.Store.Get(ctx, rp.Name, versionsKey)
 		if errors.Is(err, repo.ErrNotFound) {
-			unlock := h.locks.Lock(rp.Name)
+			unlock, lerr := h.Store.Lock(ctx, "rubygems\x00"+rp.Name)
+			if lerr != nil {
+				return proxy.Result{}, lerr
+			}
 			defer unlock()
 			if err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error { return h.writeVersions(ctx, tx, rp, "", "", false) }); err != nil {
 				return proxy.Result{}, err

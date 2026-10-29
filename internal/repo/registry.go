@@ -12,6 +12,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
@@ -26,23 +29,33 @@ type Snapshot struct {
 }
 
 // Registry holds the live repository definitions (plan 9 Decision 5). Reads
-// load the current Snapshot; writes are serialized, validated against the
-// whole would-be list, persisted, then published as a new Snapshot.
+// load the current Snapshot; writes are serialized by the cluster lock
+// "registry" (meta.DB.Lock), validated against the whole would-be list,
+// persisted, then published as a new Snapshot. Each repository's Gen is its
+// stored gen (meta.DB.RepositoryGen).
 type Registry struct {
-	mu   sync.Mutex // serializes writes
 	snap atomic.Pointer[Snapshot]
 	db   *meta.DB
+	mu   sync.Mutex // WithWriteLock's lock without a db (a read-only registry)
 
 	// routes are the compiled routing rules by name (routing.go).
 	routes atomic.Pointer[map[string]*Route]
 
-	// gens gives each repository incarnation a distinct Gen: it changes when a
-	// repository is created again or its remote changes, never otherwise.
-	gens    map[string]uint64
-	nextGen uint64
+	sf singleflight.Group // Lookup's resyncs
+
+	// Cluster is set when other nodes write the database too (PostgreSQL):
+	// a write first re-reads the stored repositories and routing rules, and
+	// runs Refresh, under the registry lock, so it validates against what
+	// every node wrote; afterwards it sends Notify("registry"). Lookup reads
+	// the database for a name the snapshot lacks.
+	Cluster bool
+	// Refresh, if set, re-reads under the registry lock of a Cluster write
+	// what else the write validates against: the app's blob stores and auth
+	// snapshot.
+	Refresh func(ctx context.Context) error
 
 	// OnDelete, if set, is called after a repository is deleted, with the
-	// write lock held, the delete's ctx and the ids of the roles whose
+	// registry lock held, the delete's ctx and the ids of the roles whose
 	// privileges on it the delete removed (QA N-25). The app uses it to apply
 	// those role changes before a repository of that name can be created
 	// again.
@@ -50,15 +63,15 @@ type Registry struct {
 
 	// Policies looks up a cleanup policy's format ("all" or a format) by
 	// name; ok is false when there is no such policy (cleanup.PolicyLookup).
-	// Create and Update call it, under the write lock, for a definition that
+	// Create and Update call it, under the registry lock, for a definition that
 	// names a policy. With a nil Policies no policy can be named.
 	Policies func(ctx context.Context, name string) (format string, ok bool, err error)
 
 	// HasStore reports whether a blob store exists. Create and Update check,
-	// under the write lock, that a non-group definition's store exists, so a
-	// repository never names a store routing cannot resolve. Blob-store create
-	// and delete take the same lock (WithWriteLock). A nil HasStore skips the
-	// check (tests without stores).
+	// under the registry lock, that a non-group definition's store exists, so
+	// a repository never names a store routing cannot resolve. Blob-store
+	// create and delete take the same lock (WithWriteLock). A nil HasStore
+	// skips the check (tests without stores).
 	HasStore func(name string) bool
 }
 
@@ -94,21 +107,125 @@ type ClearSecrets struct {
 }
 
 // NewRegistry publishes the first snapshot from defs, which must already be
-// validated with defaults applied. db receives the writes; with a nil db the
+// validated with defaults applied, each with Gen 0; Reload reads them, with
+// their gens, from db instead. db receives the writes; with a nil db the
 // registry is read-only (tests).
 func NewRegistry(db *meta.DB, defs []config.Repository) *Registry {
-	r := &Registry{db: db, gens: map[string]uint64{}}
-	for _, d := range defs {
-		r.newGen(d.Name)
-	}
-	r.snap.Store(newSnapshot(defs, r.gens))
+	r := &Registry{db: db}
+	r.snap.Store(newSnapshot(defs, nil))
 	return r
 }
 
-// newGen starts a new incarnation of the named repository.
-func (r *Registry) newGen(name string) {
-	r.nextGen++
-	r.gens[name] = r.nextGen
+// registryLock is the cluster lock of the registry's writes. Lock order
+// (meta/cluster.go): "access", then "registry", then the formats' keys, then
+// a write transaction.
+const registryLock = "registry"
+
+// lock takes the registry lock for a write; in a Cluster it then re-reads
+// what the write validates against.
+func (r *Registry) lock(ctx context.Context) (func(), error) {
+	if err := r.store(); err != nil {
+		return nil, err
+	}
+	unlock, err := r.db.Lock(ctx, registryLock)
+	if err != nil {
+		return nil, err
+	}
+	if r.Cluster {
+		if err := r.refresh(ctx); err != nil {
+			unlock()
+			return nil, err
+		}
+	}
+	return unlock, nil
+}
+
+// refresh re-reads the stored repositories and routing rules and runs
+// Refresh. The registry lock is held, so no node writes them meanwhile.
+func (r *Registry) refresh(ctx context.Context) error {
+	if err := r.Reload(ctx); err != nil {
+		return err
+	}
+	if err := r.ReloadRoutes(ctx); err != nil {
+		return err
+	}
+	if r.Refresh != nil {
+		return r.Refresh(ctx)
+	}
+	return nil
+}
+
+// Resync takes the registry lock to re-read, in a Cluster, the repositories,
+// routing rules and what Refresh reads, as a write does first: a node
+// applies the changes of the others so (Notify, and a periodic safety net).
+func (r *Registry) Resync(ctx context.Context) error {
+	unlock, err := r.lock(ctx)
+	if err != nil {
+		return err
+	}
+	unlock()
+	return nil
+}
+
+// written tells the other nodes of a committed registry write.
+func (r *Registry) written(ctx context.Context) {
+	if r.Cluster {
+		r.db.Notify(context.WithoutCancel(ctx), registryLock) // missed, it is the 5 s reload's
+	}
+}
+
+// Reload replaces the snapshot with the stored repositories, normalized as
+// at start (config.NormalizeStored), and their gens. Call it with the
+// registry lock held (Resync), or before the registry is shared.
+func (r *Registry) Reload(ctx context.Context) error {
+	if err := r.store(); err != nil {
+		return err
+	}
+	defs, gens, err := r.db.ListRepositoriesGen(ctx)
+	if err != nil {
+		return err
+	}
+	for i := range defs {
+		config.NormalizeStored(&defs[i])
+	}
+	if err := config.ValidateRepositories(defs); err != nil {
+		return fmt.Errorf("stored repositories are invalid: %w", err)
+	}
+	r.snap.Store(newSnapshot(defs, gens))
+	return nil
+}
+
+// Lookup is Get for a request naming a repository: in a Cluster, a name the
+// snapshot lacks is looked up in the database, and when another node
+// created it this node resyncs at once (Resync, one at a time), so the
+// repository, and the blob store and routing rule it names, are served
+// right away.
+func (r *Registry) Lookup(ctx context.Context, name string) *Repository {
+	if rp := r.Get(name); rp != nil || !r.Cluster || r.db == nil {
+		return rp
+	}
+	if _, err := r.db.RepositoryGen(ctx, name); err != nil {
+		return nil
+	}
+	r.sf.Do("resync", func() (any, error) {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lookupWait)
+		defer cancel()
+		return nil, r.Resync(ctx)
+	})
+	return r.Get(name)
+}
+
+// lookupWait bounds Lookup's wait for the registry lock.
+const lookupWait = 10 * time.Second
+
+// gens returns the Gen of every repository of the current snapshot.
+func (r *Registry) gens() map[string]uint64 {
+	s := r.snap.Load()
+	out := make(map[string]uint64, len(s.Sorted))
+	for _, rp := range s.Sorted {
+		out[rp.Name] = rp.Gen
+	}
+	return out
 }
 
 func newSnapshot(defs []config.Repository, gens map[string]uint64) *Snapshot {
@@ -164,11 +281,11 @@ func (r *Registry) Create(ctx context.Context, def config.Repository) error {
 // CreateDef is Create, returning the stored definition (defaults applied),
 // read under the write lock so a concurrent Delete cannot invalidate it.
 func (r *Registry) CreateDef(ctx context.Context, def config.Repository) (config.Repository, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := r.store(); err != nil {
+	unlock, err := r.lock(ctx)
+	if err != nil {
 		return config.Repository{}, err
 	}
+	defer unlock()
 	def = cloneDef(def)
 	if err := validateNewName(def.Name); err != nil {
 		return config.Repository{}, err
@@ -192,14 +309,17 @@ func (r *Registry) CreateDef(ctx context.Context, def config.Repository) (config
 	if err := r.checkRoute(def); err != nil {
 		return config.Repository{}, err
 	}
-	if err := r.db.CreateRepository(ctx, def); err != nil {
+	gen, err := r.db.CreateRepositoryGen(ctx, def)
+	if err != nil {
 		if errors.Is(err, meta.ErrExists) {
 			return config.Repository{}, &ValidationError{Errors: []string{fmt.Sprintf("duplicate repository name %q", def.Name)}}
 		}
 		return config.Repository{}, err
 	}
-	r.newGen(def.Name)
-	r.snap.Store(newSnapshot(list, r.gens))
+	gens := r.gens()
+	gens[def.Name] = gen
+	r.snap.Store(newSnapshot(list, gens))
+	r.written(ctx)
 	return cloneDef(def), nil
 }
 
@@ -215,11 +335,11 @@ func (r *Registry) Update(ctx context.Context, name string, def config.Repositor
 
 // UpdateDef is Update, returning the stored definition under the write lock.
 func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Repository, clear ClearSecrets) (config.Repository, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := r.store(); err != nil {
+	unlock, err := r.lock(ctx)
+	if err != nil {
 		return config.Repository{}, err
 	}
+	defer unlock()
 	cur := r.Get(name)
 	if cur == nil {
 		return config.Repository{}, Errorf(http.StatusNotFound, "repository %q not found", name)
@@ -287,16 +407,19 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	if err := r.checkRoute(def); err != nil {
 		return config.Repository{}, err
 	}
-	if err := r.db.UpdateRepository(ctx, def); err != nil {
+	gen, err := r.db.UpdateRepositoryGen(ctx, def) // a new one when the remote changed
+	if err != nil {
 		if errors.Is(err, meta.ErrNotFound) {
 			return config.Repository{}, Errorf(http.StatusNotFound, "repository %q not found", name)
 		}
 		return config.Repository{}, err
 	}
+	gens := r.gens()
 	if def.Remote != cur.Remote {
-		r.newGen(name)
+		gens[name] = gen
 	}
-	r.snap.Store(newSnapshot(list, r.gens))
+	r.snap.Store(newSnapshot(list, gens))
+	r.written(ctx)
 	return cloneDef(def), nil
 }
 
@@ -304,11 +427,11 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 // and removes the role privileges on it (QA N-25). A repository that is a
 // member or writeMember of a group is refused with 409, naming the groups.
 func (r *Registry) Delete(ctx context.Context, name string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := r.store(); err != nil {
+	unlock, err := r.lock(ctx)
+	if err != nil {
 		return err
 	}
+	defer unlock()
 	s := r.snap.Load()
 	if s.ByName[name] == nil {
 		return Errorf(http.StatusNotFound, "repository %q not found", name)
@@ -331,8 +454,8 @@ func (r *Registry) Delete(ctx context.Context, name string) error {
 	}
 	list := r.definitions()
 	list = slices.DeleteFunc(list, func(d config.Repository) bool { return d.Name == name })
-	delete(r.gens, name)
-	r.snap.Store(newSnapshot(list, r.gens))
+	r.snap.Store(newSnapshot(list, r.gens()))
+	r.written(ctx)
 	if r.OnDelete != nil {
 		r.OnDelete(ctx, name, roles)
 	}
@@ -362,13 +485,23 @@ func (r *Registry) checkPolicy(ctx context.Context, def config.Repository) error
 	return nil
 }
 
-// WithWriteLock runs fn with the write lock held and the current snapshot,
-// so no repository is created, updated or deleted meanwhile. Cleanup policy
-// changes use it: a policy delete or format change must not race with a
-// repository being connected to that policy.
-func (r *Registry) WithWriteLock(fn func(*Snapshot) error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// WithWriteLock runs fn with the registry lock held and the current
+// snapshot (in a Cluster re-read first), so no repository is created,
+// updated or deleted meanwhile on any node. Cleanup policy, routing rule
+// and blob store changes use it: a policy delete or format change must not
+// race with a repository being connected to that policy. fn's caller tells
+// the other nodes of what it changed.
+func (r *Registry) WithWriteLock(ctx context.Context, fn func(*Snapshot) error) error {
+	if r.db == nil {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return fn(r.snap.Load())
+	}
+	unlock, err := r.lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return fn(r.snap.Load())
 }
 

@@ -80,8 +80,11 @@ func (u *UI) putRealms(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if body.Realms == nil {
 		body.Realms = []meta.Realm{}
 	}
@@ -129,7 +132,7 @@ func (u *UI) putRealms(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	if err := u.Auth.Reload(r.Context()); err != nil {
+	if err := u.reloadAccess(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return
 	}
@@ -217,8 +220,11 @@ func (u *UI) putLDAP(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	// Merge into the stored value, not the snapshot, so the password that
 	// is kept is the stored one.
 	set, err := u.DB.LoadSettings(r.Context())
@@ -294,7 +300,7 @@ func (u *UI) putLDAP(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	if err := u.Auth.Reload(r.Context()); err != nil {
+	if err := u.reloadAccess(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return
 	}

@@ -336,11 +336,14 @@ func (h *Handler) manifest(w http.ResponseWriter, r *http.Request, rp *repo.Repo
 // after inserting the version's row with attrs when it has none (or
 // updating its attrs when update is set), then emits the upload event.
 func (h *Handler) write(r *http.Request, rp *repo.Repository, rt Route, attrs string, update bool, fn func(*meta.Tx) error) error {
-	unlock := h.locks.Lock(rp.Name + "\x00" + rt.Name)
+	unlock, err := h.Store.Lock(r.Context(), "terraform\x00"+rp.Name+"\x00"+rt.Name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	ctx := r.Context()
 	now := h.Now().UTC()
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		row := meta.Package{Repo: rp.Name, Format: "terraform", Name: rt.Name, Version: rt.Version, Attrs: attrs, CreatedAt: now}
 		switch err := tx.InsertPackage(ctx, row); {
 		case errors.Is(err, meta.ErrExists) && update:
@@ -596,7 +599,10 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 	if c.Name == "" || c.Version == "" {
 		return component.Result{}, fmt.Errorf("terraform component %q is incomplete", c.Label())
 	}
-	unlock := h.locks.Lock(rp.Name + "\x00" + c.Name)
+	unlock, err := h.Store.Lock(ctx, "terraform\x00"+rp.Name+"\x00"+c.Name)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	// A module's files: modules/<name>/<version>.<ext>; a provider's: the
 	// version directory. The name's shape tells them apart.
@@ -608,7 +614,7 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 	}
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		have, err := tx.ListAssets(ctx, rp.Name, prefix)
 		if err != nil {

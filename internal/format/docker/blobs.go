@@ -61,10 +61,18 @@ func (h *Handler) openSession(rp *repo.Repository, rt Route) (*session, error) {
 		s.remove()
 		return nil, errUploadUnknown(rt.UUID)
 	}
-	info, err := os.Stat(s.path)
+	// The size from an open file: on NFS, open revalidates the attributes
+	// (close-to-open), so a chunk another node just appended counts, where a
+	// stat could answer from the attribute cache.
+	f, err := os.Open(s.path)
 	if err != nil {
 		s.remove()
 		return nil, errUploadUnknown(rt.UUID)
+	}
+	info, err := f.Stat()
+	f.Close()
+	if err != nil {
+		return nil, err
 	}
 	s.size = info.Size()
 	return s, nil
@@ -213,9 +221,14 @@ func uploadErr(err error) error {
 }
 
 // upload serves the session routes: PATCH appends a chunk, PUT appends the
-// rest and completes, GET reports progress, DELETE cancels.
+// rest and completes, GET reports progress, DELETE cancels. The session's
+// lock is a cluster lock, so the steps of one upload are serialized
+// whichever nodes they reach (the session lives on the shared store).
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
-	unlock := h.locks.Lock("upload\x00" + rt.UUID)
+	unlock, err := h.Store.Lock(r.Context(), "docker\x00upload\x00"+rt.UUID)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	s, err := h.openSession(rp, rt)
 	if err != nil {

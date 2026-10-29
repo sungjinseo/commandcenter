@@ -26,7 +26,10 @@ func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repositor
 	groupID, artifactID, baseVersion := strings.Join(segs[:n-2], "."), segs[n-2], segs[n-1]
 	path := verDir + "/maven-metadata.xml"
 
-	unlock := h.locks.Lock(rp.Name + "\x00" + verDir)
+	unlock, err := h.Store.Lock(ctx, "maven\x00"+rp.Name+"\x00"+verDir)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	type build struct {
 		timestamp string // yyyyMMdd.HHmmss
@@ -45,7 +48,7 @@ func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repositor
 		builds = map[string]build{} // per file key, the build of files[key]
 	)
 	base := strings.TrimSuffix(baseVersion, "SNAPSHOT")
-	err := h.Store.DB.WalkAssetPaths(ctx, rp.Name, verDir+"/", func(p string) { // streamed, as in rebuildGA
+	err = h.Store.DB.WalkAssetPaths(ctx, rp.Name, verDir+"/", func(p string) { // streamed, as in rebuildGA
 		if dir(p) != verDir {
 			return
 		}

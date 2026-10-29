@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"slices"
 	"time"
 
@@ -45,7 +47,7 @@ func (d *DB) ImportRepositories(ctx context.Context, defs []config.Repository) (
 			if err != nil {
 				return err
 			}
-			if err := insertRepository(ctx, tx.q, def); err != nil {
+			if err := insertRepository(ctx, tx.q, def, newGen()); err != nil {
 				return err
 			}
 		}
@@ -61,36 +63,81 @@ func (d *DB) ImportRepositories(ctx context.Context, defs []config.Repository) (
 
 // ListRepositories returns every stored definition, ordered by name.
 func (d *DB) ListRepositories(ctx context.Context) ([]config.Repository, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT name, config FROM repositories ORDER BY name`)
+	defs, _, err := d.ListRepositoriesGen(ctx)
+	return defs, err
+}
+
+// ListRepositoriesGen is ListRepositories with each repository's gen, from
+// the same query.
+func (d *DB) ListRepositoriesGen(ctx context.Context) ([]config.Repository, map[string]uint64, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT name, config, gen FROM repositories ORDER BY name`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	var out []config.Repository
+	gens := map[string]uint64{}
 	for rows.Next() {
 		var name, js string
-		if err := rows.Scan(&name, &js); err != nil {
-			return nil, err
+		var gen int64
+		if err := rows.Scan(&name, &js, &gen); err != nil {
+			return nil, nil, err
 		}
 		var def config.Repository
 		if err := json.Unmarshal([]byte(js), &def); err != nil {
-			return nil, fmt.Errorf("repository %q: decode stored definition: %w", name, err)
+			return nil, nil, fmt.Errorf("repository %q: decode stored definition: %w", name, err)
 		}
 		if err := d.box.openRepo(&def); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out = append(out, def)
+		gens[def.Name] = uint64(gen)
 	}
-	return out, rows.Err()
+	return out, gens, rows.Err()
+}
+
+// A repository's gen names its incarnation: a random number set when it is
+// created and when its remote changes, never otherwise (0 for a row stored
+// before schema 6). A write that read the repository's definition at the
+// start of a request checks it inside its transaction (Tx.RepositoryGen),
+// so it fails, instead of writing into the new repository, when another
+// node deleted and re-created the name meanwhile.
+func newGen() int64 { return rand.Int64N(math.MaxInt64) + 1 }
+
+// RepositoryGen returns the named repository's gen; ErrNotFound if there is
+// no such repository.
+func (d *DB) RepositoryGen(ctx context.Context, name string) (uint64, error) {
+	return repositoryGen(ctx, d.sql, name)
+}
+
+// RepositoryGen is DB.RepositoryGen inside the transaction.
+func (t *Tx) RepositoryGen(ctx context.Context, name string) (uint64, error) {
+	return repositoryGen(ctx, t.q, name)
+}
+
+func repositoryGen(ctx context.Context, q querier, name string) (uint64, error) {
+	var gen int64
+	err := q.QueryRowContext(ctx, `SELECT gen FROM repositories WHERE name = ?`, name).Scan(&gen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return uint64(gen), err
 }
 
 // CreateRepository stores a new definition; ErrExists if the name is taken.
 func (d *DB) CreateRepository(ctx context.Context, def config.Repository) error {
+	_, err := d.CreateRepositoryGen(ctx, def)
+	return err
+}
+
+// CreateRepositoryGen is CreateRepository, returning the new repository's gen.
+func (d *DB) CreateRepositoryGen(ctx context.Context, def config.Repository) (uint64, error) {
 	def, err := d.box.sealRepo(def)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return d.Tx(ctx, func(tx *Tx) error {
+	gen := newGen()
+	return uint64(gen), d.Tx(ctx, func(tx *Tx) error {
 		var one int
 		err := tx.q.QueryRowContext(ctx, `SELECT 1 FROM repositories WHERE name = ?`, def.Name).Scan(&one)
 		if err == nil {
@@ -107,7 +154,7 @@ func (d *DB) CreateRepository(ctx context.Context, def config.Repository) error 
 		if err := purgeRepository(ctx, tx.q, def.Name); err != nil {
 			return err
 		}
-		return insertRepository(ctx, tx.q, def)
+		return insertRepository(ctx, tx.q, def, gen)
 	})
 }
 
@@ -115,17 +162,25 @@ func (d *DB) CreateRepository(ctx context.Context, def config.Repository) error 
 // if there is none. Format and type are stored as given; callers enforce
 // that they do not change.
 func (d *DB) UpdateRepository(ctx context.Context, def config.Repository) error {
+	_, err := d.UpdateRepositoryGen(ctx, def)
+	return err
+}
+
+// UpdateRepositoryGen is UpdateRepository, returning the repository's gen:
+// a new one when the remote changed.
+func (d *DB) UpdateRepositoryGen(ctx context.Context, def config.Repository) (uint64, error) {
 	sealed, err := d.box.sealRepo(def)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	js, err := json.Marshal(sealed)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return d.Tx(ctx, func(tx *Tx) error {
+	var gen int64
+	err = d.Tx(ctx, func(tx *Tx) error {
 		var old string
-		err := tx.q.QueryRowContext(ctx, `SELECT config FROM repositories WHERE name = ?`, def.Name).Scan(&old)
+		err := tx.q.QueryRowContext(ctx, `SELECT config, gen FROM repositories WHERE name = ?`, def.Name).Scan(&old, &gen)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -140,14 +195,20 @@ func (d *DB) UpdateRepository(ctx context.Context, def config.Repository) error 
 			def.Format, def.Type, string(js), toMs(time.Now()), def.Name); err != nil {
 			return err
 		}
-		// Misses recorded against the old remote say nothing about the new one.
+		// Misses recorded against the old remote say nothing about the new
+		// one, and what was fetched from it is another incarnation's.
 		if prev.Remote != def.Remote {
 			if _, err := tx.q.ExecContext(ctx, `DELETE FROM negative_cache WHERE repo = ?`, def.Name); err != nil {
+				return err
+			}
+			gen = newGen()
+			if _, err := tx.q.ExecContext(ctx, `UPDATE repositories SET gen = ? WHERE name = ?`, gen, def.Name); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+	return uint64(gen), err
 }
 
 // DeleteRepository removes the definition and, in the same transaction, every
@@ -214,13 +275,13 @@ func purgeRepository(ctx context.Context, q querier, name string) error {
 	return nil
 }
 
-func insertRepository(ctx context.Context, q querier, def config.Repository) error {
+func insertRepository(ctx context.Context, q querier, def config.Repository, gen int64) error {
 	js, err := json.Marshal(def)
 	if err != nil {
 		return err
 	}
 	now := toMs(time.Now())
-	_, err = q.ExecContext(ctx, `INSERT INTO repositories(name, format, type, config, created_at, updated_at) VALUES(?,?,?,?,?,?)`,
-		def.Name, def.Format, def.Type, string(js), now, now)
+	_, err = q.ExecContext(ctx, `INSERT INTO repositories(name, format, type, config, created_at, updated_at, gen) VALUES(?,?,?,?,?,?,?)`,
+		def.Name, def.Format, def.Type, string(js), now, now, gen)
 	return err
 }

@@ -28,7 +28,6 @@ import (
 type Handler struct {
 	Store    *repo.Store
 	Resolver *resolve.Resolver
-	locks    repo.KeyedMutex // serializes the writePolicy check and the write per path
 
 	// Auth checks overwrites for Edit; nil leaves every check to the server.
 	Auth *auth.Authenticator
@@ -210,9 +209,12 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p string) error {
 	if rp.WritePolicy == "deny" {
 		return repo.Errorf(http.StatusBadRequest, "repository %q is read-only", rp.Name)
 	}
-	unlock := h.locks.Lock(rp.Name + "\x00" + p)
+	unlock, err := h.Store.Lock(ctx, "raw\x00"+rp.Name+"\x00"+p)
+	if err != nil {
+		return err
+	}
 	defer unlock()
-	_, err := h.Store.Get(ctx, rp.Name, p)
+	_, err = h.Store.Get(ctx, rp.Name, p)
 	switch {
 	case err == nil && rp.WritePolicy == "allow_once":
 		return repo.Errorf(http.StatusBadRequest, "repository %q does not allow updating assets: %s", rp.Name, p)

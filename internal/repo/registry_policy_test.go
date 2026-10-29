@@ -85,7 +85,7 @@ func TestRegistryPolicyLookupError(t *testing.T) {
 func TestRegistryWithWriteLock(t *testing.T) {
 	reg, _ := newRegistry(t, baseDefs()...)
 	var got []string
-	err := reg.WithWriteLock(func(s *Snapshot) error {
+	err := reg.WithWriteLock(context.Background(), func(s *Snapshot) error {
 		for _, rp := range s.Sorted {
 			got = append(got, rp.Name)
 		}

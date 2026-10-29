@@ -140,7 +140,7 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	if !p.Anonymous() {
 		hd.Set("Cache-Control", "private") // authorized content must not enter shared caches
 	}
-	rp := s.Registry.Get(r.PathValue("name"))
+	rp := s.Registry.Lookup(r.Context(), r.PathValue("name"))
 	if rp == nil {
 		// Whoever could not read a repository of this name (an unknown name
 		// follows the global anonymousRead and authenticatedRead) gets the

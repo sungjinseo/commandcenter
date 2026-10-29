@@ -42,7 +42,10 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request, rp *repo.Repos
 	name := strings.ToLower(m.Name)
 	ctx := r.Context()
 
-	unlock := h.locks.Lock(rp.Name + "\x00" + canonicalName(name))
+	unlock, err := h.Store.Lock(ctx, "cargo\x00"+rp.Name+"\x00"+canonicalName(name))
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	if err := h.checkDuplicate(ctx, rp, m); err != nil {
 		return err
@@ -92,9 +95,12 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request, rp *repo.Repos
 // yank sets the yanked flag of a hosted crate version.
 func (h *Handler) yank(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route, yanked bool) error {
 	ctx := r.Context()
-	unlock := h.locks.Lock(rp.Name + "\x00" + canonicalName(rt.Name))
+	unlock, err := h.Store.Lock(ctx, "cargo\x00"+rp.Name+"\x00"+canonicalName(rt.Name))
+	if err != nil {
+		return err
+	}
 	defer unlock()
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		pkgs, err := tx.ListPackages(ctx, rp.Name, rt.Name)
 		if err != nil {
 			return err

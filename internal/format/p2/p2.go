@@ -24,8 +24,6 @@ type Handler struct {
 	Store   *repo.Store
 	Fetcher *proxy.Fetcher
 	BaseURL func() string // the prefix of a group's child locations
-	// locks serializes the read-modify-write of a proxy's .remote/index.json.
-	locks repo.KeyedMutex
 }
 
 func New(store *repo.Store, fetcher *proxy.Fetcher, baseURL func() string) *Handler {

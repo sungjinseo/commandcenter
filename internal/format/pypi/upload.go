@@ -169,7 +169,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 // record stores the file row, the file and its core metadata sidecar (PEP
 // 658, blob mdSums) in one transaction.
 func (h *Handler) record(ctx context.Context, rp *repo.Repository, project string, attrs fileAttrs, sums, mdSums blob.Sums) error {
-	unlock := h.locks.Lock(rp.Name + "\x00" + project)
+	unlock, err := h.Store.Lock(ctx, "pypi\x00"+rp.Name+"\x00"+project)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	doc, err := json.Marshal(attrs)
 	if err != nil {

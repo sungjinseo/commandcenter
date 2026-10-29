@@ -144,7 +144,10 @@ func (h *Handler) putManifest(w http.ResponseWriter, r *http.Request, rp *repo.R
 		return err
 	}
 	ctx := r.Context()
-	unlock := h.locks.Lock(lockKey(rp, rt.Image))
+	unlock, err := h.Store.Lock(ctx, lockKey(rp, rt.Image))
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	for _, d := range m.Blobs {
 		if _, err := h.Store.DB.GetAsset(ctx, rp.Name, blobKey(rt.Image, d)); err != nil {
@@ -212,9 +215,12 @@ func unknownRef(err error, kind, digest string) error {
 // next delete of a manifest referencing it reclaims it. actor is recorded
 // on the event.
 func (h *Handler) deleteManifest(ctx context.Context, rp *repo.Repository, image, digest, actor string) error {
-	unlock := h.locks.Lock(lockKey(rp, image))
+	unlock, err := h.Store.Lock(ctx, lockKey(rp, image))
+	if err != nil {
+		return err
+	}
 	defer unlock()
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		pkgs, err := tx.ListPackages(ctx, rp.Name, image)
 		if err != nil {
 			return err

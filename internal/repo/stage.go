@@ -123,11 +123,11 @@ func (s *Store) WaitWrites(ctx context.Context, repo string) error {
 // then the published definition follows. The repository keeps its
 // incarnation (Gen), so requests in flight carry on.
 func (r *Registry) SetBlobStore(ctx context.Context, name, store string, check func(*meta.Tx) error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if err := r.store(); err != nil {
+	unlock, err := r.lock(ctx)
+	if err != nil {
 		return err
 	}
+	defer unlock()
 	cur := r.Get(name)
 	if cur == nil {
 		return Errorf(http.StatusNotFound, "repository %q not found", name)
@@ -149,7 +149,8 @@ func (r *Registry) SetBlobStore(ctx context.Context, name, store string, check f
 			list[i] = def
 		}
 	}
-	r.snap.Store(newSnapshot(list, r.gens))
+	r.snap.Store(newSnapshot(list, r.gens()))
+	r.written(ctx)
 	return nil
 }
 

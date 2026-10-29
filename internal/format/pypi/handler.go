@@ -23,7 +23,6 @@ type Handler struct {
 	Fetcher *proxy.Fetcher
 	BaseURL func() string // live: read per request (plan 12)
 	Now     func() time.Time
-	locks   repo.KeyedMutex // serializes uploads per repository and project
 }
 
 func New(store *repo.Store, fetcher *proxy.Fetcher, baseURL func() string) *Handler {

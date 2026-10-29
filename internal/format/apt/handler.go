@@ -30,9 +30,6 @@ type Handler struct {
 	Resolver *resolve.Resolver
 	Auth     *auth.Authenticator
 	Now      func() time.Time
-	// locks serializes the writes of a hosted repository: every upload
-	// and delete regenerates dists/. ponytail: one lock per repository.
-	locks repo.KeyedMutex
 }
 
 func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticator) *Handler {
@@ -235,7 +232,11 @@ func (h *Handler) store(ctx context.Context, rp *repo.Repository, body io.Reader
 		return row{}, err
 	}
 	now := h.Now().UTC()
-	unlock := h.locks.Lock(rp.Name)
+	// Every upload and delete regenerates dists/. ponytail: one lock per repository.
+	unlock, err := h.Store.Lock(ctx, "apt\x00"+rp.Name)
+	if err != nil {
+		return row{}, err
+	}
 	defer unlock()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		p := meta.Package{Repo: rp.Name, Format: "apt", Name: rw.Package, Version: rw.key(), Attrs: string(attrs), CreatedAt: now}
@@ -321,11 +322,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 	if c.Group == "" || c.Name == "" || c.Version == "" {
 		return component.Result{}, fmt.Errorf("apt component %q is incomplete: architecture, package and version are needed", c.Label())
 	}
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "apt\x00"+rp.Name)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		key := c.Version + "_" + c.Group
 		file := poolPath(rp.Component, c.Name, c.Version, c.Group)

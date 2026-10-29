@@ -389,7 +389,10 @@ func (h *Handler) indexAsset(ctx context.Context, rp *repo.Repository) (proxy.Re
 		}
 	}
 	fp := fingerprint(srcs)
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "helm\x00"+rp.Name)
+	if err != nil {
+		return proxy.Result{}, err
+	}
 	defer unlock()
 	if a, err := h.Store.Get(ctx, rp.Name, indexKey); err == nil && a.RemoteETag == fp {
 		return proxy.Result{Asset: a, Stale: stale}, nil

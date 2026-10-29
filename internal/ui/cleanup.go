@@ -228,7 +228,7 @@ func (u *UI) updatePolicy(w http.ResponseWriter, r *http.Request) {
 	body.Name = name
 	p := body.policy()
 	var users []string
-	err := u.Repos.WithWriteLock(func(s *repo.Snapshot) error {
+	err := u.Repos.WithWriteLock(r.Context(), func(s *repo.Snapshot) error {
 		var mismatched []string
 		for _, rp := range s.Sorted {
 			if rp.CleanupPolicy != name {
@@ -269,7 +269,7 @@ func (u *UI) deletePolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	err := u.Repos.WithWriteLock(func(*repo.Snapshot) error {
+	err := u.Repos.WithWriteLock(r.Context(), func(*repo.Snapshot) error {
 		return u.DB.DeleteCleanupPolicy(r.Context(), name)
 	})
 	if err != nil {

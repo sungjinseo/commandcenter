@@ -27,7 +27,10 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	if !ok {
 		return nil, repo.Errorf(http.StatusBadRequest, "repository %q has depth 1: %s is not in a directory", dst.Name, file)
 	}
-	unlock := h.locks.Lock(dst.Name)
+	unlock, err := h.Store.Lock(ctx, "yum\x00"+dst.Name)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	rows, err := h.Store.DB.ListPackages(ctx, src.Name, c.Name)
 	if err != nil {

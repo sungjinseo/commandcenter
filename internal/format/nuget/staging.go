@@ -24,7 +24,10 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		return nil, fmt.Errorf("nuget component %q is incomplete", c.Label())
 	}
 	id, ver := strings.ToLower(c.Name), strings.ToLower(c.Version)
-	unlock := h.locks.Lock(dst.Name + "\x00" + id)
+	unlock, err := h.Store.Lock(ctx, "nuget\x00"+dst.Name+"\x00"+id)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	rows, err := h.Store.DB.ListPackages(ctx, src.Name, id)
 	if err != nil {

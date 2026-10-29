@@ -24,7 +24,10 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		return nil, fmt.Errorf("pypi component %q is incomplete", c.Label())
 	}
 	project := Normalize(c.Name)
-	unlock := h.locks.Lock(dst.Name + "\x00" + project)
+	unlock, err := h.Store.Lock(ctx, "pypi\x00"+dst.Name+"\x00"+project)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	all, err := h.Store.DB.ListPackages(ctx, src.Name, project)
 	if err != nil {

@@ -166,15 +166,28 @@ func TestStatusOf(t *testing.T) {
 	}
 }
 
-func TestKeyedMutex(t *testing.T) {
-	var k KeyedMutex
+// Store.Lock lets one holder of a key in at a time, and LockAll takes Lock
+// for each of its keys, a key named twice once.
+func TestStoreLock(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
 	var inside, max int32
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			unlock := k.Lock("a")
+			var unlock func()
+			var err error
+			if i%2 == 0 {
+				unlock, err = s.Lock(ctx, "a")
+			} else {
+				unlock, err = s.LockAll(ctx, []string{"b", "a", "b"})
+			}
+			if err != nil {
+				t.Error(err)
+				return
+			}
 			n := atomic.AddInt32(&inside, 1)
 			for {
 				m := atomic.LoadInt32(&max)
@@ -190,9 +203,6 @@ func TestKeyedMutex(t *testing.T) {
 	wg.Wait()
 	if max != 1 {
 		t.Fatalf("max concurrent holders = %d", max)
-	}
-	if len(k.m) != 0 {
-		t.Fatalf("entries leaked: %d", len(k.m))
 	}
 }
 

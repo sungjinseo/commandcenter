@@ -40,7 +40,6 @@ type Handler struct {
 	Resolver *resolve.Resolver
 	Auth     *auth.Authenticator
 	Now      func() time.Time
-	locks    repo.KeyedMutex // one per hosted repository: every write rebuilds a directory's index
 }
 
 func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticator) *Handler {
@@ -231,7 +230,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		ct = ctZip
 	}
 	rowName := dir + "/" + name
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "r\x00"+rp.Name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		pkg := meta.Package{Repo: rp.Name, Format: "r", Name: rowName, Version: version, Attrs: string(attrs), CreatedAt: now}
@@ -341,11 +343,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 	if _, _, _, ok := component.SplitR(file); !ok || !component.RContribDir(c.Group) {
 		return component.Result{}, fmt.Errorf("r component %q is not a package of a contrib directory", c.Label())
 	}
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "r\x00"+rp.Name)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		switch a, err := tx.GetAsset(ctx, rp.Name, file); {
 		case err == nil:

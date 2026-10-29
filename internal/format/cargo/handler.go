@@ -27,7 +27,6 @@ type Handler struct {
 	Auth    *auth.Authenticator
 	BaseURL func() string // live: read per request (plan 12)
 	Now     func() time.Time
-	locks   repo.KeyedMutex // serializes writes per repository and crate
 }
 
 func New(store *repo.Store, fetcher *proxy.Fetcher, authn *auth.Authenticator, baseURL func() string) *Handler {

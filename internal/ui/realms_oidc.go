@@ -127,8 +127,11 @@ func (u *UI) putOIDC(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, write and reload as one step, as the other access changes
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, write and reload as one step, as the other access changes
+	if !ok {
+		return
+	}
+	defer unlock()
 	// Merge into the stored value, not the snapshot, so the secret that is
 	// kept is the stored one.
 	set, err := u.DB.LoadSettings(r.Context())
@@ -173,7 +176,7 @@ func (u *UI) putOIDC(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	if err := u.Auth.Reload(r.Context()); err != nil {
+	if err := u.reloadAccess(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return
 	}

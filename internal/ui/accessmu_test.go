@@ -100,16 +100,19 @@ func TestRepoDeleteSerialisedWithRoleChanges(t *testing.T) {
 	const privs = `"privileges":[{"target":"repo:tmp-repo","actions":["read"]},{"target":"*","actions":["browse"]}]`
 	wantStatus(t, e.admin(t, "POST", "/-/api/roles", `{"id":"keeper",`+privs+`}`), http.StatusCreated)
 
-	e.ui.accessMu.Lock() // a role change between its read and its write
+	unlock, err := e.db.Lock(context.Background(), accessLock) // a role change between its read and its write
+	if err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan resp, 1)
 	go func() { done <- e.admin(t, "DELETE", "/-/api/repositories/tmp-repo", "") }()
 	select {
 	case r := <-done:
-		e.ui.accessMu.Unlock()
+		unlock()
 		t.Fatalf("the delete did not wait for the access change: %d %s", r.status, r.body)
 	case <-time.After(200 * time.Millisecond):
 	}
-	e.ui.accessMu.Unlock()
+	unlock()
 	wantStatus(t, <-done, http.StatusNoContent)
 
 	if r := e.admin(t, "GET", "/-/api/roles/keeper", ""); !strings.Contains(r.body, `"privileges":[{"target":"*","actions":["browse"]}]`) {

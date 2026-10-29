@@ -1,10 +1,12 @@
 package meta
 
 import (
+	"cmp"
 	"context"
 	"hash/fnv"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,9 +26,11 @@ import (
 // process per file, Lock is the in-process mutex alone and Notify does
 // nothing.
 //
-// Lock order: a caller never takes a Lock inside a write transaction (Tx).
-// A Lock waiting on another node while holding the global write lock would
-// stall every write on every node until lock_timeout.
+// Lock order: "access" (ui), then "registry" (repo.Registry), then the
+// formats' keys (repo.Store.Lock), then a write transaction (Tx). A caller
+// never takes a Lock inside a Tx: a Lock waiting on another node while
+// holding the global write lock would stall every write on every node until
+// lock_timeout.
 
 // lockClass is the first key of DB.Lock's advisory locks ("CC" 1). The
 // two-int4 form has a lock-tag space of its own, apart from the bigint
@@ -311,6 +315,31 @@ func (d *DB) TryLock(key string) (unlock func(), ok bool, err error) {
 			local()
 		})
 	}, true, nil
+}
+
+// LockAll takes Lock for every distinct key and returns one unlock for
+// them all. The keys are taken in one order every caller shares, by their
+// advisory lock's hash and then by key, so two callers never deadlock, not
+// even over keys whose hashes collide.
+func (d *DB) LockAll(ctx context.Context, keys []string) (unlock func(), err error) {
+	keys = slices.Clone(keys)
+	slices.SortFunc(keys, func(a, b string) int { return cmp.Or(cmp.Compare(hash32(a), hash32(b)), strings.Compare(a, b)) })
+	keys = slices.Compact(keys)
+	unlocks := make([]func(), 0, len(keys))
+	all := func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
+	}
+	for _, k := range keys {
+		u, err := d.Lock(ctx, k)
+		if err != nil {
+			all()
+			return nil, err
+		}
+		unlocks = append(unlocks, u)
+	}
+	return all, nil
 }
 
 func hash32(key string) int32 {

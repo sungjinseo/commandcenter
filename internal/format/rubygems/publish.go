@@ -45,7 +45,10 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 	}
 	name, ver := a.Name, a.rowVersion()
 	now := h.Now().UTC()
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(r.Context(), "rubygems\x00"+rp.Name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	ctx := r.Context()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
@@ -187,11 +190,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 	if c.Name == "" || c.Version == "" {
 		return component.Result{}, fmt.Errorf("rubygems component %q is incomplete", c.Label())
 	}
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "rubygems\x00"+rp.Name)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		file := gemFile(fullName(c.Name, c.Version))
 		switch a, err := tx.GetAsset(ctx, rp.Name, file); {

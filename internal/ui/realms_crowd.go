@@ -70,8 +70,11 @@ func (u *UI) putCrowd(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, lockout check, write and reload as one step
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step
+	if !ok {
+		return
+	}
+	defer unlock()
 	// Merge into the stored value, so the password kept is the stored one.
 	set, err := u.DB.LoadSettings(r.Context())
 	if err != nil {
@@ -134,7 +137,7 @@ func (u *UI) putCrowd(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	if err := u.Auth.Reload(r.Context()); err != nil {
+	if err := u.reloadAccess(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return
 	}

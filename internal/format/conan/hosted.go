@@ -206,7 +206,9 @@ func (h *Handler) conanInfo(ctx context.Context, rp *repo.Repository, path strin
 	return ParseConanInfo(string(raw)), nil
 }
 
-func lockKey(rp *repo.Repository, ref Ref) string { return rp.Name + "\x00" + ref.String() }
+func lockKey(rp *repo.Repository, ref Ref) string {
+	return "conan\x00" + rp.Name + "\x00" + ref.String()
+}
 
 // put stores a recipe or package file of hosted rp at its path. The same
 // content again is a 200; different content under writePolicy allow_once
@@ -234,7 +236,10 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 	if err != nil {
 		return uploadErr(err)
 	}
-	unlock := h.locks.Lock(lockKey(rp, rt.Ref))
+	unlock, err := h.Store.Lock(ctx, lockKey(rp, rt.Ref))
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	created := false
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
@@ -335,7 +340,10 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 // the reference's lock, checking the assets against ev (cleanup.CheckUnchanged)
 // first, and emits the delete event. gone reports that a row was dropped.
 func (h *Handler) delete(ctx context.Context, rp *repo.Repository, ref Ref, rm removal, ev *component.Evaluated, actor, label string) (res component.Result, gone bool, err error) {
-	unlock := h.locks.Lock(lockKey(rp, ref))
+	unlock, err := h.Store.Lock(ctx, lockKey(rp, ref))
+	if err != nil {
+		return component.Result{}, false, err
+	}
 	defer unlock()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		res, gone = component.Result{}, false

@@ -38,7 +38,6 @@ type Handler struct {
 	BaseURL func() string // live: read per request
 	Key     []byte        // signs the login tokens (HMAC-SHA256)
 	Now     func() time.Time
-	locks   repo.KeyedMutex // serializes the writes of one recipe reference per repository
 }
 
 // New returns a Handler. A nil key gets a random one (tests).

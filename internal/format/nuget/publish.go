@@ -74,7 +74,10 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 	if err != nil {
 		return err
 	}
-	unlock := h.locks.Lock(rp.Name + "\x00" + id)
+	unlock, err := h.Store.Lock(r.Context(), "nuget\x00"+rp.Name+"\x00"+id)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	ctx := r.Context()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
@@ -151,11 +154,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		return component.Result{}, fmt.Errorf("nuget component %q is incomplete", c.Label())
 	}
 	id, ver := strings.ToLower(c.Name), strings.ToLower(c.Version)
-	unlock := h.locks.Lock(rp.Name + "\x00" + id)
+	unlock, err := h.Store.Lock(ctx, "nuget\x00"+rp.Name+"\x00"+id)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		files := []string{assetPath(id, ver, NupkgFile(id, ver)), assetPath(id, ver, NuspecFile(id, ver))}
 		var have []meta.Asset

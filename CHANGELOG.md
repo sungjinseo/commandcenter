@@ -9,6 +9,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- Cluster-wide locks and cache invalidation on PostgreSQL (HA groundwork): every format's per-path,
+  per-package and per-index locks (uploads, deletes, metadata rebuilds, repository import, Docker upload
+  sessions) and repository, blob store, cleanup policy, routing rule, user, role, realm and settings
+  changes are serialized across all nodes on the database (advisory locks). A node that changes
+  repositories, routing rules, blob stores, webhooks or users/roles/settings notifies the others
+  (LISTEN/NOTIFY), which re-read at once (the 5 s reload stays as the safety net), and a request naming a
+  repository another node just created is served at once. SQLite keeps in-process locks; the
+  single-writer guard stays until HA is turned on.
 - UI sessions are stored in the database: they survive restarts on both drivers, and on PostgreSQL every
   node accepts them. On PostgreSQL the per-name sign-in throttle is shared by all nodes, OIDC and SAML
   login state is single-use across nodes and SAML assertion replay is refused across nodes, OIDC, SAML,
@@ -352,6 +360,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `commandcenter user reset-password` and `token create` take effect at once on servers using PostgreSQL.
 - Webhook deliveries are sent only by `serve`. CLI commands store the deliveries their events make and
   leave them to the running server, or to the next one started. Before, a CLI command beside a server
   sent them too, sometimes twice.
@@ -359,6 +368,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   while a task runs on any node, and task runs wait while it collects (run now answers 409).
 
 ### Fixed
+- A write racing a delete and re-create of its repository could land in the new repository. Repositories
+  now carry a stored generation (`repositories.gen`) checked inside the write transaction, so such a
+  write fails with 503 (retry).
 - APT hosted: `.deb` packages whose control archive is `control.tar.xz` (Debian's `dpkg-deb` default),
   `control.tar.zst` (Ubuntu 21.10 and later), `control.tar.bz2` or `control.tar.lzma` are accepted.
   Before, only `control.tar.gz` and an uncompressed `control.tar` were read, so nearly every
@@ -378,7 +390,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Upgrade notes
 - The database schema version is now 6: the columns `tasks.running_node`, `tasks.running_since`,
   `webhook_deliveries.claimed_by`, `webhook_deliveries.claim_until` and the index
-  `webhook_deliveries_due`, and the tables `sessions`, `login_states`, `saml_replay`, `auth_failures`
+  `webhook_deliveries_due`, the column `repositories.gen` (existing repositories keep 0 until re-created or
+  their remote changes), and the tables `sessions`, `login_states`, `saml_replay`, `auth_failures`
   and `sso_identities` plus the settings rows `registry.tokenKey` and `secretKey.check`, created on the
   first start of this version. Compat is 6: a full stop, older versions refuse the upgraded database,
   so stop every older instance first and take a backup if you may need to go back.

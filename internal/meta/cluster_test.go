@@ -91,6 +91,50 @@ func TestLockExcludesAcrossNodes(t *testing.T) {
 	other()
 }
 
+// LockAll takes overlapping key sets named in any order from two nodes
+// without deadlocking, excludes the holders of each key, and frees every
+// in-process entry afterwards.
+func TestLockAll(t *testing.T) {
+	a, b, _ := twoNodes(t)
+	tctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var cur, peak atomic.Int32
+	var wg sync.WaitGroup
+	for i := range 40 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d, keys := a, []string{"x", "y", "z", "x"}
+			if i%2 == 1 {
+				d, keys = b, []string{"z", "y"}
+			}
+			unlock, err := d.LockAll(tctx, keys)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			n := cur.Add(1)
+			for p := peak.Load(); n > p && !peak.CompareAndSwap(p, n); p = peak.Load() {
+			}
+			time.Sleep(time.Millisecond)
+			cur.Add(-1)
+			unlock()
+		}()
+	}
+	wg.Wait()
+	if p := peak.Load(); p != 1 {
+		t.Fatalf("up to %d holders of y at once, want 1", p)
+	}
+	for _, d := range []*DB{a, b} {
+		d.keys.mu.Lock()
+		n := len(d.keys.m)
+		d.keys.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("%d in-process lock entries left", n)
+		}
+	}
+}
+
 // A waiter whose context ends gives up, in the process and across nodes,
 // and leaves the lock usable.
 func TestLockCancelWhileWaiting(t *testing.T) {
@@ -397,7 +441,7 @@ func TestSchemaCompat(t *testing.T) {
 		{3, 3, "webhooks, routing rules and content selectors"},
 		{4, 4, "user tokens, blob store groups, cleanup criteria, tags, store moves, vulnerability data"},
 		{5, 5, "nodes, leases, compat: a full stop, as the single-writer guard must refuse a second instance, which older builds would not"},
-		{6, 6, "task run marks and webhook delivery claims (expand-only) together with sessions and auth state in the database, " +
+		{6, 6, "task run marks, webhook delivery claims and repositories.gen (expand-only) together with sessions and auth state in the database, " +
 			"the shared token key and the secret key check: a full stop, as an older build would keep sessions in memory and leave " +
 			"stored sessions of a changed user valid for this one"},
 	}

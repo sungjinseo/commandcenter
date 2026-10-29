@@ -22,7 +22,10 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	if c.Name == "" || c.Version == "" {
 		return nil, fmt.Errorf("helm component %q is incomplete", c.Label())
 	}
-	unlock := h.locks.Lock(dst.Name)
+	unlock, err := h.Store.Lock(ctx, "helm\x00"+dst.Name)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	rows, err := h.Store.DB.ListPackages(ctx, src.Name, c.Name)
 	if err != nil {

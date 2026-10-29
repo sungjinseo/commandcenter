@@ -116,9 +116,9 @@ type Logger interface {
 }
 
 // Locker is implemented by the format handlers: LockPaths takes the locks
-// an upload of paths to rp takes and returns their unlock.
+// an upload of paths to rp takes, on every node, and returns their unlock.
 type Locker interface {
-	LockPaths(rp *repo.Repository, paths []string) (unlock func())
+	LockPaths(ctx context.Context, rp *repo.Repository, paths []string) (unlock func(), err error)
 }
 
 // RebuildFunc regenerates the derived index documents of a hosted

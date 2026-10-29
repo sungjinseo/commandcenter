@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS tokens(
   created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS repositories(
   name TEXT PRIMARY KEY, format TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, gen INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS blob_stores(name TEXT PRIMARY KEY, path TEXT NOT NULL, created_at INTEGER NOT NULL,
   type TEXT NOT NULL DEFAULT 'file', config TEXT NOT NULL DEFAULT '{}');
@@ -214,6 +214,8 @@ CREATE TABLE IF NOT EXISTS sso_identities(realm TEXT NOT NULL, id TEXT NOT NULL,
 //	   secretKey.check: an older build would keep its sessions in memory,
 //	   leave a changed user's stored sessions for this one to accept again,
 //	   and seal with another secret key unchecked.
+//	6: repositories.gen, the incarnation (repositories.go): expand-only, an
+//	   older build ignores it and keeps its in-process incarnations.
 const schemaVersion = 6
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
@@ -460,6 +462,7 @@ func migrate(ctx context.Context, db querier) error {
 		{"request_stats", "upstream_max_ms", "upstream_max_ms INTEGER NOT NULL DEFAULT 0"},
 		{"request_stats", "cache_hits", "cache_hits INTEGER NOT NULL DEFAULT 0"},
 		{"request_stats", "cache_misses", "cache_misses INTEGER NOT NULL DEFAULT 0"},
+		{"repositories", "gen", "gen INTEGER NOT NULL DEFAULT 0"},
 	} {
 		has, err := hasColumn(ctx, db, c.table, c.col)
 		if err != nil {

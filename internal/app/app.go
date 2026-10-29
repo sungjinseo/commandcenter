@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"commandcenter/internal/auth"
@@ -470,10 +471,18 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		return nil, err
 	}
 
+	// The registry's snapshot is the stored one, with each repository's gen.
+	// On PostgreSQL other nodes write the database too (Cluster).
+	registry := repo.NewRegistry(db, defs)
+	registry.Cluster = db.Driver() == "postgresql"
+	if err := registry.Reload(context.Background()); err != nil {
+		return nil, fmt.Errorf("load repositories: %w", err)
+	}
+	store.CheckGen = true
+
 	// Started only after the checks above can no longer fail, so an error return
 	// never leaves the writer running against a database New is about to close.
 	evts := events.New(db)
-	registry := repo.NewRegistry(db, defs)
 	// Every event goes through the webhook dispatcher to the recorder; Serve
 	// starts sending the deliveries.
 	hooks := &webhook.Dispatcher{DB: db, Next: evts, Repos: registry, Log: log}
@@ -528,6 +537,18 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		cur := registry.Get(rp.Name)
 		return cur != nil && cur.Gen == rp.Gen
 	}
+	// A registry write on PostgreSQL validates against the blob stores and
+	// users, roles and settings as every node left them.
+	var storeErr string
+	registry.Refresh = func(ctx context.Context) error {
+		if err := store.SyncStores(ctx, cfg.DataDir); err != nil && err.Error() != storeErr {
+			log.Error("could not open a blob store another node created or changed; it stays unusable on this node", "err", logsafe.Err(err))
+			storeErr = err.Error() // once per failure: Refresh runs every few seconds; the registry lock is held
+		} else if err == nil {
+			storeErr = ""
+		}
+		return authn.Reload(ctx)
+	}
 	store.Lookup = registry.Get // contentDisposition on downloads
 	authn.AnonymousRead = registry.AnonymousRead
 	authn.RepoFormat = func(name string) string {
@@ -549,6 +570,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 			log.Warn("could not reload users, roles and settings after a repository delete; the removed privileges stay in force until the next reload",
 				"repository", name, "err", logsafe.Err(err))
 		}
+		db.Notify(context.Background(), "access") // the other nodes drop them too
 		log.Warn("removed the privileges on a deleted repository from roles", "repository", name, "roles", strings.Join(roles, ", "))
 		actor := auth.FromContext(ctx).Owner()
 		for _, id := range roles {
@@ -825,13 +847,13 @@ func (a *App) Serve(ctx context.Context) error {
 			a.log.Warn("could not flush metrics on shutdown", "err", logsafe.Err(err))
 		}
 	}()
-	// Users, roles and settings that another process changed apply within
-	// accessReloadEvery; the loop ends before Close closes the database.
+	// What another process or node changed applies at once (PostgreSQL) or
+	// within accessReloadEvery; the loop ends before Close closes the database.
 	rctx, stopReload := context.WithCancel(ctx)
 	reloadDone := make(chan struct{})
 	go func() {
 		defer close(reloadDone)
-		a.reloadAccess(rctx)
+		a.follow(rctx)
 	}()
 	defer func() {
 		stopReload()
@@ -892,26 +914,74 @@ func newHTTPServer(h http.Handler) *http.Server {
 // to a running server, QA N-2) applies without a restart. A reload reads
 // three small tables; polling SQLite's data_version would need a connection
 // of its own and changes on every write the server itself makes anyway.
+// On PostgreSQL it is the safety net of the notifications between nodes,
+// and covers the repositories, routing rules, blob stores and webhooks too.
 var accessReloadEvery = 5 * time.Second
 
-// reloadAccess reloads the auth snapshot every accessReloadEvery until ctx
-// ends. A failed reload keeps the current snapshot and is logged once per
-// run of failures.
-func (a *App) reloadAccess(ctx context.Context) {
+// The cache topics of meta.DB.Notify: a node that changed what the others
+// cache sends one after the commit, and every node re-reads it.
+var followTopics = []string{"access", "registry", "routing", "blobstores", "webhooks"}
+
+// follow keeps this node's caches in step with the database until ctx
+// ends: every accessReloadEvery, and on PostgreSQL also at once when a
+// node sends a topic's notification. A failed reload keeps what is loaded
+// and is logged once per run of failures. (The log level, cleanup policy,
+// flush and task stop notifications have their own subscribers.)
+func (a *App) follow(ctx context.Context) {
+	cluster := a.DB.Driver() == "postgresql"
+	var mu sync.Mutex
+	pending := map[string]bool{}
+	kick := make(chan struct{}, 1)
+	if cluster {
+		for _, topic := range followTopics {
+			a.DB.Subscribe(topic, func(string) {
+				mu.Lock()
+				pending[topic] = true
+				mu.Unlock()
+				select {
+				case kick <- struct{}{}:
+				default:
+				}
+			})
+		}
+	}
 	tick := time.NewTicker(accessReloadEvery)
 	defer tick.Stop()
-	failing := false
+	failing := map[string]bool{}
 	for {
+		todo := map[string]bool{"access": true}
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+			if cluster {
+				todo["registry"], todo["webhooks"] = true, true
+			}
+		case <-kick:
+			mu.Lock()
+			todo, pending = pending, map[string]bool{}
+			mu.Unlock()
 		}
-		err := a.Auth.Reload(ctx)
-		if err != nil && !failing && ctx.Err() == nil {
-			a.log.Warn("could not reload users, roles and settings; the loaded ones stay in force", "err", logsafe.Err(err))
+		for _, job := range []struct {
+			name, what string
+			run        func(context.Context) error
+		}{
+			{"access", "users, roles and settings", a.Auth.Reload},
+			// one Resync re-reads the repositories, routing rules and blob stores
+			{"registry", "repositories, routing rules and blob stores", a.Registry.Resync},
+			{"webhooks", "webhooks", a.Webhooks.Reload},
+		} {
+			if !todo[job.name] && (job.name != "registry" || !todo["routing"] && !todo["blobstores"]) {
+				continue
+			}
+			jctx, cancel := context.WithTimeout(ctx, accessReloadEvery)
+			err := job.run(jctx)
+			cancel()
+			if err != nil && !failing[job.name] && ctx.Err() == nil {
+				a.log.Warn("could not reload the "+job.what+" from the database; the loaded ones stay in force", "err", logsafe.Err(err))
+			}
+			failing[job.name] = err != nil
 		}
-		failing = err != nil
 	}
 }
 

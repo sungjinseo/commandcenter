@@ -73,7 +73,6 @@ type UI struct {
 
 	smtpTest       smtpTestState              // rate limit of the SMTP test send
 	settingsLoaded func()                     // test hook: runs between putSettings' read and its write
-	accessMu       sync.Mutex                 // serialises access changes: load, lockout check, write, reload (final review I3)
 	accessChecked  func()                     // test hook: runs after an access change passed its lockout check, before the write
 	memReader      func() (used, limit int64) // test hook; nil reads the runtime
 	blobChecker    func() (bool, string)      // test hook; nil runs checkBlobStore
@@ -106,6 +105,43 @@ type UI struct {
 	// over their soft quota, so the blobstore.quota event fires once per flip.
 	quotaMu       sync.Mutex
 	quotaViolated map[string]bool
+}
+
+// accessLock is the cluster lock of access changes (meta.DB.Lock): users,
+// roles, realms and the settings that name roles are loaded, checked against
+// a lockout, written and reloaded under it, whichever node takes the request
+// (final review I3). Lock order (meta/cluster.go): it comes before the
+// registry's.
+const accessLock = "access"
+
+// lockAccess takes the access lock. It answers the request and reports
+// false when the lock cannot be had.
+func (u *UI) lockAccess(w http.ResponseWriter, r *http.Request) (unlock func(), ok bool) {
+	unlock, err := u.DB.Lock(r.Context(), accessLock)
+	if err != nil {
+		u.fail(w, r, err)
+		return nil, false
+	}
+	return unlock, true
+}
+
+// reloadAccess reloads the auth snapshot after an access or settings write
+// and tells the other nodes to do the same.
+func (u *UI) reloadAccess(ctx context.Context) error {
+	if err := u.Auth.Reload(ctx); err != nil {
+		return err
+	}
+	u.notify(ctx, accessLock)
+	return nil
+}
+
+// notify tells every node that what it caches of topic changed
+// (meta.DB.Notify), after the change committed. A node that misses it
+// re-reads within the app's reload interval.
+func (u *UI) notify(ctx context.Context, topic string) {
+	if err := u.DB.Notify(context.WithoutCancel(ctx), topic); err != nil && u.Log != nil {
+		u.Log.Warn("could not tell the other nodes of a change; they apply it within seconds", "topic", topic, "err", logsafe.Err(err))
+	}
 }
 
 // Routes registers "/", "GET /ui/", "/-/api/" and the "/-/sso/" login

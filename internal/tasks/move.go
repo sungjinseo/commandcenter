@@ -144,7 +144,7 @@ func runMove(ctx context.Context, s *Service, t meta.Task, actor string, log *Ru
 	if m, ok := s.Store.MoveOf(p.Repo); ok {
 		source = m.Source
 		log.Infof("%s: continuing the unfinished move from %q to %q", p.Repo, source, p.Target)
-	} else if err := s.Repos.WithWriteLock(func(*repo.Snapshot) error { // blob store deletes take it too
+	} else if err := s.Repos.WithWriteLock(ctx, func(*repo.Snapshot) error { // blob store deletes take it too
 		if !s.Store.HasStore(p.Target) {
 			return fmt.Errorf("blob store %q does not exist", p.Target)
 		}

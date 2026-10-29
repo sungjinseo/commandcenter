@@ -36,7 +36,6 @@ type Handler struct {
 	Resolver *resolve.Resolver
 	Auth     *auth.Authenticator
 	Now      func() time.Time
-	locks    repo.KeyedMutex // one per hosted repository: every write rebuilds repodata
 }
 
 func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticator) *Handler {
@@ -141,7 +140,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		return err
 	}
 	name, version := strings.TrimSuffix(p, pkg.NVRA())+pkg.Name, pkg.Version+"-"+pkg.Release+"."+pkg.Arch
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "yum\x00"+rp.Name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		row := meta.Package{Repo: rp.Name, Format: "yum", Name: name, Version: version, Attrs: string(attrs), CreatedAt: now}
@@ -202,11 +204,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 	if !ok {
 		return component.Result{}, fmt.Errorf("yum component %q is not in a directory of repository %q (depth 1)", c.Label(), rp.Name)
 	}
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "yum\x00"+rp.Name)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		switch a, err := tx.GetAsset(ctx, rp.Name, file); {
 		case err == nil:

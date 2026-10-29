@@ -62,13 +62,16 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 // It returns how many versions it removed and their tarballs.
 func (h *Handler) deleteVersions(ctx context.Context, rp *repo.Repository, name, actor string,
 	pick func(tx *meta.Tx, stored []meta.Package) ([]string, error)) (int, component.Result, error) {
-	unlock := h.locks.Lock(rp.Name + "\x00" + name)
+	unlock, err := h.Store.Lock(ctx, "npm\x00"+rp.Name+"\x00"+name)
+	if err != nil {
+		return 0, component.Result{}, err
+	}
 	defer unlock()
 
 	var res component.Result
 	var gone []string // versions whose row or tarball was removed
 	var files map[string]int
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		res, gone, files = component.Result{}, nil, map[string]int{}
 		stored, err := tx.ListPackages(ctx, rp.Name, name)
 		if err != nil {

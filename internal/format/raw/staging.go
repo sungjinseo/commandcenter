@@ -16,7 +16,10 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	if err := repo.CheckImport(src, dst, c, "raw"); err != nil {
 		return nil, err
 	}
-	unlock := h.locks.Lock(dst.Name + "\x00" + c.Name)
+	unlock, err := h.Store.Lock(ctx, "raw\x00"+dst.Name+"\x00"+c.Name)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	a, err := h.Store.DB.GetAsset(ctx, src.Name, c.Name)
 	if errors.Is(err, meta.ErrNotFound) {

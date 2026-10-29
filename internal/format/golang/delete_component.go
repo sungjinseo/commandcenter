@@ -34,11 +34,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		return component.Result{}, fmt.Errorf("go component %q is incomplete", c.Label())
 	}
 	module, version := Escape(c.Name), Escape(c.Version)
-	unlock := h.locks.Lock(rp.Name + "\x00" + module + "@" + version)
+	unlock, err := h.Store.Lock(ctx, "go\x00"+rp.Name+"\x00"+module+"@"+version)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		res = component.Result{}
 		var files []meta.Asset
 		for _, k := range []Kind{KindMod, KindInfo, KindZip} {

@@ -13,16 +13,16 @@ import (
 // LockPaths takes the locks a publish of paths to rp takes, for repository
 // import (internal/transfer): one per package, <name>/-/<file> and
 // <name>/package.json.
-func (h *Handler) LockPaths(rp *repo.Repository, paths []string) (unlock func()) {
+func (h *Handler) LockPaths(ctx context.Context, rp *repo.Repository, paths []string) (unlock func(), err error) {
 	keys := make([]string, len(paths))
 	for i, p := range paths {
 		name, _, ok := strings.Cut(p, "/-/")
 		if !ok {
 			name = strings.TrimSuffix(p, "/package.json")
 		}
-		keys[i] = rp.Name + "\x00" + name
+		keys[i] = "npm\x00" + rp.Name + "\x00" + name
 	}
-	return h.locks.LockAll(keys)
+	return h.Store.LockAll(ctx, keys)
 }
 
 // RebuildMetadata regenerates the stored package document of every package
@@ -37,8 +37,11 @@ func (h *Handler) RebuildMetadata(ctx context.Context, rp *repo.Repository, logf
 		return err
 	}
 	for _, name := range names {
-		unlock := h.locks.Lock(rp.Name + "\x00" + name)
-		err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error { return h.writePackument(ctx, tx, rp, name) })
+		unlock, err := h.Store.Lock(ctx, "npm\x00"+rp.Name+"\x00"+name)
+		if err != nil {
+			return err
+		}
+		err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error { return h.writePackument(ctx, tx, rp, name) })
 		unlock()
 		if err != nil {
 			return fmt.Errorf("package %s: %w", name, err)

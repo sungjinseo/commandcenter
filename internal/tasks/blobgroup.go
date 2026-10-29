@@ -83,9 +83,11 @@ func groupRemoveParamsOf(s *Service, raw json.RawMessage, check bool) (string, [
 }
 
 // editGroup applies edit to the group's stored configuration, then to the
-// live group, under the registry's write lock (as the blob-store API does).
+// live group, under the registry's lock (as the blob-store API does), and
+// tells the other nodes.
 func editGroup(ctx context.Context, s *Service, name string, edit func(*blob.GroupConfig) error) error {
-	return s.Repos.WithWriteLock(func(*repo.Snapshot) error {
+	defer s.DB.Notify(context.WithoutCancel(ctx), "blobstores")
+	return s.Repos.WithWriteLock(ctx, func(*repo.Snapshot) error {
 		row, err := s.DB.GetBlobStore(ctx, name)
 		if err != nil {
 			return err

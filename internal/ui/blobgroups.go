@@ -148,7 +148,7 @@ func groupDetail(cfg blob.GroupConfig) string {
 // going to a member it made read-only or dropped.
 func (u *UI) setGroupMembers(ctx context.Context, name string, body blobStoreRequest) (blob.GroupConfig, error) {
 	var cfg blob.GroupConfig
-	err := u.Repos.WithWriteLock(func(snap *repo.Snapshot) error {
+	err := u.Repos.WithWriteLock(ctx, func(snap *repo.Snapshot) error {
 		row, err := u.DB.GetBlobStore(ctx, name)
 		if err != nil {
 			return err
@@ -204,7 +204,7 @@ func (u *UI) convertBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.writeBlobStoreError(w, r, err)
 		return
 	}
-	err := u.Repos.WithWriteLock(func(*repo.Snapshot) error {
+	err := u.Repos.WithWriteLock(r.Context(), func(*repo.Snapshot) error {
 		ctx := r.Context()
 		row, err := u.DB.GetBlobStore(ctx, name)
 		if err != nil {
@@ -249,6 +249,7 @@ func (u *UI) convertBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.writeBlobStoreError(w, r, err)
 		return
 	}
+	u.notify(r.Context(), "blobstores")
 	u.emit(r, "blobstore.convert", "", name, "member="+member)
 	u.writeBlobStore(w, r, name, http.StatusOK)
 }

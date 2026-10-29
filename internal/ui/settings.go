@@ -140,8 +140,11 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.DefaultRoles != nil { // a role reference: serialised with role deletes
-		u.accessMu.Lock()
-		defer u.accessMu.Unlock()
+		unlock, ok := u.lockAccess(w, r)
+		if !ok {
+			return
+		}
+		defer unlock()
 	}
 	// Start from the stored settings, not the snapshot, so a concurrent
 	// change to other keys (realms) is not written back stale.
@@ -301,7 +304,7 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
-	if err := u.Auth.Reload(r.Context()); err != nil {
+	if err := u.reloadAccess(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return
 	}

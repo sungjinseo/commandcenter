@@ -111,6 +111,7 @@ func (u *UI) reloadRoutes(w http.ResponseWriter, r *http.Request) bool {
 		u.fail(w, r, err)
 		return false
 	}
+	u.notify(r.Context(), "routing")
 	return true
 }
 
@@ -213,7 +214,7 @@ func (u *UI) deleteRoutingRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
-	err := u.Repos.WithWriteLock(func(*repo.Snapshot) error {
+	err := u.Repos.WithWriteLock(r.Context(), func(*repo.Snapshot) error {
 		return u.DB.DeleteRoutingRule(r.Context(), name)
 	})
 	if err != nil {
@@ -396,14 +397,17 @@ func (u *UI) updateSelector(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteSelector removes a selector no role names (409 naming the roles
-// otherwise), under accessMu so no role edit adds one meanwhile.
+// otherwise), under the access lock so no role edit adds one meanwhile.
 func (u *UI) deleteSelector(w http.ResponseWriter, r *http.Request) {
 	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
 		return
 	}
 	name := r.PathValue("name")
-	u.accessMu.Lock()
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if err := u.DB.DeleteContentSelector(r.Context(), name); err != nil {
 		u.writeSecurityError(w, r, err)
 		return

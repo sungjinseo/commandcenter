@@ -23,7 +23,10 @@ import (
 // published is called once for each new version after the transaction committed
 // (a deprecation-only publish adds none).
 func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.Repository, name string, r *http.Request, published func(version string)) error {
-	unlock := h.locks.Lock(rp.Name + "\x00" + name)
+	unlock, err := h.Store.Lock(ctx, "npm\x00"+rp.Name+"\x00"+name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 
 	// The attachment blob is streamed to the store while the document is being
@@ -247,7 +250,10 @@ func (h *Handler) validateTarball(ctx context.Context, rp *repo.Repository, sums
 }
 
 func (h *Handler) setDistTag(ctx context.Context, rp *repo.Repository, name, tag, version string) error {
-	unlock := h.locks.Lock(rp.Name + "\x00" + name)
+	unlock, err := h.Store.Lock(ctx, "npm\x00"+rp.Name+"\x00"+name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	return h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		pkgs, err := tx.ListPackages(ctx, rp.Name, name)
@@ -289,7 +295,10 @@ func (h *Handler) deleteDistTag(ctx context.Context, rp *repo.Repository, name, 
 	if tag == "latest" {
 		return repo.Errorf(http.StatusBadRequest, "the latest tag cannot be removed")
 	}
-	unlock := h.locks.Lock(rp.Name + "\x00" + name)
+	unlock, err := h.Store.Lock(ctx, "npm\x00"+rp.Name+"\x00"+name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	return h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		err := tx.DeleteDistTag(ctx, rp.Name, name, tag)

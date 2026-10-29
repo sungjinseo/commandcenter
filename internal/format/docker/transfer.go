@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"context"
 	"strings"
 
 	"commandcenter/internal/repo"
@@ -9,7 +10,7 @@ import (
 // LockPaths takes the locks a push of paths to rp takes, for repository
 // import (internal/transfer): one per image, <image>/manifests/<digest> and
 // <image>/blobs/<digest>.
-func (h *Handler) LockPaths(rp *repo.Repository, paths []string) (unlock func()) {
+func (h *Handler) LockPaths(ctx context.Context, rp *repo.Repository, paths []string) (unlock func(), err error) {
 	keys := make([]string, len(paths))
 	for i, p := range paths {
 		image := p
@@ -20,5 +21,5 @@ func (h *Handler) LockPaths(rp *repo.Repository, paths []string) (unlock func())
 		}
 		keys[i] = lockKey(rp, image)
 	}
-	return h.locks.LockAll(keys)
+	return h.Store.LockAll(ctx, keys)
 }

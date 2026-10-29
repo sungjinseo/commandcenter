@@ -18,7 +18,10 @@ func (h *Handler) RebuildMetadata(ctx context.Context, rp *repo.Repository, logf
 	if rp.Format != "yum" || rp.Type != "hosted" {
 		return fmt.Errorf("rebuild metadata of %s %s repository %q: %w", rp.Format, rp.Type, rp.Name, component.ErrNotSupported)
 	}
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "yum\x00"+rp.Name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	return h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		names, err := tx.ListPackageNames(ctx, rp.Name)

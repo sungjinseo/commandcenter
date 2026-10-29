@@ -33,12 +33,15 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		return component.Result{}, fmt.Errorf("cargo component %q is incomplete", c.Label())
 	}
 	name := strings.ToLower(c.Name)
-	unlock := h.locks.Lock(rp.Name + "\x00" + canonicalName(name))
+	unlock, err := h.Store.Lock(ctx, "cargo\x00"+rp.Name+"\x00"+canonicalName(name))
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		key := crateKey(name, c.Version)
 		switch a, err := tx.GetAsset(ctx, rp.Name, key); {

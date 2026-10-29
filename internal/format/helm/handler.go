@@ -20,15 +20,10 @@ import (
 // Add (the server's default rule); overwriting a version under writePolicy
 // allow needs Edit, checked here as Maven does.
 type Handler struct {
-	Store   *repo.Store
-	Fetcher *proxy.Fetcher
-	Auth    *auth.Authenticator
-	Now     func() time.Time
-	// locks serializes the writes of a repository: hosted uploads and
-	// deletes (each rewrites index.yaml) and a proxy's or group's index
-	// derivation. ponytail: one lock per repository; per chart if hosted
-	// pushes ever queue up (they rebuild the whole index anyway).
-	locks     repo.KeyedMutex
+	Store     *repo.Store
+	Fetcher   *proxy.Fetcher
+	Auth      *auth.Authenticator
+	Now       func() time.Time
 	upstreams sync.Map // proxy name -> *upstream
 }
 

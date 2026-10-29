@@ -199,7 +199,10 @@ func (h *Handler) publish(w http.ResponseWriter, r *http.Request, rp *repo.Repos
 		return err
 	}
 	id := ID(rt.Scope, rt.Name)
-	unlock := h.locks.Lock(rp.Name + "\x00" + id)
+	unlock, err := h.Store.Lock(r.Context(), "swift\x00"+rp.Name+"\x00"+id)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	ctx := r.Context()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
@@ -415,11 +418,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		return component.Result{}, fmt.Errorf("swift component %q is incomplete", c.Label())
 	}
 	id := ID(scope, name)
-	unlock := h.locks.Lock(rp.Name + "\x00" + id)
+	unlock, err := h.Store.Lock(ctx, "swift\x00"+rp.Name+"\x00"+id)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		p := archivePath(scope, name, c.Version)
 		var have []meta.Asset

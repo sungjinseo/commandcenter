@@ -121,7 +121,7 @@ func (u *UI) putSMTP(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
-	if err := u.Auth.Reload(r.Context()); err != nil {
+	if err := u.reloadAccess(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return
 	}

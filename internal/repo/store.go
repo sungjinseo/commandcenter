@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +43,14 @@ type Store struct {
 	// Live, if set, reports whether rp is still the registered incarnation of its
 	// name. Writes for a deleted or re-created repository are refused.
 	Live func(rp *Repository) bool
+	// CheckGen makes Tx also compare rp.Gen with the stored gen inside the
+	// transaction (meta.Tx.RepositoryGen), which is exact even before this
+	// node's registry saw another node delete and re-create the repository.
+	// The app sets it; test stores whose repositories are not stored leave
+	// it off. ponytail: writes outside Tx (Put, DB.PutAsset: raw files,
+	// Maven artifacts) are checked by neither; move them into Tx if a
+	// re-create racing them shows up.
+	CheckGen bool
 
 	// Downloads, if set, is told about every GET of an asset body that was
 	// served with a 2xx status (metrics.Recorder.Download).
@@ -249,6 +258,68 @@ func (s *Store) RemoveStore(name string) {
 	s.blobMu.Unlock()
 }
 
+// SyncStores brings the live blob stores in line with the stored rows, which
+// another node may have changed: a new store is opened at its StoreRoot under
+// dataDir, a group takes its stored members and fill policy, a store
+// converted to a group is replaced by the group, and a deleted one goes.
+// Callers hold the registry lock, as every blob store change does, so this
+// node changes none meanwhile. A store that does not open is left as it is
+// and named in the error.
+func (s *Store) SyncStores(ctx context.Context, dataDir string) error {
+	rows, err := s.DB.ListBlobStores(ctx)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	stored := map[string]bool{}
+	var groups []meta.BlobStore // after their members
+	for _, row := range rows {
+		stored[row.Name] = true
+		if row.Type == meta.BlobStoreGroup {
+			groups = append(groups, row)
+			continue
+		}
+		if cur := s.StoreByName(row.Name); cur != nil {
+			if _, isGroup := cur.Group(); !isGroup { // a file or S3 store never changes
+				continue
+			}
+		}
+		bs, err := OpenStore(dataDir, row)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("open blob store %q: %w", row.Name, err))
+			continue
+		}
+		s.AddStore(row.Name, bs)
+	}
+	for _, row := range groups {
+		if row.Group == nil {
+			continue
+		}
+		if cur := s.StoreByName(row.Name); cur != nil {
+			if cfg, ok := cur.Group(); ok {
+				if cfg.FillPolicy != row.Group.FillPolicy || !slices.Equal(cfg.Members, row.Group.Members) {
+					if err := cur.SetGroup(*row.Group, s.StoreByName); err != nil {
+						errs = append(errs, fmt.Errorf("blob store group %q: %w", row.Name, err))
+					}
+				}
+				continue
+			}
+		}
+		g, err := OpenGroup(dataDir, row, s.StoreByName)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("open blob store group %q: %w", row.Name, err))
+			continue
+		}
+		s.AddStore(row.Name, g)
+	}
+	for _, name := range s.StoreNames() {
+		if !stored[name] && name != DefaultStore {
+			s.RemoveStore(name)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // errReplaced is returned for a write that raced with a repository delete or re-create.
 func errReplaced(rp *Repository) error {
 	return Errorf(http.StatusServiceUnavailable, "repository %q changed during the request; retry", rp.Name)
@@ -264,14 +335,37 @@ func (s *Store) Current(rp *Repository) error {
 }
 
 // Tx runs fn in a metadata transaction for repository rp, first checking that rp
-// was not deleted or re-created while the request was running.
+// was not deleted or re-created while the request was running. Never call
+// Lock inside it (lock order: meta/cluster.go).
 func (s *Store) Tx(ctx context.Context, rp *Repository, fn func(*meta.Tx) error) error {
 	return s.DB.Tx(ctx, func(tx *meta.Tx) error {
 		if err := s.Current(rp); err != nil {
 			return err
 		}
+		if s.CheckGen {
+			gen, err := tx.RepositoryGen(ctx, rp.Name)
+			if errors.Is(err, meta.ErrNotFound) || err == nil && gen != rp.Gen {
+				return errReplaced(rp)
+			}
+			if err != nil {
+				return err
+			}
+		}
 		return fn(tx)
 	})
+}
+
+// Lock takes the lock named key on every node (meta.DB.Lock). The formats
+// serialize the writes of one path, package or derived index with it; their
+// keys start with the format's name and a NUL, so no two formats share one.
+// Take it before Tx, never inside (lock order: meta/cluster.go).
+func (s *Store) Lock(ctx context.Context, key string) (unlock func(), err error) {
+	return s.DB.Lock(ctx, key)
+}
+
+// LockAll is Lock for several keys at once (meta.DB.LockAll).
+func (s *Store) LockAll(ctx context.Context, keys []string) (unlock func(), err error) {
+	return s.DB.LockAll(ctx, keys)
 }
 
 func (s *Store) Get(ctx context.Context, repo, path string) (meta.Asset, error) {

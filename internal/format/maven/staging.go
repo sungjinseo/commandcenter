@@ -49,10 +49,16 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 			return nil, err
 		}
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path }) // lock order
-	for _, a := range files {
-		defer h.locks.Lock("asset\x00" + dst.Name + "\x00" + a.Path)()
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+	keys := make([]string, len(files))
+	for i, a := range files {
+		keys[i] = "maven\x00asset\x00" + dst.Name + "\x00" + a.Path
 	}
+	unlock, err := h.Store.LockAll(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, files); err != nil {
 		return nil, err
 	}

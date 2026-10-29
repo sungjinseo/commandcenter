@@ -400,11 +400,14 @@ func (im *importer) unit(ctx context.Context, lines []Line) error {
 	for i, it := range items {
 		paths[i] = it.l.Path
 	}
-	unlock := im.locker.LockPaths(im.rp, paths)
+	unlock, err := im.locker.LockPaths(ctx, im.rp, paths)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	var written, bytes, same, conflicts, rows int64
 	var changed, keptTags []string
-	err := im.s.Store.Tx(ctx, im.rp, func(tx *meta.Tx) error {
+	err = im.s.Store.Tx(ctx, im.rp, func(tx *meta.Tx) error {
 		written, bytes, same, conflicts, rows, changed, keptTags = 0, 0, 0, 0, 0, nil, nil
 		for _, it := range items {
 			cur, err := tx.GetAsset(ctx, im.dest, it.l.Path)

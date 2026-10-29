@@ -503,7 +503,10 @@ func (h *Handler) sidecar(ctx context.Context, rp *repo.Repository, project, fil
 // can read (a proxy's cached .egg, say) has no sidecar (404); a hosted row
 // remembers that (noMetadata) so the index stops advertising one.
 func (h *Handler) extract(ctx context.Context, rp *repo.Repository, project, filename string) (meta.Asset, error) {
-	unlock := h.locks.Lock(rp.Name + "\x00" + project)
+	unlock, err := h.Store.Lock(ctx, "pypi\x00"+rp.Name+"\x00"+project)
+	if err != nil {
+		return meta.Asset{}, err
+	}
 	defer unlock()
 	if a, err := h.Store.Get(ctx, rp.Name, metadataKey(project, filename)); err == nil || !errors.Is(err, repo.ErrNotFound) {
 		return a, err // stored while waiting for the lock

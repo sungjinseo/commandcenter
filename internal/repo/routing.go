@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strings"
@@ -57,6 +58,15 @@ func (r *Registry) SetRoutingRules(rules []meta.RoutingRule) error {
 	}
 	r.routes.Store(&m)
 	return nil
+}
+
+// ReloadRoutes replaces the routing rules with the stored ones.
+func (r *Registry) ReloadRoutes(ctx context.Context) error {
+	rules, err := r.db.ListRoutingRules(ctx)
+	if err != nil {
+		return err
+	}
+	return r.SetRoutingRules(rules)
 }
 
 // Route returns the compiled rule by name, or nil.

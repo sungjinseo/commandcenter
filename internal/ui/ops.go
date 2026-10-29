@@ -546,7 +546,7 @@ func (u *UI) listCertificates(w http.ResponseWriter, r *http.Request) {
 }
 
 // loadTrustStore reads the stored list (not the snapshot: a concurrent
-// change must not be written back stale). Callers hold accessMu.
+// change must not be written back stale). Callers hold the access lock.
 func (u *UI) loadTrustStore(ctx context.Context) ([]string, error) {
 	pems := []string{}
 	_, err := u.DB.GetSettingJSON(ctx, meta.SettingTrustedCertificates, &pems)
@@ -564,7 +564,7 @@ func (u *UI) saveTrustStore(w http.ResponseWriter, r *http.Request, pems []strin
 		u.fail(w, r, err)
 		return false
 	}
-	if err := u.Auth.Reload(r.Context()); err != nil {
+	if err := u.reloadAccess(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return false
 	}
@@ -589,8 +589,11 @@ func (u *UI) addCertificate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "pem: "+err.Error())
 		return
 	}
-	u.accessMu.Lock()
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r)
+	if !ok {
+		return
+	}
+	defer unlock()
 	pems, err := u.loadTrustStore(r.Context())
 	if err != nil {
 		u.fail(w, r, err)
@@ -631,8 +634,11 @@ func (u *UI) removeCertificate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := normalizeFingerprint(r.PathValue("id"))
-	u.accessMu.Lock()
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r)
+	if !ok {
+		return
+	}
+	defer unlock()
 	pems, err := u.loadTrustStore(r.Context())
 	if err != nil {
 		u.fail(w, r, err)

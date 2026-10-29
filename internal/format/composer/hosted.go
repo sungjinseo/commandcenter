@@ -101,7 +101,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if err != nil {
 		return err
 	}
-	unlock := h.locks.Lock(rp.Name + "\x00" + rt.Name)
+	unlock, err := h.Store.Lock(r.Context(), "composer\x00"+rp.Name+"\x00"+rt.Name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	ctx := r.Context()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
@@ -217,11 +220,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		return component.Result{}, fmt.Errorf("composer component %q is incomplete", c.Label())
 	}
 	name := strings.ToLower(c.Name)
-	unlock := h.locks.Lock(rp.Name + "\x00" + name)
+	unlock, err := h.Store.Lock(ctx, "composer\x00"+rp.Name+"\x00"+name)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		p := distPath(name, c.Version)
 		var have []meta.Asset

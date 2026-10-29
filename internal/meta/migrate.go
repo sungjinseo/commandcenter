@@ -10,7 +10,7 @@ import (
 // them. TestCopyTablesCoverSchema keeps it complete: a new table or column
 // goes here too.
 var copyTables = []struct{ name, cols string }{
-	{"repositories", "name, format, type, config, created_at, updated_at"},
+	{"repositories", "name, format, type, config, created_at, updated_at, gen"},
 	{"blob_stores", "name, path, created_at, type, config"},
 	{"users", "id, name, email, password_hash, source, status, roles, created_at, updated_at"},
 	{"roles", "id, description, privileges, created_at, updated_at"},

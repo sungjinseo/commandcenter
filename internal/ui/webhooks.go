@@ -112,6 +112,7 @@ func (u *UI) reloadWebhooks(r *http.Request) {
 	if err := u.Webhooks.Reload(r.Context()); err != nil && u.Log != nil {
 		u.Log.Warn("could not reload webhooks after a change", "err", err.Error())
 	}
+	u.notify(r.Context(), "webhooks")
 }
 
 // newWebhookID is 16 random hex characters.

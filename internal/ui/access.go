@@ -336,7 +336,7 @@ func (u *UI) checkLockout(ctx context.Context, change func(users []meta.User) []
 // also ends the user's sessions and password cache. It reports false after
 // having answered the request.
 func (u *UI) applied(w http.ResponseWriter, r *http.Request, invalidate string) bool {
-	if err := u.Auth.Reload(r.Context()); err != nil {
+	if err := u.reloadAccess(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return false
 	}
@@ -380,8 +380,11 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	var v validation
 	if err := checkUserID(body.ID); err != nil {
 		v = append(v, err.(*repo.ValidationError).Errors...)
@@ -458,8 +461,11 @@ func (u *UI) updateUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	cur, err := u.DB.GetUser(r.Context(), id)
 	if err != nil {
 		u.writeAccessError(w, r, err)
@@ -528,8 +534,11 @@ func (u *UI) deleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	cur, err := u.DB.GetUser(r.Context(), id)
 	if err != nil {
 		u.writeAccessError(w, r, err)
@@ -575,8 +584,11 @@ func (u *UI) resetPassword(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	cur, err := u.DB.GetUser(r.Context(), id)
 	if err != nil {
 		u.writeAccessError(w, r, err)
@@ -660,8 +672,11 @@ func (u *UI) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, &repo.ValidationError{Errors: []string{"the new password must differ from the current one"}})
 		return
 	}
-	u.accessMu.Lock() // every access write is serialised (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // every access write is serialised (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	cur, err := u.DB.GetUser(r.Context(), p.User)
 	if err != nil {
 		u.writeAccessError(w, r, err)
@@ -763,8 +778,11 @@ func (u *UI) createRole(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	var v validation
 	if err := checkRoleID(body.ID); err != nil {
 		v = append(v, err.(*repo.ValidationError).Errors...)
@@ -810,8 +828,11 @@ func (u *UI) updateRole(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	cur, err := u.DB.GetRole(r.Context(), id)
 	if err != nil {
 		u.writeAccessError(w, r, err)
@@ -848,14 +869,17 @@ func (u *UI) deleteRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
-	defer u.accessMu.Unlock()
+	unlock, ok := u.lockAccess(w, r) // load, lockout check, write and reload as one step (final review I3)
+	if !ok {
+		return
+	}
+	defer unlock()
 	if id == meta.AdminRole {
 		writeError(w, http.StatusConflict, "the admin role cannot be deleted")
 		return
 	}
 	// A role named by the LDAP settings would leave a dangling mapping
-	// (final review M2); putLDAP takes accessMu too, so the check holds.
+	// (final review M2); putLDAP takes the access lock too, so the check holds.
 	set, err := u.DB.LoadSettings(r.Context())
 	if err != nil {
 		u.fail(w, r, err)

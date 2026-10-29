@@ -64,7 +64,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	key := assetKey(rt.Module, rt.Version+ext(rt.Kind))
 	infoKey := assetKey(rt.Module, rt.Version+".info")
 
-	unlock := h.locks.Lock(rp.Name + "\x00" + rt.Module + "@" + rt.Version)
+	unlock, err := h.Store.Lock(ctx, "go\x00"+rp.Name+"\x00"+rt.Module+"@"+rt.Version)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	// Only a .mod may be re-uploaded, and only with byte-identical content (for
 	// example one derived from a zip): that is a no-op. Anything else is 409.

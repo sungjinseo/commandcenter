@@ -246,7 +246,7 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`members and fillPolicy are a group's ("type": "group")`}})
 		return
 	}
-	err := u.Repos.WithWriteLock(func(snap *repo.Snapshot) error {
+	err := u.Repos.WithWriteLock(r.Context(), func(snap *repo.Snapshot) error {
 		ctx := r.Context()
 		// A duplicate name is a conflict, not an isolation problem.
 		if _, err := u.DB.GetBlobStore(ctx, body.Name); err == nil {
@@ -312,6 +312,7 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 	if stored.Group != nil {
 		detail = groupDetail(*stored.Group)
 	}
+	u.notify(r.Context(), "blobstores")
 	u.emit(r, "blobstore.create", "", body.Name, detail)
 	v, err := u.blobStoreView(r.Context(), stored)
 	if err != nil {
@@ -364,6 +365,7 @@ func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 			u.writeBlobStoreError(w, r, err)
 			return
 		}
+		u.notify(r.Context(), "blobstores")
 		u.emit(r, "blobstore.update", "", name, groupDetail(cfg))
 	}
 	if setQuota {
@@ -468,7 +470,7 @@ func (u *UI) deleteBlobStore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "the default blob store cannot be deleted")
 		return
 	}
-	err := u.Repos.WithWriteLock(func(s *repo.Snapshot) error {
+	err := u.Repos.WithWriteLock(r.Context(), func(s *repo.Snapshot) error {
 		if users := repo.ReposForStore(s, name); len(users) > 0 {
 			return &errStoreInUse{name: name, repos: users}
 		}
@@ -500,6 +502,7 @@ func (u *UI) deleteBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.writeBlobStoreError(w, r, err)
 		return
 	}
+	u.notify(r.Context(), "blobstores")
 	u.emit(r, "blobstore.delete", "", name, "")
 	w.WriteHeader(http.StatusNoContent)
 }

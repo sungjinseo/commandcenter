@@ -36,7 +36,6 @@ type Handler struct {
 	Resolver *resolve.Resolver
 	Auth     *auth.Authenticator
 	Now      func() time.Time
-	locks    repo.KeyedMutex // one per hosted repository: every write rebuilds the documents
 }
 
 func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticator) *Handler {
@@ -194,7 +193,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if strings.HasSuffix(p, ".conda") {
 		ct = ctZip
 	}
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "conda\x00"+rp.Name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		pkg := meta.Package{Repo: rp.Name, Format: "conda", Name: name, Version: p, Attrs: string(attrs), CreatedAt: now}
@@ -255,11 +257,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		return component.Result{}, fmt.Errorf("conda component %q is not a package", c.Label())
 	}
 	files := []string{stem + ".tar.bz2", stem + ".conda"}
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "conda\x00"+rp.Name)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowsGone := 0
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowsGone, res = 0, component.Result{}
 		var current []meta.Asset
 		for _, file := range files {

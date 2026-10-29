@@ -91,7 +91,12 @@ func (h *Handler) store(ctx context.Context, rp *repo.Repository, body io.Reader
 	if err != nil {
 		return "", "", badChart("Chart.yaml cannot be stored as JSON: %v", err)
 	}
-	unlock := h.locks.Lock(rp.Name)
+	// One lock per repository (each write rewrites index.yaml). ponytail: per
+	// chart if hosted pushes ever queue up (they rebuild the whole index anyway).
+	unlock, err := h.Store.Lock(ctx, "helm\x00"+rp.Name)
+	if err != nil {
+		return "", "", err
+	}
 	defer unlock()
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		row := meta.Package{Repo: rp.Name, Format: "helm", Name: name, Version: version, Attrs: string(attrs), CreatedAt: now}
@@ -155,11 +160,14 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 	if c.Name == "" || c.Version == "" {
 		return component.Result{}, fmt.Errorf("helm component %q is incomplete", c.Label())
 	}
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "helm\x00"+rp.Name)
+	if err != nil {
+		return component.Result{}, err
+	}
 	defer unlock()
 	rowGone := false
 	var res component.Result
-	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		rowGone, res = false, component.Result{}
 		file := ChartFile(c.Name, c.Version)
 		switch a, err := tx.GetAsset(ctx, rp.Name, file); {

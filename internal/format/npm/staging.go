@@ -28,7 +28,10 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	if c.Group != "" {
 		name = c.Group + "/" + c.Name
 	}
-	unlock := h.locks.Lock(dst.Name + "\x00" + name)
+	unlock, err := h.Store.Lock(ctx, "npm\x00"+dst.Name+"\x00"+name)
+	if err != nil {
+		return nil, err
+	}
 	defer unlock()
 	rows, err := h.Store.DB.ListPackages(ctx, src.Name, name)
 	if err != nil {

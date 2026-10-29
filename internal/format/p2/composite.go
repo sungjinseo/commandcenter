@@ -196,7 +196,10 @@ func (h *Handler) children(ctx context.Context, rp *repo.Repository) (map[string
 // addChildren records the mirrored children added by a rewrite in the
 // proxy's table; one writer at a time per proxy.
 func (h *Handler) addChildren(ctx context.Context, rp *repo.Repository, added map[string]string) error {
-	unlock := h.locks.Lock(rp.Name)
+	unlock, err := h.Store.Lock(ctx, "p2\x00"+rp.Name)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	cur, err := h.children(ctx, rp)
 	if err != nil {

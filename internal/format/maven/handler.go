@@ -24,7 +24,6 @@ type Handler struct {
 	Store    *repo.Store
 	Resolver *resolve.Resolver
 	Now      func() time.Time
-	locks    repo.KeyedMutex // serializes maven-metadata.xml updates per directory
 
 	// Auth checks overwrites for Edit; nil leaves every check to the server.
 	Auth *auth.Authenticator
@@ -213,9 +212,12 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 // (plan 12 Decision 2). A POM is checked once on disk, before it is recorded,
 // against c: p.Coords, or sbtLegacy's for a file in sbt's legacy layout.
 func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path, c *Coordinates, body io.Reader) error {
-	unlock := h.locks.Lock("asset\x00" + rp.Name + "\x00" + p.Main)
+	unlock, err := h.Store.Lock(ctx, "maven\x00asset\x00"+rp.Name+"\x00"+p.Main)
+	if err != nil {
+		return err
+	}
 	defer unlock()
-	_, err := h.Store.Get(ctx, rp.Name, p.Main)
+	_, err = h.Store.Get(ctx, rp.Name, p.Main)
 	switch {
 	case err == nil && rp.WritePolicy == "allow_once":
 		return repo.Errorf(http.StatusBadRequest, "repository %q does not allow updating assets: %s", rp.Name, p.Main)
@@ -373,7 +375,10 @@ func (h *Handler) putMetadata(ctx context.Context, rp *repo.Repository, path str
 	if len(up.Plugins) == 0 {
 		return nil
 	}
-	unlock := h.locks.Lock(rp.Name + "\x00" + d)
+	unlock, err := h.Store.Lock(ctx, "maven\x00"+rp.Name+"\x00"+d)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 	existing, err := h.loadMetadata(ctx, rp, path)
 	if err != nil {
@@ -390,14 +395,17 @@ func (h *Handler) putMetadata(ctx context.Context, rp *repo.Repository, path str
 // GA without artifacts gets no document.
 func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, artifactID string, replace bool) error {
 	gaDir := strings.ReplaceAll(groupID, ".", "/") + "/" + artifactID
-	unlock := h.locks.Lock(rp.Name + "\x00" + gaDir)
+	unlock, err := h.Store.Lock(ctx, "maven\x00"+rp.Name+"\x00"+gaDir)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 
 	// The paths are streamed: memory grows with the GA's versions, not with
 	// its files (a SNAPSHOT GA that CI deploys to can hold 10^5 of them).
 	seen := map[string]bool{}
 	var versions []string
-	err := h.Store.DB.WalkAssetPaths(ctx, rp.Name, gaDir+"/", func(path string) {
+	err = h.Store.DB.WalkAssetPaths(ctx, rp.Name, gaDir+"/", func(path string) {
 		pp, err := ParsePath(path)
 		if err != nil || pp.Coords == nil || pp.Coords.GroupID != groupID || pp.Coords.ArtifactID != artifactID {
 			return
