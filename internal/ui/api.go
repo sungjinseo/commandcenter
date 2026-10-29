@@ -61,6 +61,8 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.webhookRoutes(mux)
 	u.securityRoutes(mux)
 	u.opsRoutes(mux)
+	u.userTokenRoutes(mux)
+	u.crowdRealmRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }
@@ -84,6 +86,8 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 			out["realm"] = "LDAP"
 		case p.IsOIDC():
 			out["realm"] = "OIDC"
+		case p.IsCrowd():
+			out["realm"] = "Crowd"
 		}
 		// Signed-in users see the version in the sidebar footer (plan 10);
 		// anonymous callers do not learn it.

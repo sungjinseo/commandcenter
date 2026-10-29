@@ -20,6 +20,7 @@ const (
 	SourceLocal = "local"
 	SourceLDAP  = "ldap"
 	SourceOIDC  = "oidc"
+	SourceCrowd = "crowd"
 
 	StatusActive   = "active"
 	StatusDisabled = "disabled"
@@ -129,7 +130,7 @@ roles = ?, updated_at = ? WHERE id = ?`, u.Name, u.Email, u.PasswordHash, u.Sour
 }
 
 // DeleteUser removes the user and, in the same transaction, its API tokens
-// (Decision 1). ErrNotFound if there is no such user.
+// (Decision 1) and user token. ErrNotFound if there is no such user.
 func (d *DB) DeleteUser(ctx context.Context, id string) error {
 	return d.Tx(ctx, func(tx *Tx) error {
 		res, err := tx.q.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
@@ -139,7 +140,10 @@ func (d *DB) DeleteUser(ctx context.Context, id string) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrNotFound
 		}
-		_, err = tx.q.ExecContext(ctx, `DELETE FROM tokens WHERE "user" = ?`, id)
+		if _, err = tx.q.ExecContext(ctx, `DELETE FROM tokens WHERE "user" = ?`, id); err != nil {
+			return err
+		}
+		_, err = tx.q.ExecContext(ctx, `DELETE FROM user_tokens WHERE owner = ?`, id)
 		return err
 	})
 }

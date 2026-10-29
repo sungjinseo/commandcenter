@@ -32,7 +32,7 @@ func TestTaskCRUD(t *testing.T) {
 	r = e.get(t, "/-/api/tasks", "admin")
 	wantStatus(t, r, http.StatusOK)
 	list := r.json(t)
-	if n := len(list["tasks"].([]any)); n != 2 || strings.Contains(r.body, "lastLog") || len(list["types"].([]any)) != 7 {
+	if n := len(list["tasks"].([]any)); n != 2 || strings.Contains(r.body, "lastLog") || len(list["types"].([]any)) != len(tasks.Types()) {
 		t.Fatalf("list: %s", r.body)
 	}
 	r = e.get(t, "/-/api/tasks/"+id, "admin")

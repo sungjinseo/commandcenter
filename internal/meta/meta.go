@@ -115,6 +115,9 @@ CREATE TABLE IF NOT EXISTS routing_rules(
 CREATE TABLE IF NOT EXISTS content_selectors(
   name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', expression TEXT NOT NULL,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS user_tokens(
+  owner TEXT PRIMARY KEY, name_code TEXT NOT NULL UNIQUE, hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT 0);
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in
@@ -134,7 +137,9 @@ CREATE TABLE IF NOT EXISTS content_selectors(
 //	   version, so the tables are only created by a bump.
 //	3: routing_rules and content_selectors: an older build would send a
 //	   proxy's blocked paths to the remote and drop "selector:" privileges.
-const schemaVersion = 3
+//	4: user_tokens: an older build would not create the table, and would
+//	   keep a deleted user's user token row.
+const schemaVersion = 4
 
 // Open opens the metadata database and creates or upgrades its tables:
 // PostgreSQL when target is a postgres:// or postgresql:// URL (see

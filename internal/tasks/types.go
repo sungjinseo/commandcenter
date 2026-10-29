@@ -41,6 +41,8 @@ var types = map[string]typeDef{
 	TypePurge:  {name: "Remove Maven snapshots", params: purgeParamsOf, run: runPurge, fields: purgeFields},
 	TypeRecalc: {name: "Recalculate blob store size", params: compactParams, run: runRecalc, fields: blobStoreFields},
 	TypeTemp:   {name: "Delete blob store temp files", params: compactParams, run: runTemp, fields: blobStoreFields},
+
+	TypePurgeUserTokens: {name: "Purge expired user tokens", params: noParams, run: runPurgeUserTokens, fields: []ParamSpec{}},
 }
 
 var blobStoreFields = []ParamSpec{{Name: "blobStore", Type: "blobStore", Help: "empty: every blob store"}}

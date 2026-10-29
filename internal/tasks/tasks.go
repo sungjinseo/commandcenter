@@ -39,6 +39,8 @@ const (
 	TypePurge   = "maven.purge-snapshots"
 	TypeRecalc  = "blobstore.recalculate-size"
 	TypeTemp    = "blobstore.delete-temp-files"
+
+	TypePurgeUserTokens = "security.purge-expired-user-tokens"
 )
 
 // Seed task (Decision 7): created on the first start after plan 11 unless

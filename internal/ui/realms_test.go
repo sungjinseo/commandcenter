@@ -61,7 +61,7 @@ func TestRealmsAPI(t *testing.T) {
 	r := e.admin(t, "GET", "/-/api/realms", "")
 	wantStatus(t, r, http.StatusOK)
 	if !strings.Contains(r.body, `"realms":[{"id":"local","enabled":true},{"id":"token","enabled":true}]`) ||
-		!strings.Contains(r.body, `"available":["local","token","ldap","oidc"]`) {
+		!strings.Contains(r.body, `"available":["local","token","ldap","oidc","crowd"]`) {
 		t.Fatalf("GET realms: %s", r.body)
 	}
 	wantStatus(t, e.get(t, "/-/api/realms", "ci"), http.StatusForbidden)

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -311,7 +312,11 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			if r.Header.Get(auth.UIHeader) != "1" { // the web UI handles 401 itself: no browser dialog
 				rec.Header().Set("WWW-Authenticate", realm)
 			}
-			writeErr(rec, r, repo.Errorf(http.StatusUnauthorized, "invalid credentials"))
+			msg := "invalid credentials"
+			if errors.Is(err, auth.ErrUserTokenRequired) {
+				msg = "a user token is required: send its name code and pass code instead of the user name and password"
+			}
+			writeErr(rec, r, repo.Errorf(http.StatusUnauthorized, "%s", msg))
 		} else {
 			if p.Anonymous() && !bearer {
 				// Read before anyone is signed in: a byte per idle period

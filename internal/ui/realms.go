@@ -26,7 +26,7 @@ const ldapTestCap = 30 * time.Second
 // bindReenterMessage is matched by the UI (static/access.js).
 const bindReenterMessage = "re-enter the bind password when changing the server or weakening TLS"
 
-var availableRealms = []string{meta.RealmLocal, meta.RealmToken, meta.RealmLDAP, meta.RealmOIDC}
+var availableRealms = []string{meta.RealmLocal, meta.RealmToken, meta.RealmLDAP, meta.RealmOIDC, meta.RealmCrowd}
 
 func (u *UI) realmRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/realms", u.getRealms)
@@ -103,6 +103,11 @@ func (u *UI) putRealms(w http.ResponseWriter, r *http.Request) {
 	}
 	if realmEnabled(body.Realms, meta.RealmOIDC) && !set.OIDC.Complete() {
 		v.add("configure OIDC (issuer, clientId) before enabling the oidc realm")
+		u.writeAccessError(w, r, v.err())
+		return
+	}
+	if realmEnabled(body.Realms, meta.RealmCrowd) && !set.Crowd.Complete() {
+		v.add("configure Crowd (url, applicationName) before enabling the crowd realm")
 		u.writeAccessError(w, r, v.err())
 		return
 	}

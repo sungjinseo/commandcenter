@@ -17,8 +17,8 @@ import (
 
 // The stored secrets are the SMTP password, the LDAP bind password, the
 // OIDC client secret, a proxy's remoteAuth password and bearer token, an S3 blob store's
-// secret key and a webhook's signing secret. They must be sent as they
-// are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
+// secret key, a webhook's signing secret and the Crowd application password.
+// They must be sent as they are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
 // with AES-256-GCM on write and opened on read, so a copy of meta.db or of a
 // backup does not give them away (QA N-29). A sealed value is sealedPrefix
 // followed by base64 of nonce and ciphertext; any other value is plain text,
@@ -123,6 +123,13 @@ func (s sealer) sealValue(v any) (any, error) {
 	case HTTP:
 		c.Proxy.Password, err = s.seal(c.Proxy.Password)
 		return c, err
+	case *Crowd:
+		if c != nil {
+			return s.sealValue(*c)
+		}
+	case Crowd:
+		c.ApplicationPassword, err = s.seal(c.ApplicationPassword)
+		return c, err
 	case SMTP:
 		c.Password, err = s.seal(c.Password)
 		return c, err
@@ -147,6 +154,8 @@ func (s sealer) openValue(key string, v any) (err error) {
 		c.ClientSecret, err = s.open(c.ClientSecret)
 	case *HTTP:
 		c.Proxy.Password, err = s.open(c.Proxy.Password)
+	case *Crowd:
+		c.ApplicationPassword, err = s.open(c.ApplicationPassword)
 	}
 	if err != nil {
 		return fmt.Errorf("setting %q: %w", key, err)
@@ -162,6 +171,9 @@ func (s sealer) openSettings(set *Settings) error {
 		return err
 	}
 	if err := s.openValue(SettingOIDC, &set.OIDC); err != nil {
+		return err
+	}
+	if err := s.openValue(SettingCrowd, &set.Crowd); err != nil {
 		return err
 	}
 	return s.openValue(SettingHTTP, &set.HTTP)
@@ -279,12 +291,13 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 		ldap := DefaultLDAP()
 		oidc := DefaultOIDC()
 		httpc := DefaultHTTP()
+		crowd := DefaultCrowd()
 		for _, st := range []struct {
 			key    string
 			v      any
 			secret *string
 		}{{SettingSMTP, &smtp, &smtp.Password}, {SettingLDAP, &ldap, &ldap.BindPassword}, {SettingOIDC, &oidc, &oidc.ClientSecret},
-			{SettingHTTP, &httpc, &httpc.Proxy.Password}} {
+			{SettingHTTP, &httpc, &httpc.Proxy.Password}, {SettingCrowd, &crowd, &crowd.ApplicationPassword}} {
 			found, err := getSettingJSON(ctx, tx.q, st.key, st.v)
 			if err != nil {
 				return err

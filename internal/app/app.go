@@ -466,6 +466,9 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	}
 
 	authn.Log = log // redacted LDAP failures, sign-in throttling
+	// Crowd goes through the proxy settings and the trust store, and may
+	// reach the class of address its URL resolves to.
+	authn.CrowdHTTP = func(u *url.URL) *http.Client { return proxy.NewClientFor(u, nil) }
 	authn.Sessions = auth.NewSessions()
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, Webhooks: hooks, log: log}

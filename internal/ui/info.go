@@ -106,6 +106,8 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 			realm = "LDAP"
 		case meta.SourceOIDC:
 			realm = "OIDC"
+		case meta.SourceCrowd:
+			realm = "Crowd"
 		}
 		st := stored[su.ID]
 		users = append(users, map[string]any{
@@ -134,6 +136,15 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 			"userId": ou.ID, "realm": "OIDC", "roles": ou.Roles,
 			"admin": isAdmin, "status": meta.StatusActive, "writeRepositories": wl, "privileges": privs,
 			"id": ou.ID, "name": ou.Name, "email": ou.Email, "source": meta.SourceOIDC, "hasPassword": false,
+			"createdAt": "", "updatedAt": "", "directory": true,
+		})
+	}
+	for _, cu := range u.Auth.CrowdUsers() {
+		isAdmin, wl, privs := summarize(cu.Roles)
+		users = append(users, map[string]any{
+			"userId": cu.ID, "realm": "Crowd", "roles": cu.Roles,
+			"admin": isAdmin, "status": meta.StatusActive, "writeRepositories": wl, "privileges": privs,
+			"id": cu.ID, "name": cu.Name, "email": cu.Email, "source": meta.SourceCrowd, "hasPassword": false,
 			"createdAt": "", "updatedAt": "", "directory": true,
 		})
 	}
@@ -298,6 +309,9 @@ func (u *UI) healthChecks(rctx context.Context) []check {
 		}))
 	}
 	checks = append(checks, runCheck("Repositories", u.checkRepositories))
+	if u.Auth.Snapshot().RealmEnabled(meta.RealmCrowd) {
+		checks = append(checks, runCheck("Crowd reachable", u.crowdCheck(rctx)))
+	}
 	return checks
 }
 

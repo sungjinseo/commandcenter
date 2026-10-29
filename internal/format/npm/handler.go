@@ -341,9 +341,12 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request, user string) err
 	if body.Name != "" && body.Name != user {
 		return repo.Errorf(http.StatusBadRequest, "user name %q does not match URL %q", body.Name, user)
 	}
-	p, err := h.Auth.CheckPassword(r.Context(), user, body.Password)
+	p, err := h.Auth.CheckRepoPassword(r.Context(), user, body.Password) // a user token's codes, or the password unless tokens are required
 	if wait := auth.RetryAfter(w.Header(), err); wait > 0 {
 		return repo.Errorf(http.StatusTooManyRequests, "too many failed sign-ins; try again in %d seconds", wait)
+	}
+	if errors.Is(err, auth.ErrUserTokenRequired) {
+		return repo.Errorf(http.StatusUnauthorized, "a user token is required: log in with its name code and pass code")
 	}
 	if err != nil {
 		return repo.Errorf(http.StatusUnauthorized, "invalid user name or password")

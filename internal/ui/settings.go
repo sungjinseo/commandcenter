@@ -32,7 +32,8 @@ type settingsDTO struct {
 	// TerraformDefaultRepository names the terraform repository the
 	// host-root /.well-known/terraform.json points at; "" is the first
 	// terraform repository by name.
-	TerraformDefaultRepository string `json:"terraformDefaultRepository"`
+	TerraformDefaultRepository string          `json:"terraformDefaultRepository"`
+	UserTokens                 meta.UserTokens `json:"userTokens"`
 }
 
 // httpDTO is the outbound HTTP configuration without the proxy password.
@@ -103,20 +104,22 @@ func httpChanged(a, b meta.HTTP) string {
 func settingsJSON(s meta.Settings) settingsDTO {
 	return settingsDTO{BaseURL: s.BaseURL, AnonymousRead: s.AnonymousRead, AuthenticatedRead: s.AuthenticatedRead,
 		SessionIdleMinutes: s.SessionIdleMinutes, MaxUploadMiB: s.MaxUploadMiB, DefaultLanguage: s.DefaultLanguage,
-		MetricsAnonymous: s.MetricsAnonymous, HTTP: httpJSON(s.HTTP), TerraformDefaultRepository: s.TerraformDefaultRepository}
+		MetricsAnonymous: s.MetricsAnonymous, HTTP: httpJSON(s.HTTP), TerraformDefaultRepository: s.TerraformDefaultRepository,
+		UserTokens: s.UserTokens}
 }
 
 // settingsRequest holds only the fields the caller wants to change.
 type settingsRequest struct {
-	BaseURL                    *string      `json:"baseURL"`
-	AnonymousRead              *bool        `json:"anonymousRead"`
-	AuthenticatedRead          *bool        `json:"authenticatedRead"`
-	SessionIdleMinutes         *int         `json:"sessionIdleMinutes"`
-	MaxUploadMiB               *int         `json:"maxUploadMiB"`
-	DefaultLanguage            *string      `json:"defaultLanguage"`
-	MetricsAnonymous           *bool        `json:"metricsAnonymous"`
-	HTTP                       *httpRequest `json:"http"`
-	TerraformDefaultRepository *string      `json:"terraformDefaultRepository"`
+	BaseURL                    *string          `json:"baseURL"`
+	AnonymousRead              *bool            `json:"anonymousRead"`
+	AuthenticatedRead          *bool            `json:"authenticatedRead"`
+	SessionIdleMinutes         *int             `json:"sessionIdleMinutes"`
+	MaxUploadMiB               *int             `json:"maxUploadMiB"`
+	DefaultLanguage            *string          `json:"defaultLanguage"`
+	MetricsAnonymous           *bool            `json:"metricsAnonymous"`
+	HTTP                       *httpRequest     `json:"http"`
+	TerraformDefaultRepository *string          `json:"terraformDefaultRepository"`
+	UserTokens                 *meta.UserTokens `json:"userTokens"`
 }
 
 func (u *UI) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -229,6 +232,15 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		check(meta.SettingTerraformDefaultRepository, err)
 	}
+	var tokensDetail string
+	if t := body.UserTokens; t != nil {
+		err := meta.ValidateUserTokens(*t)
+		if err == nil {
+			tokensDetail = fmt.Sprintf("enabled %t, required %t, expirationDays %d", t.Enabled, t.Required, t.ExpirationDays)
+			s.UserTokens = *t
+		}
+		check(meta.SettingUserTokens, err)
+	}
 	if err := v.err(); err != nil {
 		u.writeAccessError(w, r, err)
 		return
@@ -246,6 +258,7 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		meta.SettingMaxUploadMiB: s.MaxUploadMiB, meta.SettingDefaultLanguage: s.DefaultLanguage,
 		meta.SettingMetricsAnonymous: s.MetricsAnonymous, meta.SettingHTTP: s.HTTP,
 		meta.SettingTerraformDefaultRepository: s.TerraformDefaultRepository,
+		meta.SettingUserTokens:                 s.UserTokens,
 	}
 	err = u.DB.Tx(r.Context(), func(tx *meta.Tx) error {
 		for _, k := range changed {
@@ -273,7 +286,10 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 	if body.HTTP != nil {
 		u.emit(r, "settings.http", "", "", httpDetail)
 	}
-	if rest := slices.DeleteFunc(slices.Clone(changed), func(k string) bool { return k == meta.SettingHTTP }); len(rest) > 0 {
+	if body.UserTokens != nil {
+		u.emit(r, "settings.userTokens", "", "", tokensDetail)
+	}
+	if rest := slices.DeleteFunc(slices.Clone(changed), func(k string) bool { return k == meta.SettingHTTP || k == meta.SettingUserTokens }); len(rest) > 0 {
 		u.emit(r, "settings.update", "", "", strings.Join(rest, ", "))
 	}
 	writeJSON(w, http.StatusOK, settingsJSON(u.Auth.Snapshot().Settings()))

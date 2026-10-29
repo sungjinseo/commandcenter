@@ -389,8 +389,8 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	if body.Status == "" {
 		body.Status = meta.StatusActive
 	}
-	if body.Source != meta.SourceLocal && body.Source != meta.SourceLDAP && body.Source != meta.SourceOIDC {
-		v.add("source must be %q, %q or %q", meta.SourceLocal, meta.SourceLDAP, meta.SourceOIDC)
+	if body.Source != meta.SourceLocal && body.Source != meta.SourceLDAP && body.Source != meta.SourceOIDC && body.Source != meta.SourceCrowd {
+		v.add("source must be %q, %q, %q or %q", meta.SourceLocal, meta.SourceLDAP, meta.SourceOIDC, meta.SourceCrowd)
 	}
 	if body.Status != meta.StatusActive && body.Status != meta.StatusDisabled {
 		v.add("status must be %q or %q", meta.StatusActive, meta.StatusDisabled)
@@ -401,7 +401,7 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	hash := ""
 	switch {
 	case body.Source != meta.SourceLocal && body.Password != "":
-		v.add("an LDAP or OIDC user has no local password")
+		v.add("an LDAP, OIDC or Crowd user has no local password")
 	case body.Source == meta.SourceLocal:
 		if err := checkPassword(body.Password); err != nil {
 			v = append(v, err.(*repo.ValidationError).Errors...)

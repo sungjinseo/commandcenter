@@ -139,6 +139,7 @@ func NewSnapshotWith(users []meta.User, roles []meta.Role, settings meta.Setting
 	settings.Realms = append([]meta.Realm{}, settings.Realms...)
 	settings.LDAP = settings.LDAP.Copy()
 	settings.OIDC = settings.OIDC.Copy()
+	settings.Crowd = settings.Crowd.Copy()
 	s.settings = settings
 	for _, r := range settings.Realms {
 		if r.Enabled {
@@ -209,6 +210,7 @@ func (s *Snapshot) Settings() meta.Settings {
 	out.OIDC = s.settings.OIDC.Copy()
 	out.HTTP = s.settings.HTTP.Copy()
 	out.TrustedCerts = append([]string{}, s.settings.TrustedCerts...)
+	out.Crowd = s.settings.Crowd.Copy()
 	return out
 }
 
@@ -276,8 +278,9 @@ var ErrLockout = errors.New("the change would leave no enabled administrator who
 // CheckLockout returns ErrLockout unless an admin can log in under s:
 // (a) an active local user with a password and the admin role while the
 // local realm is enabled, or (b) the ldap realm enabled with a complete
-// configuration whose group mappings or default roles grant admin. A stored
-// ldap-source row with the admin role does not count by itself. The APIs
+// configuration whose group mappings or default roles grant admin, or (c)
+// the same for the crowd realm. A stored ldap-source row with the admin
+// role does not count by itself. The APIs
 // call it on the would-be snapshot before committing a change.
 func CheckLockout(s *Snapshot) error {
 	if s.realms[meta.RealmLocal] {
@@ -289,6 +292,9 @@ func CheckLockout(s *Snapshot) error {
 		}
 	}
 	if s.realms[meta.RealmLDAP] && s.settings.LDAP.Complete() && s.settings.LDAP.GrantsAdmin() {
+		return nil
+	}
+	if crowdUsable(s) && s.settings.Crowd.GrantsAdmin() {
 		return nil
 	}
 	return ErrLockout

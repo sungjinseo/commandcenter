@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/sync/singleflight"
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
@@ -180,6 +182,17 @@ type Authenticator struct {
 
 	oidcMu    sync.Mutex
 	oidcUsers map[string]oidcEntry // OIDC id -> identity (oidc.go)
+
+	// CrowdHTTP builds the HTTP client for a Crowd URL (the app: the
+	// egress policy and proxy settings); nil uses one trusting the SSL
+	// trust store.
+	CrowdHTTP    func(*url.URL) *http.Client
+	crowdMu      sync.Mutex
+	crowdUsers   map[string]crowdEntry   // Crowd id -> entry (crowd.go)
+	crowdPass    map[string]crowdPassHit // crowdPassKey -> cached success
+	crowdHTTP    *http.Client
+	crowdHTTPURL string
+	crowdFlight  singleflight.Group
 }
 
 const (
@@ -261,6 +274,9 @@ func (a *Authenticator) setSnapshot(s *Snapshot) {
 	if old != nil && oidcChanged(old, s) {
 		a.clearOIDC()
 	}
+	if old != nil && crowdChanged(old, s) {
+		a.clearCrowd()
+	}
 }
 
 // Snapshot returns the live snapshot. It is immutable.
@@ -278,9 +294,11 @@ func (a *Authenticator) OnUserChanged(id string) {
 		a.Sessions.DeleteUser(id)
 		a.Sessions.DeleteUser(ldapOwnerPrefix + id)
 		a.Sessions.DeleteUser(oidcOwnerPrefix + id)
+		a.Sessions.DeleteUser(crowdOwnerPrefix + id)
 	}
 	a.dropLDAP(id)
 	a.dropOIDC(id)
+	a.dropCrowd(id)
 	prefix := id + "\x00"
 	a.mu.Lock()
 	for k := range a.cache {
@@ -306,6 +324,9 @@ func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 		return a.cookiePrincipal(r), nil
 	}
 	if user, pass, ok := r.BasicAuth(); ok {
+		if p, handled, err := a.userTokenBasic(r.Context(), user, pass); handled {
+			return p, err // a user token's name code and pass code (usertoken.go)
+		}
 		// A token may stand in for the password (Maven, pip, Go CI), but only
 		// for its owner. Anything else falls through to the password check,
 		// which a token string can never pass.
@@ -326,6 +347,9 @@ func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 				// retrying one must not get its owner's sign-ins throttled.
 				return Principal{}, ErrBadCredentials
 			}
+		}
+		if repoEndpoint(r.URL.Path) && a.snap.Load().userTokensRequired() {
+			return Principal{}, ErrUserTokenRequired // refused unchecked: not a failed sign-in
 		}
 		return a.CheckPassword(r.Context(), user, pass)
 	}
@@ -418,6 +442,9 @@ func (a *Authenticator) lookup(ctx context.Context, name string) (Principal, boo
 	if id, ok := splitOIDCOwner(name); ok {
 		return a.oidcLookup(ctx, id)
 	}
+	if id, ok := strings.CutPrefix(name, crowdOwnerPrefix); ok {
+		return a.crowdLookup(ctx, id)
+	}
 	u, ok := a.snap.Load().users[name]
 	if !ok || u.Status != meta.StatusActive || u.Source != meta.SourceLocal {
 		return Principal{}, false // an ldap- or oidc-source row is an override, not a principal
@@ -461,6 +488,10 @@ func (a *Authenticator) checkRealms(ctx context.Context, user, pass string, cach
 			}
 		case meta.RealmLDAP:
 			if p, ok := a.ldapPassword(ctx, s, user, pass, cachedOnly); ok {
+				return p, true
+			}
+		case meta.RealmCrowd:
+			if p, ok := a.crowdPassword(ctx, s, user, pass, cachedOnly); ok {
 				return p, true
 			}
 		}
@@ -563,6 +594,17 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 			return Principal{}, ErrBadCredentials
 		}
 		p = op
+	} else if id, isCrowd := strings.CutPrefix(user, crowdOwnerPrefix); isCrowd {
+		// A Crowd user's token: the crowd realm must be on and the user
+		// still active in Crowd (re-read once cacheMinutes passed).
+		if owner != "" && id != owner {
+			return Principal{}, ErrBadCredentials
+		}
+		cp, ok := a.crowdLookup(ctx, id)
+		if !ok {
+			return Principal{}, ErrBadCredentials
+		}
+		p = cp
 	} else {
 		u, ok := s.users[user]
 		if !ok || u.Status != meta.StatusActive || u.Source != meta.SourceLocal {
@@ -682,7 +724,7 @@ func (a *Authenticator) RevokeUserTokens(ctx context.Context, id string) (int64,
 	if !ok {
 		return 0, errors.New("auth: the token store cannot revoke tokens")
 	}
-	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id)
+	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id, crowdOwnerPrefix+id)
 }
 
 // RevokeToken deletes token when p owns it (npm logout). A token that does not

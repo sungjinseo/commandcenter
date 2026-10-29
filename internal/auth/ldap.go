@@ -84,6 +84,8 @@ func (p Principal) Owner() string {
 		return ldapOwnerPrefix + p.User
 	case p.IsOIDC():
 		return oidcOwnerPrefix + p.User
+	case p.IsCrowd():
+		return crowdOwnerPrefix + p.User
 	}
 	return p.User
 }
@@ -362,6 +364,12 @@ func (a *Authenticator) CreateTokenFor(ctx context.Context, p Principal) (id, to
 	}
 	if p.IsOIDC() {
 		if _, ok := a.oidcLookup(ctx, p.User); !ok {
+			return "", "", fmt.Errorf("%w: %q", ErrUserDisabled, p.User)
+		}
+		return a.storeToken(ctx, p.Owner())
+	}
+	if p.IsCrowd() {
+		if _, ok := a.crowdLookup(ctx, p.User); !ok {
 			return "", "", fmt.Errorf("%w: %q", ErrUserDisabled, p.User)
 		}
 		return a.storeToken(ctx, p.Owner())

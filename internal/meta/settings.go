@@ -36,9 +36,10 @@ const (
 	RealmToken = "token" // API tokens
 	RealmLDAP  = "ldap"  // password login against LDAP (plan 12 Task 6)
 	RealmOIDC  = "oidc"  // browser login through an OpenID Connect provider
+	RealmCrowd = "crowd" // password login against Atlassian Crowd
 )
 
-var knownRealms = map[string]bool{RealmLocal: true, RealmToken: true, RealmLDAP: true, RealmOIDC: true}
+var knownRealms = map[string]bool{RealmLocal: true, RealmToken: true, RealmLDAP: true, RealmOIDC: true, RealmCrowd: true}
 
 // Realm is one entry of the ordered realm list.
 type Realm struct {
@@ -123,6 +124,8 @@ type Settings struct {
 	MetricsAnonymous           bool
 	TrustedCerts               []string // PEM, one certificate each (the SSL trust store)
 	TerraformDefaultRepository string
+	UserTokens                 UserTokens
+	Crowd                      Crowd
 }
 
 // DefaultSettings returns the values used for missing keys: today's behaviour.
@@ -138,6 +141,7 @@ func DefaultSettings() Settings {
 		OIDC:               DefaultOIDC(),
 		HTTP:               DefaultHTTP(),
 		TrustedCerts:       []string{},
+		Crowd:              DefaultCrowd(),
 	}
 }
 
@@ -253,6 +257,8 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 		{SettingMetricsAnonymous, &s.MetricsAnonymous},
 		{SettingTrustedCertificates, &s.TrustedCerts},
 		{SettingTerraformDefaultRepository, &s.TerraformDefaultRepository},
+		{SettingUserTokens, &s.UserTokens},
+		{SettingCrowd, &s.Crowd},
 	} {
 		if _, err := getSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return Settings{}, err
@@ -288,6 +294,9 @@ func (d *DB) SaveSettings(ctx context.Context, s Settings) error {
 	if s.HTTP.Proxy.Password, err = d.box.seal(s.HTTP.Proxy.Password); err != nil {
 		return err
 	}
+	if s.Crowd.ApplicationPassword, err = d.box.seal(s.Crowd.ApplicationPassword); err != nil {
+		return err
+	}
 	return d.Tx(ctx, func(tx *Tx) error { return saveSettings(ctx, tx.q, s) })
 }
 
@@ -315,6 +324,8 @@ func saveSettings(ctx context.Context, q querier, s Settings) error {
 		{SettingMetricsAnonymous, s.MetricsAnonymous},
 		{SettingTrustedCertificates, s.TrustedCerts},
 		{SettingTerraformDefaultRepository, s.TerraformDefaultRepository},
+		{SettingUserTokens, s.UserTokens},
+		{SettingCrowd, s.Crowd},
 	} {
 		if err := setSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return err
@@ -452,6 +463,18 @@ func validateSettingValue(key string, b []byte) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		return ValidateTrustedCertificates(v)
+	case SettingUserTokens:
+		var v UserTokens
+		if err := json.Unmarshal(b, &v); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		return ValidateUserTokens(v)
+	case SettingCrowd:
+		v := DefaultCrowd()
+		if err := json.Unmarshal(b, &v); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		return ValidateCrowd(v)
 	}
 	return nil
 }
