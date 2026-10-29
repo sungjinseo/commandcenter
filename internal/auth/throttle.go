@@ -41,7 +41,7 @@ import (
 // (nothing stays locked until an administrator acts), and tokens and
 // existing sessions are never affected.
 //
-// With Shared (PostgreSQL) a name's failures are counted in the database,
+// With Shared (the app's) a name's failures are counted in the database,
 // so the nodes of a cluster refuse a name together: N nodes do not allow N
 // times the guesses. A name's checks run one at a time per node, and the
 // address limit counts per node (N nodes allow an address N times its

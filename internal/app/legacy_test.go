@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -23,7 +22,7 @@ import (
 // (final review C1): it runs between two starts on the same data directory.
 func storeLegacy(t *testing.T, cfg *config.Config, edit func(*config.Repository)) {
 	t.Helper()
-	db, err := meta.Open(metatest.Target(t, filepath.Join(cfg.DataDir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, cfg.DataDir))
 	if err != nil {
 		t.Fatal(err)
 	}

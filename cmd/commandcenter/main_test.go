@@ -1,31 +1,19 @@
 package main
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha1"
-	"crypto/sha512"
 	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
-	"commandcenter/internal/app"
-	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/meta/metatest"
 )
@@ -33,11 +21,7 @@ import (
 // configYAML is a config file with dataDir, on the test's database (see
 // metatest).
 func configYAML(t *testing.T, dataDir string) []byte {
-	y := "dataDir: " + filepath.ToSlash(dataDir) + "\n"
-	if u := metatest.URL(t, dataDir); u != "" {
-		y += "database: {url: " + strconv.Quote(u) + "}\n"
-	}
-	return []byte(y)
+	return []byte("dataDir: " + filepath.ToSlash(dataDir) + "\ndatabase: {url: " + strconv.Quote(metatest.URL(t, dataDir)) + "}\n")
 }
 
 func TestHashPassword(t *testing.T) {
@@ -143,7 +127,7 @@ func TestUserResetPassword(t *testing.T) {
 			t.Fatalf("output %q lacks %q", out.String(), want)
 		}
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "data", "meta.db")))
+	db, err := meta.Open(metatest.URL(t, filepath.Join(dir, "data")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +150,7 @@ func TestUserResetPassword(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `user "dirk" is an LDAP role-override record; choose another id for a local recovery account`) {
 		t.Fatalf("ldap override id: %v", err)
 	}
-	db, err = meta.Open(metatest.Target(t, filepath.Join(dir, "data", "meta.db")))
+	db, err = meta.Open(metatest.URL(t, filepath.Join(dir, "data")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +180,7 @@ func TestSecretKeyRotate(t *testing.T) {
 	oldKey, newKey := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
 	open := func(key []byte) *meta.DB {
 		t.Helper()
-		db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+		db, err := meta.Open(metatest.URL(t, dir))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -257,248 +241,4 @@ func TestSecretKeyRotate(t *testing.T) {
 	if set, err := db.LoadSettings(ctx); err != nil || set.SMTP.Password != "smtp-secret" || set.LDAP.BindPassword != "ldap-secret" {
 		t.Fatalf("with the new key: smtp %q ldap %q, %v", set.SMTP.Password, set.LDAP.BindPassword, err)
 	}
-}
-
-// migrate-db copies an SQLite meta.db populated through the real handlers
-// into an empty target (PostgreSQL on the PostgreSQL run, else another
-// SQLite file), prints per-table counts and nothing secret, refuses a
-// non-empty target, and the server answers the same on both. On PostgreSQL
-// the reverse direction is checked too.
-func TestMigrateDB(t *testing.T) {
-	dir := t.TempDir()
-	dataDir := filepath.Join(dir, "data")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
-	key := bytes.Repeat([]byte{7}, 32)
-	t.Setenv("COMMANDCENTER_SECRET_KEY", base64.StdEncoding.EncodeToString(key))
-	// The source is SQLite at <dataDir>/meta.db whatever the test database is.
-	yaml := "dataDir: " + filepath.ToSlash(dataDir) + `
-anonymousRead: true
-users:
-  - { name: ci, passwordHash: "` + string(h) + `", roles: [deployer] }
-  - { name: root, passwordHash: "` + string(h) + `", roles: [admin] }
-roles:
-  deployer: { write: [maven-releases, npm-hosted] }
-repositories:
-  - { name: maven-releases, format: maven, type: hosted }
-  - { name: maven-public, format: maven, type: group, members: [maven-releases] }
-  - { name: npm-hosted, format: npm, type: hosted }
-`
-	cfgPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	do := func(t *testing.T, ts *httptest.Server, method, path, user, body string) (int, string) {
-		t.Helper()
-		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
-		if user != "" {
-			req.SetBasicAuth(user, "pw")
-		}
-		req.Header.Set("X-Command-Center-UI", "1")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		b, _ := io.ReadAll(resp.Body)
-		return resp.StatusCode, string(b)
-	}
-	const jar = "/repository/maven-releases/org/example/app/1.0/app-1.0.jar"
-	a, err := app.New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ts := httptest.NewServer(a.Handler)
-	for _, p := range []string{jar, "/repository/maven-releases/org/example/app/1.1/app-1.1.jar"} {
-		if st, body := do(t, ts, "PUT", p, "ci", "jar"); st != 201 {
-			t.Fatalf("PUT %s: %d %s", p, st, body)
-		}
-	}
-	if st, body := do(t, ts, "PUT", "/repository/npm-hosted/pkg", "ci", npmPublish("pkg", "1.0.0")); st != 201 {
-		t.Fatalf("npm publish: %d %s", st, body)
-	}
-	_, token, err := a.Auth.CreateToken(context.Background(), "ci")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st, body := do(t, ts, "PUT", "/-/api/settings/smtp", "root", `{"host":"mail","port":25,"security":"none","from":"a@b.com","password":"smtp-secret"}`); st/100 != 2 {
-		t.Fatalf("PUT settings: %d %s", st, body)
-	}
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, list := do(t, ts, "GET", "/-/api/events", "root", ""); strings.Count(list, `"kind":"upload"`) == 3 && strings.Contains(list, `"kind":"settings.smtp"`) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("events not recorded")
-		}
-	}
-	ts.Close()
-	a.Close()
-
-	type target struct {
-		name, to, dataDir string // dataDir: where an app on the target runs
-		url               string // database.url for that app
-	}
-	var targets []target
-	if metatest.Postgres() {
-		u := metatest.Target(t, filepath.Join(dir, "pg", "meta.db"))
-		targets = append(targets, target{"postgres", u, dataDir, u})
-	} else {
-		copyDir := filepath.Join(dir, "copy")
-		targets = append(targets, target{"sqlite", filepath.Join(copyDir, "meta.db"), copyDir, ""})
-	}
-	srcCfg := cfgPath
-	for i, tg := range targets {
-		if tg.dataDir != dataDir { // an SQLite target runs beside its own copy of the blobs
-			if err := os.CopyFS(filepath.Join(tg.dataDir, "blobs"), os.DirFS(filepath.Join(dataDir, "blobs"))); err != nil {
-				t.Fatal(err)
-			}
-		}
-		var out bytes.Buffer
-		if err := run([]string{"migrate-db", "-config", srcCfg, "-to", tg.to}, nil, &out); err != nil {
-			t.Fatalf("%s: %v", tg.name, err)
-		}
-		for _, want := range []string{"repositories       3\n", "users              2\n", "tokens             1\n", "assets             5\n",
-			"packages           1\n", "dist_tags          1\n", "settings           ", "events             ", "done; copied "} {
-			if !strings.Contains(out.String(), want) {
-				t.Fatalf("%s: output lacks %q:\n%s", tg.name, want, out.String())
-			}
-		}
-		pw := ""
-		if u, err := url.Parse(tg.to); err == nil && u.User != nil {
-			pw, _ = u.User.Password()
-		}
-		for _, secret := range []string{tg.to, token, "smtp-secret", pw} {
-			if secret != "" && strings.Contains(out.String(), secret) {
-				t.Fatalf("%s: output holds a secret:\n%s", tg.name, out.String())
-			}
-		}
-		// Again: the target is no longer empty, and the error names no URL.
-		err := run([]string{"migrate-db", "-config", srcCfg, "-to", tg.to}, nil, &out)
-		if err == nil || !strings.Contains(err.Error(), "not empty") || (pw != "" && strings.Contains(err.Error(), pw)) {
-			t.Fatalf("%s: second run: %v", tg.name, err)
-		}
-
-		// The sealed SMTP password opens with the same key on the target.
-		db, err := meta.Open(tg.to)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := db.SetSecretKey(key); err != nil {
-			t.Fatal(err)
-		}
-		if s, err := db.LoadSettings(context.Background()); err != nil || s.SMTP.Password != "smtp-secret" {
-			t.Fatalf("%s: smtp password %q, %v", tg.name, s.SMTP.Password, err)
-		}
-		db.Close()
-
-		// The HTTP API answers identically on the source and the target.
-		tgCfg := filepath.Join(dir, tg.name+".yaml")
-		y := strings.Replace(yaml, filepath.ToSlash(dataDir), filepath.ToSlash(tg.dataDir), 1)
-		if tg.url != "" {
-			y += "database: {url: " + strconv.Quote(tg.url) + "}\n"
-		}
-		if err := os.WriteFile(tgCfg, []byte(y), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		var servers []*httptest.Server
-		for _, p := range []string{cfgPath, tgCfg} {
-			c, err := config.Load(p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			a, err := app.New(c, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if err != nil {
-				t.Fatalf("%s: %v", tg.name, err)
-			}
-			defer a.Close()
-			s := httptest.NewServer(a.Handler)
-			defer s.Close()
-			servers = append(servers, s)
-		}
-		for _, c := range []struct{ method, path, user, body string }{
-			{"GET", "/-/api/repositories", "root", ""},
-			{"GET", "/-/api/repositories/maven-releases/packages", "root", ""},
-			{"GET", "/-/api/repositories/maven-releases/browse?path=org/example/app/1.0/", "root", ""},
-			{"GET", jar, "", ""},
-			{"GET", "/repository/maven-public/org/example/app/maven-metadata.xml", "", ""},
-			{"GET", "/-/api/repositories/npm-hosted/packages", "root", ""},
-			{"GET", "/repository/npm-hosted/pkg", "", ""},
-			{"GET", "/repository/npm-hosted/pkg/-/pkg-1.0.0.tgz", "", ""},
-			{"GET", "/-/api/events", "root", ""},
-			{"GET", "/-/api/users", "root", ""},
-			{"GET", "/-/api/tokens", "ci", ""},
-			{"POST", "/-/api/login", "", `{"user":"ci","password":"pw"}`},
-			{"POST", "/-/api/login", "", `{"user":"ci","password":"wrong"}`},
-		} {
-			st1, b1 := do(t, servers[0], c.method, c.path, c.user, c.body)
-			st2, b2 := do(t, servers[1], c.method, c.path, c.user, c.body)
-			b1 = strings.ReplaceAll(b1, servers[0].URL, "<base>") // npm tarball URLs
-			b2 = strings.ReplaceAll(b2, servers[1].URL, "<base>")
-			if st1 != st2 || b1 != b2 {
-				t.Fatalf("%s: %s %s differs: source %d %s; target %d %s", tg.name, c.method, c.path, st1, b1, st2, b2)
-			}
-			if st1 != 200 && !(strings.Contains(c.body, "wrong") && st1 == 401) {
-				t.Fatalf("%s %s: %d %s", c.method, c.path, st1, b1)
-			}
-		}
-		req, _ := http.NewRequest("GET", servers[1].URL+"/-/api/me", nil)
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		me, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != 200 || !strings.Contains(string(me), `"user":"ci"`) {
-			t.Fatalf("%s: token on the target: %d %s", tg.name, resp.StatusCode, me)
-		}
-		if i == 0 && metatest.Postgres() { // and back: PostgreSQL -> a new SQLite file
-			backDir := filepath.Join(dir, "back")
-			targets = append(targets, target{"back", filepath.Join(backDir, "meta.db"), backDir, ""})
-			srcCfg = tgCfg
-		}
-	}
-
-	for _, c := range []struct {
-		args []string
-		want string
-	}{
-		{[]string{"migrate-db", "-config", cfgPath}, "-to is required"},
-		{[]string{"migrate-db", "-config", cfgPath, "-to", "mysql://u:p@h/db"}, "must be a postgres://"},
-	} {
-		if err := run(c.args, nil, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Fatalf("%v: %v", c.args, err)
-		}
-	}
-}
-
-// npmPublish builds what `npm publish` sends for a package holding only its package.json.
-func npmPublish(name, version string) string {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-	pj, _ := json.Marshal(map[string]string{"name": name, "version": version})
-	tw.WriteHeader(&tar.Header{Name: "package/package.json", Mode: 0o644, Size: int64(len(pj)), Typeflag: tar.TypeReg})
-	tw.Write(pj)
-	tw.Close()
-	gz.Close()
-	tgz := buf.Bytes()
-	s1, s512 := sha1.Sum(tgz), sha512.Sum512(tgz)
-	file := name + "-" + version + ".tgz"
-	doc, _ := json.Marshal(map[string]any{
-		"_id": name, "name": name, "dist-tags": map[string]string{"latest": version},
-		"versions": map[string]any{version: map[string]any{"name": name, "version": version, "dist": map[string]string{
-			"shasum": hex.EncodeToString(s1[:]), "integrity": "sha512-" + base64.StdEncoding.EncodeToString(s512[:]),
-			"tarball": "http://localhost/" + name + "/-/" + file}}},
-		"_attachments": map[string]any{file: map[string]any{"content_type": "application/octet-stream",
-			"data": base64.StdEncoding.EncodeToString(tgz), "length": len(tgz)}},
-	})
-	return string(doc)
 }

@@ -11,16 +11,13 @@ Docker image ships at /usr/share/doc/commandcenter/. The per-module list is in
 ATTRIBUTION.md.
 
 Go standard library — BSD-3-Clause, Copyright The Go Authors.
-golang.org/x/crypto, golang.org/x/sync, golang.org/x/sys — BSD-3-Clause, Copyright 2009 The Go Authors.
+golang.org/x/crypto, golang.org/x/sync, golang.org/x/sys, golang.org/x/text — BSD-3-Clause, Copyright 2009 The Go Authors.
 gopkg.in/yaml.v3 — MIT and Apache-2.0, Copyright (c) 2006-2011 Kirill Simonov, Copyright (c) 2011-2019 Canonical Ltd.
   Its NOTICE file reads: "Copyright 2011-2016 Canonical Ltd. Licensed under the Apache License, Version 2.0."
-modernc.org/sqlite — BSD-3-Clause, Copyright (c) 2017 The Sqlite Authors. Embeds SQLite, which is in the public domain.
-modernc.org/libc — BSD-3-Clause, Copyright (c) 2017 The Libc Authors.
-modernc.org/mathutil — BSD-3-Clause, Copyright (c) 2014 The mathutil Authors.
-modernc.org/memory — BSD-3-Clause, Copyright (c) 2017 The Memory Authors.
-github.com/google/uuid — BSD-3-Clause, Copyright (c) 2009,2014 Google Inc.
-github.com/remyoudompheng/bigfft — BSD-3-Clause, Copyright (c) 2012 The Go Authors.
-github.com/dustin/go-humanize — MIT, Copyright (c) 2005-2008 Dustin Sallings.
+github.com/jackc/pgx/v5 — MIT, Copyright (c) 2013-2021 Jack Christensen.
+github.com/jackc/pgpassfile — MIT, Copyright (c) 2019 Jack Christensen.
+github.com/jackc/pgservicefile — MIT, Copyright (c) 2020 Jack Christensen.
+github.com/jackc/puddle/v2 — MIT, Copyright (c) 2018 Jack Christensen.
 
 The published Docker image is based on gcr.io/distroless/static-debian12, whose
 packages carry their own licenses inside the image.

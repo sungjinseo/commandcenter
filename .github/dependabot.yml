@@ -4,10 +4,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    ignore:
-      # modernc.org/sqlite needs the exact libc version its own go.mod names;
-      # bumping modernc.org/sqlite brings that version along.
-      - dependency-name: modernc.org/libc
   - package-ecosystem: docker
     directory: /
     schedule:

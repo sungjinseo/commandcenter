@@ -19,7 +19,7 @@ import (
 // restart (HA design 2.4, 2.5): UI sessions, pending SSO logins, the SAML
 // assertions already used, the sign-in failures of each name and the
 // identities SSO realms asserted. No transaction that checks an invariant
-// reads these tables, so on PostgreSQL their writes skip the write lock
+// reads these tables, so their writes skip the write lock
 // (execFree, or a write through QueryRowContext, as acquireLease).
 
 const (
@@ -325,16 +325,11 @@ func keyCheck(key []byte) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// CheckSecretKey makes every node of a PostgreSQL database use one secret
-// key. The first start with a key stores its check value (keyCheck); a
-// later start is refused with another key, or with none, even while no
-// secret is sealed yet, as nodes would otherwise seal with different keys.
-// On SQLite, one process, it does nothing: sealed secrets that do not open
-// already refuse a start there.
+// CheckSecretKey makes every node of the database use one secret key. The
+// first start with a key stores its check value (keyCheck); a later start
+// is refused with another key, or with none, even while no secret is
+// sealed yet, as nodes would otherwise seal with different keys.
 func (d *DB) CheckSecretKey(ctx context.Context) error {
-	if !d.sql.pg {
-		return nil
-	}
 	var stored string
 	found, err := getSettingJSON(ctx, d.sql, settingKeyCheck, &stored)
 	if err == nil && !found && d.box.aead != nil {

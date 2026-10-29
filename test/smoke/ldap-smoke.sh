@@ -17,6 +17,7 @@ root="$(pwd -W 2>/dev/null || pwd)"
 work="test/smoke/.work-ldap-$$"
 net=commandcenter-ldap-smoke-$$
 name=commandcenter-ldap-smoke-$$
+. test/postgres.sh
 ldapname=commandcenter-ldap-smoke-dir-$$
 ldapimage=bitnamilegacy/openldap:2.6
 base=http://localhost:18087
@@ -25,7 +26,7 @@ ldappw=ldap-admin-Secret-7
 alicepw=alice-ldap-pw-9
 
 cleanup() {
-  docker rm -f "$name" "$ldapname" >/dev/null 2>&1 || true
+  docker rm -f "$name" "$name-pg" "$ldapname" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }
@@ -117,7 +118,8 @@ docker exec "$ldapname" ldapsearch -x -H ldap://localhost:1389 -D "$ldapadmin" -
   -b ou=people,dc=example,dc=org "(uid=alice)" memberOf | grep -qi '^memberOf: cn=cc-admins' || fail "memberOf not set"
 
 echo "== commandcenter"
-docker run -d --name "$name" --network "$net" --memory 128m \
+start_postgres
+docker run -d --name "$name" --network "$net" -e COMMANDCENTER_DATABASE_URL="$pg_url" --memory 128m \
   -v "$root/$work/config.yaml:/etc/commandcenter/config.yaml:ro" -p 18087:8081 commandcenter:smoke >/dev/null
 ready=0
 for i in $(seq 1 30); do

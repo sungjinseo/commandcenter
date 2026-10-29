@@ -61,15 +61,13 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 		return gc(args[1:], stdout)
 	case "healthcheck":
 		return healthcheck(args[1:])
-	case "migrate-db":
-		return migrateDB(args[1:], stdout)
 	case "import-nexus":
 		return importNexus(args[1:], stdout)
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return nil
 	}
-	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, migrate-db, import-nexus, healthcheck, version)", args[0])
+	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, import-nexus, healthcheck, version)", args[0])
 }
 
 // pickConfigPath returns the config file to load. A -config given explicitly
@@ -169,7 +167,7 @@ func token(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	a.DB.Notify(context.Background(), "access") // the servers on PostgreSQL re-read users and tokens at once
+	a.DB.Notify(context.Background(), "access") // the servers re-read users and tokens at once
 	fmt.Fprintln(stdout, tok)
 	return nil
 }
@@ -299,12 +297,11 @@ func resetPassword(ctx context.Context, cfg *config.Config, name, pw string, adm
 	if err != nil {
 		return err
 	}
-	// A refusal of the name ends with the reset: the servers' own counts
-	// (SQLite) when they reload, the shared one (PostgreSQL) here.
+	// A refusal of the name ends with the reset.
 	if err := db.ClearAuthFailures(ctx, strings.ToLower(name)); err != nil {
 		return err
 	}
-	db.Notify(ctx, "access") // the servers on PostgreSQL apply it at once, the others within a few seconds
+	db.Notify(ctx, "access") // the servers apply it at once
 	for _, c := range changes {
 		fmt.Fprintln(stdout, c)
 	}
@@ -350,61 +347,5 @@ func secretKey(args []string, stdout io.Writer) error {
 	// Counts only: never a key or a secret.
 	fmt.Fprintf(stdout, "re-encrypted %d stored secrets with the new key and encrypted %d that were plain text\n", resealed, plain)
 	fmt.Fprintln(stdout, "done; start the server with the new key in COMMANDCENTER_SECRET_KEY or secretKeyFile")
-	return nil
-}
-
-const migrateUsage = "usage: commandcenter migrate-db -config PATH -to TARGET (TARGET: the postgres:// URL of an empty database, " +
-	"or the path of a new SQLite file for the reverse direction; stop the server first; the source is the database the " +
-	"config names, as for serve)"
-
-// migrateDB copies the metadata database the config names into the empty
-// database -to names, offline like user reset-password. Secrets copy as
-// stored, so the same secret key serves the target. Neither URL is ever
-// printed.
-func migrateDB(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("migrate-db", flag.ContinueOnError)
-	path := fs.String("config", defaultConfig, "config file")
-	to := fs.String("to", "", "target database: a postgres:// URL or an SQLite file path (required; must be empty)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *to == "" {
-		return errors.New("-to is required; " + migrateUsage)
-	}
-	if strings.Contains(*to, "://") && !meta.IsPostgresURL(*to) {
-		return errors.New("-to must be a postgres:// or postgresql:// URL, or the path of an SQLite file; " + migrateUsage)
-	}
-	explicit := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "config" {
-			explicit = true
-		}
-	})
-	p := pickConfigPath(*path, explicit, legacyConfig, func(msg string) { fmt.Fprintln(os.Stderr, msg) })
-	cfg, err := config.Load(p)
-	if err != nil {
-		return err
-	}
-	src, err := app.OpenDB(cfg)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	dst, err := meta.Open(*to) // its errors never hold the URL
-	if err != nil {
-		return fmt.Errorf("open target database: %w", err)
-	}
-	defer dst.Close()
-	counts, err := meta.Copy(context.Background(), src, dst)
-	if err != nil {
-		return fmt.Errorf("migrate (nothing was written): %w", err)
-	}
-	var total int64
-	for _, c := range counts {
-		fmt.Fprintf(stdout, "%-18s %d\n", c.Table, c.Rows)
-		total += c.Rows
-	}
-	fmt.Fprintf(stdout, "done; copied %d rows in %d tables; point database.url (or COMMANDCENTER_DATABASE_URL) at the target "+
-		"and start the server with the same secret key\n", total, len(counts))
 	return nil
 }

@@ -10,10 +10,11 @@ root="$(pwd -W 2>/dev/null || pwd)"
 work="test/smoke/.work-ui-$$"
 net=commandcenter-ui-smoke-$$
 name=commandcenter-ui-smoke-$$
+. test/postgres.sh
 base=http://localhost:18086
 
 cleanup() {
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker rm -f "$name" "$name-pg" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }
@@ -29,7 +30,7 @@ docker build -q -t commandcenter:smoke . >/dev/null
 
 echo "== JS parse check (node --check on every static module)"
 docker run --rm -v "$root/internal/ui/static:/s:ro" node:20-alpine sh -c 'for f in /s/*.js; do node --check "$f" || exit 1; done'   || fail "node --check failed on a static JS file"
-hash="$(printf 'ui-pass\n' | docker run --rm -i commandcenter:smoke hash-password)"
+hash="$(printf 'ui-smoke-pass\n' | docker run --rm -i commandcenter:smoke hash-password)"
 
 cat > "$work/config.yaml" <<EOF2
 anonymousRead: false
@@ -44,7 +45,8 @@ repositories:
 EOF2
 
 docker network create "$net" >/dev/null
-docker run -d --name "$name" --network "$net" --memory 128m \
+start_postgres
+docker run -d --name "$name" --network "$net" -e COMMANDCENTER_DATABASE_URL="$pg_url" --memory 128m \
   -v "$root/$work/config.yaml:/etc/commandcenter/config.yaml:ro" -p 18086:8081 commandcenter:smoke >/dev/null
 
 ready=0
@@ -70,7 +72,7 @@ head -1 "$work/ui.headers" | grep -q ' 200' || fail "GET /ui/ not 200"
 grep -qi '^content-security-policy:.*default-src' "$work/ui.headers" || fail "no CSP on /ui/"
 
 echo "== login"
-login='{"user":"admin","password":"ui-pass"}'
+login='{"user":"admin","password":"ui-smoke-pass"}'
 expect 403 "$(status -c "$jar" -X POST -d "$login" "$base/-/api/login")" "login without UI header"
 expect 200 "$(status -c "$jar" "${ui[@]}" -X POST -d "$login" "$base/-/api/login")" "login with UI header"
 grep -q "^#HttpOnly_.*cc_session" "$jar" || fail "session cookie is not HttpOnly: $(cat "$jar")"
@@ -80,7 +82,7 @@ echo "$me" | grep -q '"user":"admin"' || fail "me: $me"
 
 echo "== maven upload, browse, asset sha1"
 printf '<project><groupId>com.example</groupId><artifactId>hello</artifactId><version>1.0.0</version></project>\n' > "$work/hello-1.0.0.pom"
-expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/hello-1.0.0.pom" \
+expect 201 "$(status -u admin:ui-smoke-pass -X PUT --data-binary @"$work/hello-1.0.0.pom" \
   "$base/repository/maven-releases/com/example/hello/1.0.0/hello-1.0.0.pom")" "maven PUT"
 curl -s -b "$jar" "$base/-/api/repositories/maven-releases/browse?path=com/example/hello/1.0.0/" \
   | grep -q 'hello-1.0.0.pom' || fail "browse does not list the pom"
@@ -108,7 +110,7 @@ expect 401 "$(status -H "Authorization: Bearer $token" "$url")" "revoked token"
 expect 401 "$(status -u "admin:$token" "$url")" "revoked token as Basic password"
 
 echo "== repository content is sandboxed"
-curl -s -D "$work/asset.headers" -o "$work/asset.body" -u admin:ui-pass "$url" || fail "fetching the asset failed (curl exit $?)"
+curl -s -D "$work/asset.headers" -o "$work/asset.body" -u admin:ui-smoke-pass "$url" || fail "fetching the asset failed (curl exit $?)"
 grep -qi "^content-security-policy: sandbox" "$work/asset.headers" || fail "no sandbox CSP on repository content"
 grep -qi "^x-content-type-options: nosniff" "$work/asset.headers" || fail "no nosniff on repository content"
 grep -qi "^cache-control: private" "$work/asset.headers" || fail "authenticated repository content is not Cache-Control: private"
@@ -116,7 +118,7 @@ grep -qi "^cache-control: private" "$work/asset.headers" || fail "authenticated 
 echo "== maven delete with a session (needs the UI header)"
 expect 401 "$(status -b "$jar" -X DELETE "$url")" "maven DELETE with cookie only"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$url")" "maven DELETE with cookie and UI header"
-expect 404 "$(status -u admin:ui-pass "$url")" "deleted asset"
+expect 404 "$(status -u admin:ui-smoke-pass "$url")" "deleted asset"
 
 echo "== gc and status"
 expect 200 "$(status -b "$jar" "${ui[@]}" -X POST "$base/-/api/gc")" "gc"
@@ -132,7 +134,7 @@ expect 404 "$(status "$base/-/api/repositories/maven-releases")" "hidden repo is
 
 echo "== components (derived), users, status checks, system information, tasks"
 printf 'PK-fake-jar\n' > "$work/hello-2.0.0.jar"
-expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/hello-2.0.0.jar" \
+expect 201 "$(status -u admin:ui-smoke-pass -X PUT --data-binary @"$work/hello-2.0.0.jar" \
   "$base/repository/maven-releases/com/example/hello/2.0.0/hello-2.0.0.jar")" "maven jar PUT"
 anoncomps="$(curl -s -w ' HTTP=%{http_code}' "$base/-/api/search/components?format=maven&name=hello")"
 case "$anoncomps" in *" HTTP=200") ;; *) fail "anonymous component search status: $anoncomps" ;; esac
@@ -192,7 +194,7 @@ rid="$(echo "$created" | sed -nE 's/^\{"id":"([^"]+)".*/\1/p')"
 [ -n "$rid" ] || fail "task create: $created"
 expect 202 "$(status -b "$jar" "${ui[@]}" -X POST "$base/-/api/tasks/$rid/run")" "rebuild-metadata run"
 wait_task "$rid" | grep -q '"lastResult":"OK"' || fail "rebuild-metadata lastResult"
-expect 200 "$(status -u admin:ui-pass "$base/repository/maven-releases/com/example/hello/maven-metadata.xml")" "metadata after rebuild"
+expect 200 "$(status -u admin:ui-smoke-pass "$base/repository/maven-releases/com/example/hello/maven-metadata.xml")" "metadata after rebuild"
 detail="$(curl -s -b "$jar" "$base/-/api/tasks/$rid")"
 echo "$detail" | grep -q '"lastLog":"' || fail "task detail without the run log: $detail"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$base/-/api/tasks/$rid")" "task delete"
@@ -200,7 +202,7 @@ expect 404 "$(status -b "$jar" "$base/-/api/tasks/$rid")" "deleted task"
 
 echo "== a non-admin user is refused the admin screens"
 ojar="$work/other-cookies.txt"
-expect 200 "$(status -c "$ojar" "${ui[@]}" -X POST -d '{"user":"other","password":"ui-pass"}' "$base/-/api/login")" "login as other"
+expect 200 "$(status -c "$ojar" "${ui[@]}" -X POST -d '{"user":"other","password":"ui-smoke-pass"}' "$base/-/api/login")" "login as other"
 for p in users status/checks systeminformation tasks; do
   expect 403 "$(status -b "$ojar" "$base/-/api/$p")" "$p as a non-admin"
 done
@@ -233,7 +235,7 @@ cdone="$(wait_task "$cid")"
 echo "$cdone" | grep -q '"lastResult":"OK"' || fail "cleanup task result: $cdone"
 echo "$cdone" | grep -q 'maven-releases: policy' || fail "cleanup log has no maven-releases line: $cdone"
 # The uploaded jar is too new to be a candidate: it is still served and listed.
-expect 200 "$(status -u admin:ui-pass "$base/repository/maven-releases/com/example/hello/2.0.0/hello-2.0.0.jar")" "jar GET after cleanup"
+expect 200 "$(status -u admin:ui-smoke-pass "$base/repository/maven-releases/com/example/hello/2.0.0/hello-2.0.0.jar")" "jar GET after cleanup"
 curl -s -b "$jar" "$base/-/api/search/components?format=maven&name=hello" | grep -q 'hello-2.0.0.jar' || fail "component gone after cleanup"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$base/-/api/tasks/$cid")" "cleanup task delete"
 expect 409 "$(status -b "$jar" "${ui[@]}" -X DELETE "$base/-/api/cleanup/policies/smoke-policy")" "delete of a policy in use"
@@ -256,7 +258,7 @@ echo "$logs" | grep -q '"message":"' || fail "logs returned no lines: $logs"
 expect 403 "$(status -b "$ojar" "$base/-/api/logs")" "logs as a non-admin"
 # Download counts and request statistics are flushed every metricsFlushSeconds (2 here).
 jarurl="$base/repository/maven-releases/com/example/hello/2.0.0/hello-2.0.0.jar"
-for i in 1 2; do expect 200 "$(status -u admin:ui-pass "$jarurl")" "jar GET $i"; done
+for i in 1 2; do expect 200 "$(status -u admin:ui-smoke-pass "$jarurl")" "jar GET $i"; done
 has_downloads() {
   curl -s -b "$jar" "$base/-/api/repositories/maven-releases/asset?path=com/example/hello/2.0.0/hello-2.0.0.jar" \
     | grep -Eq '"downloads":[1-9]'
@@ -284,14 +286,14 @@ expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d "$newrepo" "$api")" "reposi
 expect 400 "$(status -b "$jar" "${ui[@]}" -X POST -d "$newrepo" "$api")" "duplicate repository create"
 rurl="$base/repository/smoke-hosted/com/example/new/1.0/new-1.0.pom"
 printf '<project><groupId>com.example</groupId><artifactId>new</artifactId><version>1.0</version></project>\n' > "$work/new-1.0.pom"
-expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/new-1.0.pom" "$rurl")" "PUT into the new repository"
-expect 200 "$(status -u admin:ui-pass "$rurl")" "GET from the new repository"
+expect 201 "$(status -u admin:ui-smoke-pass -X PUT --data-binary @"$work/new-1.0.pom" "$rurl")" "PUT into the new repository"
+expect 200 "$(status -u admin:ui-smoke-pass "$rurl")" "GET from the new repository"
 cfg="$(curl -s -b "$jar" "$api/smoke-hosted/config")"
 echo "$cfg" | grep -q '"writePolicy":"allow"' || fail "repository config: $cfg"
 # PUT is a full replace: send the whole body with writePolicy deny.
 deny='{"name":"smoke-hosted","format":"maven","type":"hosted","versionPolicy":"release","writePolicy":"deny"}'
 expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d "$deny" "$api/smoke-hosted")" "repository update to deny"
-expect 400 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/new-1.0.pom" \
+expect 400 "$(status -u admin:ui-smoke-pass -X PUT --data-binary @"$work/new-1.0.pom" \
   "$base/repository/smoke-hosted/com/example/new/2.0/new-2.0.pom")" "PUT into a deny repository"
 echo "== group member cannot be deleted"
 grp='{"name":"smoke-group","format":"maven","type":"group","members":["smoke-hosted"]}'
@@ -306,7 +308,7 @@ expect 403 "$(status -H "Authorization: Bearer $token2" "${ui[@]}" -X POST \
   -d '{"name":"tok-repo","format":"maven","type":"hosted"}' "$api")" "token-auth repository create"
 expect 403 "$(status -H "Authorization: Bearer $token2" "${ui[@]}" -X DELETE "$api/smoke-hosted")" "token-auth repository delete"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$api/smoke-hosted")" "repository delete"
-expect 404 "$(status -u admin:ui-pass "$rurl")" "GET after the repository delete"
+expect 404 "$(status -u admin:ui-smoke-pass "$rurl")" "GET after the repository delete"
 expect 404 "$(status -b "$jar" "$api/smoke-hosted/config")" "config after the repository delete"
 
 echo "== access control: users, roles, last admin, own password, realms"
@@ -358,12 +360,12 @@ off='{"name":"smoke-off","format":"maven","type":"hosted","versionPolicy":"relea
 expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d "$on" "$api")" "offline test repository create"
 ourl="$base/repository/smoke-off/com/example/off/1.0/off-1.0.pom"
 printf '<project><groupId>com.example</groupId><artifactId>off</artifactId><version>1.0</version></project>\n' > "$work/off-1.0.pom"
-expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/off-1.0.pom" "$ourl")" "PUT into the repository before going offline"
+expect 201 "$(status -u admin:ui-smoke-pass -X PUT --data-binary @"$work/off-1.0.pom" "$ourl")" "PUT into the repository before going offline"
 expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d "$off" "$api/smoke-off")" "repository offline"
-expect 503 "$(status -u admin:ui-pass "$ourl")" "GET from an offline repository"
+expect 503 "$(status -u admin:ui-smoke-pass "$ourl")" "GET from an offline repository"
 curl -s -b "$jar" "$api" | grep -Eq '"name":"smoke-off"[^}]*"online":false' || fail "repository list does not show smoke-off offline"
 expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d "$on" "$api/smoke-off")" "repository online again"
-expect 200 "$(status -u admin:ui-pass "$ourl")" "GET after going online"
+expect 200 "$(status -u admin:ui-smoke-pass "$ourl")" "GET after going online"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$api/smoke-off")" "offline test repository delete"
 # a blob store with a hosted repository in it
 bs="$base/-/api/blobstores"
@@ -376,8 +378,8 @@ expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d "$inbs" "$api")" "repositor
 curl -s -b "$jar" "$api" | grep -Eq '"name":"smoke-in-store"[^}]*"blobStore":"smoke-store"' || fail "repository list does not show the blob store"
 surl="$base/repository/smoke-in-store/com/example/bs/1.0/bs-1.0.pom"
 printf '<project><groupId>com.example</groupId><artifactId>bs</artifactId><version>1.0</version></project>\n' > "$work/bs-1.0.pom"
-expect 201 "$(status -u admin:ui-pass -X PUT --data-binary @"$work/bs-1.0.pom" "$surl")" "PUT into the blob store repository"
-curl -s -u admin:ui-pass "$surl" | cmp -s - "$work/bs-1.0.pom" || fail "download from the blob store repository differs"
+expect 201 "$(status -u admin:ui-smoke-pass -X PUT --data-binary @"$work/bs-1.0.pom" "$surl")" "PUT into the blob store repository"
+curl -s -u admin:ui-smoke-pass "$surl" | cmp -s - "$work/bs-1.0.pom" || fail "download from the blob store repository differs"
 expect 409 "$(status -b "$jar" "${ui[@]}" -X DELETE "$bs/smoke-store")" "delete of a blob store in use"
 expect 409 "$(status -b "$jar" "${ui[@]}" -X DELETE "$bs/default")" "delete of the default blob store"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$api/smoke-in-store")" "blob store repository delete"

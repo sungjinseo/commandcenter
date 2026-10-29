@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +29,7 @@ func setup(t *testing.T, remote http.HandlerFunc) (*Resolver, map[string]*repo.R
 	t.Cleanup(ts.Close)
 	dir := t.TempDir()
 	b, _ := blob.Open(dir)
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}

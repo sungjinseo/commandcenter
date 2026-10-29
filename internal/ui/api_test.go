@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -68,7 +67,7 @@ func newEnvWith(t *testing.T, baseURL string, mutate func(*config.Config)) *env 
 	if mutate != nil {
 		mutate(cfg)
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,9 +82,7 @@ func newEnvWith(t *testing.T, baseURL string, mutate func(*config.Config)) *env 
 	authn := auth.New(cfg, db)
 	authn.Source = db
 	authn.Sessions = auth.NewSessions(db, authn.SessionIdle)
-	if db.Driver() == "postgresql" { // as the app
-		authn.Shared = db
-	}
+	authn.Shared = db // as the app
 	if _, err := db.ImportRepositories(context.Background(), cfg.Repositories); err != nil {
 		t.Fatal(err)
 	}
@@ -112,12 +109,9 @@ func newEnvWith(t *testing.T, baseURL string, mutate func(*config.Config)) *env 
 }
 
 // twin is a second node on e's database, with an Authenticator, UI and
-// server of its own, as another process of a cluster. PostgreSQL only.
+// server of its own, as another process of a cluster.
 func (e *env) twin(t *testing.T) *env {
 	t.Helper()
-	if !metatest.Postgres() {
-		t.Skip("nodes share a database on PostgreSQL only")
-	}
 	authn, err := auth.Open(context.Background(), e.db, e.db)
 	if err != nil {
 		t.Fatal(err)

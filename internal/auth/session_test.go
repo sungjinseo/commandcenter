@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -32,11 +31,10 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
-// testDB is a metadata database of the test's own (metatest: SQLite, or
-// PostgreSQL with COMMANDCENTER_TEST_POSTGRES_URL).
+// testDB is a metadata database of the test's own (metatest).
 func testDB(t *testing.T) *meta.DB {
 	t.Helper()
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

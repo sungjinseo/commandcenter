@@ -355,7 +355,7 @@ func (u *UI) supportZip(w http.ResponseWriter, r *http.Request) {
 		info["uptimeSeconds"] = int64(now.Sub(u.Started).Seconds())
 	}
 	addJSON("info.json", info)
-	process := map[string]any{"database": u.DB.Driver()}
+	process := map[string]any{}
 	if c := u.Config; c != nil {
 		process["dataDir"], process["listen"], process["memoryLimitMiB"] = c.DataDir, c.Listen, c.MemoryLimitMiB
 	}

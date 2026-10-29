@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +50,7 @@ func newMavenServer(t *testing.T) (*httptest.Server, *auth.Sessions) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +190,7 @@ func TestGroupOfOfflineMembersAnswers503(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +256,7 @@ func TestCrossSiteUploadRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}

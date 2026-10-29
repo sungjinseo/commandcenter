@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -329,7 +328,7 @@ func TestRoleChangesApplyLive(t *testing.T) {
 }
 
 func TestReloadFromDatabase(t *testing.T) {
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +375,7 @@ func TestReloadFromDatabase(t *testing.T) {
 // Reload, which ends what the API's OnUserChanged would: the sessions of a
 // user whose password changed or who was disabled or removed.
 func TestReloadEndsSessionsOfChangedUsers(t *testing.T) {
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +420,7 @@ func TestReloadEndsSessionsOfChangedUsers(t *testing.T) {
 }
 
 func TestReloadUnderConcurrency(t *testing.T) {
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

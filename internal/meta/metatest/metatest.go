@@ -1,10 +1,9 @@
-// Package metatest gives tests their metadata database. By default it is
-// the SQLite file a test names, as always. With COMMANDCENTER_TEST_POSTGRES_URL
-// set to a PostgreSQL server, such as
-// postgres://postgres:pw@host:5432/postgres?sslmode=disable for a user that
-// may create databases, each test gets a database of its own instead,
-// created on first use and dropped when the test ends, so test packages
-// that run in parallel never share one.
+// Package metatest gives tests their metadata database: a PostgreSQL
+// database of their own on the server COMMANDCENTER_TEST_POSTGRES_URL names,
+// such as postgres://postgres:pw@host:5432/postgres?sslmode=disable for a
+// user that may create databases. Each database is created on first use and
+// dropped when the test ends, so test packages that run in parallel never
+// share one.
 package metatest
 
 import (
@@ -26,28 +25,33 @@ const EnvURL = "COMMANDCENTER_TEST_POSTGRES_URL"
 var (
 	mu     sync.Mutex
 	server *sql.DB
-	dbs    = map[string]string{} // SQLite path -> URL of the database standing in for it
+	dbs    = map[string]string{} // key -> URL of its database
+	hint   sync.Once
 )
 
-// Postgres reports whether the tests run on PostgreSQL.
-func Postgres() bool { return os.Getenv(EnvURL) != "" }
-
-// Target returns what meta.Open opens for the SQLite file at path: path
-// itself, or on PostgreSQL the URL of a database created for it. The same
-// path gives the same database until t ends and drops it, so a test can
-// reopen it.
-func Target(t testing.TB, path string) string {
+// URL returns the URL of the test database for key, usually the test's
+// dataDir or a t.TempDir(): the same key gives the same database until t
+// ends and drops it, so a test can reopen it. It fails the test when
+// EnvURL is not set.
+func URL(t testing.TB, key string) string {
 	t.Helper()
-	if !Postgres() {
-		return path
+	env := os.Getenv(EnvURL)
+	if env == "" {
+		msg := EnvURL + " is not set"
+		hint.Do(func() { // once per package: every test that needs a database fails the same way
+			msg += ": the tests need a PostgreSQL server and a user that may create databases, e.g. " + EnvURL +
+				"='postgres://postgres:PASSWORD@localhost:5432/postgres?sslmode=disable' " +
+				"(docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=PASSWORD postgres:17-alpine)"
+		})
+		t.Fatal(msg)
 	}
-	path = filepath.Clean(path)
+	key = filepath.Clean(key)
 	mu.Lock()
 	defer mu.Unlock()
-	if u, ok := dbs[path]; ok {
+	if u, ok := dbs[key]; ok {
 		return u
 	}
-	u, err := url.Parse(os.Getenv(EnvURL))
+	u, err := url.Parse(env)
 	if err != nil {
 		t.Fatalf("%s does not parse", EnvURL) // without the URL: it holds a password
 	}
@@ -67,24 +71,14 @@ func Target(t testing.TB, path string) string {
 		}
 	}
 	u.Path = "/" + name
-	dbs[path] = u.String()
+	dbs[key] = u.String()
 	t.Cleanup(func() {
 		mu.Lock()
-		delete(dbs, path)
+		delete(dbs, key)
 		mu.Unlock()
 		if _, err := server.Exec(`DROP DATABASE IF EXISTS ` + name + ` WITH (FORCE)`); err != nil {
 			t.Errorf("drop test database %s: %v", name, err)
 		}
 	})
 	return u.String()
-}
-
-// URL returns the database.url for a test config with dataDir: "" (SQLite
-// at <dataDir>/meta.db) or on PostgreSQL Target's URL for that file.
-func URL(t testing.TB, dataDir string) string {
-	t.Helper()
-	if !Postgres() {
-		return ""
-	}
-	return Target(t, filepath.Join(dataDir, "meta.db"))
 }

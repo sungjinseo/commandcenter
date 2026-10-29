@@ -1,7 +1,11 @@
 # The published image (default): set COMMANDCENTER_VERSION to a release without the "v"
-# (images are tagged 1.2.3) in a .env file next to this one, so every compose command sees it.
+# (images are tagged 1.2.3) and a password for the bundled PostgreSQL in a .env file next to this
+# one, so every compose command sees them. The password goes into a URL: keep it to letters and digits.
 #   echo COMMANDCENTER_VERSION=1.2.3 >> .env
+#   echo POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') >> .env
 #   docker compose up -d
+# The server reads the database URL from COMMANDCENTER_DATABASE_URL below: leave database.url
+# out of config.yaml. Back up both volumes; the metadata is in the database (pg_dump).
 # To upgrade, change the version in .env and run docker compose up -d again: it pulls first.
 #
 # A local build of this checkout instead:
@@ -11,6 +15,23 @@
 # There is no build: section on purpose: with one, compose builds this checkout whenever the
 # pull fails (a mistyped version, no access to ghcr.io) and runs it under the release's name.
 services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: commandcenter-postgres
+    environment:
+      POSTGRES_DB: commandcenter
+      POSTGRES_USER: commandcenter
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env (letters and digits)}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U commandcenter -d commandcenter"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+    stop_grace_period: 60s
+
   commandcenter:
     image: ${COMMANDCENTER_IMAGE:-ghcr.io/sungjinseo/commandcenter}:${COMMANDCENTER_VERSION:?set it in .env to a release such as 1.2.3}
     container_name: commandcenter
@@ -18,8 +39,12 @@ services:
     volumes:
       - ./config.yaml:/etc/commandcenter/config.yaml:ro
       - data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       GOMEMLIMIT: 80MiB
+      COMMANDCENTER_DATABASE_URL: postgres://commandcenter:${POSTGRES_PASSWORD:?set it in .env (letters and digits)}@postgres:5432/commandcenter?sslmode=disable
       # HTTPS_PROXY: http://proxy.example.com:3128   # set if a corporate proxy is required
       # COMMANDCENTER_SECRET_KEY: ${COMMANDCENTER_SECRET_KEY:?}   # encrypts stored SMTP/LDAP/remoteAuth secrets (shell or .env); back it up apart from the volume
     mem_limit: 128m
@@ -31,3 +56,5 @@ services:
 volumes:
   data:
     name: ${COMMANDCENTER_VOLUME:-commandcenter-data}
+  pgdata:
+    name: ${COMMANDCENTER_DB_VOLUME:-commandcenter-postgres}

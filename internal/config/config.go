@@ -98,12 +98,11 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Database is the metadata database. Without a URL it is SQLite at
-// <dataDir>/meta.db; COMMANDCENTER_DATABASE_URL may give the URL instead
-// (the app reads it, see app.OpenDB).
+// Database is the PostgreSQL metadata database. URL is required unless
+// COMMANDCENTER_DATABASE_URL gives it (the app reads it, see app.OpenDB).
 type Database struct {
 	URL      string `yaml:"url"`      // postgres:// or postgresql://; never logged (it may hold a password)
-	MaxConns int    `yaml:"maxConns"` // connection pool size; 0: 4 for SQLite, 10 for PostgreSQL
+	MaxConns int    `yaml:"maxConns"` // connection pool size; 0: 10
 }
 
 type Config struct {

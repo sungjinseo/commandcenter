@@ -2,7 +2,6 @@ package meta
 
 import (
 	"bytes"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -86,7 +85,7 @@ func checkSecretsRead(t *testing.T, db *DB) {
 // read; a database without the key, or with another one, cannot read them,
 // and the errors never hold a secret.
 func TestSecretsSealedAtRest(t *testing.T) {
-	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	path := metatest.URL(t, t.TempDir())
 	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -183,7 +182,7 @@ func TestSealRefusesSealedLookingPlainText(t *testing.T) {
 // does not open stops it before anything is written, also when it comes
 // after secrets that did open.
 func TestRotateSecretKey(t *testing.T) {
-	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	path := metatest.URL(t, t.TempDir())
 	open := func(key byte) *DB { // key 0: none
 		t.Helper()
 		db, err := Open(path)
@@ -247,7 +246,7 @@ func TestRotateSecretKey(t *testing.T) {
 // An apt signingKey is sealed like the remote credentials, opens on read,
 // and SealSecrets seals one stored in plain text.
 func TestSigningKeySealed(t *testing.T) {
-	db, err := Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -18,11 +18,11 @@ import (
 // The stored secrets are the SMTP password, the LDAP bind password, the
 // OIDC client secret, a proxy's remoteAuth password and bearer token, an S3 blob store's
 // secret key, a webhook's signing secret, the Crowd application password, the
-// SAML service provider key and, on PostgreSQL, the key that signs the Docker
-// and Conan tokens (TokenKey).
+// SAML service provider key and the key that signs the Docker and Conan
+// tokens (TokenKey).
 // They must be sent as they are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
-// with AES-256-GCM on write and opened on read, so a copy of meta.db or of a
-// backup does not give them away (QA N-29). A sealed value is sealedPrefix
+// with AES-256-GCM on write and opened on read, so a copy of the database or
+// of a backup does not give them away (QA N-29). A sealed value is sealedPrefix
 // followed by base64 of nonce and ciphertext; any other value is plain text,
 // as stored without a key or by older builds.
 const sealedPrefix = "enc:v1:"
@@ -348,8 +348,7 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 				return err
 			}
 		}
-		rows, err := tx.q.QueryContext(ctx, pg(tx.q, `SELECT name, config FROM repositories WHERE json_extract(config, '$.remoteAuth') IS NOT NULL OR json_extract(config, '$.signingKey') IS NOT NULL`,
-			`SELECT name, config FROM repositories WHERE config::json ->> 'remoteAuth' IS NOT NULL OR config::json ->> 'signingKey' IS NOT NULL`))
+		rows, err := tx.q.QueryContext(ctx, `SELECT name, config FROM repositories WHERE config::json ->> 'remoteAuth' IS NOT NULL OR config::json ->> 'signingKey' IS NOT NULL`)
 		if err != nil {
 			return err
 		}

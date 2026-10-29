@@ -3,7 +3,6 @@ package meta
 import (
 	"bytes"
 	"errors"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -278,7 +277,7 @@ func TestTokenKey(t *testing.T) {
 		}
 	}
 
-	target := metatest.Target(t, filepath.Join(t.TempDir(), "sealed.db"))
+	target := metatest.URL(t, t.TempDir())
 	k1 := openKey(t, target, 1)
 	want, err := k1.TokenKey(ctx)
 	if err != nil {
@@ -298,19 +297,10 @@ func TestTokenKey(t *testing.T) {
 	}
 }
 
-// On PostgreSQL every start uses the key of the first start with one; a
-// rotation changes it.
+// Every start uses the key of the first start with one; a rotation changes
+// it.
 func TestCheckSecretKey(t *testing.T) {
-	target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
-	if !metatest.Postgres() {
-		if err := openKey(t, target, 1).CheckSecretKey(ctx); err != nil {
-			t.Fatal(err)
-		}
-		if err := openKey(t, target, 2).CheckSecretKey(ctx); err != nil {
-			t.Fatalf("SQLite checks no key: %v", err)
-		}
-		return
-	}
+	target := metatest.URL(t, t.TempDir())
 	check := func(key byte, want string) *DB {
 		t.Helper()
 		db := openKey(t, target, key)

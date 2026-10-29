@@ -16,14 +16,13 @@ import (
 )
 
 // The identities the SSO realms (oidc, saml, rutauth) asserted, which
-// their sessions and tokens resolve through. Without Shared an identity
-// lives in this process only, as before: until a restart or a change of
-// the realm's configuration. With Shared (PostgreSQL) it is a row every
-// node reads (meta.Identity), trusted for meta.SessionMaxAge after the
+// their sessions and tokens resolve through. With Shared (the app's) it is
+// a row every node reads (meta.Identity), trusted for meta.SessionMaxAge after the
 // login that asserted it and tied to a hash of the realm's configuration,
 // so that no node uses it under another configuration; a node's own copy
 // is read again once it is identityCache old, so that a row another node
-// deleted stops working here too.
+// deleted stops working here too. Without Shared (unit tests) an identity
+// lives in this process only.
 
 const (
 	identityCache = 30 * time.Second

@@ -409,7 +409,7 @@ func TestDatabase(t *testing.T) {
 		t.Fatalf("database = %+v, %v", c.Database, err)
 	}
 	if c, err := Parse([]byte("{}")); err != nil || c.Database != (Database{}) {
-		t.Fatalf("default database = %+v, %v; want SQLite (no URL)", c.Database, err)
+		t.Fatalf("default database = %+v, %v; want none (the environment may give the URL)", c.Database, err)
 	}
 	for _, bad := range []string{"-1", "1001"} {
 		if _, err := Parse([]byte("database: {maxConns: " + bad + "}\n")); err == nil || !strings.Contains(err.Error(), "database.maxConns") {

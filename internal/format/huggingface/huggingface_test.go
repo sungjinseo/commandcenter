@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -156,7 +155,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}

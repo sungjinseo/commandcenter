@@ -49,8 +49,7 @@ func (u *UI) listNodes(w http.ResponseWriter, r *http.Request) {
 
 // checkCluster lists the live nodes and fails when this node is not ready
 // (draining, an incompatible schema, the lock connection or the listener
-// down) or when more than one node is alive on SQLite, which takes one
-// (high availability needs PostgreSQL).
+// down).
 func (u *UI) checkCluster(rctx context.Context) func() (bool, string) {
 	return func() (bool, string) {
 		ctx, cancel := context.WithTimeout(rctx, 2*time.Second)
@@ -79,9 +78,6 @@ func (u *UI) checkCluster(rctx context.Context) func() (bool, string) {
 		}
 		if err := u.DB.Ready(ctx); err != nil {
 			return false, msg + "; this node is not ready: " + err.Error()
-		}
-		if len(live) > 1 && u.DB.Driver() != "postgresql" {
-			return false, msg + ": SQLite takes one instance; several need PostgreSQL (high availability)"
 		}
 		return true, msg
 	}
@@ -419,7 +415,6 @@ func (u *UI) systemInformation(w http.ResponseWriter, r *http.Request) {
 	cfg := map[string]any{}
 	if c := u.Config; c != nil {
 		cfg["dataDir"] = c.DataDir
-		cfg["database"] = u.DB.Driver() // never the URL: it may hold a password
 		cfg["listen"] = c.Listen
 		cfg["memoryLimitMiB"] = c.MemoryLimitMiB
 	}
@@ -474,7 +469,7 @@ func (u *UI) systemInformation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stores := map[string]any{"blobCount": blobs, "blobBytes": blobBytes}
-	if n, err := u.DB.SizeBytes(r.Context()); err == nil { // the meta.db file, or the PostgreSQL database
+	if n, err := u.DB.SizeBytes(r.Context()); err == nil { // the PostgreSQL database
 		stores["metaDbBytes"] = n
 	}
 

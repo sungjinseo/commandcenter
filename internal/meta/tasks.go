@@ -239,7 +239,7 @@ func (d *DB) SetTaskRunning(ctx context.Context, id, node string, since time.Tim
 func (d *DB) RunningTask(ctx context.Context, except string) (string, error) {
 	var id string
 	err := d.sql.QueryRowContext(ctx, `SELECT t.id FROM tasks t JOIN nodes n ON n.id = t.running_node
-WHERE t.running_node <> '' AND t.running_node <> ? AND n.heartbeat_at > `+dbNow(d.sql)+` - ?
+WHERE t.running_node <> '' AND t.running_node <> ? AND n.heartbeat_at > `+dbNow+` - ?
 ORDER BY t.running_since DESC, t.id LIMIT 1`, except, NodeTTL.Milliseconds()).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil

@@ -50,9 +50,8 @@ func (d *DB) FlushDownloads(ctx context.Context, batch []DownloadDelta) error {
 	}
 	return d.Tx(ctx, func(tx *Tx) error {
 		for _, b := range batch {
-			if _, err := tx.q.ExecContext(ctx, pg(tx.q, `UPDATE assets SET downloads = downloads + ?, last_downloaded = max(last_downloaded, ?)
-WHERE repo = ? AND path = ?`, `UPDATE assets SET downloads = downloads + ?, last_downloaded = GREATEST(last_downloaded, ?)
-WHERE repo = ? AND path = ?`), b.N, toMs(b.Last), b.Repo, b.Path); err != nil {
+			if _, err := tx.q.ExecContext(ctx, `UPDATE assets SET downloads = downloads + ?, last_downloaded = GREATEST(last_downloaded, ?)
+WHERE repo = ? AND path = ?`, b.N, toMs(b.Last), b.Repo, b.Path); err != nil {
 				return err
 			}
 		}
@@ -73,9 +72,8 @@ ms = request_stats.ms + excluded.ms, upstream = request_stats.upstream + exclude
 upstream_failures = request_stats.upstream_failures + excluded.upstream_failures, upstream_ms = request_stats.upstream_ms + excluded.upstream_ms,
 cache_hits = request_stats.cache_hits + excluded.cache_hits, cache_misses = request_stats.cache_misses + excluded.cache_misses, `
 			if _, err := tx.q.ExecContext(ctx, `INSERT INTO request_stats(hour, repo, `+requestStatCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(hour, repo) DO UPDATE SET `+add+pg(tx.q,
-				`max_ms = max(request_stats.max_ms, excluded.max_ms), upstream_max_ms = max(request_stats.upstream_max_ms, excluded.upstream_max_ms)`,
-				`max_ms = GREATEST(request_stats.max_ms, excluded.max_ms), upstream_max_ms = GREATEST(request_stats.upstream_max_ms, excluded.upstream_max_ms)`),
+ON CONFLICT(hour, repo) DO UPDATE SET `+add+
+				`max_ms = GREATEST(request_stats.max_ms, excluded.max_ms), upstream_max_ms = GREATEST(request_stats.upstream_max_ms, excluded.upstream_max_ms)`,
 				b.Hour, b.Repo, b.Requests, b.Bytes, b.Errors, b.BytesIn, b.Ms, b.MaxMs,
 				b.Upstream, b.UpstreamFailures, b.UpstreamMs, b.UpstreamMaxMs, b.CacheHits, b.CacheMisses); err != nil {
 				return err

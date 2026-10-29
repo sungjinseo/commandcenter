@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"commandcenter/internal/auth"
-	"commandcenter/internal/meta/metatest"
 )
 
 // uiCall sends a UI request with the session cookie id, if any, and returns the
@@ -61,9 +60,6 @@ func signedIn(t *testing.T, base, id string) bool {
 // behind a load balancer would run them (without Serve: not registered).
 func twoApps(t *testing.T) (a, b *App, ua, ub string) {
 	t.Helper()
-	if !metatest.Postgres() {
-		t.Skip("nodes share a database on PostgreSQL only")
-	}
 	cfg := testConfig(t, "  - { name: conan-hosted, format: conan, type: hosted }\n")
 	start := func() (*App, string) {
 		x, err := New(cfg, quiet())
@@ -155,7 +151,7 @@ func TestClusterRegistryTokens(t *testing.T) {
 	}
 }
 
-// A session survives a restart, on SQLite too.
+// A session survives a restart.
 func TestSessionSurvivesRestart(t *testing.T) {
 	cfg := testConfig(t, "")
 	start := func() string {
@@ -175,8 +171,8 @@ func TestSessionSurvivesRestart(t *testing.T) {
 	}
 }
 
-// On PostgreSQL a node with another key, or none, does not start, even
-// before a secret is stored (HA design 2.5); SQLite checks nothing.
+// A node with another key, or none, does not start, even before a secret
+// is stored (HA design 2.5).
 func TestClusterSecretKey(t *testing.T) {
 	cfg := testConfig(t, "")
 	key := func(b byte) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{b}, 32)) }
@@ -185,9 +181,6 @@ func TestClusterSecretKey(t *testing.T) {
 	} {
 		t.Setenv(secretKeyEnv, c.key)
 		a, err := New(cfg, quiet())
-		if !metatest.Postgres() {
-			c.want = ""
-		}
 		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
 			t.Fatalf("start with key %q: %v, want %q", c.key, err, c.want)
 		}

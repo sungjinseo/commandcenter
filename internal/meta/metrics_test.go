@@ -1,12 +1,8 @@
 package meta
 
 import (
-	"database/sql"
-	"path/filepath"
 	"testing"
 	"time"
-
-	"commandcenter/internal/meta/metatest"
 )
 
 func TestFlushDownloadsAddsAndTakesMax(t *testing.T) {
@@ -88,38 +84,6 @@ func TestRequestStatsBucketsAndPrune(t *testing.T) {
 	}
 }
 
-func TestMigrationIsIdempotentOnOldDB(t *testing.T) {
-	if metatest.Postgres() {
-		t.Skip("SQLite's migration: PostgreSQL support starts at schema 1")
-	}
-	path := filepath.Join(t.TempDir(), "meta.db")
-	old, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := old.Exec(`CREATE TABLE assets(
-  repo TEXT NOT NULL, path TEXT NOT NULL, blob_sha256 TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
-  content_type TEXT NOT NULL DEFAULT '', sha1 TEXT NOT NULL DEFAULT '', md5 TEXT NOT NULL DEFAULT '',
-  sha512 TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0, last_modified INTEGER NOT NULL DEFAULT 0,
-  remote_etag TEXT NOT NULL DEFAULT '', remote_last_modified TEXT NOT NULL DEFAULT '',
-  checked_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(repo, path)) WITHOUT ROWID;
-INSERT INTO assets(repo, path, blob_sha256) VALUES('r','p','s');`); err != nil {
-		t.Fatal(err)
-	}
-	old.Close()
-	for i := 0; i < 3; i++ { // each start runs the migration again
-		db, err := Open(path)
-		if err != nil {
-			t.Fatalf("open %d: %v", i, err)
-		}
-		a, err := db.GetAsset(ctx, "r", "p")
-		if err != nil || a.Downloads != 0 || !a.LastDownloaded.IsZero() {
-			t.Fatalf("open %d: %+v %v", i, a, err)
-		}
-		db.Close()
-	}
-}
-
 func TestFlushRollsBackWholeBatchOnError(t *testing.T) {
 	db := openTest(t)
 	for _, p := range []string{"a", "bad"} {
@@ -129,16 +93,10 @@ func TestFlushRollsBackWholeBatchOnError(t *testing.T) {
 	}
 	// A trigger forces the second row of each batch to fail.
 	ddls := []string{
-		`CREATE TRIGGER fail_dl BEFORE UPDATE ON assets WHEN NEW.path = 'bad' BEGIN SELECT RAISE(ABORT, 'forced'); END`,
-		`CREATE TRIGGER fail_rq BEFORE INSERT ON request_stats WHEN NEW.repo = 'bad' BEGIN SELECT RAISE(ABORT, 'forced'); END`,
-	}
-	if db.sql.pg {
-		ddls = []string{
-			`CREATE FUNCTION fail_dl() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.path = 'bad' THEN RAISE 'forced'; END IF; RETURN NEW; END $$`,
-			`CREATE TRIGGER fail_dl BEFORE UPDATE ON assets FOR EACH ROW EXECUTE FUNCTION fail_dl()`,
-			`CREATE FUNCTION fail_rq() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.repo = 'bad' THEN RAISE 'forced'; END IF; RETURN NEW; END $$`,
-			`CREATE TRIGGER fail_rq BEFORE INSERT ON request_stats FOR EACH ROW EXECUTE FUNCTION fail_rq()`,
-		}
+		`CREATE FUNCTION fail_dl() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.path = 'bad' THEN RAISE 'forced'; END IF; RETURN NEW; END $$`,
+		`CREATE TRIGGER fail_dl BEFORE UPDATE ON assets FOR EACH ROW EXECUTE FUNCTION fail_dl()`,
+		`CREATE FUNCTION fail_rq() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.repo = 'bad' THEN RAISE 'forced'; END IF; RETURN NEW; END $$`,
+		`CREATE TRIGGER fail_rq BEFORE INSERT ON request_stats FOR EACH ROW EXECUTE FUNCTION fail_rq()`,
 	}
 	for _, ddl := range ddls {
 		if _, err := db.sql.ExecContext(ctx, ddl); err != nil {

@@ -229,8 +229,9 @@ func TestKubernetesLivenessBypassesConnCap(t *testing.T) {
 	var cs []container
 	for dec := yaml.NewDecoder(f); ; {
 		var doc struct {
-			Kind string
-			Spec struct {
+			Kind     string
+			Metadata struct{ Name string }
+			Spec     struct {
 				Template struct {
 					Spec struct{ Containers []container }
 				}
@@ -241,7 +242,7 @@ func TestKubernetesLivenessBypassesConnCap(t *testing.T) {
 		} else if err != nil {
 			t.Fatal(err)
 		}
-		if doc.Kind == "StatefulSet" {
+		if doc.Kind == "StatefulSet" && doc.Metadata.Name == "commandcenter" { // not its PostgreSQL
 			cs = append(cs, doc.Spec.Template.Spec.Containers...)
 		}
 	}

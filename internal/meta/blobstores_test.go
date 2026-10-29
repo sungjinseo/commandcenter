@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"path/filepath"
 	"testing"
 
 	"commandcenter/internal/blob"
@@ -14,7 +13,7 @@ import (
 // A blob_stores table from schema 1 (no type or config column) reads back
 // as file stores after the upgrade, next to new S3 rows.
 func TestBlobStoreUpgradeFromSchema1(t *testing.T) {
-	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	path := metatest.URL(t, t.TempDir())
 	raw := rawOpen(t, path)
 	for _, q := range []string{
 		`CREATE TABLE blob_stores(name TEXT PRIMARY KEY, path TEXT NOT NULL, created_at BIGINT NOT NULL)`,
@@ -58,7 +57,7 @@ func TestBlobStoreUpgradeFromSchema1(t *testing.T) {
 // The soft quota lives in the config column next to an S3 store's sealed
 // secret: setting it keeps the secret, rekeying keeps the quota.
 func TestBlobStoreQuotaStored(t *testing.T) {
-	db, err := Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

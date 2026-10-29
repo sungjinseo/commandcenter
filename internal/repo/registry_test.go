@@ -21,7 +21,7 @@ import (
 
 func newRegistry(t *testing.T, defs ...config.Repository) (*Registry, *meta.DB) {
 	t.Helper()
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,8 +221,8 @@ func TestRegistryValidationErrors(t *testing.T) {
 		ve.Errors[0] != `repository "g": unknown member "missing"` {
 		t.Fatalf("update: %v", err)
 	}
-	if reg.Snapshot() != before {
-		t.Fatal("a rejected write swapped the snapshot")
+	if got := reg.Snapshot(); fmt.Sprint(names(got.Sorted), got.ByName["g"].Members) != fmt.Sprint(names(before.Sorted), before.ByName["g"].Members) {
+		t.Fatal("a rejected write changed the snapshot")
 	}
 	if defs, _ := db.ListRepositories(ctx); len(defs) != 3 {
 		t.Fatalf("a rejected write reached the db: %+v", defs)
@@ -384,8 +384,8 @@ func TestRegistryCredentialsDoNotFollowHostChange(t *testing.T) {
 		if !errors.As(err, &ve) || !strings.Contains(ve.Errors[0], "remote host changed: re-enter the remote credentials or clear them") {
 			t.Fatalf("update to %s: %v", def.Remote, err)
 		}
-		if reg.Snapshot() != before {
-			t.Fatal("rejected update swapped the snapshot")
+		if reg.Get("p").Remote != before.ByName["p"].Remote {
+			t.Fatal("a rejected update changed the snapshot")
 		}
 	}
 	if a := remoteAuthOf(t, reg, db, "p"); a != creds || reg.Get("p").Remote != "https://r.example/" {
@@ -706,7 +706,7 @@ func TestRegistryCreateNormalizesRemoteAuth(t *testing.T) {
 // M7 (final review): a legacy row stored with an empty blobStore lives in the
 // default store, so an update that says "default" explicitly is no change.
 func TestRegistryBlobStoreLegacyEmptyAcceptsDefault(t *testing.T) {
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

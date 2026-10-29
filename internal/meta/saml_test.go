@@ -3,7 +3,6 @@ package meta
 import (
 	"bytes"
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,7 +58,7 @@ func TestValidateSAML(t *testing.T) {
 // and SealSecrets cover it.
 func TestSAMLKeySealed(t *testing.T) {
 	ctx := context.Background()
-	db, err := Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

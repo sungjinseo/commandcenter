@@ -11,7 +11,7 @@ welcome. Write issues and pull requests in Korean or English, whichever you pref
 
 - **Bugs**: open an issue with the bug report form. The `commandcenter version` output and how you
   deploy it (Docker or Kubernetes, reverse proxy, storage for `/data`) save a round trip.
-- **Larger changes** (a new format or repository type, a change to `meta.db` or the blob layout, a
+- **Larger changes** (a new format or repository type, a change to the database schema or the blob layout, a
   new config key, a new dependency): open an issue first, so the design is agreed before you write
   the code.
 - **Small fixes** (documentation, an obvious bug together with its test) can go straight to a pull
@@ -43,8 +43,8 @@ requests, uploads or proxy downloads are handled.
 
 ## How the code is written
 
-- **Standard library first.** The binary has four direct dependencies (SQLite, YAML,
-  `golang.org/x/crypto`, `golang.org/x/sync`); even the LDAP client is built on the standard
+- **Standard library first.** The binary has four direct dependencies (the PostgreSQL driver
+  `pgx`, YAML, `golang.org/x/crypto`, `golang.org/x/sync`); even the LDAP client is built on the standard
   library. A new module needs a reason in the pull request, a row in [ATTRIBUTION.md](ATTRIBUTION.md)
   and a regenerated `THIRD_PARTY_LICENSES.txt` (`scripts/third-party-licenses.sh`). The build stays
   `CGO_ENABLED=0`.

@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -84,7 +83,7 @@ func (e *env) clock() time.Time {
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	e := &env{path: metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")), now: time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC)}
+	e := &env{path: metatest.URL(t, t.TempDir()), now: time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC)}
 	e.open(t)
 	return e
 }
@@ -477,9 +476,6 @@ func TestStaleDeliveryNotResent(t *testing.T) {
 // Two nodes' dispatchers on one database (high availability) send every
 // delivery exactly once: each sends only what it claimed.
 func TestTwoDispatchersSendOnce(t *testing.T) {
-	if !metatest.Postgres() {
-		t.Skip("several nodes need PostgreSQL")
-	}
 	e := newEnv(t)
 	dbB, err := meta.Open(e.path)
 	if err != nil {

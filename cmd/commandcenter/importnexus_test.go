@@ -25,6 +25,7 @@ import (
 
 	"commandcenter/internal/app"
 	"commandcenter/internal/config"
+	"commandcenter/internal/meta/metatest"
 )
 
 // fakeNexus is a Nexus 3 REST API v1 with hosted maven2, npm, pypi, raw, helm
@@ -187,8 +188,10 @@ func TestImportNexus(t *testing.T) {
 
 	// The target: a Command Center with matching repositories.
 	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	dataDir := t.TempDir()
 	cfg, err := config.Parse([]byte(`
-dataDir: ` + filepath.ToSlash(t.TempDir()) + `
+dataDir: ` + filepath.ToSlash(dataDir) + `
+database: {url: ` + strconv.Quote(metatest.URL(t, dataDir)) + `}
 anonymousRead: true
 users:
   - { name: ci, passwordHash: "` + string(h) + `", roles: [deployer] }

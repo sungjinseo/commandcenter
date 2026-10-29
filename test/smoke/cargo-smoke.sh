@@ -12,9 +12,10 @@ root="$(pwd -W 2>/dev/null || pwd)"
 work="test/smoke/.work-cargo-$$"
 net=commandcenter-cargo-smoke-$$
 name=commandcenter-cargo-smoke-$$
+. test/postgres.sh
 
 cleanup() {
-  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker rm -f "$name" "$name-pg" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }
@@ -75,7 +76,8 @@ echo "CARGO CLIENT OK"
 EOF
 
 docker network create "$net" >/dev/null
-docker run -d --name "$name" --network "$net" --network-alias commandcenter --memory 128m \
+start_postgres
+docker run -d --name "$name" --network "$net" -e COMMANDCENTER_DATABASE_URL="$pg_url" --network-alias commandcenter --memory 128m \
   -v "$root/$work/config.yaml:/etc/commandcenter/config.yaml:ro" -p 18085:8081 commandcenter:smoke-cargo >/dev/null
 
 ready=0

@@ -1231,7 +1231,7 @@ func (h *Handler) searchDownload(w http.ResponseWriter, r *http.Request) {
 
 // statusWritable is the readiness check (Kubernetes, load balancers): 200
 // while the node should take requests (meta.DB.Ready: the database answers,
-// the node is not draining, its schema is compatible and, on PostgreSQL,
+// the node is not draining, its schema is compatible and
 // its lock connection and listener are up), else 503.
 func (h *Handler) statusWritable(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)

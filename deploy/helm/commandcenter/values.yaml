@@ -1,8 +1,9 @@
 # Command Center chart. Read README.md (next to this file) and "Kubernetes" in docs/guide.md first.
 #
-# One pod by default: a StatefulSet with its own volume, and meta.db SQLite in WAL mode on it.
-# replicaCount above 1 runs the pods active-active (high availability) and needs PostgreSQL
-# (database) and a ReadWriteMany volume (persistence). values.schema.json rejects unknown keys.
+# One pod by default: a StatefulSet with its own volume, beside a bundled single-pod PostgreSQL
+# (postgresql) that holds the metadata. replicaCount above 1 runs the pods active-active (high
+# availability) and needs a ReadWriteMany volume (persistence). values.schema.json rejects unknown
+# keys.
 
 # 1 renders the single-pod StatefulSet. Above 1: a Deployment (rolling updates start a new pod
 # before they stop an old one), one shared ReadWriteMany claim, a PodDisruptionBudget of one pod
@@ -25,12 +26,13 @@ nameOverride: ""
 fullnameOverride: ""
 
 # config.yaml at /etc/commandcenter/config.yaml. baseURL, anonymousRead, the users
-# (adminPasswordHash), roles, maxUploadMiB and repositories are imported into meta.db on the first
+# (adminPasswordHash), roles, maxUploadMiB and repositories are imported into the database on the first
 # start only: change them in the web UI afterwards. The other keys are read on every start, and
 # only a change to those restarts the pod.
 config:
   # A Secret holding the whole file under the key config.yaml, which you then keep up to date and
-  # restart the pod for. The other config values must stay empty.
+  # restart the pod for. The other config values must stay empty. If its config.yaml has a
+  # database.url, set postgresql.enabled to false: the server refuses a second URL.
   existingSecret: ""
   # The address clients use, https when TLS ends at the ingress. Required.
   baseURL: ""
@@ -43,7 +45,7 @@ config:
   repositories: []
   # Other keys of config.yaml: users (replaces the admin user above), roles, maxUploadMiB,
   # metricsFlushSeconds, secretKeyFile. listen and dataDir belong to the chart; memoryLimitMiB is
-  # goMemLimit below.
+  # goMemLimit below; the database URL is database or postgresql below.
   extra: {}
 
 # Encrypts the stored SMTP password, LDAP bind password and proxy remoteAuth credentials
@@ -54,18 +56,56 @@ secretKey:
   existingSecret: ""
   key: key
 
-# Metadata database. Empty uses SQLite in /data/meta.db, which needs block storage. On NFS, for
-# more than a small team, and always with replicaCount above 1, point it at PostgreSQL: the volume
-# then holds only blobs, which may be on NFS. The URL goes in a Secret (it carries the password):
+# Metadata database: PostgreSQL 13 or newer, required. Empty existingSecret uses the bundled one
+# (postgresql below). For an external server or a managed service, put the URL in a Secret (it
+# carries the password):
 #   kubectl create secret generic commandcenter-database \
 #     --from-literal=url='postgres://cc:PASSWORD@db:5432/commandcenter?sslmode=require'
-# The database must exist; tables are created on the first start. "commandcenter migrate-db"
-# copies an existing meta.db into it (docs/guide.md).
+# The database must exist, owned by the URL's role; tables are created on the first start.
 database:
   existingSecret: ""
   key: url
-  # Pool size; 0 leaves the server's default (10 on PostgreSQL).
+  # Pool size per pod; 0 leaves the server's default (10).
   maxConns: 0
+
+# The bundled PostgreSQL, used while database.existingSecret is empty: one pod (a StatefulSet
+# <fullname>-postgresql) with a volume of its own, and a password generated on install and kept
+# across upgrades in the Secret <fullname>-postgresql (key password; key url is the server's URL).
+# It is one pod, not highly available, and its volume outlives the release like the server's: for
+# production, and for replicaCount above 1, prefer a replicated PostgreSQL (database.existingSecret).
+# Back it up with pg_dump (docs/guide.md).
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "17-alpine"
+    digest: ""
+    pullPolicy: IfNotPresent
+  database: commandcenter
+  username: commandcenter
+  # The image's postgres user (uid 70 on Alpine). OpenShift's restricted-v2 SCC assigns the user
+  # and groups itself: set runAsUser, runAsGroup and fsGroup to null there.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 70
+    runAsGroup: 70
+    fsGroup: 70
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  persistence:
+    # Block storage (a cloud disk, iSCSI, a local volume), never NFS or SMB. Empty uses the
+    # cluster's default StorageClass; "-" sets storageClassName "". Fixed at install.
+    storageClass: ""
+    size: 8Gi
+    accessModes: [ReadWriteOnce]
+    annotations: {}
 
 # Go's soft memory limit (GOMEMLIMIT). Keep it about 60-65 % of resources.limits.memory, and raise
 # both together. "" leaves it to memoryLimitMiB in an existingSecret's config.yaml.
@@ -90,16 +130,15 @@ resources:
     memory: 128Mi
 
 persistence:
-  # With SQLite, block storage only: a cloud disk, iSCSI or a local volume. Never NFS or SMB, since
-  # SQLite's WAL mode needs local file locking. With replicaCount above 1, a ReadWriteMany class
-  # (NFS, CephFS, EFS, ...) that every pod mounts. Empty uses the cluster's default StorageClass;
-  # "-" sets storageClassName "" (pre-bound volumes).
+  # Block storage or a network file system (NFS, ...). With replicaCount above 1, a ReadWriteMany
+  # class (NFS, CephFS, EFS, ...) that every pod mounts. Empty uses the cluster's default
+  # StorageClass; "-" sets storageClassName "" (pre-bound volumes).
   storageClass: ""
-  # meta.db (SQLite), the default blob store and every store's temp and upload session files.
+  # The default blob store and every store's temp and upload session files.
   # Proxy caches grow until cleanup policies remove them. storageClass, size, accessModes and
   # annotations are fixed at install: README.md says how to resize.
   size: 50Gi
-  # ReadWriteOnce or ReadWriteOncePod with one pod; ReadWriteMany (needs PostgreSQL) with more.
+  # ReadWriteOnce, ReadWriteOncePod or ReadWriteMany with one pod; ReadWriteMany with more.
   accessModes: [ReadWriteOnce]
   # On the claim; with replicaCount above 1 the chart adds helm.sh/resource-policy: keep, so an
   # uninstall leaves the shared claim, as it leaves the StatefulSet's.
@@ -176,8 +215,8 @@ securityContext:
   capabilities:
     drop: ["ALL"]
 
-# On SIGTERM the server turns unready (on PostgreSQL it keeps serving for 5 s more, so the
-# endpoints drop it first), drains requests for up to 30 s, then writes the download counters,
+# On SIGTERM the server turns unready (it keeps serving for 5 s more, so the endpoints drop it
+# first), drains requests for up to 30 s, then writes the download counters,
 # queued e-mail and activity events and closes the database. The other pods keep serving; a task
 # the pod was running stops and runs again later.
 terminationGracePeriodSeconds: 60
@@ -190,7 +229,7 @@ startupProbe:
   timeoutSeconds: 5
   failureThreshold: 60 # 5 minutes for a first start or a database upgrade
 # 200 while the node should take requests: the database answers, the node is not shutting down,
-# its schema is compatible and (PostgreSQL) its lock connection and change listener are up. Keep
+# its schema is compatible and its lock connection and change listener are up. Keep
 # it on status/writable with replicaCount above 1: the Service then drops a pod that lost the
 # database or is draining while the others serve.
 readinessProbe:
@@ -208,7 +247,7 @@ livenessProbe:
   timeoutSeconds: 5
 
 # More volumes, for example an NFS claim for a named blob store created in the web UI with that
-# path (blobs may live on NFS; meta.db may not). With replicaCount above 1 every pod mounts them
+# path (blobs may live on NFS). With replicaCount above 1 every pod mounts them
 # at the same path, so they must be ReadWriteMany too.
 extraVolumes: []
 extraVolumeMounts: []

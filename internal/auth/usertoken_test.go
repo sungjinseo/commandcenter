@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -22,7 +21,7 @@ type userTokenFixture struct {
 
 func newUserTokenFixture(t *testing.T) *userTokenFixture {
 	t.Helper()
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

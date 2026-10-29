@@ -14,34 +14,28 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-// The package's SQL is written for SQLite, with ? placeholders. On
-// PostgreSQL the same statements run through pool and txConn, which rebind
-// the placeholders to $1, $2, ...; the few whose syntax differs pick their
-// PostgreSQL form with pg. What the code relies on keeps its SQLite meaning:
+// The package's SQL is written with ? placeholders, which pool and txConn
+// rebind to $1, $2, ... What the code relies on:
 //
-//   - One writer at a time (SQLite's BEGIN IMMEDIATE): every PostgreSQL
-//     write, a transaction or a single statement, first takes the advisory
-//     lock writeLock, held until it commits or rolls back. Reads take no
-//     lock and run beside a writer, as with WAL.
-//   - A write waits at most 5 s for the lock, as busy_timeout(5000) waits
-//     for SQLite's (lock_timeout; a URL may set another). Neither error is
-//     mapped: both surface as errors, as SQLITE_BUSY always has. Constraint
-//     errors are not mapped either: ErrExists comes from a SELECT made under
-//     the write lock, which the advisory lock keeps exact.
-//   - Text compares, sorts and prefix-matches byte-wise (SQLite's BINARY):
-//     every text column is COLLATE "C", whatever the database's locale. Case
-//     folding is ASCII only, as SQLite's lower(), LIKE and NOCASE: lower()
-//     under the "C" collation.
-//   - JSON is stored as text, so documents read back byte for byte;
-//     json_extract and json_each become ->> and json_array_elements_text.
-//   - Integers, booleans (0/1) and times (Unix ms) are BIGINT, as SQLite's
-//     64-bit INTEGER; events.id is an identity column where SQLite has its
-//     rowid alias. No query sorts a nullable column, so NULL ordering does
-//     not arise.
-//   - PostgreSQL text cannot hold what SQLite's can: invalid UTF-8 and NUL
-//     bytes (older builds stored such Maven names). No stored row can match
-//     such a value, so a query with one returns no rows without asking the
-//     server, and a write fails with ErrInvalidText.
+//   - One writer at a time: every write, a transaction or a single
+//     statement, first takes the advisory lock writeLock, held until it
+//     commits or rolls back. Reads take no lock and run beside a writer.
+//   - A write waits at most 5 s for the lock (lock_timeout; a URL may set
+//     another). The error is not mapped. Constraint errors are not mapped
+//     either: ErrExists comes from a SELECT made under the write lock,
+//     which the advisory lock keeps exact.
+//   - Text compares, sorts and prefix-matches byte-wise: every text column
+//     is COLLATE "C", whatever the database's locale. Case folding is ASCII
+//     only: lower() under the "C" collation.
+//   - JSON is stored as text, so documents read back byte for byte, and
+//     read with ->> and json_array_elements_text.
+//   - Integers, booleans (0/1) and times (Unix ms) are BIGINT; events.id is
+//     an identity column. No query sorts a nullable column, so NULL
+//     ordering does not arise.
+//   - Text cannot hold invalid UTF-8 or NUL bytes (older builds stored such
+//     Maven names). No stored row can match such a value, so a query with
+//     one returns no rows without asking the server, and a write fails with
+//     ErrInvalidText.
 
 // writeLock takes the advisory lock of the one writer (key "ccmeta").
 const writeLock = `SELECT pg_advisory_xact_lock(109278688277601)`
@@ -51,49 +45,21 @@ const writeLock = `SELECT pg_advisory_xact_lock(109278688277601)`
 // database upgraded.
 const migrateLock = `SELECT pg_advisory_xact_lock(109278688536434)`
 
-// pool is the database handle; on PostgreSQL it rebinds and locks writes.
+// pool is the database handle: it rebinds and locks writes.
 type pool struct {
 	db *sql.DB
-	pg bool
 }
 
 // txConn is a transaction on a pool.
 type txConn struct {
 	tx *sql.Tx
-	pg bool
-}
-
-func (p *pool) postgres() bool  { return p.pg }
-func (t txConn) postgres() bool { return t.pg }
-
-// pg returns the PostgreSQL form of a statement on PostgreSQL, else the
-// SQLite form.
-func pg(q querier, sqlite, postgres string) string {
-	if q.postgres() {
-		return postgres
-	}
-	return sqlite
-}
-
-func (p *pool) bind(q string) string {
-	if p.pg {
-		return rebind(q)
-	}
-	return q
-}
-
-func (t txConn) bind(q string) string {
-	if t.pg {
-		return rebind(q)
-	}
-	return q
 }
 
 // ErrInvalidText refuses a write of text PostgreSQL cannot store: not valid
 // UTF-8, or holding a NUL byte.
 var ErrInvalidText = errors.New("text that is not valid UTF-8 or holds a NUL byte cannot be stored")
 
-// storable reports whether PostgreSQL can take every string in args.
+// storable reports whether the database can take every string in args.
 func storable(args []any) bool {
 	for _, a := range args {
 		if s, ok := a.(string); ok && (!utf8.ValidString(s) || strings.IndexByte(s, 0) >= 0) {
@@ -121,25 +87,22 @@ func (r row) Scan(dest ...any) error {
 }
 
 func (p *pool) QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error) {
-	if p.pg && !storable(args) {
+	if !storable(args) {
 		return p.db.QueryContext(ctx, noRows)
 	}
-	return p.db.QueryContext(ctx, p.bind(q), args...)
+	return p.db.QueryContext(ctx, rebind(q), args...)
 }
 
 func (p *pool) QueryRowContext(ctx context.Context, q string, args ...any) row {
-	if p.pg && !storable(args) {
+	if !storable(args) {
 		return row{err: sql.ErrNoRows}
 	}
-	return row{r: p.db.QueryRowContext(ctx, p.bind(q), args...)}
+	return row{r: p.db.QueryRowContext(ctx, rebind(q), args...)}
 }
 
-// ExecContext runs a write. On PostgreSQL it is a transaction of its own
-// that takes the write lock first, as SQLite's implicit one does.
+// ExecContext runs a write: a transaction of its own that takes the write
+// lock first.
 func (p *pool) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
-	if !p.pg {
-		return p.db.ExecContext(ctx, q, args...)
-	}
 	if !storable(args) {
 		return nil, ErrInvalidText
 	}
@@ -155,27 +118,18 @@ func (p *pool) ExecContext(ctx context.Context, q string, args ...any) (sql.Resu
 	return res, tx.Commit()
 }
 
-// execFree runs a single-statement write without the write lock (on
-// SQLite as ExecContext), for the bookkeeping tables no transaction that
+// execFree runs a single-statement write without the write lock, for the
+// bookkeeping tables no transaction that
 // checks an invariant reads: nodes, leases and the auth state (authstate.go).
 // It keeps frequent small writes, such as heartbeats, from queueing behind
 // the one writer.
 func (p *pool) execFree(ctx context.Context, q string, args ...any) (sql.Result, error) {
-	return p.db.ExecContext(ctx, p.bind(q), args...)
+	return p.db.ExecContext(ctx, rebind(q), args...)
 }
 
 // begin starts a write transaction, which holds the write lock, or a read
-// transaction, which sees one snapshot (SQLite's deferred BEGIN in WAL mode;
-// REPEATABLE READ on PostgreSQL) and takes no lock.
+// transaction, which sees one snapshot (REPEATABLE READ) and takes no lock.
 func (p *pool) begin(ctx context.Context, write bool) (*sql.Tx, error) {
-	if !p.pg {
-		if write {
-			return p.db.BeginTx(ctx, nil) // BEGIN IMMEDIATE (the DSN's _txlock)
-		}
-		// ReadOnly makes the driver issue a plain (deferred) BEGIN, which does
-		// not take the write lock.
-		return p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	}
 	if !write {
 		return p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	}
@@ -191,24 +145,24 @@ func (p *pool) begin(ctx context.Context, write bool) (*sql.Tx, error) {
 }
 
 func (t txConn) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
-	if t.pg && !storable(args) {
+	if !storable(args) {
 		return nil, ErrInvalidText
 	}
-	return t.tx.ExecContext(ctx, t.bind(q), args...)
+	return t.tx.ExecContext(ctx, rebind(q), args...)
 }
 
 func (t txConn) QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error) {
-	if t.pg && !storable(args) {
+	if !storable(args) {
 		return t.tx.QueryContext(ctx, noRows)
 	}
-	return t.tx.QueryContext(ctx, t.bind(q), args...)
+	return t.tx.QueryContext(ctx, rebind(q), args...)
 }
 
 func (t txConn) QueryRowContext(ctx context.Context, q string, args ...any) row {
-	if t.pg && !storable(args) {
+	if !storable(args) {
 		return row{err: sql.ErrNoRows}
 	}
-	return row{r: t.tx.QueryRowContext(ctx, t.bind(q), args...)}
+	return row{r: t.tx.QueryRowContext(ctx, rebind(q), args...)}
 }
 
 // rebind turns the ? placeholders outside quotes into $1, $2, ...
@@ -235,8 +189,7 @@ func rebind(q string) string {
 	return b.String()
 }
 
-// IsPostgresURL reports whether target names a PostgreSQL database rather
-// than an SQLite file.
+// IsPostgresURL reports whether target is a postgres:// or postgresql:// URL.
 func IsPostgresURL(target string) bool {
 	return strings.HasPrefix(target, "postgres://") || strings.HasPrefix(target, "postgresql://")
 }
@@ -254,7 +207,7 @@ func openPostgres(url string) (*sql.DB, *pgx.ConnConfig, string, error) {
 		return nil, nil, "", errBadURL
 	}
 	if _, ok := cfg.RuntimeParams["lock_timeout"]; !ok {
-		cfg.RuntimeParams["lock_timeout"] = "5000" // ms, as SQLite's busy_timeout(5000)
+		cfg.RuntimeParams["lock_timeout"] = "5000" // ms
 	}
 	db := stdlib.OpenDB(*cfg)
 	db.SetMaxOpenConns(defaultPostgresConns)
@@ -274,14 +227,13 @@ func ddlError(err error, name string) error {
 	return err
 }
 
-// defaultPostgresConns is the PostgreSQL pool size unless SetMaxOpenConns
-// sets another; SQLite's is 4.
+// defaultPostgresConns is the pool size unless SetMaxOpenConns sets another.
 const defaultPostgresConns = 10
 
-// pgSchema is schema for PostgreSQL, at schemaVersion with every column, so
-// it needs no migrate step. A later column goes into both: into schema plus
-// migrate for SQLite, and here as ALTER TABLE ... ADD COLUMN IF NOT EXISTS.
-const pgSchema = `
+// schema creates the tables at schemaVersion with every column. A later
+// column goes into its CREATE TABLE and into an ALTER TABLE ... ADD COLUMN
+// IF NOT EXISTS, for databases created before it.
+const schema = `
 CREATE TABLE IF NOT EXISTS assets(
   repo TEXT COLLATE "C" NOT NULL, path TEXT COLLATE "C" NOT NULL,
   blob_sha256 TEXT COLLATE "C" NOT NULL, size BIGINT NOT NULL DEFAULT 0,

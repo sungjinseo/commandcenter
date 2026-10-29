@@ -1,10 +1,11 @@
-# Command Center: reference Kubernetes deployment (one instance).
+# Command Center: reference Kubernetes deployment (one instance and its PostgreSQL).
 #
 # The recommended way to install Command Center on Kubernetes is the Helm chart
 # (deploy/helm/commandcenter; guide: "Kubernetes"), published with every release:
 #   helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter \
 #     --version <version> -n <namespace> -f <your values file>
-# It runs the same single-pod StatefulSet, keeps config.yaml in a Secret and can add an Ingress.
+# It runs the same single-pod StatefulSets, keeps config.yaml in a Secret, generates the database
+# password and can add an Ingress.
 # This file is the plain-manifest form, for clusters where Helm is not used.
 #
 # Read "프로덕션 배포" in docs/guide.md first. Before applying, set:
@@ -14,18 +15,139 @@
 #   2. config.yaml       baseURL and the admin passwordHash (docker run --rm -i <image> hash-password).
 #                        Repositories you want created on the first start can be copied from
 #                        config.example.yaml. users, roles, anonymousRead, baseURL, maxUploadMiB and
-#                        repositories are imported into meta.db on the first start only; change them
-#                        in the web UI afterwards.
-#   3. storageClassName  block storage (cloud disk, iSCSI, local volume). Never NFS or SMB: meta.db is
-#                        SQLite in WAL mode and needs local file locking.
+#                        repositories are imported into the database on the first start only; change
+#                        them in the web UI afterwards.
+#   3. password          of the PostgreSQL Secret below: letters and digits only (it goes into a URL),
+#                        e.g. head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'. PostgreSQL reads it on
+#                        its first start only. To use an external PostgreSQL instead, delete the three
+#                        commandcenter-postgresql objects and the init container, and point
+#                        COMMANDCENTER_DATABASE_URL at it (from a Secret).
+#   4. storageClassName  of both claims: block storage (cloud disk, iSCSI, local volume) for the
+#                        database, never NFS or SMB; the blob volume may also be on NFS.
 # Then: kubectl apply -n <namespace> -f deploy/kubernetes/commandcenter.yaml
 #
 # The Service speaks plain HTTP. Publish it through your Ingress or Gateway with TLS, a request body
 # limit of at least maxUploadMiB and body/read timeouts (guide: "TLS와 리버스 프록시").
 #
-# Exactly one replica: meta.db is SQLite on the pod's own volume, and every extra replica would get
-# its own empty volume. Do not force-delete the pod while its node may still be running it. Several
-# pods (high availability) need PostgreSQL and a ReadWriteMany volume: the Helm chart's replicaCount.
+# Exactly one replica of each: an extra replica would get its own empty volume. Do not force-delete
+# a pod while its node may still be running it. Several Command Center pods (high availability) need
+# a ReadWriteMany volume: the Helm chart's replicaCount. Back the database up with pg_dump
+# (guide: "백업과 복원").
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: commandcenter-postgresql
+  labels:
+    app.kubernetes.io/name: commandcenter-postgresql
+type: Opaque
+stringData:
+  password: "REPLACE_WITH_A_RANDOM_PASSWORD" # letters and digits only
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: commandcenter-postgresql
+  labels:
+    app.kubernetes.io/name: commandcenter-postgresql
+spec:
+  selector:
+    app.kubernetes.io/name: commandcenter-postgresql
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: commandcenter-postgresql
+  labels:
+    app.kubernetes.io/name: commandcenter-postgresql
+spec:
+  replicas: 1
+  serviceName: commandcenter-postgresql
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: commandcenter-postgresql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: commandcenter-postgresql
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70 # the image's postgres user (Alpine)
+        runAsGroup: 70
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgresql
+          image: postgres:17-alpine
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: commandcenter
+            - name: POSTGRES_USER
+              value: commandcenter
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: commandcenter-postgresql, key: password }
+            # A directory below the mount point: initdb refuses a non-empty one (lost+found).
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-q", "-h", "127.0.0.1", "-U", "commandcenter", "-d", "commandcenter"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: postgresql
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # The socket directory and temporary files; the root filesystem is read-only.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: commandcenter-postgresql
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # Block storage, never an NFS/SMB provisioner. Unset: the cluster's default StorageClass.
+        # storageClassName: <block storage class>
+        resources:
+          requests:
+            storage: 8Gi # the metadata: repositories, components, assets, users, tasks, events
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -68,8 +190,7 @@ metadata:
   labels:
     app.kubernetes.io/name: commandcenter
 spec:
-  # Never more than 1 (see the header). A StatefulSet stops the old pod before it starts the new
-  # one, so two processes never open meta.db at the same time; a Deployment's rolling update could.
+  # Never more than 1 (see the header): a second pod would get its own empty volume.
   replicas: 1
   serviceName: commandcenter
   selector:
@@ -92,6 +213,21 @@ spec:
         fsGroupChangePolicy: OnRootMismatch # no recursive chown of every blob on each start
         seccompProfile:
           type: RuntimeDefault
+      # The server exits when the database does not answer; on a first start it would crash-loop
+      # until PostgreSQL is up.
+      initContainers:
+        - name: wait-for-postgresql
+          image: postgres:17-alpine
+          # -U: the pod's user has no passwd entry, and pg_isready refuses to guess one.
+          command: ["sh", "-c", "until pg_isready -q -h commandcenter-postgresql -p 5432 -U commandcenter; do sleep 2; done"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 32Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
       containers:
         - name: commandcenter
           image: ghcr.io/sungjinseo/commandcenter:VERSION # pin a release such as 1.2.3, never latest
@@ -101,6 +237,11 @@ spec:
           env:
             - name: GOMEMLIMIT
               value: 80MiB
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: commandcenter-postgresql, key: password }
+            - name: COMMANDCENTER_DATABASE_URL # $(POSTGRES_PASSWORD) is the variable above
+              value: postgres://commandcenter:$(POSTGRES_PASSWORD)@commandcenter-postgresql:5432/commandcenter?sslmode=disable
             # - name: HTTPS_PROXY # if proxy repositories must reach the internet through a proxy
             #   value: http://proxy.example.com:3128
             # - name: COMMANDCENTER_SECRET_KEY # encrypts stored SMTP/LDAP/remoteAuth secrets (guide: "저장된 비밀값 암호화")
@@ -151,7 +292,7 @@ spec:
             - name: config
               mountPath: /etc/commandcenter
               readOnly: true
-            # SQLite's temporary files; the root filesystem is read-only. Scratch space only:
+            # Temporary files; the root filesystem is read-only. Scratch space only:
             # never put a blob store here, it is gone when the pod is recreated.
             - name: tmp
               mountPath: /tmp
@@ -168,9 +309,8 @@ spec:
           app.kubernetes.io/name: commandcenter
       spec:
         accessModes: ["ReadWriteOnce"]
-        # Left unset, the cluster's default StorageClass is used: make sure it is block storage and
-        # not an NFS/SMB provisioner (nfs-subdir-external-provisioner, Azure Files, EFS, ...).
-        # storageClassName: <block storage class>
+        # Left unset, the cluster's default StorageClass is used.
+        # storageClassName: <storage class>
         resources:
           requests:
-            storage: 50Gi # blobs and meta.db; proxy caches keep growing until cleanup policies remove them
+            storage: 50Gi # blobs; proxy caches keep growing until cleanup policies remove them

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -62,7 +61,7 @@ func TestWebhookCRUD(t *testing.T) {
 // The signing secret is sealed in its row with a key, never stored in plain
 // text, and follows a key rotation.
 func TestWebhookSecretSealed(t *testing.T) {
-	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	path := metatest.URL(t, t.TempDir())
 	open := func(key byte) *DB {
 		t.Helper()
 		db, err := Open(path)

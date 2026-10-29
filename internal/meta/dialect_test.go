@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -17,9 +16,8 @@ import (
 	"commandcenter/internal/meta/metatest"
 )
 
-// The tests in this file pin the SQLite semantics the code relies on, so
-// they hold on PostgreSQL too (COMMANDCENTER_TEST_POSTGRES_URL, see
-// metatest).
+// The tests in this file pin the semantics the code relies on (see
+// dialect.go), whatever the database's locale.
 
 func TestRebind(t *testing.T) {
 	for in, want := range map[string]string{
@@ -34,7 +32,7 @@ func TestRebind(t *testing.T) {
 }
 
 // User and role ids are unique ignoring ASCII case (QA N-18), and only
-// ASCII case, as SQLite's NOCASE.
+// ASCII case.
 func TestIDsUniqueIgnoringASCIICase(t *testing.T) {
 	db := openTest(t)
 	if err := db.CreateUser(ctx, User{ID: "Alice"}); err != nil {
@@ -57,7 +55,7 @@ func TestIDsUniqueIgnoringASCIICase(t *testing.T) {
 }
 
 // Searches match a substring ignoring ASCII case only, with no wildcard
-// characters, as SQLite's instr(lower(...), lower(?)).
+// characters.
 func TestSearchFoldsASCIIOnly(t *testing.T) {
 	db := openTest(t)
 	for _, p := range []string{"Dir/ReadMe.TXT", "x/a_b", "x/axb", "x/100%", "u/é", "u/É"} {
@@ -101,7 +99,7 @@ func TestSearchFoldsASCIIOnly(t *testing.T) {
 	}
 }
 
-// Text sorts and ranges byte-wise (SQLite's BINARY), whatever the
+// Text sorts and ranges byte-wise, whatever the
 // database's collation: "B" < "Z" < "a" < "é".
 func TestTextOrderIsBytewise(t *testing.T) {
 	db := openTest(t)
@@ -141,7 +139,7 @@ func TestTextOrderIsBytewise(t *testing.T) {
 }
 
 // JSON is stored as text, so a document reads back byte for byte, and the
-// queries into it (json_extract, json_each) match as SQLite's do.
+// queries into it (->>, json_array_elements_text) match its values.
 func TestJSONQueries(t *testing.T) {
 	db := openTest(t)
 	attrs := `{ "name" : "Serde_JSON",  "deps":[1, 2.50] }`
@@ -188,7 +186,7 @@ func TestJSONQueries(t *testing.T) {
 	}
 }
 
-// Writers queue one at a time, as with SQLite's BEGIN IMMEDIATE: a
+// Writers queue one at a time (writeLock): a
 // transaction that reads a value and writes it back increased loses no
 // update, neither to another transaction nor to a single-statement write.
 func TestWritersAreSerialized(t *testing.T) {
@@ -239,7 +237,7 @@ func TestWritersAreSerialized(t *testing.T) {
 	}
 }
 
-// Reads do not wait for a writer, as with WAL.
+// Reads do not wait for a writer.
 func TestReadsDoNotWaitForTheWriter(t *testing.T) {
 	db := openTest(t)
 	if err := db.SetSetting(ctx, "k", "before"); err != nil {
@@ -264,13 +262,10 @@ func TestReadsDoNotWaitForTheWriter(t *testing.T) {
 	}
 }
 
-// On PostgreSQL the upgrade is one transaction too: when a step fails, the
-// tables made before it and the version table are gone again.
+// The upgrade is one transaction: when a step fails, the tables made before
+// it and the version table are gone again.
 func TestOpenPostgresInOneTransaction(t *testing.T) {
-	if !metatest.Postgres() {
-		t.Skip("PostgreSQL's upgrade; TestOpenMigratesInOneTransaction is SQLite's")
-	}
-	target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	target := metatest.URL(t, t.TempDir())
 	raw := rawOpen(t, target)
 	if _, err := raw.db.Exec(`CREATE TABLE assets(repo TEXT)`); err != nil { // no blob_sha256 to index
 		t.Fatal(err)
@@ -295,22 +290,15 @@ func TestOpenPostgresInOneTransaction(t *testing.T) {
 	}
 }
 
-func TestDriverAndSize(t *testing.T) {
+func TestSize(t *testing.T) {
 	db := openTest(t)
-	want := "sqlite"
-	if metatest.Postgres() {
-		want = "postgresql"
-	}
-	if db.Driver() != want {
-		t.Fatalf("Driver = %q, want %q", db.Driver(), want)
-	}
 	if n, err := db.SizeBytes(ctx); err != nil || n <= 0 {
 		t.Fatalf("SizeBytes = %d, %v", n, err)
 	}
 }
 
-// SQLite stores any bytes as text, PostgreSQL only valid UTF-8 without NUL.
-// There a value it cannot store matches no row, and a write of it is
+// The database stores only valid UTF-8 without NUL as text. A value it
+// cannot store matches no row, and a write of it is
 // refused with ErrInvalidText (repo.StatusOf: 400) instead of failing on
 // the server.
 func TestUnstorableText(t *testing.T) {
@@ -318,12 +306,6 @@ func TestUnstorableText(t *testing.T) {
 	for _, p := range []string{"a\x00b", "caf\xe9"} {
 		err := db.PutAsset(ctx, Asset{Repo: "r", Path: p, BlobSHA256: "s"})
 		_, getErr := db.GetAsset(ctx, "r", p)
-		if !db.sql.pg {
-			if err != nil || getErr != nil {
-				t.Fatalf("SQLite %q: put %v, get %v", p, err, getErr)
-			}
-			continue
-		}
 		if !errors.Is(err, ErrInvalidText) || !errors.Is(getErr, ErrNotFound) {
 			t.Fatalf("%q: put %v, get %v; want ErrInvalidText and ErrNotFound", p, err, getErr)
 		}
@@ -375,14 +357,10 @@ func TestCreatesCheckAndInsertUnderTheWriteLock(t *testing.T) {
 }
 
 // Review postgres-1: an up-to-date database opens without DDL rights, so a
-// role with DML on the tables (created by a DBA, or by migrate-db with the
-// admin URL) runs the server; one that needs an upgrade says what the role
-// must be.
+// role with DML on the tables (created by a DBA) runs the server; one that
+// needs an upgrade says what the role must be.
 func TestOpenAsLeastPrivilegeRole(t *testing.T) {
-	if !metatest.Postgres() {
-		t.Skip("PostgreSQL only")
-	}
-	target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	target := metatest.URL(t, t.TempDir())
 	db, err := Open(target) // the owner creates the tables
 	if err != nil {
 		t.Fatal(err)

@@ -2,7 +2,6 @@ package meta
 
 import (
 	"bytes"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,7 +64,7 @@ func TestValidateOIDC(t *testing.T) {
 // The client secret is sealed at rest like the other secrets and opens on
 // every read path; a stored partial configuration round-trips with defaults.
 func TestOIDCSecretSealed(t *testing.T) {
-	db, err := Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

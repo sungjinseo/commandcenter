@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,14 +16,10 @@ import (
 // of its database, both joined as nodes (two servers on one database, as
 // high availability runs them); A joins
 // first and holds the scheduler lease, and both are ready (listening).
-// PostgreSQL only: on SQLite one process runs.
 func twoNodes(t *testing.T) (h *harness, b *Service, memberA *meta.Member) {
 	t.Helper()
-	if !metatest.Postgres() {
-		t.Skip("several nodes need PostgreSQL")
-	}
 	h = newHarness(t)
-	dbB, err := meta.Open(metatest.Target(t, filepath.Join(h.dir, "meta.db")))
+	dbB, err := meta.Open(metatest.URL(t, h.dir))
 	if err != nil {
 		t.Fatal(err)
 	}

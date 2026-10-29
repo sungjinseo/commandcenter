@@ -16,6 +16,7 @@ root="$(pwd -W 2>/dev/null || pwd)"
 work="test/smoke/.work-mail-$$"
 net=commandcenter-mail-smoke-$$
 name=commandcenter-mail-smoke-$$
+. test/postgres.sh
 mailname=commandcenter-mail-smoke-mailpit-$$
 mailalias=mailpit
 mailimage=axllent/mailpit:v1.21
@@ -23,7 +24,7 @@ base=http://localhost:18088
 mailapi=http://localhost:18089
 
 cleanup() {
-  docker rm -f "$name" "$mailname" >/dev/null 2>&1 || true
+  docker rm -f "$name" "$name-pg" "$mailname" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }
@@ -62,7 +63,8 @@ if [ "$ready" != 1 ]; then
 fi
 
 echo "== commandcenter"
-docker run -d --name "$name" --network "$net" --memory 128m \
+start_postgres
+docker run -d --name "$name" --network "$net" -e COMMANDCENTER_DATABASE_URL="$pg_url" --memory 128m \
   -v "$root/$work/config.yaml:/etc/commandcenter/config.yaml:ro" -p 18088:8081 commandcenter:smoke >/dev/null
 ready=0
 for i in $(seq 1 30); do

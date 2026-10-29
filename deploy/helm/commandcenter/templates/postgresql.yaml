@@ -1,0 +1,142 @@
+{{- if include "commandcenter.postgresql" . }}
+{{- $name := include "commandcenter.postgresql.fullname" . }}
+{{- $pg := .Values.postgresql }}
+{{- /* The password is made on install and read back on every upgrade: the data directory keeps the first one. */}}
+{{- $password := randAlphaNum 32 }}
+{{- with (lookup "v1" "Secret" .Release.Namespace $name) }}
+{{- with (index (.data | default dict) "password") }}{{ $password = b64dec . }}{{ end }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "commandcenter.postgresql.labels" . | nindent 4 }}
+  annotations:
+    # The data volume outlives an uninstall, and it only opens with this password.
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  password: {{ $password | b64enc }}
+  # Letters and digits only, so the password needs no escaping in the URL.
+  url: {{ printf "postgres://%s:%s@%s:5432/%s?sslmode=disable" $pg.username $password $name $pg.database | b64enc }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "commandcenter.postgresql.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+  selector:
+    {{- include "commandcenter.postgresql.selectorLabels" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "commandcenter.postgresql.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  podManagementPolicy: Parallel
+  serviceName: {{ $name }}
+  selector:
+    matchLabels:
+      {{- include "commandcenter.postgresql.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "commandcenter.postgresql.selectorLabels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $pg.podSecurityContext | nindent 8 }}
+      containers:
+        - name: postgresql
+          image: {{ include "commandcenter.postgresql.image" . | quote }}
+          imagePullPolicy: {{ $pg.image.pullPolicy }}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ $pg.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ $pg.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $name }}
+                  key: password
+            # A directory below the mount point: initdb refuses a non-empty one (lost+found).
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            {{- toYaml $pg.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-q", "-h", "127.0.0.1", "-U", {{ $pg.username | quote }}, "-d", {{ $pg.database | quote }}]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: postgresql
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            # The socket directory and temporary files; the root filesystem is read-only.
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  # Fixed at install, and the claim outlives the release, as the server's does.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "commandcenter.postgresql.selectorLabels" . | nindent 10 }}
+        {{- with $pg.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml $pg.persistence.accessModes | nindent 10 }}
+        {{- with $pg.persistence.storageClass }}
+        storageClassName: {{ if eq "-" . }}""{{ else }}{{ . }}{{ end }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $pg.persistence.size }}
+{{- end }}

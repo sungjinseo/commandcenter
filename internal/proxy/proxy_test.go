@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -78,7 +77,7 @@ func setupN(t *testing.T, rm *remote, maxConcurrent int) (*Fetcher, *repo.Reposi
 	t.Cleanup(ts.Close)
 	dir := t.TempDir()
 	b, _ := blob.Open(dir)
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}

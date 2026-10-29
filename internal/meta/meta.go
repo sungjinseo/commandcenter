@@ -1,4 +1,4 @@
-// Package meta stores repository metadata in SQLite or PostgreSQL.
+// Package meta stores repository metadata in PostgreSQL.
 package meta
 
 import (
@@ -7,11 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync/atomic"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 var ErrNotFound = errors.New("not found")
@@ -33,12 +30,11 @@ type Asset struct {
 }
 
 type DB struct {
-	sql  *pool
-	path string // the SQLite file; "" on PostgreSQL
-	box  sealer // seals the stored secrets; see SetSecretKey
+	sql *pool
+	box sealer // seals the stored secrets; see SetSecretKey
 
 	keys keyedLocks             // Lock's in-process mutexes (cluster.go)
-	cl   *cluster               // PostgreSQL: the lock connection and the listener; nil on SQLite
+	cl   *cluster               // the lock connection and the listener
 	self atomic.Pointer[Member] // this process's node, once Join ran (nodes.go)
 }
 
@@ -47,138 +43,14 @@ type querier interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) row
-	postgres() bool
 }
 
-const schema = `
-CREATE TABLE IF NOT EXISTS assets(
-  repo TEXT NOT NULL, path TEXT NOT NULL,
-  blob_sha256 TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
-  content_type TEXT NOT NULL DEFAULT '',
-  sha1 TEXT NOT NULL DEFAULT '', md5 TEXT NOT NULL DEFAULT '', sha512 TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL DEFAULT 0, last_modified INTEGER NOT NULL DEFAULT 0,
-  remote_etag TEXT NOT NULL DEFAULT '', remote_last_modified TEXT NOT NULL DEFAULT '',
-  checked_at INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(repo, path)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS assets_blob ON assets(blob_sha256);
-CREATE TABLE IF NOT EXISTS packages(
-  repo TEXT NOT NULL, format TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL,
-  attrs TEXT NOT NULL DEFAULT '{}', yanked INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(repo, name, version)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS dist_tags(
-  repo TEXT NOT NULL, name TEXT NOT NULL, tag TEXT NOT NULL, version TEXT NOT NULL,
-  PRIMARY KEY(repo, name, tag)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS negative_cache(
-  repo TEXT NOT NULL, path TEXT NOT NULL, expires_at INTEGER NOT NULL,
-  PRIMARY KEY(repo, path)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS tokens(
-  id TEXT PRIMARY KEY, user TEXT NOT NULL, hash TEXT NOT NULL UNIQUE,
-  created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS repositories(
-  name TEXT PRIMARY KEY, format TEXT NOT NULL, type TEXT NOT NULL, config TEXT NOT NULL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, gen INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS blob_stores(name TEXT PRIMARY KEY, path TEXT NOT NULL, created_at INTEGER NOT NULL,
-  type TEXT NOT NULL DEFAULT 'file', config TEXT NOT NULL DEFAULT '{}');
-CREATE TABLE IF NOT EXISTS users(
-  id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', email TEXT NOT NULL DEFAULT '',
-  password_hash TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT 'local',
-  status TEXT NOT NULL DEFAULT 'active', roles TEXT NOT NULL DEFAULT '[]',
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS roles(
-  id TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', privileges TEXT NOT NULL DEFAULT '[]',
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS request_stats(
-  hour INTEGER NOT NULL, repo TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(hour, repo)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS events(
-  id INTEGER PRIMARY KEY, at INTEGER NOT NULL, kind TEXT NOT NULL, actor TEXT NOT NULL DEFAULT '',
-  repo TEXT NOT NULL DEFAULT '', subject TEXT NOT NULL DEFAULT '', detail TEXT NOT NULL DEFAULT '');
-CREATE TABLE IF NOT EXISTS cleanup_policies(
-  name TEXT PRIMARY KEY, format TEXT NOT NULL, config TEXT NOT NULL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS tasks(
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, schedule TEXT NOT NULL,
-  params TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
-  last_run INTEGER NOT NULL DEFAULT 0, last_result TEXT NOT NULL DEFAULT '',
-  last_duration_ms INTEGER NOT NULL DEFAULT 0, last_message TEXT NOT NULL DEFAULT '',
-  last_log TEXT NOT NULL DEFAULT '', next_run INTEGER NOT NULL DEFAULT 0,
-  last_removed INTEGER NOT NULL DEFAULT 0, last_bytes INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS webhooks(
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL DEFAULT '',
-  events TEXT NOT NULL DEFAULT '[]', repo TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS webhook_deliveries(
-  id TEXT PRIMARY KEY, webhook_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
-  next_at INTEGER NOT NULL DEFAULT 0, response_code INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '',
-  claimed_by TEXT NOT NULL DEFAULT '', claim_until INTEGER NOT NULL DEFAULT 0);
-CREATE INDEX IF NOT EXISTS webhook_deliveries_hook ON webhook_deliveries(webhook_id, created_at);
-CREATE INDEX IF NOT EXISTS webhook_deliveries_due ON webhook_deliveries(status, next_at);
-CREATE TABLE IF NOT EXISTS routing_rules(
-  name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL,
-  matchers TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS content_selectors(
-  name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', expression TEXT NOT NULL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS user_tokens(
-  owner TEXT PRIMARY KEY, name_code TEXT NOT NULL UNIQUE, hash TEXT NOT NULL,
-  created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS tags(
-  name TEXT PRIMARY KEY, attributes TEXT NOT NULL DEFAULT '{}',
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS component_tags(
-  tag TEXT NOT NULL, repo TEXT NOT NULL, grp TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL,
-  PRIMARY KEY(tag, repo, grp, name, version)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS component_tags_component ON component_tags(repo, grp, name, version);
-CREATE TABLE IF NOT EXISTS blob_store_moves(
-  repo TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL, started_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS vuln_advisories(
-  ecosystem TEXT NOT NULL, pkg TEXT NOT NULL, id TEXT NOT NULL,
-  aliases TEXT NOT NULL DEFAULT '[]', summary TEXT NOT NULL DEFAULT '', severity TEXT NOT NULL DEFAULT '',
-  score INTEGER NOT NULL DEFAULT -1, vector TEXT NOT NULL DEFAULT '', malicious INTEGER NOT NULL DEFAULT 0,
-  affected TEXT NOT NULL DEFAULT '[]', published INTEGER NOT NULL DEFAULT 0, modified INTEGER NOT NULL DEFAULT 0,
-  withdrawn INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY(ecosystem, pkg, id)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS vuln_advisories_id ON vuln_advisories(id);
-CREATE TABLE IF NOT EXISTS vuln_queries(
-  ecosystem TEXT NOT NULL, pkg TEXT NOT NULL, version TEXT NOT NULL,
-  ids TEXT NOT NULL DEFAULT '[]', checked_at INTEGER NOT NULL,
-  PRIMARY KEY(ecosystem, pkg, version)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS vuln_findings(
-  repo TEXT NOT NULL, ecosystem TEXT NOT NULL, pkg TEXT NOT NULL, version TEXT NOT NULL,
-  name TEXT NOT NULL DEFAULT '', ids TEXT NOT NULL DEFAULT '[]', vulns INTEGER NOT NULL DEFAULT 0,
-  severity TEXT NOT NULL DEFAULT '', sev_rank INTEGER NOT NULL DEFAULT 0, malicious INTEGER NOT NULL DEFAULT 0,
-  unchecked INTEGER NOT NULL DEFAULT 0, scanned_at INTEGER NOT NULL,
-  PRIMARY KEY(repo, ecosystem, pkg, version)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS firewall_quarantine(
-  repo TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL,
-  ecosystem TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '', ids TEXT NOT NULL DEFAULT '[]',
-  severity TEXT NOT NULL DEFAULT '', malicious INTEGER NOT NULL DEFAULT 0,
-  first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, hits INTEGER NOT NULL DEFAULT 1,
-  PRIMARY KEY(repo, name, version)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS nodes(
-  id TEXT PRIMARY KEY, hostname TEXT NOT NULL, version TEXT NOT NULL, schema INTEGER NOT NULL,
-  started_at INTEGER NOT NULL, heartbeat_at INTEGER NOT NULL, draining INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sessions(key TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL);
-CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner, last_seen);
-CREATE TABLE IF NOT EXISTS login_states(state TEXT PRIMARY KEY, realm TEXT NOT NULL, nonce TEXT NOT NULL,
-  verifier TEXT NOT NULL DEFAULT '', next TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS saml_replay(id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS auth_failures(key TEXT PRIMARY KEY, fails INTEGER NOT NULL, last_fail INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS sso_identities(realm TEXT NOT NULL, id TEXT NOT NULL, conf TEXT NOT NULL, data TEXT NOT NULL,
-  checked_at INTEGER NOT NULL, PRIMARY KEY(realm, id)) WITHOUT ROWID;
-`
-
 // schemaVersion is the database layout this build reads and writes, kept in
-// SQLite's PRAGMA user_version and in PostgreSQL's schema_version table
-// (which starts at 1). Open refuses a database with a higher
-// version: an older build must never run on data a newer one wrote (QA
-// N-30). Bump it with every change an older build would mishandle (a table
-// or column it would not maintain, a stored value it would misread). Builds
-// before version 1 left it at 0 and do not check it.
+// the schema_version table (which starts at 1). Open refuses a database
+// with a higher version: an older build must never run on data a newer one
+// wrote (QA N-30). Bump it with every change an older build would
+// mishandle (a table or column it would not maintain, a stored value it
+// would misread). Builds before version 1 left it at 0 and do not check it.
 //
 //	1: users, roles and settings in the database, named blob stores,
 //	   secrets sealed with the secret key (secrets.go).
@@ -219,13 +91,12 @@ CREATE TABLE IF NOT EXISTS sso_identities(realm TEXT NOT NULL, id TEXT NOT NULL,
 const schemaVersion = 6
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
-// build upgraded, stamped in PostgreSQL's schema_version.compat (SQLite keeps
-// none: there it is the version itself, so a newer database is refused, as
-// before). A change older builds can ignore ("expand-only": new tables, or
-// new columns with defaults, and no new meaning for stored values) sets it
-// to schemaVersion-1, so the previous release still runs on the upgraded
-// database: a rolling upgrade, or a one-release rollback. Any other change
-// sets it to schemaVersion. The rule (N/N-1):
+// build upgraded, stamped in schema_version.compat. A change older builds
+// can ignore ("expand-only": new tables, or new columns with defaults, and
+// no new meaning for stored values) sets it to schemaVersion-1, so the
+// previous release still runs on the upgraded database: a rolling upgrade,
+// or a one-release rollback. Any other change sets it to schemaVersion. The
+// rule (N/N-1):
 //
 //   - Open refuses a database whose version and compat are both above
 //     schemaVersion;
@@ -238,68 +109,30 @@ const schemaVersion = 6
 // TestSchemaCompat pins every version's decision, so a bump needs one.
 const schemaCompat = 6
 
-// Open opens the metadata database and creates or upgrades its tables:
-// PostgreSQL when target is a postgres:// or postgresql:// URL (see
-// IsPostgresURL), else the SQLite file at target, created if needed. Errors
-// never hold the URL.
-func Open(target string) (*DB, error) {
-	var p *pool
-	var name string
-	var cl *cluster
-	if IsPostgresURL(target) {
-		db, cfg, n, err := openPostgres(target)
-		if err != nil {
-			return nil, err
-		}
-		p, name, cl = &pool{db: db, pg: true}, n, newCluster(cfg)
-	} else {
-		dsn := "file:" + target +
-			"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-4000)&_txlock=immediate"
-		db, err := sql.Open("sqlite", dsn)
-		if err != nil {
-			return nil, err
-		}
-		db.SetMaxOpenConns(4)
-		p, name = &pool{db: db}, target
-	}
-	if err := upgrade(p, name); err != nil {
-		p.db.Close()
+// Open opens the PostgreSQL database at url and creates or upgrades its
+// tables. Errors never hold the URL.
+func Open(url string) (*DB, error) {
+	db, cfg, name, err := openPostgres(url)
+	if err != nil {
 		return nil, err
 	}
-	d := &DB{sql: p, cl: cl}
-	if !p.pg {
-		d.path = target
+	p := &pool{db: db}
+	if err := upgrade(p, name); err != nil {
+		db.Close()
+		return nil, err
 	}
-	return d, nil
+	return &DB{sql: p, cl: newCluster(cfg)}, nil
 }
 
-// SetMaxOpenConns sets the size of the connection pool (default 4 for
-// SQLite, 10 for PostgreSQL). Call it before d is used.
+// SetMaxOpenConns sets the size of the connection pool (default 10). Call
+// it before d is used.
 func (d *DB) SetMaxOpenConns(n int) {
 	d.sql.db.SetMaxOpenConns(n)
-	if d.sql.pg {
-		d.sql.db.SetMaxIdleConns(n)
-	}
+	d.sql.db.SetMaxIdleConns(n)
 }
 
-// Driver names the database d runs on: "sqlite" or "postgresql".
-func (d *DB) Driver() string {
-	if d.sql.pg {
-		return "postgresql"
-	}
-	return "sqlite"
-}
-
-// SizeBytes returns the size of the database: of the SQLite file (without
-// its WAL), or pg_database_size on PostgreSQL.
+// SizeBytes returns the size of the database (pg_database_size).
 func (d *DB) SizeBytes(ctx context.Context) (int64, error) {
-	if !d.sql.pg {
-		st, err := os.Stat(d.path)
-		if err != nil {
-			return 0, err
-		}
-		return st.Size(), nil
-	}
 	var n int64
 	err := d.sql.QueryRowContext(ctx, `SELECT pg_database_size(current_database())`).Scan(&n)
 	return n, err
@@ -311,7 +144,7 @@ func (d *DB) SizeBytes(ctx context.Context) (int64, error) {
 // a newer build wrote is refused before anything is written unless its
 // compat lets this build run on it, and one at or above schemaVersion is
 // left alone: no DDL runs, so a PostgreSQL role with DML rights alone opens
-// it. On PostgreSQL the transaction first takes migrateLock without a lock
+// it. The transaction first takes migrateLock without a lock
 // or statement timeout, so nodes starting at once upgrade one after the
 // other however long the DDL takes (the startup probe bounds the wait), and
 // takes the write lock only for the DDL.
@@ -322,7 +155,7 @@ func upgrade(p *pool, name string) error {
 		return err
 	}
 	defer tx.Rollback()
-	q := txConn{tx: tx, pg: p.pg}
+	q := txConn{tx: tx}
 	version, compat, err := readSchema(ctx, q)
 	if err != nil {
 		return err
@@ -335,21 +168,14 @@ func upgrade(p *pool, name string) error {
 	if version >= schemaVersion {
 		return tx.Commit()
 	}
-	if p.pg {
-		if err := refuseOlderNodes(ctx, q, name); err != nil {
-			return err
-		}
-		if _, err := q.ExecContext(ctx, writeLock); err != nil {
-			return err
-		}
+	if err := refuseOlderNodes(ctx, q, name); err != nil {
+		return err
 	}
-	if _, err := q.ExecContext(ctx, pg(q, schema, pgSchema)); err != nil {
+	if _, err := q.ExecContext(ctx, writeLock); err != nil {
+		return err
+	}
+	if _, err := q.ExecContext(ctx, schema); err != nil {
 		return ddlError(err, name)
-	}
-	if !p.pg { // pgSchema has every column
-		if err := migrate(ctx, q); err != nil {
-			return err
-		}
 	}
 	if err := stampSchemaVersion(ctx, q, schemaVersion, schemaCompat); err != nil {
 		return err
@@ -357,12 +183,9 @@ func upgrade(p *pool, name string) error {
 	return tx.Commit()
 }
 
-// beginUpgrade starts upgrade's transaction: SQLite's BEGIN IMMEDIATE, or
-// on PostgreSQL one that holds migrateLock and waits without a timeout.
+// beginUpgrade starts upgrade's transaction, which holds migrateLock and
+// waits without a timeout.
 func beginUpgrade(ctx context.Context, p *pool) (*sql.Tx, error) {
-	if !p.pg {
-		return p.begin(ctx, true)
-	}
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -385,7 +208,7 @@ func refuseOlderNodes(ctx context.Context, q querier, name string) error {
 	}
 	var id string
 	var s int
-	err := q.QueryRowContext(ctx, `SELECT id, schema FROM nodes WHERE schema < ? AND heartbeat_at > `+dbNow(q)+` - ? ORDER BY id LIMIT 1`,
+	err := q.QueryRowContext(ctx, `SELECT id, schema FROM nodes WHERE schema < ? AND heartbeat_at > `+dbNow+` - ? ORDER BY id LIMIT 1`,
 		schemaCompat, NodeTTL.Milliseconds()).Scan(&id, &s)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -400,13 +223,9 @@ func refuseOlderNodes(ctx context.Context, q querier, name string) error {
 
 // readSchema reads the stamped schema version and compat: 0 for a new
 // database or one from before the stamp; compat is the version itself on
-// SQLite and on databases stamped before compat existed. It runs no DDL
-// (pgSchema creates the table and the column).
+// databases stamped before compat existed. It runs no DDL (schema creates
+// the table and the column).
 func readSchema(ctx context.Context, q querier) (version, compat int, err error) {
-	if !q.postgres() {
-		err = q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version)
-		return version, version, err
-	}
 	var stamped, hasCompat bool
 	if err := q.QueryRowContext(ctx, `SELECT to_regclass('schema_version') IS NOT NULL,
   EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('schema_version') AND attname = 'compat' AND NOT attisdropped)`).Scan(&stamped, &hasCompat); err != nil || !stamped {
@@ -426,76 +245,13 @@ func schemaVersionOf(ctx context.Context, q querier) (int, error) {
 	return v, err
 }
 
-// stampSchemaVersion stamps version v and, on PostgreSQL, compat.
+// stampSchemaVersion stamps version v and compat.
 func stampSchemaVersion(ctx context.Context, q querier, v, compat int) error {
-	if !q.postgres() { // PRAGMA takes no bind parameters
-		_, err := q.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", v))
-		return err
-	}
 	if _, err := q.ExecContext(ctx, `DELETE FROM schema_version`); err != nil {
 		return err
 	}
 	_, err := q.ExecContext(ctx, `INSERT INTO schema_version(version, compat) VALUES(?, ?)`, v, compat)
 	return err
-}
-
-// migrate adds columns that older SQLite databases lack. Each step checks
-// PRAGMA table_info first, so it is safe on every start.
-func migrate(ctx context.Context, db querier) error {
-	for _, c := range []struct{ table, col, ddl string }{
-		{"assets", "downloads", "downloads INTEGER NOT NULL DEFAULT 0"},
-		{"assets", "last_downloaded", "last_downloaded INTEGER NOT NULL DEFAULT 0"},
-		{"tasks", "notify_email", "notify_email TEXT NOT NULL DEFAULT '[]'"},
-		{"tasks", "running_node", "running_node TEXT NOT NULL DEFAULT ''"},
-		{"tasks", "running_since", "running_since INTEGER NOT NULL DEFAULT 0"},
-		{"webhook_deliveries", "claimed_by", "claimed_by TEXT NOT NULL DEFAULT ''"},
-		{"webhook_deliveries", "claim_until", "claim_until INTEGER NOT NULL DEFAULT 0"},
-		{"blob_stores", "type", "type TEXT NOT NULL DEFAULT 'file'"},
-		{"blob_stores", "config", "config TEXT NOT NULL DEFAULT '{}'"},
-		{"request_stats", "errors", "errors INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "bytes_in", "bytes_in INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "ms", "ms INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "max_ms", "max_ms INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "upstream", "upstream INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "upstream_failures", "upstream_failures INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "upstream_ms", "upstream_ms INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "upstream_max_ms", "upstream_max_ms INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "cache_hits", "cache_hits INTEGER NOT NULL DEFAULT 0"},
-		{"request_stats", "cache_misses", "cache_misses INTEGER NOT NULL DEFAULT 0"},
-		{"repositories", "gen", "gen INTEGER NOT NULL DEFAULT 0"},
-	} {
-		has, err := hasColumn(ctx, db, c.table, c.col)
-		if err != nil {
-			return err
-		}
-		if has {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, "ALTER TABLE "+c.table+" ADD COLUMN "+c.ddl); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func hasColumn(ctx context.Context, db querier, table, col string) (bool, error) {
-	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid, notnull, pk int
-		var name, typ string
-		var dflt any
-		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
-			return false, err
-		}
-		if name == col {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
 }
 
 // Close leaves the node registry if Join ran, closes the lock connection and
@@ -504,9 +260,7 @@ func (d *DB) Close() error {
 	if m := d.self.Load(); m != nil {
 		m.Leave(context.Background())
 	}
-	if d.cl != nil {
-		d.cl.close()
-	}
+	d.cl.close()
 	return d.sql.db.Close()
 }
 

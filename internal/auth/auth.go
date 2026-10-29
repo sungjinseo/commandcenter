@@ -140,10 +140,11 @@ type Authenticator struct {
 	// Sessions enables cookie authentication for the UI; nil disables it.
 	Sessions *Sessions
 
-	// Shared, set on PostgreSQL, keeps in the database the auth state every
-	// node must agree on: the sign-in failures of each name (throttle.go)
-	// and the identities the SSO realms asserted (identity.go). nil keeps
-	// them in this process, the one instance on SQLite.
+	// Shared keeps in the database the auth state every node must agree
+	// on: the sign-in failures of each name (throttle.go) and the
+	// identities the SSO realms asserted (identity.go). The app always
+	// sets it; nil (New, or Open over a Source that is not the database:
+	// unit tests) keeps them in this process.
 	Shared *meta.DB
 
 	// AnonymousRead returns a repository's anonymousRead override, or nil to

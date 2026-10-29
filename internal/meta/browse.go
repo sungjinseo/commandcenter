@@ -68,10 +68,9 @@ func (d *DB) ListDir(ctx context.Context, repo, prefix string, limit int) (entri
 }
 
 // contains is the condition that expr, a lower-cased column, contains the
-// lower-cased ? parameter: ASCII case folding, as SQLite's lower(), and no
-// wildcard characters.
-func contains(q querier, expr string) string {
-	return pg(q, `instr(`+expr+`, lower(?)) > 0`, `strpos(`+expr+`, lower(? COLLATE "C")) > 0`)
+// lower-cased ? parameter: ASCII case folding, and no wildcard characters.
+func contains(expr string) string {
+	return `strpos(` + expr + `, lower(? COLLATE "C")) > 0`
 }
 
 // AssetHit is one search result.
@@ -90,7 +89,7 @@ func (d *DB) SearchAssets(ctx context.Context, repos []string, q string, limit i
 	}
 	args = append(args, q, limit+1)
 	rows, err := d.sql.QueryContext(ctx, `SELECT repo, path FROM assets WHERE repo IN (`+marks+`)
-AND `+contains(d.sql, "lower(path)")+` ORDER BY repo, path LIMIT ?`, args...)
+AND `+contains("lower(path)")+` ORDER BY repo, path LIMIT ?`, args...)
 	if err != nil {
 		return nil, false, err
 	}
@@ -115,7 +114,7 @@ AND `+contains(d.sql, "lower(path)")+` ORDER BY repo, path LIMIT ?`, args...)
 // (case-insensitive; "" matches all), at most limit.
 func (d *DB) SearchPackageNames(ctx context.Context, repo, q string, limit int) ([]string, bool, error) {
 	rows, err := d.sql.QueryContext(ctx, `SELECT DISTINCT name FROM packages WHERE repo = ?
-AND `+contains(d.sql, "lower(name)")+` ORDER BY name LIMIT ?`, repo, q, limit+1)
+AND `+contains("lower(name)")+` ORDER BY name LIMIT ?`, repo, q, limit+1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -377,7 +376,7 @@ func (d *DB) searchAssetInfos(ctx context.Context, repos []string, q string, lim
 	}
 	args = append(args, q, limit+1)
 	rows, err := d.sql.QueryContext(ctx, `SELECT repo, path, size, last_modified, downloads, last_downloaded FROM assets WHERE repo IN (`+marks+`)
-AND `+contains(d.sql, pathExpr)+` ORDER BY repo, path LIMIT ?`, args...)
+AND `+contains(pathExpr)+` ORDER BY repo, path LIMIT ?`, args...)
 	if err != nil {
 		return nil, false, err
 	}

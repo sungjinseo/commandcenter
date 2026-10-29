@@ -310,7 +310,7 @@ func TestServeAppliesOutOfProcessAccessChanges(t *testing.T) {
 	}()
 
 	// A second handle on the database stands in for the CLI process.
-	other, err := meta.Open(metatest.Target(t, filepath.Join(cfg.DataDir, "meta.db")))
+	other, err := meta.Open(metatest.URL(t, cfg.DataDir))
 	if err != nil {
 		t.Fatal(err)
 	}

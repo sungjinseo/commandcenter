@@ -75,6 +75,42 @@ podAntiAffinity:
 {{- end }}
 {{- end }}
 
+{{/*
+"true" when the server uses an external PostgreSQL: database.existingSecret, a URL in
+config.extra or COMMANDCENTER_DATABASE_URL in extraEnv.
+*/}}
+{{- define "commandcenter.externalDatabase" -}}
+{{- $url := or .Values.database.existingSecret (dig "database" "url" "" (.Values.config.extra | default dict)) }}
+{{- range .Values.extraEnv }}{{ if eq (.name | default "") "COMMANDCENTER_DATABASE_URL" }}{{ $url = true }}{{ end }}{{ end }}
+{{- if $url }}true{{ end }}
+{{- end }}
+
+{{/* "true" when the chart runs the bundled PostgreSQL (postgresql.yaml). */}}
+{{- define "commandcenter.postgresql" -}}
+{{- if and .Values.postgresql.enabled (not (include "commandcenter.externalDatabase" .)) }}true{{ end }}
+{{- end }}
+
+{{- define "commandcenter.postgresql.fullname" -}}
+{{- printf "%s-postgresql" (include "commandcenter.fullname" . | trunc 41 | trimSuffix "-") }}
+{{- end }}
+
+{{- define "commandcenter.postgresql.image" -}}
+{{- with .Values.postgresql.image }}{{ .repository }}:{{ .tag }}{{ with .digest }}@{{ . }}{{ end }}{{ end }}
+{{- end }}
+
+{{- define "commandcenter.postgresql.labels" -}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
+{{ include "commandcenter.postgresql.selectorLabels" . }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/* Not the server's labels: its Service and PodDisruptionBudget must not select these pods. */}}
+{{- define "commandcenter.postgresql.selectorLabels" -}}
+app.kubernetes.io/name: postgresql
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/part-of: {{ include "commandcenter.name" . }}
+{{- end }}
+
 {{/* Settings that would otherwise be ignored without a word, or fail only after the install. */}}
 {{- define "commandcenter.validate" -}}
 {{- with .Values.config }}
@@ -85,18 +121,11 @@ podAntiAffinity:
 {{- fail "set secretKey.existingSecret or config.extra.secretKeyFile, not both: the server refuses to start with two keys" }}
 {{- end }}
 {{- end }}
-{{- /* PostgreSQL: database.existingSecret, a URL in config.extra or COMMANDCENTER_DATABASE_URL in extraEnv. */}}
-{{- $postgres := or .Values.database.existingSecret (dig "database" "url" "" (.Values.config.extra | default dict)) }}
-{{- range .Values.extraEnv }}{{ if eq (.name | default "") "COMMANDCENTER_DATABASE_URL" }}{{ $postgres = true }}{{ end }}{{ end }}
-{{- $rwx := has "ReadWriteMany" .Values.persistence.accessModes }}
-{{- if and (include "commandcenter.ha" .) (not $postgres) }}
-{{- fail "replicaCount above 1 needs PostgreSQL, which every pod shares (SQLite takes one instance): set database.existingSecret to a Secret with the URL (or config.extra.database.url, or COMMANDCENTER_DATABASE_URL in extraEnv)" }}
+{{- if not (or .Values.postgresql.enabled (include "commandcenter.externalDatabase" .)) }}
+{{- fail "no database configured: Command Center needs PostgreSQL. Set database.existingSecret to a Secret with the URL (or config.extra.database.url, or COMMANDCENTER_DATABASE_URL in extraEnv), or postgresql.enabled to true for the bundled one" }}
 {{- end }}
-{{- if and (include "commandcenter.ha" .) (not $rwx) (not .Values.persistence.existingClaim) }}
+{{- if and (include "commandcenter.ha" .) (not (has "ReadWriteMany" .Values.persistence.accessModes)) (not .Values.persistence.existingClaim) }}
 {{- fail "replicaCount above 1 needs one volume every pod mounts: set persistence.accessModes to [ReadWriteMany] (NFS, CephFS, EFS, ...) or persistence.existingClaim to such a claim" }}
-{{- end }}
-{{- if and $rwx (not $postgres) }}
-{{- fail "persistence.accessModes ReadWriteMany is a network file system, where SQLite (meta.db) breaks: set database.existingSecret to use PostgreSQL" }}
 {{- end }}
 {{- /* The pods' controller-revision-hash label is the StatefulSet's name plus 11 characters. */}}
 {{- if gt (len (include "commandcenter.fullname" .)) 52 }}
@@ -124,7 +153,7 @@ first and the chart's keys go on top: listen and dataDir must match the pod's po
 
 {{/*
 Hash of the keys the server reads on every start. The others (config.AccessKeys and repositories
-in the server) are imported into meta.db on the first start and ignored later, so a change to them
+in the server) are imported into the database on the first start and ignored later, so a change to them
 must not restart the pod for nothing.
 */}}
 {{- define "commandcenter.configChecksum" -}}

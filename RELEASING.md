@@ -12,13 +12,13 @@ starts the release workflow, so push no other `v` tags (no `v1`, no `v0.1`).
 
 **The first release is v0.1.0.** The initial open-source commit (cc41abc) has no tag, so v0.1.0 is
 the first version anyone can pin. A major version of zero says that config keys, the REST API and
-the `meta.db` layout may still change in a minor release, and the workflow gives 0.x releases no
+the database schema may still change in a minor release, and the workflow gives 0.x releases no
 floating `0` image tag. Release v1.0.0 once the project commits to in-place upgrades without
 breaking changes within a major version.
 
 While the major version is 0, a minor release may break compatibility and a patch release only
 fixes things. Whatever needs an action from the people who run Command Center goes under "Upgrade
-notes" in [CHANGELOG.md](CHANGELOG.md). This includes a new `meta.db` schema version, because the
+notes" in [CHANGELOG.md](CHANGELOG.md). This includes a new database schema version, because the
 only way back from one is the backup.
 
 ## Cutting a release
@@ -189,9 +189,6 @@ Read the diff before you commit. A new module or a changed license text needs a 
 third-party code must stay permissively licensed. A new module also needs a row in
 [ATTRIBUTION.md](ATTRIBUTION.md). CI does not check that file, so its versions are easy to
 forget.
-
-`modernc.org/libc` gets no pull requests of its own. `modernc.org/sqlite` needs the exact libc
-version that its `go.mod` names, and a sqlite update brings that version along.
 
 ### The golang image
 

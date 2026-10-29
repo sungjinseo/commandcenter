@@ -283,7 +283,7 @@ ORDER BY created_at DESC, id DESC LIMIT ?`, webhookID, limit)
 // deliveries of enabled webhooks whose next attempt is not after now and
 // that no claim holds (one that ended before now does not), and returns
 // them earliest first. A claimed delivery is node's to send: two nodes
-// claiming at once on PostgreSQL skip each other's rows (FOR UPDATE SKIP
+// claiming at once skip each other's rows (FOR UPDATE SKIP
 // LOCKED), and a node that dies holding a claim leaves the delivery to the
 // others once the claim ends. The statement takes no write lock: no
 // transaction checks an invariant on the claim.
@@ -291,7 +291,7 @@ func (d *DB) ClaimDeliveries(ctx context.Context, node string, now, until time.T
 	list, err := queryDeliveries(ctx, d.sql, `UPDATE webhook_deliveries SET claimed_by = ?, claim_until = ?
 WHERE id IN (SELECT d.id FROM webhook_deliveries d JOIN webhooks w ON w.id = d.webhook_id
   WHERE d.status = ? AND d.next_at <= ? AND d.claim_until < ? AND w.enabled = 1
-  ORDER BY d.next_at, d.id LIMIT ?`+pg(d.sql, ``, ` FOR UPDATE OF d SKIP LOCKED`)+`)
+  ORDER BY d.next_at, d.id LIMIT ? FOR UPDATE OF d SKIP LOCKED)
 RETURNING `+deliveryRead, node, toMs(until), DeliveryPending, toMs(now), toMs(now), limit)
 	slices.SortFunc(list, func(a, b WebhookDelivery) int {
 		return cmp.Or(a.NextAt.Compare(b.NextAt), strings.Compare(a.ID, b.ID))
@@ -299,13 +299,10 @@ RETURNING `+deliveryRead, node, toMs(until), DeliveryPending, toMs(now), toMs(no
 	return list, err
 }
 
-// ReleaseDeliveries ends the claims of node on pending deliveries, or with
-// node "" every claim, so that they are sent again at once.
+// ReleaseDeliveries ends the claims of node on pending deliveries, so that
+// they are sent again at once.
 func (d *DB) ReleaseDeliveries(ctx context.Context, node string) error {
-	q, args := `UPDATE webhook_deliveries SET claimed_by = '', claim_until = 0 WHERE claim_until > 0 AND status = ?`, []any{DeliveryPending}
-	if node != "" {
-		q, args = q+` AND claimed_by = ?`, append(args, node)
-	}
-	_, err := d.sql.ExecContext(ctx, q, args...)
+	_, err := d.sql.ExecContext(ctx, `UPDATE webhook_deliveries SET claimed_by = '', claim_until = 0
+WHERE claim_until > 0 AND status = ? AND claimed_by = ?`, DeliveryPending, node)
 	return err
 }

@@ -8,8 +8,8 @@ metadata:
     {{- include "commandcenter.labels" . | nindent 4 }}
 spec:
   # replicaCount 1: a second pod would get its own empty volume. A StatefulSet stops the old pod
-  # before it starts the new one, so two processes never open meta.db at the same time; a
-  # Deployment's rolling update could. More pods (PostgreSQL, ReadWriteMany) are deployment.yaml.
+  # before it starts the new one, so the pod's volume is never mounted twice. More pods (one
+  # ReadWriteMany volume) are deployment.yaml.
   replicas: 1
   # With OrderedReady (the default) a pod that never gets ready, after a bad image tag or config,
   # blocks every later rollout, helm rollback included, until someone deletes it by hand. With one

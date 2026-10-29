@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +28,7 @@ func newStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}

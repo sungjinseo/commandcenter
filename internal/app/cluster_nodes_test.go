@@ -20,7 +20,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"commandcenter/internal/config"
-	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/tasks"
 )
 
@@ -42,9 +41,6 @@ type node struct {
 // maven-releases.
 func clusterConfig(t *testing.T, extra string) *config.Config {
 	t.Helper()
-	if !metatest.Postgres() {
-		t.Skip("the nodes of a cluster share a PostgreSQL database")
-	}
 	cfg := testConfig(t, extra)
 	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
 	for _, u := range []string{"root", "adm1", "adm2"} {

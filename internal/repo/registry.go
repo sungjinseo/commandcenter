@@ -43,14 +43,14 @@ type Registry struct {
 
 	sf singleflight.Group // Lookup's resyncs
 
-	// Cluster is set when other nodes write the database too (PostgreSQL):
-	// a write first re-reads the stored repositories and routing rules, and
-	// runs Refresh, under the registry lock, so it validates against what
-	// every node wrote; afterwards it sends Notify("registry"). Lookup reads
-	// the database for a name the snapshot lacks.
-	Cluster bool
-	// Refresh, if set, re-reads under the registry lock of a Cluster write
-	// what else the write validates against: the app's blob stores and auth
+	// Other nodes write the database too: a write first re-reads the stored
+	// repositories and routing rules, and runs Refresh, under the registry
+	// lock, so it validates against what every node wrote; afterwards it
+	// sends Notify("registry"). Lookup reads the database for a name the
+	// snapshot lacks.
+	//
+	// Refresh, if set, re-reads under the registry lock of a write what
+	// else the write validates against: the app's blob stores and auth
 	// snapshot.
 	Refresh func(ctx context.Context) error
 
@@ -121,8 +121,8 @@ func NewRegistry(db *meta.DB, defs []config.Repository) *Registry {
 // a write transaction.
 const registryLock = "registry"
 
-// lock takes the registry lock for a write; in a Cluster it then re-reads
-// what the write validates against.
+// lock takes the registry lock for a write, then re-reads what the write
+// validates against.
 func (r *Registry) lock(ctx context.Context) (func(), error) {
 	if err := r.store(); err != nil {
 		return nil, err
@@ -131,11 +131,9 @@ func (r *Registry) lock(ctx context.Context) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if r.Cluster {
-		if err := r.refresh(ctx); err != nil {
-			unlock()
-			return nil, err
-		}
+	if err := r.refresh(ctx); err != nil {
+		unlock()
+		return nil, err
 	}
 	return unlock, nil
 }
@@ -155,7 +153,7 @@ func (r *Registry) refresh(ctx context.Context) error {
 	return nil
 }
 
-// Resync takes the registry lock to re-read, in a Cluster, the repositories,
+// Resync takes the registry lock to re-read the repositories,
 // routing rules and what Refresh reads, as a write does first: a node
 // applies the changes of the others so (Notify, and a periodic safety net).
 func (r *Registry) Resync(ctx context.Context) error {
@@ -169,9 +167,7 @@ func (r *Registry) Resync(ctx context.Context) error {
 
 // written tells the other nodes of a committed registry write.
 func (r *Registry) written(ctx context.Context) {
-	if r.Cluster {
-		r.db.Notify(context.WithoutCancel(ctx), registryLock) // missed, it is the 5 s reload's
-	}
+	r.db.Notify(context.WithoutCancel(ctx), registryLock) // missed, it is the 5 s reload's
 }
 
 // Reload replaces the snapshot with the stored repositories, normalized as
@@ -195,13 +191,12 @@ func (r *Registry) Reload(ctx context.Context) error {
 	return nil
 }
 
-// Lookup is Get for a request naming a repository: in a Cluster, a name the
-// snapshot lacks is looked up in the database, and when another node
-// created it this node resyncs at once (Resync, one at a time), so the
-// repository, and the blob store and routing rule it names, are served
-// right away.
+// Lookup is Get for a request naming a repository: a name the snapshot
+// lacks is looked up in the database, and when another node created it
+// this node resyncs at once (Resync, one at a time), so the repository,
+// and the blob store and routing rule it names, are served right away.
 func (r *Registry) Lookup(ctx context.Context, name string) *Repository {
-	if rp := r.Get(name); rp != nil || !r.Cluster || r.db == nil {
+	if rp := r.Get(name); rp != nil || r.db == nil {
 		return rp
 	}
 	if _, err := r.db.RepositoryGen(ctx, name); err != nil {
@@ -486,7 +481,7 @@ func (r *Registry) checkPolicy(ctx context.Context, def config.Repository) error
 }
 
 // WithWriteLock runs fn with the registry lock held and the current
-// snapshot (in a Cluster re-read first), so no repository is created,
+// snapshot (re-read first), so no repository is created,
 // updated or deleted meanwhile on any node. Cleanup policy, routing rule
 // and blob store changes use it: a policy delete or format change must not
 // race with a repository being connected to that policy. fn's caller tells

@@ -130,7 +130,7 @@ func (s *Service) StartBlobStoreMove(ctx context.Context, name, target, actor st
 }
 
 // MoveRunning reports whether repository name's repository.change-blobstore
-// task is running, on this node or (PostgreSQL) another live one.
+// task is running, on this node or another live one.
 func (s *Service) MoveRunning(name string) bool {
 	id := s.Running()
 	if id == "" {
@@ -153,7 +153,7 @@ func runMove(ctx context.Context, s *Service, t meta.Task, actor string, log *Ru
 		return summary{msg: err.Error()}, err
 	}
 	// Under the registry lock (blob store deletes take it too), after it
-	// re-read the moves another node may have begun (PostgreSQL).
+	// re-read the moves another node may have begun.
 	var source string
 	if err := s.Repos.WithWriteLock(ctx, func(snap *repo.Snapshot) error {
 		rp := snap.ByName[p.Repo]

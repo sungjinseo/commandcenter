@@ -22,7 +22,7 @@ import (
 func orphanApp(t *testing.T) (*App, *bytes.Buffer) {
 	t.Helper()
 	cfg := testConfig(t, "")
-	db, err := meta.Open(metatest.Target(t, filepath.Join(cfg.DataDir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, cfg.DataDir))
 	if err != nil {
 		t.Fatal(err)
 	}

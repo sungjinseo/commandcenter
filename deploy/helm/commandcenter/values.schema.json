@@ -346,7 +346,7 @@
           "pattern": "^[0-9]+(\\.[0-9]+)?([KMGTPE]i|[kMGTPE])?$"
         },
         "accessModes": {
-          "description": "ReadWriteOnce or ReadWriteOncePod with SQLite (meta.db needs a single-node volume); ReadWriteMany, a network file system, needs PostgreSQL (database) and is what replicaCount above 1 needs",
+          "description": "ReadWriteOnce, ReadWriteOncePod or ReadWriteMany; replicaCount above 1 needs ReadWriteMany (one volume every pod mounts)",
           "type": "array",
           "minItems": 1,
           "items": {
@@ -550,7 +550,86 @@
         "maxConns": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 1000
+          "maximum": 1000,
+          "description": "Connection pool size per pod; 0 is the server's default (10)"
+        }
+      },
+      "description": "The external PostgreSQL: a Secret holding its URL. Empty uses the bundled one (postgresql)."
+    },
+    "postgresql": {
+      "description": "The bundled single-pod PostgreSQL, used while database.existingSecret is empty",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repository": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tag": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^(sha256:[a-f0-9]{64})?$"
+            },
+            "pullPolicy": {
+              "enum": [
+                "Always",
+                "IfNotPresent",
+                "Never"
+              ]
+            }
+          }
+        },
+        "database": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$",
+          "description": "Database name; it goes into the URL unescaped"
+        },
+        "username": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$",
+          "description": "Role name; it goes into the URL unescaped"
+        },
+        "podSecurityContext": {
+          "type": "object"
+        },
+        "resources": {
+          "type": "object"
+        },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "storageClass": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?([KMGTPE]i|[kMGTPE])?$"
+            },
+            "accessModes": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "enum": [
+                  "ReadWriteOnce",
+                  "ReadWriteOncePod"
+                ]
+              }
+            },
+            "annotations": {
+              "$ref": "#/definitions/strings"
+            }
+          }
         }
       }
     }

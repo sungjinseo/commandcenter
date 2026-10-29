@@ -19,22 +19,13 @@ fails until the file is regenerated.
 | `golang.org/x/crypto` | v0.58.0 | The Go Authors | <https://go.googlesource.com/crypto> | BSD-3-Clause |
 | `golang.org/x/sync` | v0.24.0 | The Go Authors | <https://go.googlesource.com/sync> | BSD-3-Clause |
 | `golang.org/x/sys` | v0.49.0 | The Go Authors | <https://go.googlesource.com/sys> | BSD-3-Clause |
+| `golang.org/x/text` | v0.43.0 | The Go Authors | <https://go.googlesource.com/text> | BSD-3-Clause |
 | `gopkg.in/yaml.v3` | v3.0.1 | Kirill Simonov; Canonical Ltd. | <https://github.com/go-yaml/yaml> | MIT and Apache-2.0 (with a NOTICE, reproduced in [`NOTICE`](NOTICE)) |
-| `modernc.org/sqlite` | v1.60.1 | The Sqlite Authors (embeds SQLite) | <https://gitlab.com/cznic/sqlite> | BSD-3-Clause; SQLite itself is public domain |
-| `modernc.org/libc` | v1.77.1 | The Libc Authors | <https://gitlab.com/cznic/libc> | BSD-3-Clause |
-| `modernc.org/mathutil` | v1.7.1 | The mathutil Authors | <https://gitlab.com/cznic/mathutil> | BSD-3-Clause |
-| `modernc.org/memory` | v1.12.1 | The Memory Authors | <https://gitlab.com/cznic/memory> | BSD-3-Clause |
-| `github.com/google/uuid` | v1.6.0 | Google Inc. | <https://github.com/google/uuid> | BSD-3-Clause |
-| `github.com/remyoudompheng/bigfft` | v0.0.0-20230129092748 | The Go Authors | <https://github.com/remyoudompheng/bigfft> | BSD-3-Clause |
-| `github.com/dustin/go-humanize` | v1.0.1 | Dustin Sallings | <https://github.com/dustin/go-humanize> | MIT |
+| `github.com/jackc/pgx/v5` | v5.11.0 | Jack Christensen | <https://github.com/jackc/pgx> | MIT |
+| `github.com/jackc/pgpassfile` | v1.0.0 | Jack Christensen | <https://github.com/jackc/pgpassfile> | MIT |
+| `github.com/jackc/pgservicefile` | v0.0.0-20240606120523 | Jack Christensen | <https://github.com/jackc/pgservicefile> | MIT |
+| `github.com/jackc/puddle/v2` | v2.2.2 | Jack Christensen | <https://github.com/jackc/puddle> | MIT |
 | Go standard library | 1.26 | The Go Authors | <https://go.dev/> | BSD-3-Clause |
-
-`modernc.org/memory` also carries the mmap-go and Go license texts, and `modernc.org/sqlite` and
-`modernc.org/libc` carry third-party notices (`LICENSE-3RD-PARTY.md`); all are included in
-`THIRD_PARTY_LICENSES.txt`.
-
-`go.mod` also lists `github.com/mattn/go-isatty` (MIT) and `github.com/ncruces/go-strftime` (MIT)
-as indirect requirements of the SQLite driver. They are not linked into the binary.
 
 ## Container image
 

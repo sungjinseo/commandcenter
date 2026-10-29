@@ -31,7 +31,7 @@ import (
 // entries. Sessions and tokens of the user ("crowd:<id>") resolve through an
 // entry that is re-read from Crowd once it is older than cacheMinutes; while
 // Crowd cannot be reached the user is denied (fail closed; local admins are
-// unaffected). With Shared (PostgreSQL) every read from Crowd is also
+// unaffected). With Shared (the app's) every read from Crowd is also
 // stored as an identity row (identity.go), so another node uses it, until
 // it is cacheMinutes old, without asking Crowd; the password successes stay
 // on the node that checked them. Roles are computed on every use

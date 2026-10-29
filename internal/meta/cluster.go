@@ -15,16 +15,14 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// Cluster primitives. On PostgreSQL every process on the database is a
-// node, and two connections of its own, besides the pool, coordinate them:
+// Cluster primitives. Every process on the database is a node, and two
+// connections of its own, besides the pool, coordinate them:
 //
 //   - the lock connection holds the session advisory locks of DB.Lock;
 //   - the listener runs LISTEN cc_changed for Subscribe, so a node learns
 //     that another one changed what it caches (DB.Notify).
 //
-// Both open when first needed and reopen after a failure. On SQLite, one
-// process per file, Lock is the in-process mutex alone and Notify does
-// nothing.
+// Both open when first needed and reopen after a failure.
 //
 // Lock order: "access" (ui), then "registry" (repo.Registry), then the
 // formats' keys (repo.Store.Lock), then a write transaction (Tx). A caller
@@ -45,7 +43,7 @@ const notifyChannel = "cc_changed"
 // whose context ends mid-statement, and with it every lock the node holds.
 const lockStmtTimeout = 5 * time.Second
 
-// cluster is a PostgreSQL DB's lock connection and listener.
+// cluster is a DB's lock connection and listener.
 type cluster struct {
 	cfg *pgx.ConnConfig // the pool's, plus TCP keepalives
 
@@ -243,8 +241,8 @@ func (c *cluster) close() {
 	}
 }
 
-// Lock takes the lock named key for this process and, on PostgreSQL, for
-// every node on the database: first an in-process mutex, then the session
+// Lock takes the lock named key for this process and every node on the
+// database: first an in-process mutex, then the session
 // advisory lock (lockClass, hash32(key)) on the lock connection, asked
 // every 10 to 250 ms (jittered) until it is free or ctx ends. Two keys with
 // the same hash only wait for each other. unlock releases both; calling it
@@ -259,10 +257,6 @@ func (d *DB) Lock(ctx context.Context, key string) (unlock func(), err error) {
 	local, err := d.keys.lock(ctx, key)
 	if err != nil {
 		return nil, err
-	}
-	if d.cl == nil {
-		var once sync.Once
-		return func() { once.Do(local) }, nil
 	}
 	h := hash32(key)
 	backoff := 10 * time.Millisecond
@@ -297,10 +291,6 @@ func (d *DB) TryLock(key string) (unlock func(), ok bool, err error) {
 	local, ok := d.keys.try(key)
 	if !ok {
 		return nil, false, nil
-	}
-	if d.cl == nil {
-		var once sync.Once
-		return func() { once.Do(local) }, true, nil
 	}
 	h := hash32(key)
 	ok, gen, err := d.cl.tryLock(h)
@@ -351,12 +341,8 @@ func hash32(key string) int32 {
 // Subscribe calls fn when a node (this one too) sends Notify for topic, with
 // the arg of "topic:arg" ("" for a bare topic), and with "" after the
 // listener reconnected: then fn re-reads all it caches. fn runs on the
-// listener's goroutine, so it must not block for long. On SQLite it does
-// nothing: the one process applies its own changes.
+// listener's goroutine, so it must not block for long.
 func (d *DB) Subscribe(topic string, fn func(arg string)) {
-	if d.cl == nil {
-		return
-	}
 	d.cl.subMu.Lock()
 	d.cl.subs[topic] = append(d.cl.subs[topic], fn)
 	d.cl.subMu.Unlock()
@@ -365,12 +351,8 @@ func (d *DB) Subscribe(topic string, fn func(arg string)) {
 
 // Notify tells every node's subscribers of topic ("topic" or "topic:arg")
 // that what they cache changed. Send it after the change committed: the
-// receivers re-read the database. It takes no write lock. On SQLite it does
-// nothing.
+// receivers re-read the database. It takes no write lock.
 func (d *DB) Notify(ctx context.Context, topic string) error {
-	if d.cl == nil {
-		return nil
-	}
 	_, err := d.sql.execFree(ctx, `SELECT pg_notify('`+notifyChannel+`', ?)`, topic)
 	return err
 }

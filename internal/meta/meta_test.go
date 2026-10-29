@@ -5,19 +5,16 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"modernc.org/sqlite"
 
 	"commandcenter/internal/meta/metatest"
 )
 
 func openTest(t *testing.T) *DB {
 	t.Helper()
-	db, err := Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +132,7 @@ func TestPruneNegative(t *testing.T) {
 
 func userVersion(t *testing.T, db *DB) int {
 	t.Helper()
-	v, err := schemaVersionOf(ctx, db.sql)
+	v, _, err := readSchema(ctx, db.sql)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,29 +142,25 @@ func userVersion(t *testing.T, db *DB) int {
 // rawOpen opens target with the bare driver, without Open's upgrade.
 func rawOpen(t *testing.T, target string) *pool {
 	t.Helper()
-	driver := "sqlite"
-	if IsPostgresURL(target) {
-		driver = "pgx"
-	}
-	db, err := sql.Open(driver, target)
+	db, err := sql.Open("pgx", target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return &pool{db: db, pg: driver == "pgx"}
+	return &pool{db: db}
 }
 
 // QA N-30: Open stamps the schema version on new and older (version 0)
 // databases, and refuses one a newer build wrote, naming both versions and
 // the way back, without changing it.
 func TestOpenSchemaVersion(t *testing.T) {
-	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	path := metatest.URL(t, t.TempDir())
 	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if v := userVersion(t, db); v != schemaVersion {
-		t.Fatalf("new database: user_version %d, want %d", v, schemaVersion)
+		t.Fatalf("new database: schema version %d, want %d", v, schemaVersion)
 	}
 	if err := stampSchemaVersion(ctx, db.sql, 0, 0); err != nil { // as builds before the guard left it
 		t.Fatal(err)
@@ -177,7 +170,7 @@ func TestOpenSchemaVersion(t *testing.T) {
 		t.Fatalf("older database: %v", err)
 	}
 	if v := userVersion(t, db); v != schemaVersion {
-		t.Fatalf("older database: user_version %d, want %d", v, schemaVersion)
+		t.Fatalf("older database: schema version %d, want %d", v, schemaVersion)
 	}
 	if err := stampSchemaVersion(ctx, db.sql, schemaVersion+1, schemaVersion+1); err != nil {
 		t.Fatal(err)
@@ -192,61 +185,8 @@ func TestOpenSchemaVersion(t *testing.T) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
 	}
-	if v, err := schemaVersionOf(ctx, rawOpen(t, path)); err != nil || v != schemaVersion+1 {
-		t.Fatalf("refused database: user_version %d (err %v), want it untouched at %d", v, err, schemaVersion+1)
-	}
-}
-
-// Open creates the tables, migrates and stamps the version in one
-// transaction: when a step fails, as a crash would stop it (here the last
-// migration, on a tasks view that ALTER TABLE cannot change), the earlier
-// steps are undone too and the version stays 0, so the next start migrates
-// again instead of trusting a half-migrated database. That next start
-// commits once, so the stamp cannot lag the migration.
-func TestOpenMigratesInOneTransaction(t *testing.T) {
-	if metatest.Postgres() {
-		t.Skip("SQLite's migration; TestOpenPostgresInOneTransaction is PostgreSQL's")
-	}
-	path := filepath.Join(t.TempDir(), "meta.db")
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	if _, err := raw.Exec("CREATE TABLE assets(repo TEXT, path TEXT, blob_sha256 TEXT); CREATE VIEW tasks AS SELECT 1 AS id"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "view") {
-		t.Fatalf("Open: %v, want the migration of the tasks view to fail", err)
-	}
-	var v, cols, tables int
-	if err := raw.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != 0 {
-		t.Fatalf("user_version %d (err %v), want 0", v, err)
-	}
-	if err := raw.QueryRow("SELECT count(*) FROM pragma_table_info('assets') WHERE name = 'downloads'").Scan(&cols); err != nil || cols != 0 {
-		t.Fatalf("the failed Open added assets.downloads (%d, err %v)", cols, err)
-	}
-	if err := raw.QueryRow("SELECT count(*) FROM sqlite_master WHERE name = 'users'").Scan(&tables); err != nil || tables != 0 {
-		t.Fatalf("the failed Open created the users table (%d, err %v)", tables, err)
-	}
-
-	if _, err := raw.Exec("DROP VIEW tasks"); err != nil {
-		t.Fatal(err)
-	}
-	commits := 0
-	sqlite.RegisterConnectionHook(func(c sqlite.ExecQuerierContext, dsn string) error {
-		if strings.HasPrefix(dsn, "file:"+path+"?") { // Open's connections only
-			c.(sqlite.HookRegisterer).RegisterCommitHook(func() int32 { commits++; return 0 })
-		}
-		return nil
-	})
-	db, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if v := userVersion(t, db); commits != 1 || v != schemaVersion {
-		t.Fatalf("upgrade: %d commits, user_version %d; want one commit that stamps %d", commits, v, schemaVersion)
+	if v, _, err := readSchema(ctx, rawOpen(t, path)); err != nil || v != schemaVersion+1 {
+		t.Fatalf("refused database: schema version %d (err %v), want it untouched at %d", v, err, schemaVersion+1)
 	}
 }
 

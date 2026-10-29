@@ -14,8 +14,7 @@ import (
 // RecordOIDC with the identity; sessions and tokens of the user
 // ("oidc:<id>") resolve through the identity it records (identity.go).
 // There is no re-check against the provider: an identity lasts until a
-// changed OIDC configuration, or a restart without Shared, or on
-// PostgreSQL meta.SessionMaxAge after the login; then the browser simply
+// changed OIDC configuration, or meta.SessionMaxAge after the login; then the browser simply
 // signs in again and a token fails closed until it does. Roles are
 // computed on every use from the live snapshot, as for LDAP: the group
 // mappings, the default roles and an optional override row (source=oidc,

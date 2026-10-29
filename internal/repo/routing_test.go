@@ -2,7 +2,6 @@ package repo
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -46,13 +45,20 @@ func TestRegistryRouteAllowedAndRuleCheck(t *testing.T) {
 	for i := range defs {
 		config.ApplyRepositoryDefaults(&defs[i])
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	reg := NewRegistry(db, defs)
-	if err := reg.SetRoutingRules([]meta.RoutingRule{{Name: "b", Mode: meta.RoutingBlock, Matchers: []string{`^/internal/`}}}); err != nil {
+	ctx := context.Background()
+	if err := db.CreateRoutingRule(ctx, meta.RoutingRule{Name: "b", Mode: meta.RoutingBlock, Matchers: []string{`^/internal/`}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ImportRepositories(ctx, defs); err != nil {
+		t.Fatal(err)
+	}
+	reg := NewRegistry(db, nil)
+	if err := reg.Resync(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if !reg.RouteAllowed(reg.Get("p"), "org/x") || reg.RouteAllowed(reg.Get("p"), "internal/x") || reg.RouteAllowed(reg.Get("p"), "/internal/x") {
@@ -62,7 +68,6 @@ func TestRegistryRouteAllowedAndRuleCheck(t *testing.T) {
 		t.Fatal("a proxy without a (known) rule must allow everything")
 	}
 	// Create and update refuse an unknown rule and a rule on a hosted repository.
-	ctx := context.Background()
 	err = reg.Create(ctx, config.Repository{Name: "q", Format: "maven", Type: "proxy", Remote: "https://x/", RoutingRule: "nope"})
 	if err == nil || !strings.Contains(err.Error(), `unknown routing rule "nope"`) {
 		t.Fatalf("create: %v", err)

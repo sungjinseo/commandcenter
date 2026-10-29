@@ -371,7 +371,7 @@ func (d *DB) LoadAccess(ctx context.Context) (AccessData, error) {
 		return AccessData{}, err
 	}
 	defer tx.Rollback()
-	q := txConn{tx: tx, pg: d.sql.pg}
+	q := txConn{tx: tx}
 	var out AccessData
 	if out.Users, err = listUsers(ctx, q); err != nil {
 		return AccessData{}, fmt.Errorf("load users: %w", err)

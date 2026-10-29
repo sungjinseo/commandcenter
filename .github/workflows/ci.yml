@@ -12,8 +12,22 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The tests' metadata databases: each test creates one of its own on this server (metatest),
+    # so packages that run in parallel never share one.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     env:
       CGO_ENABLED: "0" # as the shipped binary is built
+      COMMANDCENTER_TEST_POSTGRES_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -80,8 +94,9 @@ jobs:
           tar -xzf kubeconform.tgz -C bin kubeconform
           echo "$PWD/bin" >>"$GITHUB_PATH"
       - name: helm lint, helm template, kubeconform
-        # Test values: the required ones, the same with every optional value set, config.yaml
-        # from an existing Secret, and both of the first with several pods (high availability).
+        # Test values: the required ones (with the bundled PostgreSQL), the same with every optional
+        # value set, config.yaml from an existing Secret, and both of the first with several pods
+        # (high availability) on an external PostgreSQL, and several pods on the bundled one.
         # -strict fails on unknown and duplicate fields.
         run: |
           chart=deploy/helm/commandcenter out="$RUNNER_TEMP/rendered.yaml"
@@ -114,6 +129,9 @@ jobs:
           priorityClassName: registry
           extraVolumes: [{name: blobs, persistentVolumeClaim: {claimName: commandcenter-blobs}}]
           extraVolumeMounts: [{name: blobs, mountPath: /blobs}]
+          postgresql:
+            image: {digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+            persistence: {storageClass: "-", size: 20Gi, annotations: {example.com/backup: "true"}}
           EOF
           cat >"$RUNNER_TEMP/ha.yaml" <<'EOF'
           replicaCount: 3
@@ -129,6 +147,7 @@ jobs:
           check --set config.existingSecret=commandcenter-config --set serviceAccount.create=false --set persistence.storageClass=fast
           check -f "$RUNNER_TEMP/required.yaml" -f "$RUNNER_TEMP/ha.yaml"
           check -f "$RUNNER_TEMP/required.yaml" -f "$RUNNER_TEMP/full.yaml" -f "$RUNNER_TEMP/ha.yaml"
+          check -f "$RUNNER_TEMP/required.yaml" --set replicaCount=3 --set "persistence.accessModes={ReadWriteMany}"
           for k8s in $KUBERNETES_VERSIONS; do
             kubeconform -strict -summary -kubernetes-version "$k8s" "$out" deploy/kubernetes/commandcenter.yaml
           done

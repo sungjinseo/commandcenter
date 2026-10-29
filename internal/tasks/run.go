@@ -322,14 +322,14 @@ func (s *Service) mark(id string, since time.Time) {
 }
 
 // StopRun cancels the run of task id if it is the one running, on this
-// node or (on PostgreSQL) another live one, and reports whether it was. The
+// node or another live one, and reports whether it was. The
 // run ends at its next cancellation check (a cleanup before its next
 // component) and records ResultStopped.
 func (s *Service) StopRun(id string) bool {
 	if s.stopLocal(id) {
 		return true
 	}
-	if id == "" || !s.clustered() || s.Running() != id {
+	if id == "" || s.Running() != id {
 		return false
 	}
 	return s.notify("task.stop:"+id) == nil // the node running it stops it (Start)

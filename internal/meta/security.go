@@ -245,8 +245,7 @@ func (d *DB) RepositoriesUsingRoutingRule(ctx context.Context, name string) ([]s
 }
 
 func reposUsingRule(ctx context.Context, q querier, name string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, pg(q, `SELECT name FROM repositories WHERE json_extract(config, '$.routingRule') = ? ORDER BY name`,
-		`SELECT name FROM repositories WHERE config::json ->> 'routingRule' = ? ORDER BY name`), name)
+	rows, err := q.QueryContext(ctx, `SELECT name FROM repositories WHERE config::json ->> 'routingRule' = ? ORDER BY name`, name)
 	if err != nil {
 		return nil, err
 	}

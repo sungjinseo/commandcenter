@@ -2,7 +2,7 @@
 // blob store compaction, repository cleanup and Maven metadata rebuilds.
 // Tasks are rows of the tasks table; a scheduler goroutine checks for due
 // tasks every 30 s and runs at most one task at a time, which "run now"
-// shares. With several nodes on one PostgreSQL database the one at a time
+// shares. With several nodes on one database the one at a time
 // holds across them (the cluster lock tasks.run), only the leader (the
 // scheduler lease) runs the due tasks, and a run shows on every node.
 package tasks
@@ -181,13 +181,13 @@ func (s *Service) log() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
-// Running returns the id of the task being run, on this node or (on
-// PostgreSQL) another live one, "" if none.
+// Running returns the id of the task being run, on this node or another
+// live one, "" if none.
 func (s *Service) Running() string {
 	s.mu.Lock()
 	id := s.running
 	s.mu.Unlock()
-	if id != "" || !s.clustered() {
+	if id != "" {
 		return id
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -205,9 +205,9 @@ var FlushWait = 2 * time.Second
 
 // flushOthers asks the other live nodes to write their pending download
 // counts (Notify "flush") and waits FlushWait, so that lastDownloadedDays
-// sees their downloads too. Only on PostgreSQL with another live node.
+// sees their downloads too. Only with another live node.
 func (s *Service) flushOthers(ctx context.Context) {
-	if s.Metrics == nil || !s.clustered() {
+	if s.Metrics == nil {
 		return
 	}
 	nodes, err := s.DB.Nodes(ctx)
@@ -233,9 +233,6 @@ func (s *Service) flushLocal() {
 		s.log().Warn("could not write the pending download counts a cleanup on another node asked for", "err", logsafe.Err(err))
 	}
 }
-
-// clustered reports whether other nodes may share the database.
-func (s *Service) clustered() bool { return s.DB.Driver() == "postgresql" }
 
 // notify sends topic to every node (meta.DB.Notify), logging a failure.
 func (s *Service) notify(topic string) error {

@@ -15,7 +15,6 @@ import (
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
-	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/webhook"
 )
 
@@ -50,10 +49,9 @@ func serveBackground(t *testing.T, a *App) (stop func() error) {
 	}
 }
 
-// Two servers on one PostgreSQL database start and serve side by side
-// (high availability), both registered, alive and ready, one the leader,
-// and the Cluster check is healthy. SQLite starts a second as before, which
-// it does not support: the check says so.
+// Two servers on one database start and serve side by side (high
+// availability), both registered, alive and ready, one the leader, and the
+// Cluster check is healthy.
 func TestTwoServersStart(t *testing.T) {
 	fastNodes(t)
 	cfg := testConfig(t, "")
@@ -75,8 +73,7 @@ func TestTwoServersStart(t *testing.T) {
 		}()
 		apps = append(apps, a)
 	}
-	pg := metatest.Postgres()
-	for deadline := time.Now().Add(5 * time.Second); pg; time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		nodes, err := apps[0].DB.Nodes(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -118,7 +115,7 @@ func TestTwoServersStart(t *testing.T) {
 		if c.Name != "Cluster" {
 			continue
 		}
-		if c.Healthy != pg || !strings.Contains(c.Message, "2 live node(s)") || !pg && !strings.Contains(c.Message, "SQLite takes one instance") {
+		if !c.Healthy || !strings.Contains(c.Message, "2 live node(s)") {
 			t.Fatalf("Cluster check: %+v", c)
 		}
 		return
@@ -128,7 +125,7 @@ func TestTwoServersStart(t *testing.T) {
 
 // Readiness (GET /service/rest/v1/status/writable) is 200 while serving;
 // on cancel the node drains: 503 and the row says draining, for drainDelay
-// on PostgreSQL before the server stops; then the row is gone.
+// before the server stops; then the row is gone.
 func TestServeReadinessAndDrain(t *testing.T) {
 	fastNodes(t)
 	defer func(d time.Duration) { drainDelay = d }(drainDelay)
@@ -176,19 +173,17 @@ func TestServeReadinessAndDrain(t *testing.T) {
 	start := time.Now()
 	go func() { stopped <- stop() }()
 	until("ready after cancel", func() bool { return writable() == http.StatusServiceUnavailable })
-	if metatest.Postgres() {
-		until("the row does not say draining", func() bool { n := nodes(); return len(n) == 1 && n[0].Draining })
-		select {
-		case <-stopped:
-			t.Fatal("Serve returned before the drain delay")
-		default:
-		}
+	until("the row does not say draining", func() bool { n := nodes(); return len(n) == 1 && n[0].Draining })
+	select {
+	case <-stopped:
+		t.Fatal("Serve returned before the drain delay")
+	default:
 	}
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
 	}
-	if d := time.Since(start); metatest.Postgres() && d < drainDelay || !metatest.Postgres() && d >= drainDelay {
-		t.Fatalf("Serve took %v to stop (drain delay %v, PostgreSQL only)", d, drainDelay)
+	if d := time.Since(start); d < drainDelay {
+		t.Fatalf("Serve took %v to stop (drain delay %v)", d, drainDelay)
 	}
 	if n := nodes(); len(n) != 0 {
 		t.Fatalf("nodes after Serve returned: %+v", n)

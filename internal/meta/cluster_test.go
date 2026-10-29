@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,12 +13,10 @@ import (
 	"commandcenter/internal/meta/metatest"
 )
 
-// twoNodes opens one database twice, as two server processes would. On
-// SQLite, where one process opens the file and Lock is in-process, it is
-// one handle twice.
+// twoNodes opens one database twice, as two server processes would.
 func twoNodes(t *testing.T) (a, b *DB, target string) {
 	t.Helper()
-	target = metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	target = metatest.URL(t, t.TempDir())
 	open := func() *DB {
 		db, err := Open(target)
 		if err != nil {
@@ -28,11 +25,7 @@ func twoNodes(t *testing.T) (a, b *DB, target string) {
 		t.Cleanup(func() { db.Close() })
 		return db
 	}
-	a = open()
-	if !metatest.Postgres() {
-		return a, a, target
-	}
-	return a, open(), target
+	return open(), open(), target
 }
 
 // shortNodeTimes makes heartbeats and leases fast for the test.
@@ -214,9 +207,6 @@ func terminate(t *testing.T, d *DB, pid uint32) {
 // documented ceiling), the node reconnects for the next Lock, and an unlock
 // from the old connection does not release a lock taken since.
 func TestLockConnectionTerminated(t *testing.T) {
-	if !metatest.Postgres() {
-		t.Skip("PostgreSQL's lock connection")
-	}
 	a, b, _ := twoNodes(t)
 	stale, err := a.Lock(ctx, "k1")
 	if err != nil {
@@ -287,22 +277,11 @@ func TestLeaseFailover(t *testing.T) {
 
 // A notification reaches the subscribers of its topic on every node; after
 // the listener is killed it reconnects and calls every subscriber with ""
-// (re-read everything), then delivers again. SQLite: both do nothing.
+// (re-read everything), then delivers again.
 func TestNotifyAndResync(t *testing.T) {
 	a, b, _ := twoNodes(t)
 	got := make(chan string, 10)
 	a.Subscribe("t", func(arg string) { got <- arg })
-	if !metatest.Postgres() {
-		if err := b.Notify(ctx, "t:x"); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case arg := <-got:
-			t.Fatalf("SQLite delivered %q", arg)
-		case <-time.After(100 * time.Millisecond):
-		}
-		return
-	}
 	next := func(want string) {
 		t.Helper()
 		select {
@@ -337,12 +316,8 @@ func TestNotifyAndResync(t *testing.T) {
 func makeV4(t *testing.T, target string) {
 	t.Helper()
 	raw := rawOpen(t, target)
-	stmts := []string{`DROP TABLE nodes`, `DROP TABLE leases`, `PRAGMA user_version = 4`}
-	if raw.pg {
-		stmts = []string{`DROP TABLE nodes`, `DROP TABLE leases`, `ALTER TABLE schema_version DROP COLUMN compat`,
-			`DELETE FROM schema_version`, `INSERT INTO schema_version(version) VALUES(4)`}
-	}
-	for _, q := range stmts {
+	for _, q := range []string{`DROP TABLE nodes`, `DROP TABLE leases`, `ALTER TABLE schema_version DROP COLUMN compat`,
+		`DELETE FROM schema_version`, `INSERT INTO schema_version(version) VALUES(4)`} {
 		if _, err := raw.db.Exec(q); err != nil {
 			t.Fatal(q, err)
 		}
@@ -353,10 +328,7 @@ func makeV4(t *testing.T, target string) {
 // after the other, and all start.
 func TestConcurrentOpen(t *testing.T) {
 	for _, v4 := range []bool{false, true} {
-		if !v4 && !metatest.Postgres() {
-			continue // SQLite: first opens of a new file race on journal_mode(WAL); one process opens a file anyway
-		}
-		target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+		target := metatest.URL(t, t.TempDir())
 		if v4 {
 			db, err := Open(target)
 			if err != nil {
@@ -385,7 +357,7 @@ func TestConcurrentOpen(t *testing.T) {
 			}
 		}
 		version, compat, err := readSchema(ctx, rawOpen(t, target))
-		if err != nil || version != schemaVersion || compat != map[bool]int{true: schemaCompat, false: schemaVersion}[metatest.Postgres()] {
+		if err != nil || version != schemaVersion || compat != schemaCompat {
 			t.Fatalf("v4 %v: schema %d compat %d (%v)", v4, version, compat, err)
 		}
 	}
@@ -394,10 +366,7 @@ func TestConcurrentOpen(t *testing.T) {
 // The upgrade waits for another node's upgrade however long it takes,
 // whatever lock_timeout the URL sets for the server's writes.
 func TestOpenWaitsForTheMigrateLock(t *testing.T) {
-	if !metatest.Postgres() {
-		t.Skip("PostgreSQL's migrate lock")
-	}
-	target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	target := metatest.URL(t, t.TempDir())
 	raw := rawOpen(t, target)
 	tx, err := raw.db.Begin()
 	if err != nil {
@@ -459,7 +428,7 @@ func TestSchemaCompat(t *testing.T) {
 // a running node turns unready when compat rises above its build.
 func TestCompatRefusals(t *testing.T) {
 	shortNodeTimes(t, time.Hour, time.Minute) // beat by hand
-	target := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	target := metatest.URL(t, t.TempDir())
 	db, err := Open(target)
 	if err != nil {
 		t.Fatal(err)
@@ -486,9 +455,6 @@ func TestCompatRefusals(t *testing.T) {
 	if _, err := Open(target); err == nil {
 		t.Fatal("Open of a database whose compat is above this build")
 	}
-	if !metatest.Postgres() {
-		return // SQLite keeps no compat
-	}
 	stamp(schemaVersion+1, schemaVersion)
 	if err := db.Ready(ctx); err != nil {
 		t.Fatalf("Ready on a newer, expand-only database: %v", err)
@@ -505,7 +471,7 @@ func TestCompatRefusals(t *testing.T) {
 	// An upgrade while a live node of an older build is registered.
 	stamp(schemaCompat-1, schemaCompat-1)
 	if _, err := raw.db.Exec(`INSERT INTO nodes(id, hostname, version, schema, started_at, heartbeat_at) VALUES('old-1', 'h', 'old', $1, 1, `+
-		dbNow(raw)+`)`, schemaCompat-1); err != nil {
+		dbNow+`)`, schemaCompat-1); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Open(target); err == nil || !strings.Contains(err.Error(), "old-1") || !strings.Contains(err.Error(), "Recreate") {
@@ -524,8 +490,7 @@ func TestCompatRefusals(t *testing.T) {
 	}
 }
 
-// Nodes join beside each other at once (high availability; SQLite, one
-// process per file, registers them too): both alive, one the leader; a
+// Nodes join beside each other at once (high availability): both alive, one the leader; a
 // node that crashed stops counting as alive after NodeTTL and keeps no one
 // waiting.
 func TestJoinBesideOthers(t *testing.T) {
@@ -575,7 +540,7 @@ func TestJoinBesideOthers(t *testing.T) {
 }
 
 // Ready follows the node: ready once joined (the lock connection and the
-// listener up on PostgreSQL), not ready while draining, and the row and
+// listener up), not ready while draining, and the row and
 // the lease go on Leave.
 func TestReadyDrainLeave(t *testing.T) {
 	shortNodeTimes(t, 50*time.Millisecond, time.Second)
@@ -660,12 +625,8 @@ func TestTryLock(t *testing.T) {
 }
 
 // Only the leader (the scheduler lease) prunes request statistics, the
-// negative cache and events; another node's prunes delete nothing. SQLite:
-// one process, always the leader.
+// negative cache and events; another node's prunes delete nothing.
 func TestLeaderAlonePrunes(t *testing.T) {
-	if !metatest.Postgres() {
-		t.Skip("SQLite runs one process, which is the leader")
-	}
 	a, b, _ := twoNodes(t)
 	joinAll(t, a, b)
 	if !a.Leader() || b.Leader() {

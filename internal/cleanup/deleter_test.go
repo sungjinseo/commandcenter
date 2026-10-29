@@ -3,7 +3,6 @@ package cleanup
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -32,7 +31,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}

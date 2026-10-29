@@ -119,6 +119,9 @@ func TestCleanupStopsWhenPolicyUnassigned(t *testing.T) {
 	if _, err := h.db.ImportRepositories(context.Background(), defs); err != nil { // so the registry can update them
 		t.Fatal(err)
 	}
+	if err := h.reg.Reload(context.Background()); err != nil { // with their stored gens
+		t.Fatal(err)
+	}
 	h.oldLibs(t, "1.0", "1.1", "1.2")
 	calls := 0
 	h.wrapMaven(func(component.Component) {

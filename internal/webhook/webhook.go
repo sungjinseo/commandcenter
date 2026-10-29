@@ -131,11 +131,6 @@ func (d *Dispatcher) Deliver() {
 	if d.node == "" { // a process that did not join as a node (tests)
 		d.node = uuid()
 	}
-	if d.DB.Driver() == "sqlite" { // one process sends: the claims a crash left were its own
-		if err := d.DB.ReleaseDeliveries(context.Background(), ""); err != nil {
-			d.Log.Warn("could not release the webhook delivery claims of the last run", "err", logsafe.Err(err))
-		}
-	}
 	d.wg.Add(1 + Workers)
 	go d.poll()
 	for i := 0; i < Workers; i++ {

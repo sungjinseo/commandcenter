@@ -33,6 +33,21 @@ template:
     {{- end }}
     securityContext:
       {{- toYaml .Values.podSecurityContext | nindent 6 }}
+    {{- if include "commandcenter.postgresql" . }}
+    # The server exits when the database does not answer; on a first install it would crash-loop
+    # until the bundled PostgreSQL is up.
+    initContainers:
+      - name: wait-for-postgresql
+        image: {{ include "commandcenter.postgresql.image" . | quote }}
+        imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+        # -U: the pod's user has no passwd entry, and pg_isready refuses to guess one.
+        command: ["sh", "-c", "until pg_isready -q -h {{ include "commandcenter.postgresql.fullname" . }} -p 5432 -U {{ .Values.postgresql.username }}; do sleep 2; done"]
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {memory: 32Mi}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+    {{- end }}
     containers:
       - name: commandcenter
         image: {{ include "commandcenter.image" . | quote }}
@@ -70,6 +85,12 @@ template:
               secretKeyRef:
                 name: {{ .Values.database.existingSecret }}
                 key: {{ .Values.database.key }}
+          {{- else if include "commandcenter.postgresql" . }}
+          - name: COMMANDCENTER_DATABASE_URL
+            valueFrom:
+              secretKeyRef:
+                name: {{ include "commandcenter.postgresql.fullname" . }}
+                key: url
           {{- end }}
           {{- with .Values.extraEnv }}
           {{- toYaml . | nindent 10 }}
@@ -96,7 +117,7 @@ template:
           - name: config
             mountPath: /etc/commandcenter
             readOnly: true
-          # SQLite's temporary files; the root filesystem is read-only. Never a blob store.
+          # Temporary files; the root filesystem is read-only. Never a blob store.
           - name: tmp
             mountPath: /tmp
           {{- with .Values.extraVolumeMounts }}

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -137,7 +136,7 @@ type env struct {
 func newEnv(t *testing.T, mode string) *env {
 	t.Helper()
 	dir := t.TempDir()
-	db, err := meta.Open(metatest.Target(t, filepath.Join(dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, dir))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,9 +2,9 @@
 
 Runs [Command Center](https://github.com/sungjinseo/commandcenter), a self-hosted registry for
 Maven, npm, PyPI, Go modules and Cargo. By default as one pod: a StatefulSet with one replica and
-a ReadWriteOnce volume for `/data`, with `meta.db` in SQLite on it. With `replicaCount` above 1
-the pods run active-active on PostgreSQL and one ReadWriteMany volume: see
-[High availability](#high-availability).
+a ReadWriteOnce volume for `/data`, beside a bundled single-pod PostgreSQL that holds the metadata
+([Database](#database)). With `replicaCount` above 1 the pods run active-active on that database
+and one ReadWriteMany volume: see [High availability](#high-availability).
 
 The operations guide is [docs/guide.md](https://github.com/sungjinseo/commandcenter/blob/main/docs/guide.md)
 (Korean); its "Kubernetes" section explains the choices made here.
@@ -26,7 +26,10 @@ config:
   baseURL: https://repo.example.com   # the address clients use
   adminPasswordHash: '$2a$10$...'     # single quotes
 persistence:
-  storageClass: <block storage class> # see Storage
+  storageClass: <storage class>       # see Storage
+postgresql:
+  persistence:
+    storageClass: <block storage class> # see Database
 ingress:
   enabled: true
   className: nginx
@@ -56,21 +59,46 @@ Chart version 1.2.3 runs image 1.2.3. `helm show values oci://ghcr.io/sungjinseo
 lists every value. The chart's values.schema.json rejects unknown keys, so a misspelt key, or one
 from another chart, fails the install instead of being ignored.
 
+## Database
+
+Command Center keeps its metadata (repositories, components, users, tasks, events) in PostgreSQL 13
+or newer. Two ways:
+
+- **Bundled** (default, `postgresql.enabled: true` while `database.existingSecret` is empty): one
+  `postgres:17-alpine` pod, the StatefulSet `<fullname>-postgresql` (`commandcenter-postgresql` for
+  the release `commandcenter`), with a volume of its own (`postgresql.persistence`, 8Gi). Its password is generated on install and kept across
+  upgrades in the Secret of the same name (key `password`; key `url` is what the server reads).
+  Put its volume on block storage: a cloud disk, iSCSI or a local volume, never NFS or SMB. It is
+  one pod and not highly available.
+- **External** (`database.existingSecret`): a Secret with the URL of a database you run or a managed
+  service, which must exist and be owned by the URL's role; the tables are created on the first
+  start. The bundled one is then not rendered. A `database.url` in the config.yaml of
+  `config.existingSecret` counts too, but the chart cannot see it: set `postgresql.enabled: false`
+  then, or the server refuses to start with two URLs.
+
+  ```bash
+  kubectl -n registry create secret generic commandcenter-database \
+    --from-literal=url='postgres://cc:PASSWORD@db.example:5432/commandcenter?sslmode=require'
+  ```
+
+Back the database up with `pg_dump` (the guide's "백업과 복원"); for the bundled one:
+
+```bash
+kubectl -n registry exec commandcenter-postgresql-0 -- pg_dump -U commandcenter -Fc commandcenter > commandcenter.dump
+```
+
 ## Storage
 
-- `meta.db` is SQLite in WAL mode. Put `/data` on block storage: a cloud disk, iSCSI or a local
-  volume. Never use NFS, SMB, EFS or Azure Files, whose locking cannot keep the database
-  consistent. With `persistence.storageClass` empty the cluster's default class is used, and
-  on-premises clusters often default to an NFS provisioner: check `kubectl get storageclass`.
+- `/data` holds the default blob store and the temp and upload session files. Block storage and
+  NFS both work; with `persistence.storageClass` empty the cluster's default class is used.
 - Named blob stores may live on NFS. Mount the claim with `extraVolumes` and `extraVolumeMounts`,
   then create the store in the web UI with that path.
 - `persistence.storageClass`, `size`, `accessModes` and `annotations` go into the StatefulSet's
   volumeClaimTemplates, which Kubernetes does not let you change. Changing one later fails
   `helm upgrade`; see [Resizing the volume](#resizing-the-volume).
 - `persistence.existingClaim` mounts a PVC you made instead, such as a restored snapshot.
-- Do not force-delete the pod (`--force --grace-period=0`) while its node may still run it: two
-  processes would write to one volume. (With `replicaCount` above 1 they share it anyway, on
-  PostgreSQL.)
+- Do not force-delete a pod (`--force --grace-period=0`) while its node may still run it: two
+  processes would write to one volume.
 
 ## Key values
 
@@ -85,15 +113,17 @@ from another chart, fails the install instead of being ignored.
 | `secretKey.existingSecret` | `""` | Secret with the key that encrypts stored SMTP, LDAP and remoteAuth passwords. Never remove or replace it without `commandcenter secret-key rotate` |
 | `image.tag`, `image.digest` | appVersion, `""` | Pin a version; add the digest cosign verified |
 | `replicaCount` | `1` | Above 1: active-active pods on PostgreSQL and a ReadWriteMany volume ([High availability](#high-availability)) |
-| `database.existingSecret` | `""` | Secret with the PostgreSQL URL (key `url`); required with `replicaCount` above 1 |
-| `persistence.storageClass`, `size` | default class, `50Gi` | Block storage with SQLite; ReadWriteMany with `replicaCount` above 1 |
+| `database.existingSecret` | `""` | Secret with the URL of an external PostgreSQL (key `url`); empty uses the bundled one ([Database](#database)) |
+| `postgresql.enabled` | `true` | The bundled single-pod PostgreSQL, while `database.existingSecret` is empty |
+| `postgresql.persistence.storageClass`, `size` | default class, `8Gi` | The bundled PostgreSQL's volume: block storage |
+| `persistence.storageClass`, `size` | default class, `50Gi` | Blobs; ReadWriteMany with `replicaCount` above 1 |
 | `resources.limits.memory`, `goMemLimit` | `128Mi`, `80MiB` | Raise them together; GOMEMLIMIT about 60-65 % of the limit |
 | `proxy.http`, `https`, `noProxy` | `""` | Forward proxy for proxy repositories |
 | `ingress.*` | disabled | Body limit of at least `maxUploadMiB` (1024 MiB) and long timeouts |
 | `httpRoute.*` | disabled | Gateway API route instead of an Ingress: `parentRefs` (required) and `hostnames` |
 
 `baseURL`, `anonymousRead`, the users (`adminPasswordHash`), `roles`, `maxUploadMiB` and
-`repositories` are imported into meta.db on the first start. After that the web UI owns them:
+`repositories` are imported into the database on the first start. After that the web UI owns them:
 changing the values does nothing, and does not restart the pod. For a lost admin password:
 
 ```bash
@@ -106,9 +136,11 @@ printf '%s\n' "$PASSWORD" | kubectl exec -i -n registry commandcenter-0 -- \
 With `replicaCount` above 1 the chart renders a Deployment instead of the StatefulSet, and every
 pod serves every request: there is no leader for requests and no session affinity. The pods share:
 
-- **PostgreSQL** (`database.existingSecret`), which also coordinates them: cluster-wide locks for
+- **PostgreSQL**, which also coordinates them: cluster-wide locks for
   uploads and index rebuilds, change notifications for the caches, one scheduled task run at a
-  time on one leader, webhook delivery claims, sessions and the sign-in throttle.
+  time on one leader, webhook delivery claims, sessions and the sign-in throttle. The bundled
+  PostgreSQL is one pod, so it is the part that is not highly available: use a replicated one
+  (`database.existingSecret`) for that.
 - **One ReadWriteMany volume** at `/data` (`persistence.accessModes: [ReadWriteMany]` with an NFS,
   CephFS or EFS class, or `persistence.existingClaim`): the default blob store and the temp and
   upload session files of every store, so a Docker push may send each chunk to another pod. Named
@@ -118,8 +150,7 @@ pod serves every request: there is no leader for requests and no session affinit
   to start.
 
 The nodes' clocks must be in sync (NTP), the NFS server's too: compaction compares blob ages.
-`commandcenter.validate` refuses `replicaCount` above 1 without PostgreSQL or a ReadWriteMany
-volume. The chart adds a PodDisruptionBudget of one pod, a `helm.sh/resource-policy: keep` claim,
+`commandcenter.validate` refuses `replicaCount` above 1 without a ReadWriteMany volume. The chart adds a PodDisruptionBudget of one pod, a `helm.sh/resource-policy: keep` claim,
 and, while `affinity` is empty, a preferred anti-affinity that spreads the pods over nodes. The
 readiness probe (`/service/rest/v1/status/writable`) takes a pod out of the Service while its
 database or change listener is down or while it shuts down.
@@ -149,9 +180,8 @@ A one-time maintenance window:
 
 1. Back up ("백업과 복원" in the guide) and stop the pod:
    `kubectl -n registry scale statefulset commandcenter --replicas=0`.
-2. On SQLite, copy `meta.db` into an empty PostgreSQL database with `commandcenter migrate-db -to
-   <url>` (the guide's "Kubernetes" section runs a server command as a Pod), and create the URL's
-   Secret.
+2. To move from the bundled PostgreSQL to a replicated one, restore the `pg_dump` into it
+   (`pg_restore --no-owner --role=<its role> -d <database>`) and create the URL's Secret.
 3. Create a ReadWriteMany claim and copy `/data/blobs` and `/data/blobstores` (named file stores)
    from `data-commandcenter-0` into it, for example with a busybox Pod mounting both claims
    (`cp -a`).
@@ -160,8 +190,10 @@ A one-time maintenance window:
    ```bash
    helm upgrade commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version <version> \
      -n registry -f values.yaml \
-     --set replicaCount=3,database.existingSecret=commandcenter-database,persistence.existingClaim=<rwx claim>
+     --set replicaCount=3,persistence.existingClaim=<rwx claim>
    ```
+
+   Add `database.existingSecret=commandcenter-database` after step 2.
 
    Helm replaces the StatefulSet with the Deployment. The old claim `data-commandcenter-0` stays
    until you delete it.
@@ -191,7 +223,7 @@ Back to one pod: `replicaCount: 1` renders the StatefulSet again, with a claim t
 
 1. Read the [CHANGELOG](https://github.com/sungjinseo/commandcenter/blob/main/CHANGELOG.md) for
    the new version and back up ("백업과 복원" in the guide). Downgrades are not supported: a new
-   version may upgrade meta.db, which older versions cannot use. The way back is that backup with
+   version may upgrade the database schema, which older versions cannot use. The way back is that backup with
    the old version, since a `helm rollback` to the old version is a downgrade too.
 2. Upgrade:
 
@@ -233,12 +265,15 @@ With `persistence.existingClaim`, resize that claim and nothing else.
 helm uninstall commandcenter -n registry
 ```
 
-The data stays. The StatefulSet never deletes its PVC (`data-commandcenter-0`), the shared claim of
-`replicaCount` above 1 (`commandcenter-data`) is kept by its resource policy, and the secret key
-Secret is yours. Installing again with the same release name and namespace mounts the same volume,
-with its users and repositories; the config values are not imported a second time. To delete the
-data for good, delete the PVC: `kubectl -n registry delete pvc data-commandcenter-0`. With the
-usual reclaim policy `Delete`, that also deletes the disk.
+The data stays. The StatefulSets never delete their PVCs (`data-commandcenter-0` and the bundled
+PostgreSQL's `data-commandcenter-postgresql-0`), the shared claim of `replicaCount` above 1
+(`commandcenter-data`) and the bundled PostgreSQL's password Secret (`commandcenter-postgresql`)
+are kept by their resource policy, and the secret key Secret is yours. Installing again with the
+same release name and namespace mounts the same volumes, with their users and repositories; the
+config values are not imported a second time. To delete the data for good, delete the PVCs and the
+password Secret: `kubectl -n registry delete pvc data-commandcenter-0 data-commandcenter-postgresql-0`
+and `kubectl -n registry delete secret commandcenter-postgresql`. With the usual reclaim policy
+`Delete`, that also deletes the disks.
 
 ## OpenShift
 
@@ -250,4 +285,9 @@ podSecurityContext:
   runAsUser: null
   runAsGroup: null
   fsGroup: null
+postgresql:
+  podSecurityContext: # the bundled PostgreSQL runs as any user too
+    runAsUser: null
+    runAsGroup: null
+    fsGroup: null
 ```

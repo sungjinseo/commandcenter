@@ -66,7 +66,7 @@ func (e *env) open() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := meta.Open(metatest.Target(t, filepath.Join(e.dir, "meta.db")))
+	db, err := meta.Open(metatest.URL(t, e.dir))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,22 +14,30 @@ config.baseURL{{ if not .Values.config.existingSecret }} ({{ .Values.config.base
 {{- if .Release.IsUpgrade }}
 
 baseURL, anonymousRead, the users (adminPasswordHash), roles, maxUploadMiB and repositories were
-imported into meta.db on the first start, so changing them in the values does nothing now: use the
+imported into the database on the first start, so changing them in the values does nothing now: use the
 web UI, or "commandcenter user reset-password" for a lost admin password (docs/guide.md).
 {{- end }}
 {{- if include "commandcenter.ha" . }}
 
 {{ .Values.replicaCount }} pods serve active-active on the PostgreSQL database and the shared claim {{ include "commandcenter.claim" . }}.
+{{- if include "commandcenter.postgresql" . }}
+The bundled PostgreSQL is one pod: for high availability use a replicated one (database.existingSecret).
+{{- end }}
 They need the same config and secret key, and clocks in sync (NTP). The admin UI's System status
 (Cluster) and GET /-/api/nodes list the nodes and the leader:
-  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name={{ include "commandcenter.name" . }},app.kubernetes.io/instance={{ .Release.Name }}
 {{- if and (not .Values.persistence.storageClass) (not .Values.persistence.existingClaim) }}
 
 The shared claim uses the cluster's default StorageClass. It must provide ReadWriteMany (NFS, CephFS, EFS).
 {{- end }}
-{{- else if and (not .Values.persistence.storageClass) (not .Values.persistence.existingClaim) }}
+{{- end }}
+{{- if include "commandcenter.postgresql" . }}
 
-The volume uses the cluster's default StorageClass. It must be block storage, never NFS or SMB.
+The metadata is in the bundled PostgreSQL {{ include "commandcenter.postgresql.fullname" . }} (one pod). Back it up with pg_dump:
+  kubectl -n {{ .Release.Namespace }} exec {{ include "commandcenter.postgresql.fullname" . }}-0 -- pg_dump -U {{ .Values.postgresql.username }} -Fc {{ .Values.postgresql.database }} > commandcenter.dump
+{{- if not .Values.postgresql.persistence.storageClass }}
+Its volume uses the cluster's default StorageClass. It must be block storage, never NFS or SMB.
+{{- end }}
 {{- end }}
 {{- if not .Values.secretKey.existingSecret }}
 

@@ -3,7 +3,6 @@ package app
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -72,9 +71,8 @@ type App struct {
 	Mail     *mail.Sender      // failure and test e-mail; Close drains its queue
 	Events   *events.Recorder  // activity events; written by a goroutine that Close stops
 	Deleters *cleanup.Registry // per-format component deleters used by cleanup
-	// DockerKey signs the Docker registry's and Conan's bearer tokens: on
-	// PostgreSQL the key every node shares (meta.DB.TokenKey), on SQLite
-	// random per process, so a restart only makes clients fetch new ones.
+	// DockerKey signs the Docker registry's and Conan's bearer tokens: the
+	// key every node shares (meta.DB.TokenKey).
 	DockerKey []byte
 	Tasks     *tasks.Service      // scheduled tasks; the scheduler runs while Serve does
 	Webhooks  *webhook.Dispatcher // webhook deliveries, sent while Serve runs; Close stops it before the database closes
@@ -122,8 +120,8 @@ type options struct {
 
 // AsServer registers the process as a node in New, right after the
 // database upgrade and before anything starts (the webhook poller among
-// them), beside the other servers on the database (on PostgreSQL, high
-// availability; SQLite takes one). The serve command passes it; Serve
+// them), beside the other servers on the database (high availability).
+// The serve command passes it; Serve
 // registers when New did not, and the CLI commands that run beside a
 // server do not register.
 func AsServer() Option { return func(o *options) { o.serve = true } }
@@ -180,12 +178,12 @@ func join(ctx context.Context, db *meta.DB, node string, log *slog.Logger) (*met
 
 // databaseEnv holds the URL of the PostgreSQL metadata database, so that it
 // can come from a Kubernetes Secret; database.url in the config file gives
-// it instead.
+// it instead. One of them is required.
 const databaseEnv = "COMMANDCENTER_DATABASE_URL"
 
-// OpenDB opens the metadata database: PostgreSQL at the URL in
-// COMMANDCENTER_DATABASE_URL or database.url, else SQLite at
-// <dataDir>/meta.db. Every command that uses the database opens it here.
+// OpenDB opens the metadata database, PostgreSQL at the URL in
+// COMMANDCENTER_DATABASE_URL or database.url. Every command that uses the
+// database opens it here.
 // The URL is never logged or put in an error: it may hold a password.
 func OpenDB(cfg *config.Config) (*meta.DB, error) {
 	url := os.Getenv(databaseEnv)
@@ -196,14 +194,13 @@ func OpenDB(cfg *config.Config) (*meta.DB, error) {
 	case url == "":
 		url, src = cfg.Database.URL, "database.url"
 	}
-	target := filepath.Join(cfg.DataDir, "meta.db")
-	if url != "" {
-		if !meta.IsPostgresURL(url) {
-			return nil, fmt.Errorf("%s must be a postgres:// or postgresql:// URL", src)
-		}
-		target = url
+	if url == "" {
+		return nil, errors.New("no database configured: set database.url (or " + databaseEnv + ") to a PostgreSQL URL")
 	}
-	db, err := meta.Open(target)
+	if !meta.IsPostgresURL(url) {
+		return nil, fmt.Errorf("%s must be a postgres:// or postgresql:// URL", src)
+	}
+	db, err := meta.Open(url)
 	if err != nil {
 		return nil, fmt.Errorf("open metadata db: %w", err)
 	}
@@ -218,8 +215,8 @@ func OpenDB(cfg *config.Config) (*meta.DB, error) {
 const secretKeyEnv = "COMMANDCENTER_SECRET_KEY"
 
 // useSecretKey gives db the secret key, if one is configured, checks that
-// it is the key the database was started with (PostgreSQL: the same on
-// every node, meta.DB.CheckSecretKey) and seals the secrets still stored in
+// it is the key the database was started with (the same on every node,
+// meta.DB.CheckSecretKey) and seals the secrets still stored in
 // plain text. Without a key secrets stay plain text, as before, and one
 // warning says so. The key is never logged.
 func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
@@ -237,7 +234,7 @@ func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
 	}
 	if key == nil {
 		log.Warn("no secret key is configured: the SMTP password, the LDAP bind password, proxy remoteAuth " +
-			"credentials and, on PostgreSQL, the key that signs Docker and Conan tokens are stored in the database in plain text; set " +
+			"credentials and the key that signs Docker and Conan tokens are stored in the database in plain text; set " +
 			secretKeyEnv + " or secretKeyFile to encrypt them")
 		return nil
 	}
@@ -252,18 +249,13 @@ func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
 }
 
 // tokenKey returns the key that signs the Docker and Conan bearer tokens:
-// on PostgreSQL the one stored for every node, so a token one node issued
-// verifies on another; on SQLite a random one.
+// the one stored for every node, so a token one node issued verifies on
+// another.
 func tokenKey(db *meta.DB) ([]byte, error) {
-	if db.Driver() == "postgresql" {
-		key, err := db.TokenKey(context.Background())
-		if err != nil {
-			return nil, fmt.Errorf("registry token key: %w", err)
-		}
-		return key, nil
+	key, err := db.TokenKey(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("registry token key: %w", err)
 	}
-	key := make([]byte, 32)
-	rand.Read(key)
 	return key, nil
 }
 
@@ -479,10 +471,9 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		return nil, err
 	}
 
-	// The registry's snapshot is the stored one, with each repository's gen.
-	// On PostgreSQL other nodes write the database too (Cluster).
+	// The registry's snapshot is the stored one, with each repository's gen;
+	// other nodes write the database too.
 	registry := repo.NewRegistry(db, defs)
-	registry.Cluster = db.Driver() == "postgresql"
 	if err := registry.Reload(context.Background()); err != nil {
 		return nil, fmt.Errorf("load repositories: %w", err)
 	}
@@ -545,7 +536,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		cur := registry.Get(rp.Name)
 		return cur != nil && cur.Gen == rp.Gen
 	}
-	// A registry write on PostgreSQL validates against the blob stores and
+	// A registry write validates against the blob stores and
 	// users, roles and settings as every node left them.
 	var storeErr string
 	registry.Refresh = func(ctx context.Context) error {
@@ -602,9 +593,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		})
 	}
 	authn.Sessions = auth.NewSessions(db, authn.SessionIdle)
-	if db.Driver() == "postgresql" { // the nodes share the sign-in throttle and the SSO identities
-		authn.Shared = db
-	}
+	authn.Shared = db // the nodes share the sign-in throttle and the SSO identities
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, Webhooks: hooks, Node: node, log: log}
 	taskSvc.Repos, taskSvc.Events = registry, hooks
 	taskSvc.Transfer.Repos, taskSvc.Transfer.Events = registry, hooks
@@ -620,9 +609,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		return a.GCStore(ctx, store, time.Hour)
 	}
 	a.Tasks = taskSvc
-	if db.Driver() == "postgresql" {
-		store.SyncNodes = a.syncNodes
-	}
+	store.SyncNodes = a.syncNodes
 	// Vulnerability data and the proxy firewall, asked before every file a
 	// format handler serves.
 	vulnSvc := &vuln.Service{DB: db, Repos: registry, Events: hooks, TempDir: cfg.DataDir, Log: log}
@@ -731,7 +718,7 @@ func loadRepositories(cfg *config.Config, log *slog.Logger, db *meta.DB, hasStor
 	}
 	if len(plain) > 0 && db.HasSecretKey() { // names only: the URL holds the secret
 		log.Warn("the remote URL of these proxies holds a user name, password or query, which the secret key does "+
-			"not encrypt: it is stored in meta.db in plain text; give a user name and password in remoteAuth instead",
+			"not encrypt: it is stored in the database in plain text; give a user name and password in remoteAuth instead",
 			"repos", strings.Join(plain, ", "))
 	}
 	if err := config.ValidateRepositories(defs); err != nil {
@@ -824,16 +811,16 @@ func warnUnknownRoleRepos(log *slog.Logger, a *auth.Snapshot, s *repo.Snapshot) 
 // process mid-drain (TestComposeStopGracePeriod).
 const shutdownTimeout = 30 * time.Second
 
-// drainDelay is how long a node on PostgreSQL keeps serving after SIGTERM
+// drainDelay is how long a node keeps serving after SIGTERM
 // while its readiness (GET /service/rest/v1/status/writable) answers 503,
 // so load balancers and Kubernetes endpoints stop sending it requests
 // before it stops taking connections. The image has no shell for a preStop
-// sleep. SQLite, one instance, does not wait. A var for tests.
+// sleep. A var for tests.
 var drainDelay = 5 * time.Second
 
 // Serve runs the HTTP server until ctx is cancelled, then drains requests for
 // up to shutdownTimeout. The node is registered (see AsServer) for as long:
-// on cancel it first turns unready, for drainDelay on PostgreSQL, and its row
+// on cancel it first turns unready, for drainDelay, and its row
 // goes after everything else stopped.
 func (a *App) Serve(ctx context.Context) error {
 	if a.member == nil {
@@ -866,8 +853,8 @@ func (a *App) Serve(ctx context.Context) error {
 			a.log.Warn("could not flush metrics on shutdown", "err", logsafe.Err(err))
 		}
 	}()
-	// What another process or node changed applies at once (PostgreSQL) or
-	// within accessReloadEvery; the loop ends before Close closes the database.
+	// What another process or node changed applies at once or within
+	// accessReloadEvery; the loop ends before Close closes the database.
 	rctx, stopReload := context.WithCancel(ctx)
 	reloadDone := make(chan struct{})
 	go func() {
@@ -892,7 +879,7 @@ func (a *App) Serve(ctx context.Context) error {
 	ln = server.LimitConns(srv, ln, maxConns)
 	errc := make(chan error, 1)
 	go func() {
-		a.log.Info("listening", "addr", a.Config.Listen, "database", a.DB.Driver())
+		a.log.Info("listening", "addr", a.Config.Listen)
 		errc <- srv.Serve(ln)
 	}()
 	select {
@@ -902,7 +889,7 @@ func (a *App) Serve(ctx context.Context) error {
 	}
 	a.log.Info("shutting down")
 	a.member.Drain(context.Background())
-	if a.DB.Driver() == "postgresql" && drainDelay > 0 {
+	if drainDelay > 0 {
 		a.log.Info("draining: readiness answers 503 so that load balancers stop sending requests here", "delay", drainDelay.String())
 		time.Sleep(drainDelay)
 	}
@@ -931,10 +918,9 @@ func newHTTPServer(h http.Handler) *http.Server {
 // accessReloadEvery is how often Serve reloads users, roles and settings, so
 // a change another process wrote ("commandcenter user reset-password" next
 // to a running server, QA N-2) applies without a restart. A reload reads
-// three small tables; polling SQLite's data_version would need a connection
-// of its own and changes on every write the server itself makes anyway.
-// On PostgreSQL it is the safety net of the notifications between nodes,
-// and covers the repositories, routing rules, blob stores and webhooks too.
+// three small tables. It is the safety net of the notifications between
+// nodes, and covers the repositories, routing rules, blob stores and
+// webhooks too.
 var accessReloadEvery = 5 * time.Second
 
 // The cache topics of meta.DB.Notify: a node that changed what the others
@@ -942,29 +928,26 @@ var accessReloadEvery = 5 * time.Second
 var followTopics = []string{"access", "registry", "routing", "blobstores", "moves", "webhooks"}
 
 // follow keeps this node's caches in step with the database until ctx
-// ends: every accessReloadEvery, and on PostgreSQL also at once when a
-// node sends a topic's notification. A failed reload keeps what is loaded
+// ends: every accessReloadEvery, and at once when a node sends a topic's
+// notification. A failed reload keeps what is loaded
 // and is logged once per run of failures. It answers the other nodes'
 // Store.Sync too (answerSync). (The log level, cleanup policy, flush and
 // task stop notifications have their own subscribers.)
 func (a *App) follow(ctx context.Context) {
-	cluster := a.DB.Driver() == "postgresql"
 	var mu sync.Mutex
 	pending := map[string]bool{}
 	kick := make(chan struct{}, 1)
-	if cluster {
-		a.DB.Subscribe("storesync", a.answerSync)
-		for _, topic := range followTopics {
-			a.DB.Subscribe(topic, func(string) {
-				mu.Lock()
-				pending[topic] = true
-				mu.Unlock()
-				select {
-				case kick <- struct{}{}:
-				default:
-				}
-			})
-		}
+	a.DB.Subscribe("storesync", a.answerSync)
+	for _, topic := range followTopics {
+		a.DB.Subscribe(topic, func(string) {
+			mu.Lock()
+			pending[topic] = true
+			mu.Unlock()
+			select {
+			case kick <- struct{}{}:
+			default:
+			}
+		})
 	}
 	tick := time.NewTicker(accessReloadEvery)
 	defer tick.Stop()
@@ -975,9 +958,7 @@ func (a *App) follow(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			if cluster {
-				todo["registry"], todo["webhooks"] = true, true
-			}
+			todo["registry"], todo["webhooks"] = true, true
 		case <-kick:
 			mu.Lock()
 			todo, pending = pending, map[string]bool{}

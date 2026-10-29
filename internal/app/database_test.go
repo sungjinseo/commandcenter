@@ -1,8 +1,6 @@
 package app
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,25 +8,14 @@ import (
 	"commandcenter/internal/meta/metatest"
 )
 
-// OpenDB takes the URL from COMMANDCENTER_DATABASE_URL or database.url, not
+// OpenDB needs a URL, from COMMANDCENTER_DATABASE_URL or database.url, not
 // both, accepts postgres:// and postgresql:// only, and no error holds the
-// URL's password. Without a URL it is SQLite at <dataDir>/meta.db.
+// URL's password.
 func TestOpenDB(t *testing.T) {
 	cfg := &config.Config{DataDir: t.TempDir()}
-	db, err := OpenDB(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	if db.Driver() != "sqlite" {
-		t.Fatalf("no URL: driver %s", db.Driver())
-	}
-	if _, err := os.Stat(filepath.Join(cfg.DataDir, "meta.db")); err != nil {
-		t.Fatal(err)
-	}
-
 	const pw = "s3cret-pw"
 	for _, c := range []struct{ env, file, want string }{
+		{"", "", "no database configured: set database.url (or COMMANDCENTER_DATABASE_URL) to a PostgreSQL URL"},
 		{"postgres://u:" + pw + "@127.0.0.1:1/db", "postgres://u:" + pw + "@127.0.0.1:1/db", "set COMMANDCENTER_DATABASE_URL or database.url, not both"},
 		{"mysql://u:" + pw + "@db/cc", "", "COMMANDCENTER_DATABASE_URL must be a postgres:// or postgresql:// URL"},
 		{"", "u:" + pw + "@db/cc", "database.url must be a postgres:// or postgresql:// URL"},
@@ -43,12 +30,10 @@ func TestOpenDB(t *testing.T) {
 		}
 	}
 
-	if !metatest.Postgres() {
-		return
-	}
-	t.Setenv(databaseEnv, metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	t.Setenv(databaseEnv, metatest.URL(t, t.TempDir()))
 	cfg.Database = config.Database{MaxConns: 2}
-	if db, err = OpenDB(cfg); err != nil || db.Driver() != "postgresql" {
+	db, err := OpenDB(cfg)
+	if err != nil {
 		t.Fatalf("from %s: %v", databaseEnv, err)
 	}
 	db.Close()

@@ -15,12 +15,13 @@ root="$(pwd -W 2>/dev/null || pwd)"
 work="test/smoke/.work-docker-$$"
 net=commandcenter-docker-smoke-$$
 name=commandcenter-docker-smoke-$$
+. test/postgres.sh
 port=18086
 reg="localhost:$port"
 export DOCKER_CONFIG="$root/$work/dockercfg" # keep the user's docker login store untouched
 
 cleanup() {
-  docker rm -f "$name" "$name-c" >/dev/null 2>&1 || true
+  docker rm -f "$name" "$name-pg" "$name-c" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   docker rmi -f "$reg/docker-hosted/smoke/hello:1.0" "$reg/docker-hosted/smoke/hello:2.0" \
     "$reg/docker-once/smoke/hello:1.0" smoke-hello:1 smoke-hello:2 >/dev/null 2>&1 || true
@@ -53,7 +54,8 @@ printf 'hello two\n' > "$work/img/hello.txt"
 docker build -q -t smoke-hello:2 "$work/img" >/dev/null
 
 docker network create "$net" >/dev/null
-docker run -d --name "$name" --network "$net" --network-alias commandcenter --memory 128m \
+start_postgres
+docker run -d --name "$name" --network "$net" -e COMMANDCENTER_DATABASE_URL="$pg_url" --network-alias commandcenter --memory 128m \
   -v "$root/$work/config.yaml:/etc/commandcenter/config.yaml:ro" -p "$port:8081" commandcenter:smoke-docker >/dev/null
 
 ready=0

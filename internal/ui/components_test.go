@@ -17,7 +17,6 @@ import (
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
-	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/repo/repotest"
 )
@@ -282,50 +281,6 @@ func TestComponentsPaging(t *testing.T) {
 	}
 	if pages != 3 || strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("%d pages:\n got  %v\n want %v", pages, got, want)
-	}
-}
-
-// QA L-23 review: a page whose last key is not valid UTF-8 (a Maven name
-// stored with a raw Latin-1 byte) resumes right after that key. With the key
-// in JSON strings the byte became U+FFFD, and the next page skipped "b한",
-// which sorts between the two.
-func TestComponentsPagingInvalidUTF8(t *testing.T) {
-	if metatest.Postgres() {
-		t.Skip("PostgreSQL never held a name that is not UTF-8")
-	}
-	e := newEnv(t, "http://x")
-	type comp struct{ name, ver string }
-	var all []comp
-	for i := 0; i < 99; i++ {
-		all = append(all, comp{fmt.Sprintf("a%03d", i), fmt.Sprintf("1.%d", i)})
-	}
-	all = append(all,
-		comp{"b\xe9", "2.0"},         // 100th in key order: Latin-1 e-acute, not UTF-8
-		comp{"b\xed\x95\x9c", "3.0"}, // "b한": valid UTF-8, sorts after "b\xe9" and before "b" + U+FFFD
-		comp{"c", "4.0"})
-	for _, c := range all {
-		putAsset(t, e.db, "maven-releases", "page/utf/"+c.name+"/"+c.ver+"/"+c.name+"-"+c.ver+".jar", 1)
-	}
-	seen := map[string]int{}
-	tok := ""
-	for pages := 1; ; pages++ {
-		q := "group=page.utf"
-		if tok != "" {
-			q += "&continuationToken=" + url.QueryEscape(tok)
-		}
-		c := searchComponents(t, e, q, "admin", 200)
-		for _, x := range c.Components {
-			seen[x.Version]++
-		}
-		if c.ContinuationToken == "" || pages > 5 {
-			break
-		}
-		tok = c.ContinuationToken
-	}
-	for _, c := range all {
-		if n := seen[c.ver]; n != 1 {
-			t.Errorf("component %q %s listed %d times across the pages, want once", c.name, c.ver, n)
-		}
 	}
 }
 

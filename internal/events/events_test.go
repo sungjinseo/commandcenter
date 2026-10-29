@@ -3,7 +3,6 @@ package events
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +16,7 @@ import (
 
 func openDB(t *testing.T) *meta.DB {
 	t.Helper()
-	db, err := meta.Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -45,7 +45,7 @@ func (d *DB) Tx(ctx context.Context, fn func(*Tx) error) error {
 			panic(p)
 		}
 	}()
-	if err := fn(&Tx{q: txConn{tx: tx, pg: d.sql.pg}, box: d.box}); err != nil {
+	if err := fn(&Tx{q: txConn{tx: tx}, box: d.box}); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -276,9 +276,8 @@ WHERE repo = ? AND replace(lower(name), '_', '-') = ? ORDER BY name`, repo, cano
 // its index lines in attrs keep the spelling it was published with.
 func (d *DB) PublishedName(ctx context.Context, repo, name string) (string, error) {
 	var n sql.NullString
-	err := d.sql.QueryRowContext(ctx, pg(d.sql, `SELECT json_extract(attrs, '$.name') FROM packages
-WHERE repo = ? AND name = ? LIMIT 1`, `SELECT attrs::json ->> 'name' FROM packages
-WHERE repo = ? AND name = ? LIMIT 1`), repo, name).Scan(&n)
+	err := d.sql.QueryRowContext(ctx, `SELECT attrs::json ->> 'name' FROM packages
+WHERE repo = ? AND name = ? LIMIT 1`, repo, name).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

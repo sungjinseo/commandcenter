@@ -3,7 +3,6 @@ package meta
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -16,7 +15,7 @@ import (
 // reopens it.
 func openTestDB(t *testing.T) (*DB, string) {
 	t.Helper()
-	path := metatest.Target(t, filepath.Join(t.TempDir(), "meta.db"))
+	path := metatest.URL(t, t.TempDir())
 	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
