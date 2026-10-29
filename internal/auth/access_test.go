@@ -419,6 +419,56 @@ func TestReloadEndsSessionsOfChangedUsers(t *testing.T) {
 	}
 }
 
+// cancelAfterLoad cancels the reload's context once the access data is
+// loaded, so ending the sessions fails.
+type cancelAfterLoad struct {
+	Source
+	cancel context.CancelFunc
+}
+
+func (s cancelAfterLoad) LoadAccess(ctx context.Context) (meta.AccessData, error) {
+	defer s.cancel()
+	return s.Source.LoadAccess(ctx)
+}
+
+// A Reload that cannot end the sessions of a user whose password changed
+// leaves them to the next Reload, whose snapshot no longer shows the change.
+func TestReloadRetriesEndingSessions(t *testing.T) {
+	db, err := meta.Open(metatest.URL(t, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.CreateUser(ctx, meta.User{ID: "ci", PasswordHash: hash(t, "pw")}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(ctx, db, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Sessions = NewSessions(testDB(t), nil)
+	sid := a.Sessions.create(t, "ci")
+	if err := db.UpdateUser(ctx, meta.User{ID: "ci", PasswordHash: hash(t, "new-pw")}); err != nil {
+		t.Fatal(err)
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	a.Source = cancelAfterLoad{db, cancel}
+	if err := a.Reload(rctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.Sessions.user(sid); !ok {
+		t.Fatal("setup: the session ended through a cancelled context")
+	}
+	a.Source = db
+	if err := a.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := a.Sessions.user(sid); ok {
+		t.Fatal("the next Reload did not end the session")
+	}
+}
+
 func TestReloadUnderConcurrency(t *testing.T) {
 	db, err := meta.Open(metatest.URL(t, t.TempDir()))
 	if err != nil {

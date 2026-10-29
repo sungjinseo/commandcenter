@@ -976,7 +976,8 @@ func (a *App) follow(ctx context.Context) {
 			if !todo[job.name] && (job.name != "registry" || !todo["routing"] && !todo["blobstores"] && !todo["moves"]) {
 				continue
 			}
-			jctx, cancel := context.WithTimeout(ctx, accessReloadEvery)
+			// not accessReloadEvery itself: a test shortens that below what a reload takes
+			jctx, cancel := context.WithTimeout(ctx, max(accessReloadEvery, 5*time.Second))
 			err := job.run(jctx)
 			cancel()
 			if err != nil && !failing[job.name] && ctx.Err() == nil {

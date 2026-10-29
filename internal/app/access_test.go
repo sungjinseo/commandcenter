@@ -286,7 +286,9 @@ func TestRepositoryDeleteDropsRolePrivileges(t *testing.T) {
 // interval and ends the user's sessions, as a reset through the API does.
 func TestServeAppliesOutOfProcessAccessChanges(t *testing.T) {
 	defer func(d time.Duration) { accessReloadEvery = d }(accessReloadEvery)
-	accessReloadEvery = 20 * time.Millisecond
+	// Slow enough that the polls below fail more often than the sign-in
+	// throttle allows before the reload: the reload must end that refusal.
+	accessReloadEvery = 300 * time.Millisecond
 	cfg := testConfig(t, "")
 	cfg.Listen = "127.0.0.1:0"
 	a, err := New(cfg, quiet())
@@ -321,19 +323,19 @@ func TestServeAppliesOutOfProcessAccessChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The deadline only absorbs a slow machine: without the reload loop the
-	// change never applies.
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if _, err := a.Auth.CheckPassword(ctx, "ci", "new-password"); err == nil {
+	// change never applies. A reload publishes the new password before it
+	// ends the sessions, so the test waits for both.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		_, err := a.Auth.CheckPassword(ctx, "ci", "new-password")
+		_, alive := a.Auth.Sessions.User(context.Background(), sid)
+		if err == nil && !alive {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("the running server did not apply the new password")
+			t.Fatalf("the running server did not apply the reset: new password: %v; session of ci alive: %v", err, alive)
 		}
 	}
 	if _, err := a.Auth.CheckPassword(ctx, "ci", "pw"); err == nil {
 		t.Fatal("the old password still works")
-	}
-	if _, ok := a.Auth.Sessions.User(context.Background(), sid); ok {
-		t.Fatal("the session of ci survived the reset")
 	}
 }

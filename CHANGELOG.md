@@ -411,6 +411,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Yum hosted repositories accept RPM files built by rpmbuild: 0.2.0 looked for the wrong header magic
   (`8d ad e8 01` instead of `8e ad e8 01`) and refused every real RPM.
 - Webhooks no longer send a delivery twice when a poll read it while a worker was sending it.
+- A password change that a node picks up from the database (another node, or `user reset-password`
+  next to a running server) also ends the sign-in refusal of that name. Before, attempts with the new
+  password made before the node loaded it counted as failures and could lock the name out for up to
+  15 minutes. When ending the user's sessions fails, the next reload tries again; before, the
+  sessions stayed valid.
 
 ### Upgrade notes
 - No schema change: the database stays at schema 6, compat 6.

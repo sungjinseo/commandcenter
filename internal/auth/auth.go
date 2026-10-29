@@ -164,7 +164,8 @@ type Authenticator struct {
 	Bearers []func(token string) (owner string, ok bool)
 
 	snap     atomic.Pointer[Snapshot]
-	reloadMu sync.Mutex // orders Reloads, so an older load never wins
+	reloadMu sync.Mutex           // orders Reloads, so an older load never wins
+	unended  map[string]time.Time // users whose sessions a Reload could not end, with the cutoff: the next Reload retries (under reloadMu)
 
 	mu    sync.Mutex
 	cache map[string]time.Time // user + "\x00" + sha256(hash, password) -> expiry
@@ -263,13 +264,29 @@ func (a *Authenticator) Reload(ctx context.Context) error {
 	if old == nil {
 		return nil
 	}
+	if a.unended == nil {
+		a.unended = map[string]time.Time{}
+	}
 	for id, was := range old.users {
 		if u, ok := s.users[id]; !ok || u.PasswordHash != was.PasswordHash ||
 			(was.Status == meta.StatusActive && u.Status != meta.StatusActive) {
-			if err := a.forget(ctx, id, u.UpdatedAt); err != nil { // zero for a removed user: every session
-				a.logger().Warn("could not end the sessions of a changed user", "user", id, "err", logsafe.Err(err))
-			}
+			a.unended[id] = u.UpdatedAt // zero for a removed user: every session
 		}
+	}
+	// The next snapshot no longer shows these changes, so a failure here is
+	// retried from unended, not found again. As OnUserChanged, it ends a
+	// sign-in refusal of the name: attempts with the new password made
+	// before this node loaded it counted as failures.
+	for id, before := range a.unended {
+		err := a.forget(ctx, id, before)
+		if a.Shared != nil {
+			err = errors.Join(err, a.Shared.ClearAuthFailures(ctx, strings.ToLower(id)))
+		}
+		if err != nil {
+			a.logger().Warn("could not end the sessions or sign-in refusal of a changed user; the next reload tries again", "user", id, "err", logsafe.Err(err))
+			continue
+		}
+		delete(a.unended, id)
 	}
 	return nil
 }
