@@ -336,6 +336,7 @@ func (a *Authenticator) crowdPrincipal(s *Snapshot, u CrowdUser) (Principal, boo
 			}
 		}
 	}
+	roles = s.grant(roles)
 	return Principal{User: u.ID, Admin: hasRole(roles, meta.AdminRole), roles: roles, source: sourceCrowd}, true
 }
 

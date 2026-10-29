@@ -86,6 +86,7 @@ func (a *Authenticator) samlPrincipal(s *Snapshot, u SAMLUser) (Principal, bool)
 			}
 		}
 	}
+	roles = s.grant(roles)
 	return Principal{User: u.ID, Admin: hasRole(roles, meta.AdminRole), roles: roles, source: sourceSAML}, true
 }
 

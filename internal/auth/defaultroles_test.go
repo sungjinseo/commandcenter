@@ -22,6 +22,8 @@ func TestDefaultRolesEveryRealm(t *testing.T) {
 	a.setSnapshot(s)
 	lp, _ := a.ldapPrincipal(s, ldap.User{ID: "l"})
 	op, _ := a.oidcPrincipal(s, OIDCUser{ID: "o"})
+	cp, _ := a.crowdPrincipal(s, CrowdUser{ID: "c"})
+	sp, _ := a.samlPrincipal(s, SAMLUser{ID: "s"})
 	r := httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "[::ffff:10.1.2.3]:4242" // an IPv4-mapped address is the IPv4 one
 	r.Header.Set("Remote_User", "Rut")
@@ -29,7 +31,7 @@ func TestDefaultRolesEveryRealm(t *testing.T) {
 	if !ok || rp.User != "rut" || !rp.IsRUT() {
 		t.Fatalf("rut: %+v %v", rp, ok)
 	}
-	for name, p := range map[string]Principal{"local": s.principal(s.users["loc"]), "ldap": lp, "oidc": op, "rut": rp} {
+	for name, p := range map[string]Principal{"local": s.principal(s.users["loc"]), "ldap": lp, "oidc": op, "rut": rp, "crowd": cp, "saml": sp} {
 		if !slices.Contains(p.roles, "base") || p.Admin {
 			t.Errorf("%s: roles %v", name, p.roles)
 		}

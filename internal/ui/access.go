@@ -869,6 +869,10 @@ func (u *UI) deleteRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, roleInUseMessage+" by the defaultRoles setting")
 		return
 	}
+	if ref := ldapRoleRef(set.Crowd.Mapping(), id); ref != "" {
+		writeError(w, http.StatusConflict, roleInUseMessage+" by the "+strings.Replace(ref, "LDAP", "Crowd", 1))
+		return
+	}
 	if ref := ldapRoleRef(set.SAML.Mapping(), id); ref != "" {
 		writeError(w, http.StatusConflict, roleInUseMessage+" by the "+strings.Replace(ref, "LDAP", "SAML", 1))
 		return

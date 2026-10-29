@@ -107,3 +107,13 @@ func TestCrowdRealmAPI(t *testing.T) {
 		}
 	}
 }
+
+// A role a Crowd group mapping names cannot be deleted.
+func TestCrowdMappedRoleNotDeleted(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	s := crowdtest.New(t)
+	wantStatus(t, e.admin(t, "PUT", "/-/api/realms/crowd", crowdBody(s.URL, "")), http.StatusOK)
+	if r := e.admin(t, "DELETE", "/-/api/roles/deployer", ""); r.status != http.StatusConflict || !strings.Contains(r.body, "Crowd") {
+		t.Fatalf("role delete: %d %s", r.status, r.body)
+	}
+}
