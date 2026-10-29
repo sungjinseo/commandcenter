@@ -23,6 +23,7 @@ func TestComponentMetadata(t *testing.T) {
 			config.Repository{Name: "helm-hosted", Format: "helm", Type: "hosted"},
 			config.Repository{Name: "yum-hosted", Format: "yum", Type: "hosted"},
 			config.Repository{Name: "nuget-hosted", Format: "nuget", Type: "hosted"},
+			config.Repository{Name: "composer-hosted", Format: "composer", Type: "hosted"},
 			config.Repository{Name: "go-hosted", Format: "go", Type: "hosted"})
 	})
 	ctx := context.Background()
@@ -160,6 +161,19 @@ func TestComponentMetadata(t *testing.T) {
 	}
 	if st, _ := get("admin", "nuget-hosted", "name=demo.pkg&version=2.0.0"); st != 404 {
 		t.Fatalf("nuget missing: %d", st)
+	}
+
+	// composer: the composer.json the upload stored; require and require-dev are the scopes
+	pkg("composer-hosted", "composer", "acme/demo", "1.0.0.0", `{"name":"acme/demo","version":"1.0.0","version_normalized":"1.0.0.0","description":"A demo package","license":["MIT","Apache-2.0"],"homepage":"https://example.org/demo","support":{"source":"https://git.example.org/demo"},"require":{"php":">=8.1","monolog/monolog":"^3.0"},"require-dev":{"phpunit/phpunit":"^10"},"dist":{"type":"zip","shasum":"x"}}`)
+	st, m = get("admin", "composer-hosted", "name=Acme/Demo&version=1.0.0.0")
+	if st != 200 || !m.Collected || *m.Description != "A demo package" || *m.License != "MIT, Apache-2.0" || *m.Homepage != "https://example.org/demo" || *m.RepositoryURL != "https://git.example.org/demo" {
+		t.Fatalf("composer: %d %+v", st, m)
+	}
+	if got := deps(m); got != "require::monolog/monolog:^3.0:req require::php:>=8.1:req require-dev::phpunit/phpunit:^10:opt" {
+		t.Fatalf("composer deps: %s", got)
+	}
+	if st, _ := get("admin", "composer-hosted", "name=acme/demo&version=2.0.0.0"); st != 404 {
+		t.Fatalf("composer missing: %d", st)
 	}
 
 	// pypi: the file's PEP 658 sidecar holds the core metadata; a file without one is "not collected"

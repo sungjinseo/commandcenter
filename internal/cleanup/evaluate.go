@@ -260,6 +260,13 @@ func unitPrefix(format, p string) string {
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]
 		}
+	case "composer": // hosted: one file per version; proxy: the version directory
+		if strings.Count(p, "/") == 3 {
+			return p
+		}
+		if i := strings.LastIndex(p, "/"); i >= 0 {
+			return p[:i+1]
+		}
 	}
 	return homePrefix(format, p)
 }
@@ -294,6 +301,10 @@ func homePrefix(format, p string) string {
 			return segs[0] + "/" + segs[1] + "/"
 		}
 		return cut("/")
+	case "composer": // dist/<vendor>/<package>/
+		if segs := strings.SplitN(p, "/", 4); len(segs) == 4 {
+			return segs[0] + "/" + segs[1] + "/" + segs[2] + "/"
+		}
 	}
 	return p
 }

@@ -471,7 +471,7 @@ func (u *UI) asset(w http.ResponseWriter, r *http.Request) {
 }
 
 // packageFormats are the formats that record packages in the metadata db.
-var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true, "helm": true, "yum": true, "nuget": true}
+var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true, "helm": true, "yum": true, "nuget": true, "composer": true}
 
 func (u *UI) packages(w http.ResponseWriter, r *http.Request) {
 	rp, ok := u.lookup(w, r)

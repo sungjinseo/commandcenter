@@ -373,6 +373,10 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 		{"apt", []string{ // one file per package_version_arch; dists/ is not a component
 			"dists/stable/Release", "pool/main/a/a/a_1.0_all.deb", "pool/main/a/a/a_1.0_amd64.deb", "pool/main/a/ab/ab_0.1_amd64.deb",
 		}, map[int]string{2: "all/a@1.0", 3: "all/a@1.0,amd64/a@1.0", 4: "all/a@1.0,amd64/a@1.0,amd64/ab@0.1"}},
+		{"composer", []string{ // a proxy's version directory holds one archive per upstream URL; p2/ is not a component
+			"dist/a/b/1.0.0.0/0123456789abcdef0123456789abcdef01234567.zip", "dist/a/b/1.0.0.0/89abcdef0123456789abcdef0123456789abcdef.zip",
+			"dist/a/b/1.1.0.0/0123456789abcdef0123456789abcdef01234567.zip", "dist/a/c/0.1.0.0/0123456789abcdef0123456789abcdef01234567.zip", "p2/a/b.json",
+		}, map[int]string{1: "", 2: "a/b@1.0.0.0", 3: "a/b@1.0.0.0,a/b@1.1.0.0", 4: "a/b@1.0.0.0,a/b@1.1.0.0,a/c@0.1.0.0", 5: "a/b@1.0.0.0,a/b@1.1.0.0,a/c@0.1.0.0"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {

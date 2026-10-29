@@ -283,6 +283,9 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return "", name, version, ok
 	case "apt": // pool/<component>/<prefix>/<package>/<package>_<version>_<arch>.deb: the architecture is the group
 		return SplitDeb(p)
+	case "composer":
+		name, version, ok = SplitComposer(p)
+		return "", name, version, ok
 	}
 	return "", "", "", false
 }
@@ -373,6 +376,8 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, version, name + "-" + version + ".rpm"
 	case "nuget":
 		return "", name, version, name + "/" + version + "/" + name + "." + version + ".nupkg"
+	case "composer": // the name is vendor/package, the version normalized
+		return "", name, version, "dist/" + name + "/" + version + ".zip"
 	}
 	return "", name, version, ""
 }
@@ -425,4 +430,29 @@ func SplitNuGet(p string) (name, version string, ok bool) {
 		return "", "", false
 	}
 	return segs[0], segs[1], true
+}
+
+// SplitComposer maps a Composer archive path to its component, named
+// vendor/package: dist/<vendor>/<package>/<version>.zip in a hosted
+// repository, dist/<vendor>/<package>/<version>/<sha1>.zip in a proxy's
+// cache (the sha1 of the upstream URL; a branch version may hold "/").
+// The metadata files under p2/ are not components.
+func SplitComposer(p string) (name, version string, ok bool) {
+	segs := strings.Split(p, "/")
+	if len(segs) < 4 || segs[0] != "dist" || segs[1] == "" || segs[2] == "" {
+		return "", "", false
+	}
+	name = segs[1] + "/" + segs[2]
+	stem, cut := strings.CutSuffix(segs[len(segs)-1], ".zip")
+	if !cut || stem == "" {
+		return "", "", false
+	}
+	if len(segs) == 4 {
+		return name, stem, true
+	}
+	if len(stem) != 40 || strings.Trim(stem, "0123456789abcdef") != "" {
+		return "", "", false
+	}
+	version = strings.Join(segs[3:len(segs)-1], "/")
+	return name, version, version != ""
 }

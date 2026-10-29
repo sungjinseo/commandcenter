@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 
 	"commandcenter/internal/auth"
@@ -87,6 +88,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.nugetMetadata(r.Context(), rp, name, version, &m)
 	case "apt":
 		found, err = u.aptMetadata(r.Context(), rp, group, name, version, &m)
+	case "composer":
+		found, err = u.composerMetadata(r.Context(), rp, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -563,6 +566,57 @@ func (u *UI) nugetMetadata(ctx context.Context, rp *repo.Repository, name, versi
 		}
 		for _, d := range g.Dependencies {
 			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: d.ID, Requirement: d.Range})
+		}
+	}
+	return true, nil
+}
+
+// composerMetadata reads what a composer hosted row holds of composer.json:
+// description, license (one or several), homepage, support.source and the
+// require (scope "require") and require-dev (scope "require-dev",
+// optional) links.
+func (u *UI) composerMetadata(ctx context.Context, rp *repo.Repository, name, version string, m *componentMetadata) (bool, error) {
+	p, ok, err := u.storedPackage(ctx, rp, strings.ToLower(name), version)
+	if err != nil || !ok {
+		return ok, err
+	}
+	var a struct {
+		Description string            `json:"description"`
+		License     any               `json:"license"`
+		Homepage    string            `json:"homepage"`
+		Support     map[string]string `json:"support"`
+		Require     map[string]string `json:"require"`
+		RequireDev  map[string]string `json:"require-dev"`
+	}
+	if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
+		return true, nil
+	}
+	m.Collected = true
+	m.Description, m.Homepage, m.RepositoryURL = optStr(a.Description), optStr(a.Homepage), optStr(a.Support["source"])
+	switch l := a.License.(type) {
+	case string:
+		m.License = optStr(l)
+	case []any:
+		var names []string
+		for _, x := range l {
+			if s, ok := x.(string); ok {
+				names = append(names, s)
+			}
+		}
+		m.License = optStr(strings.Join(names, ", "))
+	}
+	for _, s := range []struct {
+		scope string
+		links map[string]string
+		opt   bool
+	}{{"require", a.Require, false}, {"require-dev", a.RequireDev, true}} {
+		names := make([]string, 0, len(s.links))
+		for n := range s.links {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: s.scope, Name: n, Requirement: s.links[n], Optional: s.opt})
 		}
 	}
 	return true, nil
