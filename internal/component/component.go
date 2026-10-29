@@ -305,6 +305,9 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return SplitConan(p)
 	case "p2": // [.remote/<sha1>/]{features,plugins}/<id>_<version>.jar, binary/<id>_<version>: the directory is the group
 		return SplitP2(p)
+	case "swift": // <scope>/<name>/<version>/<file>: every file of the version directory (archive, manifests, a proxy's release.json)
+		name, version, ok = SplitSwift(p)
+		return "", name, version, ok
 	}
 	return "", "", "", false
 }
@@ -340,6 +343,26 @@ func SplitP2(p string) (group, name, version string, ok bool) {
 		}
 	}
 	return "", "", "", false
+}
+
+// swiftScopeRE, swiftNameRE and swiftVersionRE mirror the swift format's
+// identifier and semver rules (parity_test.go keeps them in step).
+var (
+	swiftScopeRE   = regexp.MustCompile(`^[a-z0-9](-?[a-z0-9])*$`)    // at most 39 bytes
+	swiftNameRE    = regexp.MustCompile(`^[a-z0-9]([-_]?[a-z0-9])*$`) // at most 100 bytes
+	swiftVersionRE = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
+)
+
+// SplitSwift maps a Swift registry asset path, <scope>/<name>/<version>/
+// <file> with the identifier lower-cased, to its package scope.name and
+// version.
+func SplitSwift(p string) (name, version string, ok bool) {
+	segs := strings.Split(p, "/")
+	if len(segs) != 4 || segs[3] == "" || len(segs[0]) > 39 || len(segs[1]) > 100 ||
+		!swiftScopeRE.MatchString(segs[0]) || !swiftNameRE.MatchString(segs[1]) || !swiftVersionRE.MatchString(segs[2]) {
+		return "", "", false
+	}
+	return segs[0] + "." + segs[1], segs[2], true
 }
 
 // SplitLFS maps a Git LFS object path, objects/<aa>/<bb>/<oid> with oid a
@@ -540,6 +563,11 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 	case "conan": // a row per recipe revision: name/version[@user/channel], version = rrev; its file is the manifest
 		if group, cname, cversion, ok := SplitConan(ConanRowPath(name, version) + "files/conanmanifest.txt"); ok {
 			return group, cname, cversion, ConanRowPath(name, version) + "files/conanmanifest.txt"
+		}
+		return "", name, version, ""
+	case "swift": // the name is scope.name (lower-cased); the archive is <scope>/<name>/<version>/source-archive.zip
+		if scope, pkg, ok := strings.Cut(name, "."); ok {
+			return "", name, version, scope + "/" + pkg + "/" + version + "/source-archive.zip"
 		}
 		return "", name, version, ""
 	}

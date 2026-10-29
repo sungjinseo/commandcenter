@@ -30,7 +30,7 @@ func TestP2Evaluate(t *testing.T) {
 	if err := (&Policy{Name: "p", Format: "p2", Criteria: Criteria{ComponentAgeDays: 1}}).Validate(); err != nil {
 		t.Errorf("p2 is a policy format: %v", err)
 	}
-	if err := (&Policy{Name: "p", Format: "osgi", Criteria: Criteria{ComponentAgeDays: 1}}).Validate(); err == nil || !strings.Contains(err.Error(), "or p2") {
+	if err := (&Policy{Name: "p", Format: "osgi", Criteria: Criteria{ComponentAgeDays: 1}}).Validate(); err == nil || !strings.Contains(err.Error(), " p2") {
 		t.Errorf("message lists p2: %v", err)
 	}
 }

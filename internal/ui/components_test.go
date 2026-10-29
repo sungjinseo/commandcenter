@@ -625,3 +625,20 @@ func TestDeleteComponentAPI(t *testing.T) {
 		}
 	}
 }
+
+// TestComponentsSwiftProxy: a swift proxy's components come from its paths,
+// <scope>/<name>/<version>/, and are found by their scope.name.
+func TestComponentsSwiftProxy(t *testing.T) {
+	e := newEnvWith(t, "http://x", func(c *config.Config) {
+		c.Repositories = append(c.Repositories, config.Repository{Name: "swift-proxy", Format: "swift", Type: "proxy", Remote: "https://swift.example.org"})
+	})
+	putAsset(t, e.db, "swift-proxy", "mona/linkedlist/1.1.1/release.json", 5)
+	putAsset(t, e.db, "swift-proxy", "mona/linkedlist/1.1.1/source-archive.zip", 6)
+	putAsset(t, e.db, "swift-proxy", "mona/linkedlist/releases.json", 7)
+	for _, q := range []string{"name=Mona.LinkedList", "name=mona.linked", "keyword=mona.linkedlist", "name=linkedlist"} {
+		c := searchComponents(t, e, q, "admin", 200)
+		if got, want := names(c), "swift-proxy::mona.linkedlist:1.1.1"; got != want || len(c.Components[0].Assets) != 2 {
+			t.Fatalf("%s: %s %+v, want %s", q, got, c.Components, want)
+		}
+	}
+}

@@ -205,6 +205,13 @@ func TestDeriveAsset(t *testing.T) {
 		{"r", "foo_1.0.0.tar.gz", "", "", "", false},
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
+		{"swift", "mona/linkedlist/1.1.1/source-archive.zip", "", "mona.linkedlist", "1.1.1", true}, // the version directory's files are the component
+		{"swift", "mona/linkedlist/1.1.1/release.json", "", "mona.linkedlist", "1.1.1", true},
+		{"swift", "mona/linkedlist/1.2.0-beta.1/Package@swift-5.9.swift", "", "mona.linkedlist", "1.2.0-beta.1", true},
+		{"swift", "mona/linkedlist/releases.json", "", "", "", false}, // the release list
+		{"swift", "mona/linkedlist/v1.1.1/source-archive.zip", "", "", "", false},
+		{"swift", "Mona/linkedlist/1.1.1/source-archive.zip", "", "", "", false},
+		{"swift", "identifiers/0123456789abcdef.json", "", "", "", false},
 		{"unknown", "a/b", "", "", "", false},
 		{"p2", "plugins/org.eclipse.core.runtime_3.31.0.v20240813-0735.jar", "plugins", "org.eclipse.core.runtime", "3.31.0.v20240813-0735", true},
 		{"p2", "features/org.eclipse.platform_4.33.0.v20240903-0240.jar", "features", "org.eclipse.platform", "4.33.0.v20240903-0240", true},

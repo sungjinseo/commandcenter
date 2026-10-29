@@ -38,6 +38,7 @@ import (
 	"commandcenter/internal/format/r"
 	"commandcenter/internal/format/raw"
 	"commandcenter/internal/format/rubygems"
+	"commandcenter/internal/format/swift"
 	"commandcenter/internal/format/yum"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
@@ -339,13 +340,14 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	gitlfsH := gitlfs.New(store, authn, baseURL)
 	rH := r.New(store, resolver, authn)
 	p2H := p2.New(store, fetcher, baseURL) // proxy and group only: its proxies use the generic deleter
+	swiftH := swift.New(store, fetcher, authn, baseURL)
 	dockerKey := make([]byte, 32)
 	rand.Read(dockerKey)
 	dockerH := docker.New(store, docker.NewFetcher(store, maxConcurrentFetches), authn, nil, baseURL, dockerKey) // Repos: the registry, below
 	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
 	conanH := conan.New(store, conan.NewFetcher(store, maxConcurrentFetches), authn, baseURL, dockerKey)
 	authn.Bearers = append(authn.Bearers, conanH.VerifyToken) // Conan login tokens
-	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH, "gitlfs": gitlfsH, "r": rH, "conan": conanH, "p2": p2H}
+	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH, "gitlfs": gitlfsH, "r": rH, "conan": conanH, "p2": p2H, "swift": swiftH}
 	// Hosted deletes go through the format handlers, which share their locks
 	// with uploads; proxies of every format use the generic deleter.
 	deleters := cleanup.NewRegistry(store)
@@ -366,6 +368,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("gitlfs", "hosted", gitlfsH)
 	deleters.Register("r", "hosted", rH)
 	deleters.Register("conan", "hosted", conanH)
+	deleters.Register("swift", "hosted", swiftH)
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)

@@ -474,7 +474,7 @@ func (u *UI) asset(w http.ResponseWriter, r *http.Request) {
 }
 
 // packageFormats are the formats that record packages in the metadata db.
-var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true, "helm": true, "yum": true, "nuget": true, "composer": true, "rubygems": true, "r": true}
+var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true, "helm": true, "yum": true, "nuget": true, "composer": true, "rubygems": true, "r": true, "swift": true}
 
 func (u *UI) packages(w http.ResponseWriter, r *http.Request) {
 	rp, ok := u.lookup(w, r)
@@ -556,6 +556,8 @@ func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 	case "pypi":
 		name, kind = pypi.Normalize(name), "files"
 	case "cargo":
+		name = strings.ToLower(name)
+	case "swift": // rows hold scope.name lower-cased
 		name = strings.ToLower(name)
 	}
 	var list []meta.VersionInfo

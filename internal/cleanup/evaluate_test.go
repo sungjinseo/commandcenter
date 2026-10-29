@@ -383,6 +383,9 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 		{"r", []string{ // one file per package_version per contrib directory (the group); the index files are not components
 			"bin/windows/contrib/4.4/PACKAGES", "bin/windows/contrib/4.4/ab_1.0.zip", "src/contrib/PACKAGES.rds", "src/contrib/ab_1.0.tar.gz", "src/contrib/ab_1.1.tar.gz",
 		}, map[int]string{1: "", 2: "bin/windows/contrib/4.4/ab@1.0", 3: "bin/windows/contrib/4.4/ab@1.0", 4: "bin/windows/contrib/4.4/ab@1.0,src/contrib/ab@1.0", 5: "bin/windows/contrib/4.4/ab@1.0,src/contrib/ab@1.0,src/contrib/ab@1.1"}},
+		{"swift", []string{ // the version directory's files are one component; the release list and identifiers are not components
+			"a/b/1.0.0/Package.swift", "a/b/1.0.0/release.json", "a/b/1.0.0/source-archive.zip", "a/b/1.1.0/source-archive.zip", "a/b/releases.json", "a/c/0.1.0/source-archive.zip", "identifiers/x.json",
+		}, map[int]string{1: "", 2: "", 3: "a.b@1.0.0", 4: "a.b@1.0.0,a.b@1.1.0", 5: "a.b@1.0.0,a.b@1.1.0", 6: "a.b@1.0.0,a.b@1.1.0,a.c@0.1.0", 7: "a.b@1.0.0,a.b@1.1.0,a.c@0.1.0"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {

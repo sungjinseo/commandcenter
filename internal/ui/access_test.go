@@ -345,6 +345,7 @@ func TestRoleValidationAndAdminImmutable(t *testing.T) {
 		{"control in description", `{"id":"r6","description":"a\u0007b"}`, http.StatusBadRequest},
 		{"duplicate target", `{"id":"r7","privileges":[{"target":"*","actions":["read"]},{"target":"*","actions":["browse"]}]}`, http.StatusBadRequest},
 		{"format r ok", `{"id":"rfmt","privileges":[{"target":"format:r","actions":["read","add"]}]}`, http.StatusCreated},
+		{"format swift ok", `{"id":"swiftfmt","privileges":[{"target":"format:swift","actions":["read","add"]}]}`, http.StatusCreated},
 		{"unknown repository", `{"id":"r8","privileges":[{"target":"repo:does-not-exist","actions":["read"]}]}`, http.StatusBadRequest},
 		{"existing repository", `{"id":"r9","privileges":[{"target":"repo:maven-releases","actions":["read"]}]}`, http.StatusCreated},
 	}

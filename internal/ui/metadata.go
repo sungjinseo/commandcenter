@@ -116,6 +116,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.conanMetadata(r.Context(), rp, group, name, version, &m)
 	case "p2":
 		found, err = u.p2Metadata(r.Context(), rp, group, name, version, &m)
+	case "swift":
+		found, err = u.swiftMetadata(r.Context(), rp, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -854,6 +856,41 @@ func (u *UI) p2Metadata(ctx context.Context, rp *repo.Repository, group, name, v
 	names, versions := p2.SplitHeader(mf["Require-Bundle"])
 	for i, n := range names {
 		m.Dependencies = append(m.Dependencies, dependencyJS{Scope: "require-bundle", Name: n, Requirement: versions[i]})
+	}
+	return true, nil
+}
+
+// swiftMetadata reads what a swift hosted row holds of the publish: the
+// metadata part's description, licenseURL (as the license), readmeURL (as
+// the homepage) and first repositoryURL, and the .package(...) dependencies
+// parsed out of Package.swift (scope "package").
+func (u *UI) swiftMetadata(ctx context.Context, rp *repo.Repository, name, version string, m *componentMetadata) (bool, error) {
+	p, ok, err := u.storedPackage(ctx, rp, strings.ToLower(name), version)
+	if err != nil || !ok {
+		return ok, err
+	}
+	var a struct {
+		Metadata struct {
+			Description    string   `json:"description"`
+			LicenseURL     string   `json:"licenseURL"`
+			ReadmeURL      string   `json:"readmeURL"`
+			RepositoryURLs []string `json:"repositoryURLs"`
+		} `json:"metadata"`
+		Dependencies []struct {
+			Name        string `json:"name"`
+			Requirement string `json:"requirement"`
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
+		return true, nil
+	}
+	m.Collected = true
+	m.Description, m.License, m.Homepage = optStr(a.Metadata.Description), optStr(a.Metadata.LicenseURL), optStr(a.Metadata.ReadmeURL)
+	if len(a.Metadata.RepositoryURLs) > 0 {
+		m.RepositoryURL = optStr(a.Metadata.RepositoryURLs[0])
+	}
+	for _, d := range a.Dependencies {
+		m.Dependencies = append(m.Dependencies, dependencyJS{Scope: "package", Name: d.Name, Requirement: d.Requirement})
 	}
 	return true, nil
 }

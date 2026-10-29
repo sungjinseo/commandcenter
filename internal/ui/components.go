@@ -152,6 +152,9 @@ func (c criteria) rawPathQuery(format string) string {
 	if c.group != "" && format == "r" { // a contrib directory, with dots (bin/windows/contrib/4.4)
 		return c.group
 	}
+	if c.name != "" && format == "swift" { // scope.name is <scope>/<name>/ in paths
+		return strings.ReplaceAll(c.name, ".", "/")
+	}
 	switch {
 	case c.group != "":
 		return strings.ReplaceAll(c.group, ".", "/")

@@ -24,7 +24,8 @@ func TestComponentMetadata(t *testing.T) {
 			config.Repository{Name: "yum-hosted", Format: "yum", Type: "hosted"},
 			config.Repository{Name: "nuget-hosted", Format: "nuget", Type: "hosted"},
 			config.Repository{Name: "composer-hosted", Format: "composer", Type: "hosted"},
-			config.Repository{Name: "go-hosted", Format: "go", Type: "hosted"})
+			config.Repository{Name: "go-hosted", Format: "go", Type: "hosted"},
+			config.Repository{Name: "swift-hosted", Format: "swift", Type: "hosted"})
 	})
 	ctx := context.Background()
 	bs, err := blob.Open(t.TempDir())
@@ -174,6 +175,19 @@ func TestComponentMetadata(t *testing.T) {
 	}
 	if st, _ := get("admin", "composer-hosted", "name=acme/demo&version=2.0.0.0"); st != 404 {
 		t.Fatalf("composer missing: %d", st)
+	}
+
+	// swift: the publish's metadata part and the manifest's .package(...) dependencies (scope "package")
+	pkg("swift-hosted", "swift", "mona.linkedlist", "1.1.1", `{"id":"mona.LinkedList","checksum":"x","size":1,"metadata":{"description":"A list","licenseURL":"https://example.org/LICENSE","readmeURL":"https://example.org/README.md","repositoryURLs":["https://github.com/mona/LinkedList","git@github.com:mona/LinkedList.git"]},"publishedAt":"2026-10-28T12:00:00Z","dependencies":[{"name":"swift-argument-parser","url":"https://github.com/apple/swift-argument-parser","requirement":"from: \"1.2.0\""},{"name":"mona.Other","requirement":"exact: \"2.0.0\""}]}`)
+	st, m = get("admin", "swift-hosted", "name=Mona.LinkedList&version=1.1.1")
+	if st != 200 || !m.Collected || *m.Description != "A list" || *m.License != "https://example.org/LICENSE" || *m.Homepage != "https://example.org/README.md" || *m.RepositoryURL != "https://github.com/mona/LinkedList" {
+		t.Fatalf("swift: %d %+v", st, m)
+	}
+	if got := deps(m); got != `package::swift-argument-parser:from: "1.2.0":req package::mona.Other:exact: "2.0.0":req` {
+		t.Fatalf("swift deps: %s", got)
+	}
+	if st, _ := get("admin", "swift-hosted", "name=mona.linkedlist&version=2.0.0"); st != 404 {
+		t.Fatalf("swift missing: %d", st)
 	}
 
 	// pypi: the file's PEP 658 sidecar holds the core metadata; a file without one is "not collected"
