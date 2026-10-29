@@ -4,7 +4,7 @@
 
 <p align="center">
   A small, solid open-source artifact registry that takes the place of Nexus Repository.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace in one binary, running as a single Kubernetes pod.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace · Terraform in one binary, running as a single Kubernetes pod.
 </p>
 
 <p align="center">
@@ -34,7 +34,7 @@ Most in-house package repositories start as Nexus Repository OSS, and then meet 
 - **The same operating model.** hosted, proxy and group repositories, users, roles and privileges, cleanup policies, scheduled tasks, blob stores: nothing to relearn.
 - **Nexus REST API compatibility and a migration tool.** Existing scripts and the Terraform provider keep working against `/service/rest/v1`, and `import-nexus` copies hosted repositories wholesale.
 - **Small.** One Go binary without CGO. It runs in a 128 MiB container; the load test peaks at 43 MiB RSS.
-- **No editions.** LDAP, OIDC (SSO), S3 blob stores and PostgreSQL are all included, under MIT or Apache-2.0, your choice.
+- **No editions.** LDAP, OIDC (SSO), S3 blob stores and PostgreSQL are all included, and so are Nexus Pro features (SAML, user tokens, staging and tags, group blob stores, retain-N cleanup, export and import), under MIT or Apache-2.0, your choice.
 
 ## Formats
 
@@ -48,7 +48,7 @@ Most in-house package repositories start as Nexus Repository OSS, and then meet 
 | Docker / OCI | ✅ | ✅ | ✅ | docker, skopeo, crane, helm push oci:// |
 | raw | ✅ | ✅ | ✅ | curl, browsers (directory listings) |
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
-| Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) ※ |
+| Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) |
 | NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) ※ |
 | APT | ✅ | ✅ | ✅ | apt (signed Release) ※ |
 | RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) ※ |
@@ -61,24 +61,33 @@ Most in-house package repositories start as Nexus Repository OSS, and then meet 
 | Swift | ✅ | ✅ | ✅ | swift package-registry ※ |
 | CocoaPods | ❌ | ✅ | ❌ | pod install (CDN) ※ |
 | HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers ※ |
+| Terraform | ✅ | ✅ | ✅ | terraform, tofu ※ |
 
 ※ marks formats checked only by protocol tests that replay client requests; they have not been run against the real client yet. The others passed end-to-end tests with the real clients.
 
-Unsupported formats are listed under [limitations](docs/guide.md#제한-사항).
+Known limits per format are listed under [limitations](docs/guide.md#제한-사항).
 
 ## Features
 
 - **Web UI**: browse, search, upload, component metadata (dependencies, licenses), and administration of repositories, users, roles, realms, blob stores and tasks. Korean and English, light and dark, embedded in the binary so it works offline.
 - **Authentication and authorization**: local users, roles with per-repository privileges (browse, read, add, edit, delete), API tokens, **LDAP** (standard-library client), **OIDC** (Keycloak, Gitea, GitHub and others, with group-to-role mapping), Docker token auth.
+- **SSO and external directories**: OIDC, SAML 2.0 (signed and encrypted assertions verified), Atlassian Crowd and reverse-proxy header (RUT) realms, with group-to-role mapping and default roles for every signed-in user.
+- **User tokens**: a name code and pass code pair that replaces the user name and password (expiry, and an option to accept only tokens on repository endpoints).
 - **Operational visibility**: per-repository requests, error rate, latency, upstream failures and cache hit rate; request trends, activity log, health checks, log viewer, failure e-mails.
 - **Storage**: file or **S3-compatible** blob stores (several at once), content-addressed deduplication, blob GC. Metadata in **SQLite** or **PostgreSQL**, with a migration command between them.
+- **Blob store groups and S3 failover**: several file or S3 stores as one store (round robin, read-only members, draining a member), soft quotas, read failover to replica buckets, SSE-S3 and SSE-KMS.
 - **Housekeeping**: cleanup policies (age, last download, name pattern), scheduled and maintenance tasks (blob verification, Maven snapshot purge, metadata rebuild, temp file sweep), per-repository online/offline.
+- **Cleanup retain-N**: keep the newest N versions of each component by each format's own version order, exclusion patterns, and a preview (CSV) before saving.
+- **Tags and staging**: tag components and move them between hosted repositories by tag or search (metadata rebuilt on both sides); move a repository to another blob store while it serves.
+- **Export and import**: export repositories to a verifiable directory (hard links, deltas) and import them into another instance.
+- **Vulnerability data and firewall (OSV)**: known vulnerabilities and malicious packages for components of ten ecosystems, proxy firewall quarantine with an allow list, offline dumps for air-gapped sites.
 - **Operations tooling**: Prometheus metrics endpoint, support bundle (support zip), thread dump, runtime log level, outbound HTTP proxy settings, SSL trust store for internal CAs.
 - **Webhooks**: global or per-repository HTTP POST of every activity event (HMAC signatures, retries, delivery history).
 - **Routing rules**: BLOCK/ALLOW regex rules on the paths a proxy may ask its remote for (keeps internal artifacts from leaking).
 - **Content selectors**: CSEL expressions (`format`, `path`, `coordinate.groupId`) that scope role privileges to paths.
 - **Kubernetes first**: a Helm chart (StatefulSet, values schema, PostgreSQL, NFS and HTTPRoute support, `helm test`), a reference manifest, and amd64/arm64 images with SBOM and provenance on every release.
-- **Nexus compatibility**: the repositories, components, assets, search and status endpoints of `/service/rest/v1`, and `commandcenter import-nexus`.
+- **Nexus compatibility**: the repositories, components, assets, search, status, blob store, cleanup policy, task, tag, staging and user token endpoints of `/service/rest/v1`, and `commandcenter import-nexus`.
+- **OpenAPI document**: an OpenAPI 3.0 description of every management API and the Nexus compatibility API (`/-/api/openapi.json`, `/service/rest/swagger.json`).
 
 ## Quick start
 
@@ -160,7 +169,7 @@ Details: [Nexus에서 이전하기](docs/guide.md#nexus에서-이전하기) and 
 
 - Terminate TLS at the Ingress or reverse proxy and set `baseURL` to the `https://` address.
 - Turn off anonymous read (`anonymousRead`) for internal use; give CI API tokens, not passwords.
-- Set a key for stored secrets (SMTP, LDAP, OIDC, remote credentials, S3) with `COMMANDCENTER_SECRET_KEY` or `secretKeyFile`, and keep it apart from backups.
+- Set a key for stored secrets (SMTP, LDAP, OIDC, Crowd, SAML, remote credentials, S3) with `COMMANDCENTER_SECRET_KEY` or `secretKeyFile`, and keep it apart from backups.
 - Keep metadata in PostgreSQL or in SQLite on block storage (never SQLite on NFS). Run one instance.
 - A 60-second stop grace period (already in the chart and compose file), regular backups, and a backup before every upgrade. Downgrades are not supported.
 
@@ -179,14 +188,13 @@ The default container limit is 128 MiB (`GOMEMLIMIT=80MiB`).
 ## Status and limits
 
 - Designed for a single instance; no high availability or horizontal scaling (the same as Nexus OSS).
-- Terraform is not available yet (in progress).
-- The Nexus REST API covers repositories, components, assets, search and status. User and role writes and the script API are not available.
+- The Nexus REST API covers repositories, components, assets, search, status, blob stores, cleanup policies, tasks, tags, staging and user tokens. User and role writes and the script API are not available.
 - Known limitations are listed in the guide ([제한 사항](docs/guide.md#제한-사항)); every release's fixes and changes are in the [CHANGELOG](CHANGELOG.md).
 - Report bugs as issues and security problems privately per the [security policy](SECURITY.md).
 
 ## Documentation
 
-- [Operations guide](docs/guide.md) (Korean): installation, Kubernetes, production deployment, configuration reference, authentication, LDAP and OIDC, blob stores, per-format client setup, backup and upgrade, Nexus migration and the compatibility API
+- [Operations guide](docs/guide.md) (Korean): installation, Kubernetes, production deployment, configuration reference, authentication, LDAP, OIDC, SAML and Crowd, blob stores, per-format client setup, backup and upgrade, Nexus migration and the compatibility API
 - [Helm chart](deploy/helm/commandcenter) · [Kubernetes reference manifest](deploy/kubernetes/commandcenter.yaml)
 - [CHANGELOG](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md) · [Attribution](ATTRIBUTION.md)
 

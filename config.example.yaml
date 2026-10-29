@@ -3,10 +3,11 @@ listen: ":8081"
 baseURL: "http://localhost:8081"   # 클라이언트가 접속하는 주소
 dataDir: "/data"
 memoryLimitMiB: 80
-# secretKeyFile: /run/secrets/commandcenter-secret-key  # 저장된 비밀값(SMTP·LDAP·remoteAuth, S3 store의 secretAccessKey)을 암호화하는 키 파일. 만들기: head -c 32 /dev/urandom | base64
+# secretKeyFile: /run/secrets/commandcenter-secret-key  # 저장된 비밀값(SMTP·LDAP·OIDC·Crowd·remoteAuth, S3 store의 secretAccessKey, SAML SP 키)을 암호화하는 키 파일. 만들기: head -c 32 /dev/urandom | base64
 # Blob store는 Blob Store 화면(POST /-/api/blobstores)에서 만듭니다. S3 store의 accessKeyId/secretAccessKey를 비우면
 # 프로세스 환경의 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY(, AWS_SESSION_TOKEN)를 씁니다.
 # maxUploadMiB: 1024               # 업로드 본문 최대 크기(MiB). 기본 1024, 1..1048576. 초과하면 413
+# exportRoot: /var/lib/commandcenter-exports   # 저장소 내보내기·가져오기 작업이 읽고 쓰는 디렉터리(절대 경로, 또는 COMMANDCENTER_EXPORT_ROOT. 둘 다는 안 됨). 비우면 두 작업을 쓸 수 없음
 anonymousRead: true                # 익명 다운로드 허용 (저장소별 anonymousRead로 덮어쓰기 가능)
 
 users:
@@ -18,7 +19,7 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted", "gems-hosted", "composer-hosted", "conda-hosted", "conan-hosted", "r-hosted", "lfs-hosted", "swift-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted", "gems-hosted", "composer-hosted", "conda-hosted", "conan-hosted", "r-hosted", "lfs-hosted", "swift-hosted", "terraform-hosted"] }
 
 # 라우팅 규칙: proxy가 원격에 물어볼 수 있는 경로. RE2 정규식, 요청 경로 앞에 "/"가 붙습니다. 첫 시작 때만 가져옵니다.
 # routingRules:
@@ -39,6 +40,8 @@ repositories:
     remote: "https://repo1.maven.org/maven2/"
     metadataMaxAge: "24h"
     # routingRule: no-internal          # 이 proxy에 적용할 라우팅 규칙 이름(없으면 모두 통과)
+    # autoBlock: true                   # 원격이 3번 연달아 실패하면 30초(두 배씩 5분까지) 묻지 않음. 그동안 캐시 제공, 없으면 바로 502
+    # blocked: false                    # true: 원격에 전혀 묻지 않음(캐시만 제공)
   - name: maven-releases
     format: maven
     type: hosted
@@ -58,6 +61,11 @@ repositories:
     type: proxy
     remote: "https://registry.npmjs.org/"
     metadataMaxAge: "1h"
+    # firewall:                         # OSV 취약점 데이터로 격리(proxy만, 취약점 데이터를 켜야 동작)
+    #   enabled: true
+    #   blockMalicious: true            # 악성 패키지(MAL-…) 차단. 기본 true
+    #   blockSeverityAtLeast: critical  # none | low | medium | high | critical
+    #   allowList: ['^left-pad@1\.3\.0$']   # name@version에 맞추는 RE2 정규식
   - name: npm-hosted
     format: npm
     type: hosted
@@ -122,6 +130,8 @@ repositories:
     format: raw
     type: hosted
     writePolicy: allow_once           # allow: 덮어쓰기 허용(edit 권한 필요). 디렉터리 목록: GET …/raw-hosted/any/path/
+    # strictContentTypeValidation: true # 내용이 확장자·Content-Type과 맞지 않는 업로드 거부(400)
+    # contentDisposition: attachment    # 다운로드를 브라우저에서 열지 않고 내려받게 함(기본 inline)
   - name: raw-proxy                   # 원격 웹 사이트의 파일을 경로 그대로 캐시 (HTML도 파일로 캐시)
     format: raw
     type: proxy
@@ -304,6 +314,23 @@ repositories:
     remote: "https://huggingface.co/"
     metadataMaxAge: "10m"             # api 문서·브랜치→커밋 재확인 주기. 커밋별 파일은 영구 캐시
     # remoteAuth: { bearerToken: "hf_..." }   # gated·비공개 모델용 Hub 읽기 토큰. Hub에만 보내고 CDN에는 보내지 않음
+
+  - name: terraform-hosted            # curl -X PUT -H "Authorization: Bearer <토큰>" --data-binary @vpc-1.2.0.tgz <host>/repository/terraform-hosted/v1/modules/acme/vpc/aws/1.2.0
+    format: terraform
+    type: hosted
+    writePolicy: allow_once           # 같은 파일 재업로드는 허용, 다른 내용은 409
+    # gpgPublicKey: |                 # 프로바이더 SHA256SUMS 서명 키(gpg --armor --export). 다운로드 문서가 key_id와 함께 알려 줌
+    #   -----BEGIN PGP PUBLIC KEY BLOCK-----
+    #   ...
+  - name: terraform-proxy
+    format: terraform
+    type: proxy
+    remote: "https://registry.terraform.io/"   # 원격 .well-known/terraform.json을 읽음. git:: 모듈 소스는 그대로 전달
+  - name: terraform                   # 일반 설정 terraformDefaultRepository로 지정 → source = "<host>/acme/vpc/aws" (Terraform은 https만)
+    format: terraform
+    type: group
+    members: [terraform-hosted, terraform-proxy]
+    writeMember: terraform-hosted
 
 # database:
 #   url: postgres://cc:password@db.example:5432/commandcenter?sslmode=require

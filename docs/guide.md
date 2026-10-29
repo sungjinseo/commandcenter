@@ -25,6 +25,14 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
 | RubyGems | O | O | O |
 | Composer | O | O | O |
 | Conda | O | O | O |
+| Conan | O | O | O |
+| R | O | O | O |
+| Git LFS | O | - | - |
+| p2 | - | O | O |
+| Swift | O | O | O |
+| CocoaPods | - | O | - |
+| HuggingFace | - | O | - |
+| Terraform | O | O | O |
 
 - **hosted**: 직접 업로드한 패키지를 저장합니다.
 - **proxy**: 원격 저장소(Maven Central, npmjs, pypi.org, proxy.golang.org, crates.io 등)를 처음 요청할 때 가져와 캐시합니다.
@@ -405,7 +413,7 @@ nginx는 기본적으로 요청 본문을 끝까지 받은 다음 서버로 넘�
 - **`meta.db`는 로컬 디스크나 블록 스토리지에**: `dataDir`(기본 `/data`)에는 `meta.db`(SQLite, WAL 모드)와 default blob store(`blobs/`)가 있습니다. WAL은 같은 호스트의 공유 메모리 파일(`meta.db-shm`)과 파일 잠금에 기대므로, NFS나 SMB(CIFS) 같은 네트워크 파일시스템에서는 잠금이 보장되지 않고 DB가 깨질 수 있습니다. 로컬 디스크, 클라우드 블록 디스크, iSCSI, Kubernetes의 ReadWriteOnce 블록 볼륨을 쓰세요.
 - **NFS에는 blob만**: blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로, 이름 붙은 blob store("Blob Store" 참고)는 NFS 경로에 둘 수 있습니다. compact 작업이 파일의 수정 시각으로 진행 중인 업로드를 보호하므로 NFS 서버와 시계를 맞춰 두세요(NTP).
 - **blob store 경로는 영구 볼륨에**: 컨테이너 안의 경로(예: `/tmp/…`)에 store를 만들면 컨테이너를 다시 만들 때 blob이 사라지고 DB 기록만 남습니다.
-- **인스턴스는 하나만**: 같은 경로 업로드의 잠금, 예약 작업, 세션, 캐시가 모두 프로세스 안에 있습니다. 같은 `dataDir`나 blob store를 두 프로세스가 함께 쓰면 안 되고, 이중화(active-active)나 여러 대로 늘리는 구성은 지원하지 않습니다. 컨테이너를 바꿀 때는 이전 컨테이너가 완전히 멈춘 뒤에 새 컨테이너를 띄우세요. 대신 재시작은 빠릅니다(중지와 기동 모두 보통 1초 안쪽).
+- **인스턴스는 하나만**: 같은 경로 업로드의 잠금, 예약 작업, 세션, OIDC·SAML 로그인 상태, proxy 자동 차단 상태, 캐시가 모두 프로세스 안에 있습니다. 같은 `dataDir`나 blob store를 두 프로세스가 함께 쓰면 안 되고, 이중화(active-active)나 여러 대로 늘리는 구성은 지원하지 않습니다. 컨테이너를 바꿀 때는 이전 컨테이너가 완전히 멈춘 뒤에 새 컨테이너를 띄우세요. 대신 재시작은 빠릅니다(중지와 기동 모두 보통 1초 안쪽).
 - **디스크 여유**: proxy 캐시는 계속 커집니다. Cleanup 정책과 compact 작업으로 정리하고, Blob Store 화면에서 파일시스템의 남은 용량을 지켜보세요.
 
 ### 리소스
@@ -502,9 +510,16 @@ Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, T
 | `GET /assets?repository=`, `GET /assets/{id}`, `DELETE /assets/{id}` | 삭제는 raw 파일만(아래 차이점) |
 | `GET /search`, `GET /search/assets`, `GET /search/assets/download` | `q`, `repository`, `format`, `group`, `name`, `version`(`*` 와일드카드), `sort`, `direction`, `maven.groupId/artifactId/baseVersion/extension/classifier`, `npm.scope`, `docker.imageName/imageTag` |
 | `GET /status`, `GET /status/writable`, `GET /status/check` | check는 admin, 상태 화면의 점검 결과를 Nexus 형식으로 |
-| `GET /security/users?userId=`, `GET /security/roles`, `GET /blobstores`, `GET /tasks` | admin, 읽기 전용 |
+| `GET /security/users?userId=`, `GET /security/roles` | admin, 읽기 전용 |
+| `GET /blobstores`, `POST /blobstores/file` → 204, `PUT /blobstores/file/{name}` → 204, `GET /blobstores/{name}/quota-status`, `GET/POST /blobstores/group`, `GET/PUT /blobstores/group/{name}` | admin. `softQuota`(`type`: `spaceUsedQuota` 또는 `spaceRemainingQuota`, `limit`: MB, 없으면 쿼터 없음), 그룹은 `name`, `members`, `fillPolicy`이고 `GET /blobstores`의 `type`은 `Group`입니다. `quota-status`는 `{isViolation, message, blobStoreName}`("Blob Store" 참고) |
 | `GET/POST /routing-rules`, `GET/PUT/DELETE /routing-rules/{name}` | admin. `name`, `description`, `mode`(`BLOCK`/`ALLOW`), `matchers`("라우팅 규칙" 참고) |
 | `GET/POST /security/content-selectors`, `GET/PUT/DELETE /security/content-selectors/{name}`, `POST/PUT /security/privileges/repository-content-selector[/{name}]` | admin. `name`, `description`, `expression`; 권한은 `priv:<이름>` 역할로 만들어집니다("컨텐츠 셀렉터" 참고) |
+| `GET/POST /cleanup-policies`, `GET/PUT/DELETE /cleanup-policies/{name}` | admin. `name`, `notes`, `format`(`maven2`, 전체는 `*`), `criteriaLastBlobUpdated`(일), `criteriaLastDownloaded`(일), `criteriaReleaseType`(`RELEASES`/`PRERELEASES`), `criteriaAssetRegex`, `retain`, `sortBy`(`version`/`date`). PUT은 204이며 Nexus에 없는 `namePattern`과 `exclude`는 유지합니다 |
+| `GET /tasks`, `POST /tasks` → 201, `GET/PUT/DELETE /tasks/{id}`, `POST /tasks/{id}/run`, `POST /tasks/{id}/stop` | admin. Nexus의 TaskTemplateXO(`type`, `name`, `enabled`, `alertEmail`, `notificationCondition`은 `FAILURE`만, `frequency`, `properties`). 종류는 `blobstore.compact`, `repository.cleanup`, `repository.maven.rebuild-metadata`, `repository.maven.remove-snapshots`, `blobstore.delete-temp-files`와 Command Center 고유 id이며, 모르는 종류는 400에 지원 목록을 알려 줍니다. `frequency.schedule`은 manual, once, hourly, daily, weekly(`recurringDays` 하나, 1=일요일…7=토요일), monthly(1–28일 하나), cron(`0 M H * * ?`, `0 M * * * ?`, `0 M H ? * MON`, `0 M H D * ?` 형태)이고, `startDate`(밀리초)와 `timeZoneOffset`의 시각을 서버 시간대의 예약으로 바꿉니다 |
+| `GET/PUT /security/user-tokens`, `DELETE /security/user-tokens`, `GET /security/user-tokens/tokens`, `GET/POST/DELETE /security/users/{userId}/{realm}/user-token` | admin. 사용자 토큰 설정(`protectContent`가 `required`), 전체 무효화, 목록, 사용자별 조회·발급·삭제("사용자 토큰" 참고) |
+| `GET/POST /tags`, `GET/PUT/DELETE /tags/{name}`, `POST/DELETE /tags/associate/{tagName}`, `POST /staging/move/{destination}`, `POST /staging/delete` | 태그 만들기·수정·삭제는 admin, 연결과 스테이징은 관련 저장소의 권한. 대상은 검색과 같은 파라미터로 고르고, `GET /search?tag=`는 태그로 거르며 컴포넌트에 `tags`가 붙습니다("태그와 스테이징" 참고) |
+| `GET /service/rest/atlas/system-information` | admin. `nexus-status`, `nexus-node`, `nexus-configuration`, `nexus-properties`, `system-time`, `system-runtime`(고루틴, 메모리, GOMAXPROCS), `system-filestores`(blob store와 남은 공간). 지원 번들과 같은 API 화면에서 만들므로 비밀번호·키·DB URL은 들어 있지 않습니다 |
+| `GET /service/rest/swagger.json` | 인증 없음. `GET /-/api/openapi.json`과 같은 OpenAPI 3.0 문서("OpenAPI 문서" 참고) |
 
 포맷 이름은 Nexus 표기를 따릅니다. Maven 저장소는 응답에서 `"format": "maven2"`이고, 생성·수정 경로는 Nexus와 같이 `/repositories/maven/hosted`처럼 씁니다. `search`의 `format=` 파라미터는 `maven2`와 `maven` 둘 다 받습니다.
 
@@ -554,12 +569,12 @@ Nexus와 다른 점:
 - 컴포넌트와 자산의 `id`는 서버가 만든 불투명한 값입니다(컴포넌트는 저장소·그룹·이름·버전, 자산은 저장소·경로를 base64url로 묶은 것). 응답에서 받은 값을 그대로 쓰면 되고, 저장소를 지우고 다시 만들어도 같은 값이 나오지만 Nexus처럼 값의 형식에 기대지는 마세요.
 - `DELETE /assets/{id}`는 raw 파일만 지웁니다. Command Center는 파일 하나가 아니라 컴포넌트 단위로 지우므로 다른 포맷은 `400`으로 답하고 `DELETE /components/{id}`를 쓰라고 알려 줍니다. 컴포넌트 삭제는 웹 UI의 컴포넌트 삭제와 같은 경로로 처리되어 hosted 저장소에서만, `writePolicy: deny`가 아닐 때만 되고 활동 이벤트에 남습니다.
 - 저장소 생성·수정·삭제는 웹 UI의 저장소 API를 그대로 호출하므로 검증 규칙과 메시지가 UI와 같고, 비밀번호 또는 세션 로그인이 필요합니다(API 토큰으로는 `403`). 같은 이름이 이미 있으면 `409`가 아니라 `400` 검증 오류입니다.
-- 본문 가운데 Command Center에 대응 값이 없는 항목(`docker`, `component.proprietaryComponents`, `httpClient.connection`, `storage.strictContentTypeValidation` 등)은 무시합니다. `cleanup.policyNames`는 첫 번째 정책만 적용되고(저장소당 하나), `negativeCache.enabled: false`는 무시되며 `timeToLive`만 반영됩니다. 그룹 본문의 `storage.blobStoreName`은 버립니다(그룹에는 blob store가 없습니다). 응답의 `httpClient.authentication`에는 사용자 이름만 있고 비밀번호는 나오지 않습니다.
+- 본문 가운데 Command Center에 대응 값이 없는 항목(`docker`, `component.proprietaryComponents`, `httpClient.connection` 등)은 무시합니다. `storage.strictContentTypeValidation`(hosted), `raw.contentDisposition`(`INLINE`/`ATTACHMENT`), `httpClient.blocked`·`httpClient.autoBlock`은 같은 이름의 저장소 키로 옮깁니다("저장소 키" 참고). `cleanup.policyNames`는 첫 번째 정책만 적용되고(저장소당 하나), `negativeCache.enabled: false`는 무시되며 `timeToLive`만 반영됩니다. 그룹 본문의 `storage.blobStoreName`은 버립니다(그룹에는 blob store가 없습니다). 응답의 `httpClient.authentication`에는 사용자 이름만 있고 비밀번호는 나오지 않습니다.
 - 시간 값은 Nexus처럼 분 단위 정수이고 `-1`은 만료 없음입니다(`contentMaxAge: -1`은 설정의 `contentMaxAge: "-1"`).
 - Docker 컴포넌트는 Nexus처럼 `name`이 이미지, `version`이 태그이며, 삭제는 그 태그가 가리키는 매니페스트(다이제스트)를 지웁니다. raw 컴포넌트는 `name`이 경로, `group`이 디렉터리(`/docs`, 최상위는 `/`), `version`은 `null`입니다. npm의 `group`은 `@` 없는 스코프입니다.
 - `search/assets/download`는 자산이 둘 이상이면 Nexus처럼 `400`으로 거절하며, `sort`를 주면 정렬 뒤 첫 번째로 보냅니다(`sort=version&direction=desc`가 최신). `sort=version`의 기본 방향은 desc입니다.
 - 컴포넌트 목록과 검색은 요청마다 저장소의 자산 경로를 모두 읽어 파생하므로 자산이 수십만 개인 저장소에서는 한 페이지에 수 초가 걸릴 수 있습니다. 전체 목록에 `continuationToken`으로 이어 받습니다.
-- `security/users`, `security/roles`, `blobstores`, `tasks`는 읽기 전용이고 역할의 `privileges`는 `"<대상>:<동작>"` 문자열입니다(컨텐츠 셀렉터 권한은 `selector:<이름>:<동작>`). 스크립트 API, 정리 정책 API, `swagger.json`은 없습니다. 모르는 경로는 JSON `404`입니다.
+- `security/users`, `security/roles`는 읽기 전용이고 역할의 `privileges`는 `"<대상>:<동작>"` 문자열입니다(컨텐츠 셀렉터 권한은 `selector:<이름>:<동작>`). 스크립트 API는 없습니다. 모르는 경로는 JSON `404`입니다.
 
 ## 웹 UI
 
@@ -654,10 +669,20 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - 지운 버전과 같은 번호로 다시 올릴 수 있습니다. 하지만 내용이 다르면 이미 받아 둔 쪽의 체크섬(npm `package-lock.json`의 `integrity`, Go `go.sum`, `Cargo.lock`)과 맞지 않아 설치가 실패하므로 새 버전 번호를 쓰세요.
 - proxy 저장소의 캐시는 이 기능으로 지우지 않습니다(Cleanup 정책을 쓰세요). 웹 UI와 API로는 group에서 지울 수 없으니 멤버 저장소에서 지우세요.
 
+### 태그와 스테이징
+
+태그는 이름과 자유 속성(JSON 객체)을 가진 라벨이며 컴포넌트(저장소·그룹·이름·버전)에 붙습니다(`/-/api/tags`, Nexus 호환 `/service/rest/v1/tags`). 태그 만들기·수정·삭제는 관리자만 할 수 있고, 컴포넌트에 붙이거나 떼려면(`POST`·`DELETE /service/rest/v1/tags/associate/<태그>?<검색 조건>`) 관련된 모든 저장소에 edit 권한이 있어야 합니다. 대상은 Nexus 검색 API와 같은 매개변수(repository, format, group, name, version, q, tag, maven.* 등, `*` 와일드카드)로 고르며, 검색 결과와 정확히 같은 컴포넌트가 선택됩니다. 웹 UI·API·Cleanup·스테이징으로 컴포넌트를 지우거나 태그를 지우면 연결도 함께 사라집니다. 검색은 `tag=`로 걸러 낼 수 있고 각 컴포넌트에 `tags`가 표시됩니다.
+
+스테이징 이동(`POST /service/rest/v1/staging/move/<대상>?repository=<원본>&tag=<태그>`, 또는 `POST /-/api/staging/move?destination=<대상>&repository=<원본>&…`)은 같은 포맷의 hosted 저장소 사이에서 컴포넌트를 옮깁니다. 컴포넌트마다 행과 파일을 대상에 복사하고(두 저장소의 blob store가 다를 때만 바이트를 복사하고 sha256을 확인합니다) 대상의 메타데이터(maven-metadata.xml, npm 패키지 문서, helm index.yaml, yum repodata 등)를 다시 만든 뒤, 원본에서는 포맷의 삭제 기능으로 지웁니다. 태그도 함께 옮겨집니다. 원본에는 읽기와 삭제 권한, 대상에는 추가 권한이 필요하고, 대상의 writePolicy가 allow일 때 기존 버전을 덮어쓰려면 edit 권한도 필요합니다. 컴포넌트마다 따로 처리하므로, 실패한 컴포넌트는 원본에 그대로 남고 응답에 사유가 표시되며(HTTP 409, 나머지는 옮겨집니다). 지원 포맷은 maven, npm, raw, pypi, nuget, helm, yum이며 docker 등 나머지는 400으로 거부합니다. `POST /service/rest/v1/staging/delete?repository=<저장소>&...`는 고른 컴포넌트를 삭제합니다(delete 권한). 한 요청은 최대 5000개 컴포넌트를 처리하며, repository 외에 tag나 검색 조건이 하나 이상 있어야 합니다. 활동 이벤트는 `tag.*`, `staging.move`, `staging.delete`입니다.
+
+- npm은 옮긴 버전의 게시 시각을 그대로 두고, 대상의 `latest`만 갱신합니다(다른 dist-tag는 옮기지 않습니다). PyPI와 npm은 writePolicy와 관계없이 이미 있는 버전을 덮어쓰지 않습니다.
+- 프로토콜 클라이언트로 지운 컴포넌트(`npm unpublish`, Maven·raw `DELETE`, docker 매니페스트 `DELETE`)는 태그 연결이 남으므로, 같은 버전을 다시 올리면 태그가 다시 붙습니다.
+- 어느 한쪽 저장소의 blob store 이동이 끝나지 않았으면 스테이징은 409입니다("저장소의 blob store 바꾸기" 참고).
+
 ### 관리자 화면
 
 - **Repositories**: 목록, 상세, 만들기·편집·삭제(아래 "저장소 관리"). Name, Format, Type, URL, Online(Online/Offline 전환), Blob Store, Remote, Members, 저장소 크기, 그리고 versionPolicy, writePolicy, metadataMaxAge, contentMaxAge, negativeCacheTTL(설정값).
-- **Users**: 사용자 목록·만들기·편집·삭제·비밀번호 재설정·API 토큰 모두 폐기(User ID, Source, Roles, Status). LDAP 로그인 사용자는 최근에 로그인한 사용자만 `directory` 행으로 보입니다("인증과 권한", "Realm, LDAP, OIDC" 참고). 비밀번호 해시는 절대 내보내지 않습니다.
+- **Users**: 사용자 목록·만들기·편집·삭제·비밀번호 재설정·API 토큰 모두 폐기(User ID, Source, Roles, Status). LDAP 로그인 사용자는 최근에 로그인한 사용자만 `directory` 행으로 보입니다("인증과 권한", "Realm, LDAP, OIDC, SAML" 참고). 비밀번호 해시는 절대 내보내지 않습니다.
 - **Roles**: 역할과 권한(대상 × 동작) 편집. 내장 `admin` 역할은 수정·삭제할 수 없습니다.
 - **Realms**: Realm 순서와 켜기/끄기, LDAP 설정과 연결 테스트.
 - **Account**: 로그인한 사용자 본인의 비밀번호 변경(로컬 사용자만).
@@ -671,7 +696,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 ### 의도적으로 없는 것
 
 - **Go, Cargo 업로드 화면**: Upload는 Maven, npm, PyPI만 지원합니다. Go와 Cargo는 `curl`(Go) 또는 `cargo publish`로 올립니다.
-- **Tags**, 악성 패키지 위험 분석, 라이선스 관리 화면, 유료 에디션 전용 화면, SAML 등. Human Edition에는 유료 에디션이 없습니다.
+- 라이선스 관리 화면, 유료 에디션 전용 화면. 에디션이 하나뿐이라 Nexus Pro의 태그·스테이징, SAML, 사용자 토큰, 취약점 데이터("취약점 데이터와 방화벽(OSV)" 참고)도 모두 같은 바이너리에 들어 있습니다.
 
 ### 주의할 점
 
@@ -688,7 +713,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 > **경고: `config.yaml`의 `repositories:`는 첫 시작 때 한 번만 읽습니다.** 저장소 정의는 `meta.db`(SQLite)로 옮겨지고, 그 뒤로는 `config.yaml`의 `repositories:`를 고쳐도 **무시**됩니다(시작할 때 파일 이름을 밝히는 경고 로그가 남습니다). 저장소는 UI(또는 `/-/api/repositories` API)로 바꾸세요. 사용자, 역할, 일반 설정, 라우팅 규칙, 컨텐츠 셀렉터도 첫 시작 때 한 번만 가져오며 이후 UI에서 관리합니다("업그레이드" 참고).
 
 - **만들기**: "Create repository"를 누르면 레시피 선택 화면(`maven2`, `npm`, `pypi`, `go`, `cargo` 각각 hosted, proxy, group)이 나오고, 고르면 해당 유형의 폼이 열립니다. 검증은 `config.yaml`과 같고 오류는 폼 맨 위에 표시됩니다. 새 저장소 이름은 영문자와 숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만 쓸 수 있으며 최대 64자입니다. `create`는 예약어라 쓸 수 없습니다(이미 저장된 이름은 그대로 동작합니다).
-- **편집**: `name`, `format`, `type`은 만든 뒤 바꿀 수 없습니다(폼에서 비활성). 나머지(remote, 인증, 최대 보관 시간, negative cache TTL, 라우팅 규칙(routingRule), group 멤버와 순서, writeMember, versionPolicy, 배포 정책(writePolicy), anonymousRead, Online/Offline)는 고칠 수 있습니다. 저장소의 Blob Store(`blobStore`)는 만들 때만 고르며 바꿀 수 없습니다("Blob Store" 참고). proxy의 `remote`를 바꿔도 캐시된 파일은 유지되지만, 이전 remote에서 받은 "없음" 기록(negative cache)은 지워집니다.
+- **편집**: `name`, `format`, `type`은 만든 뒤 바꿀 수 없습니다(폼에서 비활성). 나머지(remote, 인증, 최대 보관 시간, negative cache TTL, 라우팅 규칙(routingRule), group 멤버와 순서, writeMember, versionPolicy, 배포 정책(writePolicy), anonymousRead, Online/Offline)는 고칠 수 있습니다. 저장소의 Blob Store(`blobStore`)는 편집으로는 바꿀 수 없고 `repository.change-blobstore` 작업으로 옮깁니다("저장소의 blob store 바꾸기" 참고). proxy의 `remote`를 바꿔도 캐시된 파일은 유지되지만, 이전 remote에서 받은 "없음" 기록(negative cache)은 지워집니다.
 - **삭제**: 저장소 이름을 직접 입력해야 삭제됩니다. 다음 규칙이 있습니다.
   - group의 멤버(또는 writeMember)인 저장소는 409로 거부하며 메시지에 group 이름이 나옵니다. group에서 먼저 빼세요.
   - 삭제하면 그 저장소의 정의와 자산, 패키지, dist-tag, negative cache 행이 한 트랜잭션으로 지워집니다. blob 파일은 다음 GC(Compact blob store)에서 회수됩니다.
@@ -744,7 +769,7 @@ repositories:
 
 설정 파일은 YAML이며 알 수 없는 키가 있으면 시작이 실패합니다. 설정을 바꾼 뒤에는 `docker compose restart`로 반영하세요.
 
-**한 번만 가져오는 키**: `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`는 **첫 시작 때 한 번만** 읽어 DB로 가져옵니다. 이후에는 파일에 남아 있어도 무시되며(시작할 때마다 경고가 한 줄 남습니다) 웹 UI에서 관리합니다("업그레이드"의 이전 안내 참고). `config.yaml`에 계속 쓰는 키는 `listen`, `dataDir`, `memoryLimitMiB`, `metricsFlushSeconds`, `secretKeyFile`뿐입니다(`repositories`도 첫 시작에만 가져옵니다).
+**한 번만 가져오는 키**: `users`, `roles`, `anonymousRead`, `baseURL`, `maxUploadMiB`는 **첫 시작 때 한 번만** 읽어 DB로 가져옵니다. 이후에는 파일에 남아 있어도 무시되며(시작할 때마다 경고가 한 줄 남습니다) 웹 UI에서 관리합니다("업그레이드"의 이전 안내 참고). `config.yaml`에 계속 쓰는 키는 `listen`, `dataDir`, `memoryLimitMiB`, `metricsFlushSeconds`, `secretKeyFile`, `exportRoot`뿐입니다(`repositories`도 첫 시작에만 가져옵니다).
 전체 예시는 `config.example.yaml`을 참고하세요.
 
 ### 최상위 키
@@ -758,7 +783,8 @@ repositories:
 | `maxUploadMiB` | 정수 | `1024` | (가져온 뒤 UI에서 관리, 바로 적용) GET/HEAD가 아닌 요청 본문의 최대 크기(MiB). 허용 범위 1..1048576, 0이면 기본값. 초과하면 모든 포맷에서 413. 포맷별로 더 작은 제한이 있으면 그것이 먼저 적용됩니다. |
 | `anonymousRead` | 불리언 | `false` | (가져온 뒤 UI에서 관리) 인증 없는 다운로드 허용 여부. 저장소별로 덮어쓸 수 있습니다. |
 | `metricsFlushSeconds` | 정수 | `30` | (숨은 설정) 다운로드 수와 요청 통계를 DB에 반영하는 주기(초). 허용 범위 1..3600. "다운로드 수·요청 추이" 참고. |
-| `secretKeyFile` | 경로 | 없음 | 저장된 비밀값(SMTP 비밀번호, LDAP bind 비밀번호, proxy `remoteAuth`, S3 blob store의 `secretAccessKey`)을 암호화하는 키가 든 파일. 환경변수 `COMMANDCENTER_SECRET_KEY`로 줄 수도 있으며, 둘 다 주면 시작하지 않습니다. 없으면 비밀값을 평문으로 저장합니다. "저장된 비밀값 암호화" 참고. |
+| `secretKeyFile` | 경로 | 없음 | 저장된 비밀값(SMTP 비밀번호, LDAP bind 비밀번호, OIDC client secret, Crowd 애플리케이션 비밀번호, SAML SP 개인키, proxy `remoteAuth`, S3 blob store의 `secretAccessKey` 등)을 암호화하는 키가 든 파일. 환경변수 `COMMANDCENTER_SECRET_KEY`로 줄 수도 있으며, 둘 다 주면 시작하지 않습니다. 없으면 비밀값을 평문으로 저장합니다. "저장된 비밀값 암호화" 참고. |
+| `exportRoot` | 경로 | 없음 | 저장소 내보내기·가져오기 작업이 읽고 쓰는 디렉터리(절대 경로). 환경변수 `COMMANDCENTER_EXPORT_ROOT`로 줄 수도 있으며, 둘 다 주면 시작하지 않습니다. 비우면 두 작업을 쓸 수 없습니다("저장소 내보내기와 가져오기" 참고). |
 | `users` | 목록 | 없음 | (첫 시작 가져오기 전용) 사용자: `name`, `passwordHash`(bcrypt), `roles`. 가져온 사용자는 로컬 사용자가 됩니다. bcrypt 해시가 아닌 값(예: `config.example.yaml`의 `<commandcenter hash-password 출력값>`)은 비밀번호가 없는 것으로 봅니다. 그 사용자는 비밀번호로 로그인할 수 없고, 사용자 API의 `hasPassword`는 `false`이며, 서버가 시작할 때마다 그런 활성 사용자마다 WARN 로그(`local user cannot sign in with a password`)가 남습니다. 웹 UI나 `user reset-password`로 비밀번호를 정하세요. |
 | `roles` | 맵 | 없음 | (첫 시작 가져오기 전용) 역할 이름 → `write: [저장소 이름…]`. `"*"`는 모든 저장소. 가져올 때 항목마다 `repo:<이름>`(또는 `*`) 대상에 browse·read·add·edit·delete 전부를 주는 권한이 됩니다(예전의 쓰기는 삭제를 포함했습니다). |
 | `repositories` | 목록 | 없음 | 저장소 정의(아래 표). **첫 시작 때만** 읽어 DB로 가져옵니다. 이후에는 무시되므로 UI에서 관리합니다("저장소 관리" 참고). |
@@ -772,7 +798,7 @@ repositories:
 | 키 | 대상 | 기본값 | 설명 |
 |---|---|---|---|
 | `name` | 모두 | 필수 | 저장소 이름. URL의 `/repository/<name>/`. `/`, 공백, `\` 불가, 중복 불가. UI/API로 만들 때는 영문자·숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만, 최대 64자, `create`는 예약어. |
-| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs`, `p2`, `swift`, `cocoapods`, `huggingface` 중 하나. |
+| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs`, `p2`, `swift`, `cocoapods`, `huggingface`, `terraform` 중 하나. |
 | `type` | 모두 | 필수 | `hosted`, `proxy`, `group` 중 하나. `gitlfs`는 `hosted`만 됩니다(proxy·group은 400). `p2`는 `proxy`·`group`만, `cocoapods`·`huggingface`는 `proxy`만 됩니다(그 밖은 400). |
 | `remote` | proxy | 필수 | 원격 저장소의 `http(s)` URL. Cargo는 `sparse+` 없는 sparse index URL, Conan은 Conan 서버 루트(`https://center.conan.io/`), R은 CRAN 미러나 Posit Package Manager의 루트, p2는 p2 사이트 URL, Swift는 다른 Swift 레지스트리의 루트, CocoaPods는 트렁크 CDN `https://cdn.cocoapods.org/`(Specs git 저장소는 안 됨), HuggingFace는 `https://huggingface.co/`. 원격 인증 정보는 URL에 넣지 말고 `remoteAuth`에 넣으세요(URL은 암호화하지 않습니다. "저장된 비밀값 암호화" 참고). |
 | `remoteAuth` | proxy | 없음 | 원격 인증: `username`/`password` 또는 `bearerToken`(둘 다 있으면 토큰 우선). 설정한 `remote`와 스킴·호스트·포트가 같은 곳에만 보내며, 리다이렉트를 따라갈 때도 같습니다. 예외는 같은 호스트의 `http`(80)에서 `https`(443)로 옮기는 리다이렉트로, 첫 요청이 이미 그 호스트에 보냈으므로 자격 증명을 유지합니다. 그 밖에 포트나 스킴이 다른 곳(`https`에서 `http`로 내려가는 경우 포함)과 하위 도메인으로 가는 리다이렉트는 자격 증명 없이 따라갑니다. |
@@ -790,7 +816,13 @@ repositories:
 | `writePolicy` | hosted | `allow_once` | `allow`(덮어쓰기 허용), `allow_once`(같은 경로 재업로드 거부), `deny`(읽기 전용). 아래 설명 참고. |
 | `anonymousRead` | 모두 | 최상위 값 | 이 저장소만 익명 읽기를 켜거나 끕니다. |
 | `cleanupPolicy` | hosted, proxy | 없음 | 연결할 Cleanup 정책 이름 하나(없으면 비움). 정책의 포맷이 `all`이거나 저장소와 같아야 하며 Cargo hosted에는 쓸 수 없습니다("Cleanup 정책" 참고). |
-| `blobStore` | hosted, proxy | `default` | 이 저장소의 blob을 둘 blob store 이름("Blob Store" 참고). 만들 때만 정할 수 있고 바꿀 수 없으며 group에는 없습니다. 없는 store 이름은 거부됩니다. |
+| `blobStore` | hosted, proxy | `default` | 이 저장소의 blob을 둘 blob store 이름("Blob Store" 참고). 편집으로는 바꿀 수 없고 `repository.change-blobstore` 작업으로 옮기며("저장소의 blob store 바꾸기" 참고) group에는 없습니다. 없는 store 이름과 blob store 그룹의 멤버는 거부됩니다. |
+| `strictContentTypeValidation` | hosted | `false` | 켜면 올린 내용이 경로·선언한 형식과 맞지 않는 업로드를 400으로 거부합니다(Nexus의 strict content type validation). raw는 확장자(`.jar`, `.zip`, `.whl`, `.nupkg`는 zip, `.tgz`·`.gz`·`.crate`는 gzip, `.pom`·`.xml`은 XML, `.rpm`, `.deb`)의 파일 시그니처를 보고, 그 밖에는 `Content-Type`(없으면 확장자로 정한 형식)의 주 형식과 실제 내용을 비교합니다(`text/*`인데 바이너리, `image/*`·`audio/*`·`video/*`인데 다른 형식). `application/octet-stream`과 SVG는 검사하지 않습니다. Maven은 같은 규칙을 아티팩트에 적용합니다(`maven-metadata.xml`과 체크섬 제외). npm, PyPI, NuGet, Helm은 이 값과 관계없이 올린 패키지를 항상 열어 검사합니다. Nexus 호환 API로 만들 때는 `storage.strictContentTypeValidation`을 따르며, Terraform 공급자와 Nexus 예제는 `true`를 보내므로 그렇게 만든 hosted 저장소는 검사가 켜집니다. |
+| `contentDisposition` | raw, gitlfs | `inline` | 다운로드 응답의 `Content-Disposition`. `attachment`이면 `attachment; filename=<파일 이름>`을 보내 브라우저가 열지 않고 내려받게 합니다. raw group은 자기 값이 있으면 그 값을, 없으면 파일을 가진 멤버의 값을 씁니다. Nexus 호환 API의 `raw.contentDisposition`(`INLINE`/`ATTACHMENT`)과 같습니다. |
+| `autoBlock` | proxy | `true` | 원격이 연달아 실패하면 잠시 원격에 묻지 않습니다(아래 "원격 자동 차단" 참고). 편집할 때 생략하면 저장된 값을 유지합니다. |
+| `blocked` | proxy | `false` | `true`이면 원격에 전혀 묻지 않습니다. 캐시된 파일만 내보내고(만료된 것은 `Warning: 110`과 함께), 없는 파일은 502입니다. 편집할 때 생략하면 `false`가 됩니다. |
+| `firewall` | proxy(취약점 데이터 대상 포맷) | 꺼짐 | OSV 취약점 데이터로 이 proxy가 내주는 컴포넌트를 격리합니다: `enabled`, `blockMalicious`(기본 `true`), `blockSeverityAtLeast`(`none`·`low`·`medium`·`high`·`critical`, 기본 `none`), `allowList`(`name@version`에 맞추는 RE2 정규식, 1000개까지). 편집할 때 생략하면 저장된 값을 유지합니다("취약점 데이터와 방화벽(OSV)" 참고). |
+| `gpgPublicKey` | terraform hosted | 없음 | 프로바이더 `SHA256SUMS` 서명을 확인할 ASCII armor 공개키(`gpg --armor --export`). 다운로드 문서가 key id와 함께 알려 주며, 읽을 수 없는 키는 400입니다("Terraform 설정" 참고). |
 | `online` | 모두 | `true` | `false`이면 저장소가 Offline이 되어 요청에 503을 돌려줍니다("저장소 Online/Offline" 참고). |
 
 **기간 형식**: Go 기간 문자열(`"30m"`, `"1h"`, `"24h"`)이며 `d` 단위는 없습니다. `"-1"`은 만료 없음(영구)입니다. 생략하거나 `0`이면 기본값입니다.
@@ -808,7 +840,9 @@ repositories:
 - 거절되면 클라이언트는 502(만료된 캐시가 있으면 그 캐시)를 받습니다. 로그의 `remote fetch failed` 줄에는 `address refused by the remote egress policy`가 남습니다.
 - `HTTPS_PROXY`/`HTTP_PROXY`의 사내 프록시를 거치는 요청은 프록시가 대신 접속하므로 IP 주소로 적힌 목적지만 검사합니다(위의 다른 IPv4 표기와 ASCII가 아닌 호스트의 거절 포함). 호스트 이름으로 적힌 목적지는 내부 주소로 해석되더라도 프록시가 그대로 접속하므로, 프록시에서 내부 대역으로 가는 요청을 막거나 사내 도메인과 대역을 `NO_PROXY`에 넣으세요. 프록시 자체의 주소는 막지 않습니다. `NO_PROXY`에 넣은 호스트에는 직접 접속하므로 위 검사를 모두 받습니다.
 
-**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum, RubyGems, Composer, Conda, Conan, R, Swift도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정", "RubyGems 설정", "Composer 설정", "Conda 설정", "Conan 설정", "R 설정", "Swift 설정" 참고). Git LFS는 같은 oid의 재업로드를 `allow_once`에서도 받고(멱등) `deny`만 업로드·삭제를 막습니다("Git LFS 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
+**원격 자동 차단**: `autoBlock`(기본 켬)인 proxy는 원격 요청이 연달아 3번 실패하면(연결 실패, 시간 초과, 5xx 응답. 404, 401, 403, 429는 응답이므로 실패가 아닙니다) 30초 동안 원격에 묻지 않습니다. 그동안 만료된 캐시는 `Warning: 110`을 붙여 내보내고, 캐시에 없는 파일은 원격을 기다리지 않고 바로 502로 답합니다. 차단이 풀린 뒤 첫 요청도 실패하면 다시 차단하며, 차단 시간은 두 배씩 늘어 5분까지 갑니다. 원격이 한 번이라도 응답하면 실패 수와 차단 시간이 처음으로 돌아갑니다. 상태는 메모리에만 두므로 서버를 다시 시작하거나 저장소 설정을 저장하면 초기화됩니다. 로그인한 사용자에게는 저장소 목록과 상세(`GET /-/api/repositories`, `GET /-/api/repositories/<이름>`)에 `blocked`, `autoBlock`, `remoteStatus`(`blocked`, 자동 차단이면 `true`인 `auto`, 차단이 끝나는 시각 `until`, 마지막 실패 원인 `lastError`. 원격 주소는 넣지 않습니다)가 나오고, 익명 사용자에게는 나오지 않습니다. 관리자가 `blocked: true`로 저장하면 원격에 전혀 묻지 않습니다(`remoteStatus.auto`는 `false`). Nexus 호환 API의 `httpClient.blocked`, `httpClient.autoBlock`과 같습니다.
+
+**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum, RubyGems, Composer, Conda, Conan, R, Swift도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정", "RubyGems 설정", "Composer 설정", "Conda 설정", "Conan 설정", "R 설정", "Swift 설정" 참고). Git LFS는 같은 oid의 재업로드를 `allow_once`에서도 받고(멱등) `deny`만 업로드·삭제를 막습니다("Git LFS 설정" 참고). Terraform은 `allow_once`에서 같은 파일의 재업로드는 받고 내용이 다르면 409이며, `allow`는 덮어쓰기에 edit 권한이 필요하고 `deny`는 읽기 전용입니다("Terraform 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
 
 ## 인증과 권한
 
@@ -819,7 +853,7 @@ repositories:
 - **Basic 인증**: 사용자 이름과 비밀번호. UI에서 사용자를 만들 때 비밀번호(8자 이상, 72바이트 이하, 공백만으로는 안 됨)를 입력합니다. `commandcenter hash-password`는 첫 시작 때 `config.yaml`에서 가져올 해시를 만들며 같은 비밀번호 규칙을 적용합니다(가져온 뒤에는 `config.yaml`의 사용자를 고쳐도 반영되지 않습니다). 관리자가 모두 잠겼을 때는 "비상 복구"의 `user reset-password`를 쓰세요. 사용자 ID는 영문자·숫자로 시작하고 영문자, 숫자, `.`, `_`, `@`, `-`만, 최대 64자이며 `create`는 예약어입니다. 이미 있는 ID와 대소문자만 다른 ID(예: `admin`이 있을 때 `Admin`)는 만들 수 없고, 409 응답에 기존 ID가 나옵니다(`already exists as "admin"`). 로그인은 대소문자를 구분하므로 비슷해 보이는 다른 계정이 생기지 않게 하기 위해서이며, 이전 버전이 이미 만든 그런 ID는 그대로 둡니다. 첫 가져오기에서도 같은 규칙을 적용하므로 규칙에 맞지 않는 ID(예: `:`이 들어간 ID)나 대소문자만 다른 ID 두 개가 `config.yaml`에 있으면 가져오기가 실패하고 서버가 시작되지 않습니다. 이름과 이메일에는 줄바꿈 같은 제어 문자를 쓸 수 없고, 이메일은 비워 두거나 `user@example.com` 형식의 주소 하나(표시 이름이나 여러 주소 없이)여야 합니다(400). 이전 버전이 저장한 값은 바꾸지 않는 한 다시 검사하지 않으므로 그런 사용자도 편집하거나 비활성화할 수 있습니다.
 - **상태**: `active` 또는 `disabled`. 비활성화하거나 삭제한 사용자는 Basic 인증, 세션, 토큰 모두 곧바로 거부됩니다. 사용자를 삭제하면 그 사용자의 API 토큰도 함께 지워집니다.
 - **본인 비밀번호 변경**: 로그인한 로컬 사용자는 계정 화면(`PUT /-/api/account/password`)에서 현재 비밀번호를 확인한 뒤 바꿉니다. 비밀번호나 세션으로 인증해야 하고 토큰으로는 안 됩니다. 새 비밀번호가 현재 비밀번호와 같으면 400입니다. 바꾸면 그 사용자의 세션이 모두 끊기고 현재 브라우저만 새 세션을 받습니다. LDAP 사용자는 비밀번호를 디렉터리에서 관리하므로 400입니다. 현재 비밀번호는 로컬 Realm으로만 확인하므로 같은 이름의 LDAP 사용자의 비밀번호로는 바꿀 수 없습니다. 관리자는 다른 로컬 사용자의 비밀번호를 재설정할 수 있고, 그러면 그 사용자의 세션이 모두 끊깁니다. 재설정은 새 비밀번호가 현재 비밀번호와 같은지 보지 않습니다(관리자가 사용자의 현재 비밀번호를 맞혀 볼 수 없게 하기 위해서입니다). 어느 쪽이든 API 토큰은 그대로 유효하므로, 비밀번호가 새어 나갔다고 의심되면 사용자 화면의 **토큰 모두 폐기**도 누르세요(아래 "API 토큰").
-- **API 토큰**: UI의 API 토큰 화면 또는 `docker compose exec commandcenter commandcenter token create -user ci`가 `cc_…` 토큰을 만듭니다. `Authorization: Bearer <토큰>`, 토큰 값만 보내는 형태(Cargo), 또는 **Basic 인증의 비밀번호 자리**(사용자 이름은 토큰 소유자와 같아야 하며 다르면 401)로 쓸 수 있어 Maven·pip·Go CI에서 비밀번호 대신 넣을 수 있습니다. 토큰으로는 새 토큰을 발급·폐기하거나 웹 UI에 로그인할 수 없습니다(실제 비밀번호나 로그인 세션만 가능). 토큰은 만료되지 않지만 사용자를 비활성화·삭제하거나 `token` Realm을 끄면 무효가 됩니다. 비밀번호를 바꾸거나 재설정해도 토큰은 남습니다. 관리자는 사용자 화면의 **토큰 모두 폐기**(`DELETE /-/api/users/<id>/tokens`, 관리자이며 비밀번호 또는 세션으로 인증하고 `X-Command-Center-UI: 1` 헤더 필요)로 그 사용자의 토큰을 한 번에 폐기합니다. 같은 ID의 LDAP 사용자 토큰(`ldap:<id>`)도 함께 폐기하고, 응답 `{"revoked": <개수>}`와 활동 기록의 `token.revoke` 이벤트(`all <개수>`)에 폐기한 개수가 나옵니다. 폐기된 토큰을 쓰던 빌드와 CI는 401을 받으므로 새 토큰을 넣으세요. 토큰은 해시만 저장되므로 분실하면 다시 발급하세요. LDAP 사용자의 토큰은 소유자가 `ldap:<id>`입니다("Realm, LDAP, OIDC" 참고).
+- **API 토큰**: UI의 API 토큰 화면 또는 `docker compose exec commandcenter commandcenter token create -user ci`가 `cc_…` 토큰을 만듭니다. `Authorization: Bearer <토큰>`, 토큰 값만 보내는 형태(Cargo), 또는 **Basic 인증의 비밀번호 자리**(사용자 이름은 토큰 소유자와 같아야 하며 다르면 401)로 쓸 수 있어 Maven·pip·Go CI에서 비밀번호 대신 넣을 수 있습니다. 토큰으로는 새 토큰을 발급·폐기하거나 웹 UI에 로그인할 수 없습니다(실제 비밀번호나 로그인 세션만 가능). 토큰은 만료되지 않지만 사용자를 비활성화·삭제하거나 `token` Realm을 끄면 무효가 됩니다. 비밀번호를 바꾸거나 재설정해도 토큰은 남습니다. 관리자는 사용자 화면의 **토큰 모두 폐기**(`DELETE /-/api/users/<id>/tokens`, 관리자이며 비밀번호 또는 세션으로 인증하고 `X-Command-Center-UI: 1` 헤더 필요)로 그 사용자의 토큰을 한 번에 폐기합니다. 같은 ID의 LDAP 사용자 토큰(`ldap:<id>`)도 함께 폐기하고, 응답 `{"revoked": <개수>}`와 활동 기록의 `token.revoke` 이벤트(`all <개수>`)에 폐기한 개수가 나옵니다. 폐기된 토큰을 쓰던 빌드와 CI는 401을 받으므로 새 토큰을 넣으세요. 토큰은 해시만 저장되므로 분실하면 다시 발급하세요. LDAP 사용자의 토큰은 소유자가 `ldap:<id>`입니다("Realm, LDAP, OIDC, SAML" 참고).
 - **`npm login`**: 사용자 이름과 비밀번호로 로그인하면 서버가 토큰을 발급해 `~/.npmrc`에 저장합니다.
 - **세션**: 웹 UI 로그인 세션은 메모리에만 있고 모두 1000개, 사용자당 20개까지입니다. 넘으면 그 사용자의 세션 가운데 가장 오래 쓰지 않은 것이 끊깁니다("웹 UI"의 "주의할 점" 참고).
 
@@ -836,7 +870,7 @@ repositories:
   - **delete**: 삭제. Maven `DELETE`(파일), `npm unpublish`, Go `DELETE`(버전 전체), 웹 UI와 API의 컴포넌트 삭제(모든 포맷, "컴포넌트 삭제" 참고). `add`만 있으면 403입니다.
 - group에 쓰는 요청은 같은 동작을 `writeMember` 저장소에 대해 검사합니다.
 - **내장 `admin` 역할**은 모든 대상에 모든 동작을 가지며 관리 화면과 `/-/metrics`도 쓸 수 있습니다. 수정·삭제할 수 없습니다.
-- 역할을 지우려는데 사용자가 쓰고 있거나 LDAP 설정의 `groupMappings[].roles` 또는 `defaultRoles`에 들어 있으면 409입니다(LDAP 참조는 메시지에 어느 매핑인지 나옵니다).
+- 역할을 지우려는데 사용자가 쓰고 있거나 LDAP 설정의 `groupMappings[].roles` 또는 `defaultRoles`에 들어 있거나, OIDC·Crowd·RUT·SAML 설정의 매핑·기본 역할 또는 일반 설정의 `defaultRoles`에 들어 있으면 409입니다(LDAP 참조는 메시지에 어느 매핑인지 나옵니다).
 - **입력 검사**: `repo:<이름>` 대상은 그 이름의 저장소가 있어야 하며, 없으면 400(`unknown repository "<이름>"`)입니다. 이미 저장된 역할에 있던 대상은 저장소가 없어도(이전 버전이 저장소를 지울 때 남긴 권한 등) 그 역할을 편집할 때 그대로 둘 수 있습니다(새로 넣는 대상만 검사합니다). 저장소를 지우면 그 대상도 역할에서 지워지므로("저장소 관리"의 삭제 참고), 삭제 전에 열어 둔 역할 편집 화면을 그대로 저장하면 400입니다. 한 역할에 같은 대상을 두 번 쓰면 400(`duplicate target`)입니다. 역할 ID도 사용자 ID처럼 이미 있는 ID와 대소문자만 다른 ID는 만들 수 없고(409, `config.yaml` 첫 가져오기에서는 시작 실패), `admin`은 대소문자와 관계없이 예약어입니다. 설명에는 제어 문자를 쓸 수 없습니다. 이전 버전이 저장한 설명은 바꾸지 않는 한 다시 검사하지 않습니다.
 - 예: `repo:maven-releases`에 `browse`, `read`, `add`만 있는 역할의 사용자가 Maven에 `PUT`하면 201, `DELETE`하면 403입니다.
 
@@ -884,9 +918,34 @@ contentSelectors:
 
 ### 잠금 방지
 
-"로그인할 수 있는 관리자"가 없어지는 변경은 409로 거부됩니다. 관리자가 로그인할 수 있는 경로는 (a) `local` Realm이 켜져 있고 쓸 수 있는 비밀번호(bcrypt 해시)가 있는 활성 로컬 `admin` 사용자가 있거나, (b) `ldap` Realm이 켜져 있고 설정이 완전하며 그룹 매핑 또는 기본 역할이 `admin`을 주는 경우입니다. 대상이 되는 변경은 사용자 삭제·비활성화·역할 변경, `local`/`ldap` Realm 끄기, LDAP 매핑 편집입니다. 추가로 **마지막 로컬 관리자(활성, bcrypt 비밀번호 해시 있음, `admin` 역할)는 LDAP 관리자 매핑이 있어도 삭제·비활성화·강등할 수 없습니다.** 로컬 비상용 관리자를 항상 남기기 위해서입니다. 그래서 LDAP만 쓰는 설치에도 로컬 관리자 한 명은 남습니다(`local` Realm 자체는 끌 수 있습니다). placeholder처럼 bcrypt 해시가 아닌 `passwordHash`를 가진 관리자는 로그인할 수 없으므로 세지 않습니다. 그래서 그런 관리자만 남게 되는 삭제·비활성화·강등도 409입니다.
+"로그인할 수 있는 관리자"가 없어지는 변경은 409로 거부됩니다. 관리자가 로그인할 수 있는 경로는 (a) `local` Realm이 켜져 있고 쓸 수 있는 비밀번호(bcrypt 해시)가 있는 활성 로컬 `admin` 사용자가 있거나, (b) `ldap` Realm이 켜져 있고 설정이 완전하며 그룹 매핑 또는 기본 역할이 `admin`을 주는 경우, (c) `crowd` Realm이 같은 조건인 경우입니다. 대상이 되는 변경은 사용자 삭제·비활성화·역할 변경, `local`/`ldap`/`crowd` Realm 끄기, LDAP·Crowd 매핑 편집입니다. 추가로 **마지막 로컬 관리자(활성, bcrypt 비밀번호 해시 있음, `admin` 역할)는 LDAP 관리자 매핑이 있어도 삭제·비활성화·강등할 수 없습니다.** 로컬 비상용 관리자를 항상 남기기 위해서입니다. 그래서 LDAP만 쓰는 설치에도 로컬 관리자 한 명은 남습니다(`local` Realm 자체는 끌 수 있습니다). placeholder처럼 bcrypt 해시가 아닌 `passwordHash`를 가진 관리자는 로그인할 수 없으므로 세지 않습니다. 그래서 그런 관리자만 남게 되는 삭제·비활성화·강등도 409입니다.
 
 사용자, 역할, Realm, LDAP 설정의 변경은 서버 안에서 하나씩 차례로 처리합니다(읽기 → 잠금 방지 검사 → 저장 → 적용). 그래서 두 관리자가 동시에 서로를 비활성화해도 하나는 409를 받고 관리자 한 명은 남습니다.
+
+### 사용자 토큰
+
+사용자 토큰은 Nexus Pro의 user token과 같은 기능으로, 사용자 이름과 비밀번호 대신 쓰는 **이름 코드(8자)와 패스 코드(44자)** 한 쌍입니다. Basic 인증을 받는 모든 곳(Maven `settings.xml`, npm `_auth`와 `npm login`, pip, `docker login`, Nexus REST API 등)에서 `<이름 코드>:<패스 코드>`를 사용자 이름과 비밀번호 자리에 넣습니다. 이름 코드에는 사용자 이름이 드러나지 않으므로 빌드 설정 파일이 유출돼도 계정 이름과 비밀번호가 함께 노출되지 않습니다.
+
+- **켜기.** 일반 설정의 `userTokens`(`PUT /-/api/settings` `{"userTokens":{"enabled":true,"required":false,"expirationDays":0}}`, 관리자)에서 켭니다. 끄면 발급된 토큰이 모두 거부되지만 지워지지는 않습니다.
+- **발급.** 사용자(로컬·LDAP·OIDC·Crowd)마다 토큰을 하나만 가질 수 있습니다. 본인 토큰은 `POST /-/api/me/usertoken`으로 만들고, 이미 있으면 새 코드로 바꿉니다(재설정, 이전 코드는 즉시 무효). 패스 코드는 **발급 응답에서 한 번만** 보이며 서버에는 해시만 저장됩니다. 비밀번호나 웹 세션으로 로그인해야 하고, API 토큰이나 사용자 토큰으로는 발급할 수 없습니다. `GET /-/api/me/usertoken`은 본인 토큰의 정보(가린 이름 코드, 생성·만료·마지막 사용 시각)를, `DELETE /-/api/me/usertoken`은 삭제를 합니다.
+- **만료.** `expirationDays`(0은 만료 없음, 1~3650일)는 토큰을 만든 시각부터 계산하며, 설정을 바꾸면 이미 발급된 토큰에도 바로 적용됩니다. 만료된 토큰은 401로 거부되고 목록에 `expired: true`로 남습니다. 유지보수 작업 `security.purge-expired-user-tokens`("Purge expired user tokens")가 만료된 토큰을 지웁니다.
+- **필수(required).** `required: true`이면 저장소 엔드포인트(`/repository/*`, Docker `/v2/*`, `npm login`)가 **사용자 이름과 비밀번호를 거부**하고(401, "a user token is required") 사용자 토큰과 API 토큰만 받습니다. 관리자도 예외가 아닙니다. 웹 UI 로그인, `/-/api/`, `/service/rest/`는 영향을 받지 않습니다. Docker는 `docker login` 단계부터 비밀번호가 거부됩니다.
+- **회수.** 사용자를 비활성화하거나 삭제하면 그 사용자의 토큰은 즉시 동작을 멈춥니다(삭제하면 토큰도 지워집니다). 비밀번호를 바꿔도, 사용자 화면의 **토큰 모두 폐기**(API 토큰)를 눌러도 사용자 토큰은 그대로이므로 유출이 의심되면 토큰을 재설정하세요. 관리자는 `GET /-/api/usertokens`로 전체 목록(사용자, 이름 코드, 생성·만료·마지막 사용 시각)을 보고, `POST /-/api/usertokens/<소유자>`로 다른 사용자의 토큰을 발급·재설정하며, `DELETE /-/api/usertokens/<소유자>`(예: `dev`, `ldap:alice`, `crowd:bob`)로 한 사용자의 토큰을, `DELETE /-/api/usertokens?confirm=true`로 모든 토큰을 무효화합니다. 마지막 사용 시각은 최대 1분에 한 번 기록합니다.
+- **잠금.** 틀린 패스 코드는 비밀번호와 같은 로그인 실패 제한을 받습니다(이름 코드마다 5회 실패 후 잠시 거부).
+- **활동.** `settings.userTokens`, `usertoken.create`, `usertoken.reset`, `usertoken.delete`가 남으며 패스 코드는 어디에도 기록하지 않습니다.
+- **Nexus REST API.** `GET/PUT /service/rest/v1/security/user-tokens`(`{"enabled","protectContent","expirationEnabled","expirationDays"}`, `protectContent`가 `required`), `DELETE /service/rest/v1/security/user-tokens`(전체 무효화), `GET /service/rest/v1/security/user-tokens/tokens`, `GET/POST/DELETE /service/rest/v1/security/users/<userId>/<realm>/user-token`(realm은 `NexusAuthenticatingRealm`, `LdapRealm`, `Crowd` 또는 `local`, `ldap`, `oidc`, `crowd`)을 제공합니다(관리자). 응답 필드 이름은 공개 문서에 없어 Command Center가 정한 것입니다.
+
+Maven `settings.xml` 예:
+
+```xml
+<server>
+  <id>commandcenter</id>
+  <username>이름 코드</username>
+  <password>패스 코드</password>
+</server>
+```
+
+`required`를 켠 뒤 빌드가 모두 막혔다면, 관리자가 웹 UI에 비밀번호로 로그인해(UI 로그인은 영향을 받지 않습니다) 일반 설정에서 `required`를 끄면 됩니다. 웹 UI에도 들어갈 수 없으면 아래 "비상 복구"를 따르세요.
 
 ### 비상 복구(break-glass)
 
@@ -943,7 +1002,7 @@ database:
 
 ### 저장된 비밀값 암호화
 
-SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비밀번호와 Bearer 토큰은 원격 서버에 그대로 보내야 하므로 사용자 비밀번호나 토큰처럼 해시로 저장할 수 없습니다. **비밀값 키를 정하면** 이 값들을 AES-256-GCM으로 암호화해 `meta.db`에 저장하고(`enc:v1:`로 시작하는 값) 쓸 때 풉니다. 그러면 `meta.db`, 볼륨 복사본, 백업 파일이 새어도 키 없이는 비밀값을 알 수 없습니다. 키가 없으면 평문으로 저장하고, 시작할 때마다 WARN 로그(`no secret key is configured`)가 한 줄 남습니다.
+SMTP 비밀번호, LDAP bind 비밀번호, Crowd 애플리케이션 비밀번호, proxy 저장소의 `remoteAuth` 비밀번호와 Bearer 토큰은 원격 서버에 그대로 보내야 하고 SAML SP 개인키는 서명·복호화에 써야 하므로 사용자 비밀번호나 토큰처럼 해시로 저장할 수 없습니다. **비밀값 키를 정하면** 이 값들을 AES-256-GCM으로 암호화해 `meta.db`에 저장하고(`enc:v1:`로 시작하는 값) 쓸 때 풉니다. 그러면 `meta.db`, 볼륨 복사본, 백업 파일이 새어도 키 없이는 비밀값을 알 수 없습니다. 키가 없으면 평문으로 저장하고, 시작할 때마다 WARN 로그(`no secret key is configured`)가 한 줄 남습니다.
 
 - **키 만들기**: 32바이트 난수를 base64로 적은 값입니다. `head -c 32 /dev/urandom | base64`나 `openssl rand -base64 32`로 만들고, 셸이 없는 PC에서는 `docker run --rm busybox sh -c 'head -c 32 /dev/urandom | base64'`를 씁니다.
 - **키 주기**: 환경변수 `COMMANDCENTER_SECRET_KEY`에 그 값을 넣거나, 그 값을 담은 파일을 `config.yaml`의 `secretKeyFile`로 가리킵니다(파일은 서버 UID 65532만 읽을 수 있게 두세요). 둘 다 주면 시작하지 않습니다. compose는 `docker-compose.yml`의 주석 처리된 `COMMANDCENTER_SECRET_KEY` 줄을 쓰면 됩니다. Kubernetes에서는 키를 Secret으로 만들고 차트의 `secretKey.existingSecret`에 그 이름을 적습니다("Helm 차트로 설치" 참고. 참조 매니페스트라면 주석 처리된 `COMMANDCENTER_SECRET_KEY`(Secret 참조) 항목). `gc`, `token create` 명령도 같은 키가 필요하고(`docker exec`는 컨테이너의 환경변수를 물려받습니다), `user reset-password`는 키 없이도 됩니다.
@@ -978,7 +1037,7 @@ SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비�
 
 ### SSL 인증서(신뢰 저장소)
 
-사내 CA가 서명한 인증서를 쓰는 원격 저장소(proxy의 `remote`), 웹훅 대상, OIDC 제공자, LDAP 서버, SMTP 서버에 연결하려면 그 CA 인증서를 신뢰 저장소에 넣습니다. 시스템 루트 인증서(와 `SSL_CERT_DIR`로 마운트한 CA)에 더해 신뢰되며, 서버를 다시 시작하지 않아도 바로 적용됩니다. OIDC의 `caCert`가 있으면 그쪽이 우선하고, LDAP·OIDC의 `insecureSkipVerify`는 여전히 검증을 건너뜁니다.
+사내 CA가 서명한 인증서를 쓰는 원격 저장소(proxy의 `remote`), 웹훅 대상, OIDC 제공자, SAML IdP 메타데이터 URL, Crowd 서버, OSV API, LDAP 서버, SMTP 서버에 연결하려면 그 CA 인증서를 신뢰 저장소에 넣습니다. 시스템 루트 인증서(와 `SSL_CERT_DIR`로 마운트한 CA)에 더해 신뢰되며, 서버를 다시 시작하지 않아도 바로 적용됩니다. OIDC의 `caCert`가 있으면 그쪽이 우선하고, LDAP·OIDC의 `insecureSkipVerify`는 여전히 검증을 건너뜁니다.
 
 관리자 화면의 SSL 인증서 페이지나 API로 관리합니다(관리자; 추가·삭제·가져오기는 비밀번호·세션 로그인과 `X-Command-Center-UI: 1` 헤더).
 
@@ -995,7 +1054,7 @@ curl -u admin -H 'X-Command-Center-UI: 1' -H 'Content-Type: application/json' \
   -d "$(jq -Rs '{pem: .}' < corp-root-ca.pem)" https://commandcenter.example.com/-/api/ssl/certificates
 ```
 
-## Realm, LDAP, OIDC
+## Realm, LDAP, OIDC, SAML
 
 **Realm**은 인증 방식입니다. Realm 화면에서 순서와 켜기/끄기를 정합니다(`GET/PUT /-/api/realms`).
 
@@ -1005,8 +1064,11 @@ curl -u admin -H 'X-Command-Center-UI: 1' -H 'Content-Type: application/json' \
 | `token` | API 토큰 |
 | `ldap` | LDAP 디렉터리의 사용자·비밀번호 로그인 |
 | `oidc` | OpenID Connect 제공자(Gitea, Keycloak 등)를 통한 브라우저 SSO 로그인("OIDC 설정" 참고) |
+| `crowd` | Atlassian Crowd(Jira·Confluence 사용자 디렉터리)의 사용자·비밀번호 로그인("Crowd 설정" 참고) |
+| `rutauth` | 앞단 리버스 프록시·SSO 게이트웨이가 헤더로 알려 주는 사용자("RUT 인증(리버스 프록시 헤더)" 참고) |
+| `saml` | SAML 2.0 IdP(Keycloak, Entra ID, Okta, ADFS 등)를 통한 브라우저 SSO 로그인("SAML 설정" 참고) |
 
-비밀번호 로그인은 켜진 Realm을 **목록 순서대로** 시도합니다(기본은 `local`, `token`이며 `ldap`은 설정을 마친 뒤 켭니다). 앞 Realm에서 실패하면 다음으로 넘어가므로 같은 이름이 로컬과 LDAP에 모두 있으면 순서가 우선순위입니다. `token` Realm을 끄면 모든 토큰이 거부됩니다. `ldap`은 URL, 사용자 기준 DN, 필터를 채우기 전에는 켤 수 없고, `local`이나 `ldap`을 끄는 변경에는 위의 잠금 방지가 적용됩니다.
+비밀번호 로그인은 켜진 Realm을 **목록 순서대로** 시도합니다(기본은 `local`, `token`이며 `ldap`·`crowd`는 설정을 마친 뒤 켭니다). 앞 Realm에서 실패하면 다음으로 넘어가므로 같은 이름이 로컬과 LDAP에 모두 있으면 순서가 우선순위입니다. `token` Realm을 끄면 모든 토큰이 거부됩니다. `ldap`은 URL, 사용자 기준 DN, 필터를 채우기 전에는 켤 수 없고, `local`, `ldap`, `crowd`를 끄는 변경에는 위의 잠금 방지가 적용됩니다. `oidc`와 `saml`은 브라우저 로그인, `rutauth`는 프록시가 보낸 헤더로 인증하므로 이 순서와 관계없습니다.
 
 `local`과 `ldap` Realm은 **비밀번호 로그인만** 막습니다. `local` Realm을 꺼도 로컬 사용자의 이미 로그인한 웹 세션과 API 토큰(토큰은 `token` Realm이 판단)은 계속 동작합니다. 끊어야 하면 그 사용자를 비활성화하거나 토큰을 폐기하세요.
 
@@ -1116,18 +1178,116 @@ caCert:         (Gitea가 사내 CA 인증서를 쓰면 그 PEM)
 
 저장한 뒤 테스트 버튼으로 discovery를 확인하고 Realm 화면에서 `oidc`를 켜면 로그인 화면에 SSO 버튼이 나타납니다. CI와 빌드 도구는 OIDC로 로그인한 사용자가 API 토큰 화면에서 만든 토큰을 씁니다.
 
+### Crowd 설정
+
+`crowd` Realm은 사용자 이름과 비밀번호를 Atlassian Crowd에 확인받습니다. Crowd에 Command Center를 **애플리케이션**(이름과 비밀번호, 필요하면 허용 주소)으로 등록한 뒤 Realm 화면(`GET/PUT /-/api/realms/crowd`, 관리자)에서 설정합니다. `url`과 `applicationName`을 채우기 전에는 Realm을 켤 수 없습니다. 웹 UI 로그인, Basic 인증, `npm login` 모두 Realm 목록 순서대로 시도합니다.
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `url` | 없음 | Crowd 주소(컨텍스트 경로까지, 예: `https://crowd.example.com/crowd`). `http://` 또는 `https://`이고 사용자 정보·쿼리·프래그먼트가 없어야 합니다. 뒤에 `/rest/usermanagement/1/...`을 붙여 호출하며, 프록시 설정과 SSL 신뢰 저장소를 따릅니다. `https://`를 권장합니다. |
+| `applicationName`, `applicationPassword` | 없음 | Crowd에 등록한 애플리케이션. 비밀번호는 저장만 되고(비밀값 키를 정하면 암호화해서) 응답·로그·이벤트에 나오지 않습니다(`applicationPasswordSet`만 표시). 비워서 보내면 기존 값을 유지하고 `clearApplicationPassword: true`로 지웁니다. **주소의 scheme·호스트·포트를 바꿀 때는 비밀번호를 다시 입력해야 합니다**(400). |
+| `timeoutSeconds` | `10` | Crowd 호출 하나의 제한 시간(1~60초) |
+| `cacheMinutes` | `1` | 로그인 성공(사용자 이름과 비밀번호의 해시로 기억하며 비밀번호 자체는 저장하지 않음)과 사용자의 그룹을 Crowd에 다시 묻지 않고 쓰는 시간(1~60분) |
+| `groupMappings`, `defaultRoles` | 없음 | LDAP와 같은 그룹 → 역할 매핑. 사용자가 속한 **중첩 그룹까지** 대소문자 구분 없이 비교합니다. |
+
+- **로그인.** `POST <url>/rest/usermanagement/1/authentication?username=<이름>`으로 비밀번호를 확인하고 `GET .../user/group/nested`로 그룹을 읽습니다. 비밀번호가 틀리거나 사용자가 없거나 비활성(`INACTIVE_ACCOUNT`)이면 401입니다. Crowd가 돌려준 사용자 이름이 사용자 ID 규칙(영문·숫자·`.`·`_`·`@`·`-`, 64자 이하)에 맞지 않으면 거부합니다. Crowd SSO 쿠키는 쓰지 않습니다(비밀번호 로그인만).
+- **사용자와 역할.** Crowd 사용자의 세션과 토큰 소유자는 `crowd:<id>`이고 `/-/api/me`의 `realm`은 `Crowd`입니다. 역할은 그룹 매핑, 기본 역할, 그리고 같은 ID의 `source: crowd` 로컬 행(사용자 화면에서 만들며, 역할을 더하거나 비활성화로 로그인을 막습니다)으로 정해집니다. 최근 로그인한 Crowd 사용자는 사용자 목록에 `directory` 행으로 보입니다.
+- **캐시와 장애.** `cacheMinutes` 안에 같은 비밀번호로 다시 로그인하면 Crowd에 묻지 않습니다. Crowd에서 비밀번호를 바꾸면 새 비밀번호로 로그인하는 순간 이전 비밀번호의 캐시가 지워지지만, 그 전까지는 이전 비밀번호가 최대 `cacheMinutes` 동안 통할 수 있습니다. 세션과 토큰은 `cacheMinutes`가 지나면 Crowd에 사용자를 다시 확인하며, Crowd에서 비활성화되거나 삭제된 사용자는 그때 거부됩니다. Crowd에 연결할 수 없으면 Crowd 사용자는 **모두 거부**되고(fail closed) 로컬 관리자는 영향을 받지 않습니다. 실패한 재확인은 10초 동안 다시 시도하지 않습니다. 상태 화면의 "Crowd reachable" 점검이 애플리케이션 인증(`GET .../config/cookie`)을 확인합니다.
+- **연결 테스트.** `POST /-/api/realms/crowd/test`(`{"username":"...","password":"..."}`, 둘 다 생략 가능)는 저장된 설정으로 애플리케이션 인증, 사용자 비밀번호(비밀번호를 비우면 사용자 존재), 그룹과 매핑된 역할을 단계별로 보여 줍니다.
+- **잠금 방지.** Crowd의 그룹 매핑이나 기본 역할이 admin을 주면 Crowd도 관리자가 로그인할 수 있는 경로로 셉니다.
+- 설정 변경은 활동 기록에 `realms.crowd.update`(바뀐 키 이름만), 연결 테스트는 `realms.crowd.test`로 남습니다.
+
+### RUT 인증(리버스 프록시 헤더)
+
+앞단의 리버스 프록시나 SSO 게이트웨이(예: OAuth2 Proxy, Apache `mod_auth_*`, 사내 SSO 에이전트)가 사용자를 인증하고 사용자 이름을 헤더로 넘겨 주는 구성에서는 `rutauth` Realm(Nexus의 Rut Auth)을 씁니다. Realm 화면 또는 `GET/PUT /-/api/realms/rutauth`(관리자)에서 설정합니다.
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `header` | `REMOTE_USER` | 사용자 이름을 담은 헤더 |
+| `trustedProxies` | 없음(필수) | 헤더를 믿을 프록시의 CIDR 목록(예: `10.0.0.0/8`, `192.168.1.10/32`) |
+| `groupHeader` | 없음 | 쉼표로 구분한 그룹 목록을 담은 헤더(선택) |
+| `groupMappings` | 없음 | 그룹을 역할로 바꾸는 매핑(`groupHeader`가 있어야 하며 LDAP 그룹 매핑과 같은 형식) |
+| `defaultRoles` | 없음 | 이 Realm으로 들어온 모든 사용자에게 주는 역할 |
+
+- 요청이 `trustedProxies`에 든 주소에서 **직접** 들어오고(TCP 연결의 상대 주소만 봅니다. `X-Forwarded-For`, `X-Real-IP`, `Forwarded`는 보지 않습니다), `header`가 있고, `Authorization`이 없으면 그 사용자로 인증합니다. 사용자 이름은 앞뒤 공백을 떼고 소문자로 바꾸며, 사용자 id 규칙에 맞지 않으면 익명으로 처리합니다. 로그인 화면을 거치지 않고 `GET /-/api/me`가 바로 그 사용자를 보여 줍니다(`realm`: `RUT`).
+- `Authorization`(Basic, Bearer, 토큰)이 있으면 그쪽이 우선하고, 세션 쿠키보다는 헤더가 우선합니다.
+- **프록시는 클라이언트가 보낸 같은 이름의 헤더를 반드시 지우거나 덮어써야 합니다.** 그렇지 않으면 누구나 그 헤더로 다른 사용자가 될 수 있습니다. Command Center 포트에는 그 프록시만 접속할 수 있게 하세요. nginx는 기본적으로 밑줄이 든 헤더(`REMOTE_USER`)를 버리므로 `X-Forwarded-User` 같은 이름을 쓰거나 `underscores_in_headers on`을 켜세요.
+- 역할은 그룹 매핑, 이 Realm의 `defaultRoles`, 일반 설정의 `defaultRoles`, 같은 id의 덮어쓰기 사용자(`source: "rutauth"`)의 역할을 합친 것입니다. 덮어쓰기 사용자를 비활성화하면 그 사용자는 들어올 수 없습니다. 로컬 사용자와 이름이 같아도 로컬 사용자의 역할은 받지 않습니다.
+- `header`와 `trustedProxies`를 채우기 전에는 Realm을 켤 수 없고, 켜진 동안 `trustedProxies`를 비울 수 없습니다.
+- RUT 사용자도 API 토큰을 만들 수 있습니다(소유자 `rutauth:<id>`). 토큰은 Realm이 켜져 있고 서버가 시작한 뒤 그 사용자가 프록시를 거쳐 한 번 이상 들어온 동안만 통하므로, 서버를 다시 시작하면 그 사용자가 웹 UI에 한 번 들어올 때까지 토큰이 거부됩니다.
+- 웹 UI의 쓰기 작업은 세션 로그인과 같은 규칙(`X-Command-Center-UI` 헤더와 교차 출처 검사)을 따릅니다. 설정을 바꾸면 활동 이벤트 `realms.rutauth.update`가 남습니다.
+
+### SAML 설정
+
+`saml` Realm은 SAML 2.0 IdP(Keycloak, Microsoft Entra ID, Okta, ADFS 등)로 **브라우저에서** 로그인합니다(SP-initiated 웹 SSO: AuthnRequest는 HTTP-Redirect 바인딩, Response는 HTTP-POST 바인딩). 로그인 화면의 SSO 버튼(`GET /-/api/auth/sso`가 알려 주는 `{"id":"saml","name":"<displayName>","url":"/-/sso/saml/login"}`)을 누르면 IdP로 갔다가 IdP가 `<baseURL>/-/sso/saml/acs`로 응답을 보내 웹 세션이 생깁니다. OIDC처럼 비밀번호가 오가지 않으므로 CLI 클라이언트는 웹 UI에서 발급한 API 토큰을 씁니다(토큰 소유자는 `saml:<id>`). 일반 설정의 `baseURL`이 있어야 합니다(없으면 503).
+
+설정은 Realm 화면(`GET/PUT /-/api/realms/saml`, 관리자. PUT은 비밀번호·세션 로그인과 `X-Command-Center-UI: 1` 헤더)에서 합니다. PUT은 설정 전체를 바꾸며 보내지 않은 값은 기본값이 됩니다. IdP 메타데이터를 넣기 전에는 Realm을 켤 수 없고, 켜진 동안 메타데이터를 비울 수 없습니다.
+
+| 필드 | 기본값 | 설명 |
+|---|---|---|
+| `idpMetadataXML`, `idpMetadataURL` | 없음 | IdP 메타데이터. 붙여 넣거나(1 MiB 이하) URL을 줍니다(둘 중 하나만). URL은 `https://`여야 하고(`http://`는 localhost만) 프록시 설정과 SSL 신뢰 저장소를 따라 받으며, 하루마다 다시 받고 받지 못하면 이전 사본을 계속 씁니다. 메타데이터의 entity ID, SSO 주소(HTTP-Redirect 바인딩), 서명 인증서를 씁니다. |
+| `displayName` | `SAML` | 로그인 화면의 버튼 이름 |
+| `entityId` | `<baseURL>/-/sso/saml/metadata` | 이 서버(SP)의 entity ID. IdP에 등록하는 값이며 응답의 audience가 이 값이어야 합니다. |
+| `usernameAttribute` | `NameID` | 사용자 ID로 쓸 속성 이름. `NameID`는 subject의 NameID입니다. 값은 앞뒤 공백을 떼고 소문자로 바꾼 뒤 사용자 ID 규칙(영문·숫자·`.`·`_`·`@`·`-`, 64자 이하)에 맞아야 하며 아니면 로그인이 실패합니다(400). |
+| `firstNameAttribute`, `lastNameAttribute`, `emailAttribute` | 없음 | 표시 이름과 이메일을 읽을 속성 |
+| `groupsAttribute` | 없음 | 그룹 목록을 담은 속성(값이 여럿) |
+| `groupMappings`, `defaultRoles` | 없음 | LDAP와 같은 그룹 → 역할 매핑(대소문자 구분 없이 비교) |
+| `validateResponseSignature`, `validateAssertionSignature` | `true`, `true` | Response의 서명과 assertion의 서명을 검사합니다. 둘 다 끌 수는 없습니다. 켠 위치에 있는 서명은 모두 맞아야 하고, 그런 서명이 적어도 하나 있어야 합니다. |
+| `allowSHA1Signatures` | `false` | RSA-SHA1 서명도 받습니다(기본은 RSA-SHA256과 ECDSA-SHA256). |
+| `allowIdpInitiated` | `false` | IdP에서 시작한 로그인(이 서버가 보낸 요청에 대한 답이 아닌 응답)도 받습니다. |
+| `clockSkewSeconds` | `120` | 유효 기간 검사에서 허용하는 시계 차이(0~600초) |
+| `signAuthnRequests` | `false` | AuthnRequest에 SP 키로 서명합니다(RSA-SHA256). IdP가 서명된 요청을 요구하면(메타데이터의 `WantAuthnRequestsSigned`) 켜세요. |
+
+- **SP 키와 메타데이터.** 처음 저장할 때 SP 키 쌍(RSA 2048비트, 10년짜리 자체 서명 인증서)을 만듭니다. 개인키는 저장만 되고(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) API·로그·이벤트에 나오지 않으며, 인증서는 `spCertificate`와 `spCertificateInfo`(주체, SHA-256 지문, 유효 기간)로 보입니다. 이 키로 암호화된 assertion을 풀고 요청에 서명합니다. IdP에 등록할 SP 메타데이터(entity ID, ACS `<baseURL>/-/sso/saml/acs`, 인증서)는 `GET <baseURL>/-/sso/saml/metadata`(IdP 메타데이터를 넣은 뒤, 인증 없이)나 `GET /-/api/realms/saml/sp-metadata`(관리자, 언제나)에서 받습니다. GET 응답의 `idp`는 읽어 들인 IdP 메타데이터(entity ID, SSO 주소, 인증서와 만료 여부)이고, 읽지 못하면 `idpError`에 이유가 나옵니다.
+- **검증.** 응답은 256 KiB 이하이고 Response 바로 아래에 assertion이 정확히 하나 있어야 하며, DTD가 있으면 거부합니다. 서명은 IdP 메타데이터의 인증서로만 확인하고 서명이 덮는 부분만 읽으므로 서명 감싸기(signature wrapping) 공격이 통하지 않습니다. 그 밖에 Destination과 SubjectConfirmation의 Recipient가 ACS 주소인지, InResponseTo가 이 로그인이 보낸 요청인지, Issuer가 IdP인지, audience가 `entityId`인지, NotBefore·NotOnOrAfter·SessionNotOnOrAfter를 확인하고, 이미 받은 assertion ID는 거부합니다(재전송 방지). 암호화된 assertion(RSA-OAEP와 AES-CBC·AES-GCM)도 받습니다. 실패하면 로그인 실패 페이지(400)에 이유가 나오고 서버 로그에 경고가 남습니다.
+- **사용자와 역할.** 세션과 토큰의 소유자는 `saml:<id>`이고 `/-/api/me`의 `realm`은 `SAML`입니다. 역할은 그룹 매핑, 이 Realm의 `defaultRoles`, 일반 설정의 `defaultRoles`, 같은 ID의 `source: saml` 덮어쓰기 행(역할을 더하고, `disabled`면 로그인 거부 403)으로 정해집니다. 최근 로그인한 SAML 사용자는 사용자 목록에 `directory` 행으로 보입니다. 그룹 매핑이나 기본 역할에 쓰인 역할은 지울 수 없습니다(409).
+- **메모리 상태.** OIDC와 같이 SAML 사용자의 항목, 진행 중인 로그인(10분), 재전송 방지 기록, 받아 둔 IdP 메타데이터는 **메모리에만** 있습니다. 서버를 다시 시작하거나 SAML 설정을 바꾸면 SAML 사용자의 세션과 API 토큰은 그 사용자가 다시 로그인할 때까지 거부되며, 인스턴스는 하나여야 합니다("저장 공간과 인스턴스" 참고).
+- **로그아웃.** Single Logout(SLO)은 없습니다. 로그아웃은 Command Center 세션만 끝내고 IdP 세션은 그대로 둡니다.
+- **https.** 로그인 상태 쿠키(`__Host-cc_saml_state`)는 `https` baseURL에서 `SameSite=None; Secure`입니다. IdP의 응답은 다른 사이트에서 오는 POST이므로 `http` baseURL에서는 브라우저가 쿠키를 보내지 않아 로그인이 실패할 수 있습니다. `baseURL`을 `https://`로 두세요.
+- 설정 변경은 활동 기록에 `realms.saml.update`로 바뀐 키 이름만 남습니다(webhook `realm.updated`).
+
 ## Blob Store
 
 blob(파일 내용)은 **blob store** 디렉터리에 sha256 이름으로 저장됩니다.
 
 - **default store**: `<dataDir>/blobs`. 기존 설치와 같은 위치이며 이름은 `default`입니다. 삭제할 수 없습니다. 현재 `dataDir`를 기준으로 하므로 `dataDir`를 옮겨도 따라갑니다.
 - **이름 붙은 store**: Blob Store 화면(`POST /-/api/blobstores`)에서 만듭니다. 경로를 비우면 `<dataDir>/blobstores/<이름>`이고, 절대 경로를 주면 그곳을 씁니다. 상대 경로는 400입니다(이전 버전은 상대 경로를 말없이 무시하고 기본 위치에 만들었습니다). 경로가 데이터 디렉터리 밖이면 응답과 `GET /-/api/blobstores`의 `warning`, Blob Store 상세 화면에 경고가 나옵니다. 그런 경로는 영구 볼륨으로 따로 마운트하고 따로 백업해야 합니다("저장 공간과 인스턴스", "백업과 복원" 참고). `<경로>/blobs/sha256`이 **없거나 비어 있어야** 하고(이미 blob이 있으면 거부, 다른 파일이 있는 디렉터리는 괜찮습니다), 쓸 수 있어야 하며, 다른 store의 blob 디렉터리와 겹치거나 심볼릭 링크로 같은 곳을 가리키면 거부됩니다. 기존 store의 경로를 확인할 수 없으면(끊어진 심볼릭 링크 등) 겹치지 않는다고 확신할 수 없으므로 그 store 이름을 알려 주며 거부합니다. 이름 규칙은 저장소와 같습니다.
-- **저장소는 만들 때 store를 고릅니다**(`blobStore`, 생략하면 `default`). 저장소를 만든 뒤에는 **바꿀 수 없습니다.** group에는 store가 없습니다.
+- **저장소는 만들 때 store를 고릅니다**(`blobStore`, 생략하면 `default`). 저장소를 만든 뒤에는 편집으로 바꿀 수 없고 `repository.change-blobstore` 작업으로 옮깁니다("저장소의 blob store 바꾸기" 참고). group 저장소에는 store가 없습니다(blob store 그룹과는 다릅니다).
 - store마다 **중복 제거와 GC가 독립**입니다. 같은 파일을 서로 다른 store의 저장소에 올리면 각각 저장되고, GC는 자기 store의 저장소가 참조하지 않는 blob만 지웁니다. 단 **default store의 GC는 어느 저장소든 참조하는 blob은 지우지 않습니다.** 이름 붙은 store를 모르는 이전 버전으로 돌린 적이 있으면 그 저장소들의 파일이 default store에 쓰였을 수 있고, 그것이 유일한 사본일 수 있기 때문입니다("업그레이드"의 다운그레이드 안내 참고). 그래서 같은 파일이 default store의 저장소에서 지워진 뒤에도, 이름 붙은 store의 저장소가 참조하는 동안은 default store의 사본이 남습니다. 존재하지 않는 store를 가리키는 저장소가 있으면(설정 가져오기 등) 조용히 default로 가지 않고 오류로 응답하며, GC는 그 저장소가 모든 store를 참조 중인 것으로 보고 지우지 않습니다.
 - **사용량**: Blob Store 화면과 `GET /-/api/blobstores`가 store별 blob 수·용량(그 store의 저장소가 참조하는 것), 저장소 수, 파일시스템 전체/남은 용량(리눅스)을 보여 줍니다.
-- **삭제**: 저장소가 쓰고 있는 store는 409입니다. 삭제해도 **디렉터리와 파일은 디스크에 남습니다**(관리자가 직접 정리하세요).
+- **소프트 쿼터**: store마다 `quota`를 둘 수 있습니다(그룹도 됩니다). `{"type": "spaceUsedBytes", "limitBytes": N}`은 그 store의 저장소가 쓰는 용량이 N바이트를 넘으면, `{"type": "spaceRemainingBytes", "limitBytes": N}`은 store 파일시스템의 남은 용량이 N바이트보다 적으면 위반입니다(S3 store는 남은 용량을 알 수 없으므로 `spaceRemainingBytes`가 위반되지 않습니다). 만들 때(`POST /-/api/blobstores`의 `quota`) 정하거나 `PUT /-/api/blobstores/<이름>`에 `{"quota": {...}}`(없애려면 `{"quota": null}`)를 보내 바꿉니다. 파일·S3 store는 이 PUT으로 쿼터만 바꿀 수 있고, 그룹은 같은 요청에 `members`·`fillPolicy`를 함께 보낼 수 있으며 멤버를 바꿔도 쿼터는 유지됩니다. 소프트 쿼터이므로 넘어도 업로드는 계속 받습니다. 상태 검사(시스템 상태 화면, `GET /-/api/status/checks`, `GET /service/rest/v1/status/check`, Prometheus의 `commandcenter_health_check`)가 쿼터가 있는 store마다 `Blob store quota: <이름>` 항목을 평가해 위반이면 실패로 표시하고(`soft quota exceeded: …`), `GET /-/api/blobstores`는 `quota`와 `quotaViolated`를 보여 줍니다. 위반이 시작되거나 풀릴 때마다 활동 이벤트 `blobstore.quota`(행위자 `system`)가 한 번씩 남습니다. 이 판단은 메모리에만 두므로 서버를 다시 시작한 뒤 처음 위반을 발견하면 다시 남습니다. 쿼터는 상태 검사를 읽을 때만 평가하므로, 이벤트를 받으려면 모니터링이 상태 검사나 메트릭을 주기적으로 읽어야 합니다. Nexus 호환 API에서는 `softQuota`(`type`: `spaceUsedQuota` 또는 `spaceRemainingQuota`, `limit`: MB)와 `GET /service/rest/v1/blobstores/<이름>/quota-status`로 다룹니다.
+- **삭제**: 저장소가 쓰고 있는 store, 그룹의 멤버, 저장소가 옮겨 오거나 떠나는 중인 store는 409입니다. 삭제해도 **디렉터리와 파일은 디스크에 남습니다**(관리자가 직접 정리하세요).
 - **compact 작업**(`blobstore.compact`)은 선택 파라미터 `blobStore`로 한 store만 정리하고, 생략하면 모든 store를 정리합니다("예약 작업" 참고).
 - **S3 store**: Blob Store 화면(`POST /-/api/blobstores`)에서 `type: "s3"`로 만들면 blob이 디렉터리 대신 S3 호환 버킷(AWS S3, MinIO, Ceph RGW)에 `<prefix>/<sha256>` 키로 저장됩니다. 필드는 `s3.bucket`(필수), `s3.prefix`(선택, 앞뒤 `/` 없이), `s3.region`(기본 `us-east-1`), `s3.endpoint`(비우면 `https://s3.<region>.amazonaws.com`, MinIO/Ceph는 그 주소), `s3.pathStyle`(`<endpoint>/<bucket>/<key>` 방식, MinIO는 보통 켬), `s3.accessKeyId`/`s3.secretAccessKey`(둘 다 비우면 `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` 환경 변수), `s3.sse`(`AES256` 또는 `aws:kms`, 업로드마다 `x-amz-server-side-encryption` 헤더). 만들 때 버킷을 목록 조회해 자격 증명과 버킷을 확인하며(실패하면 400), 같은 endpoint·버킷·prefix를 쓰는 다른 S3 store가 있으면 거부합니다. `secretAccessKey`는 다른 비밀값처럼 비밀값 키로 암호화해 저장하고(`secretKeyFile`), 응답과 화면에는 보이지 않습니다(`GET /-/api/blobstores`는 값 대신 `secretSet: true/false`만 돌려줍니다). 64 MiB를 넘는 파일은 멀티파트 업로드로 올리고, 다운로드는 Range 요청을 그대로 버킷의 Range GET으로 넘깁니다. `path`(비우면 `<dataDir>/blobstores/<이름>`)는 업로드 중인 임시 파일과 Docker 업로드 세션만 두는 로컬 디렉터리이므로 작지만 영구 볼륨에 두세요. compact 작업(GC)은 prefix 아래를 나열해 참조되지 않는 객체를 지웁니다. 삭제해도 버킷의 객체는 남습니다. S3 store를 모르는 이전 버전(구조 버전 1)은 이 store의 경로를 빈 디렉터리로 열어 파일을 찾지 못하므로 내리지 마세요("업그레이드" 참고).
+
+### 저장소의 blob store 바꾸기
+
+관리자는 저장소의 blob store를 옮길 수 있습니다(`POST /-/api/repositories/<이름>/blobstore`, 본문 `{"blobStore":"<대상>"}`, 비밀번호·세션 로그인과 `X-Command-Center-UI: 1` 헤더). 응답은 202와 작업 ID이며, 이동은 그 저장소의 `repository.change-blobstore` 작업(저장소마다 하나를 다시 씀)으로 백그라운드에서 실행됩니다. 진행 상황은 작업 실행 로그와 저장소 목록의 `blobStoreMove`(`source`, `target`, `state`, `copied`, `total`)에서 봅니다. 이동하는 동안 읽기는 새 store에 없으면 이전 store에서 읽으므로 끊기지 않고, 새 업로드는 바로 새 store에 씁니다. 모든 blob을 복사하며 sha256을 확인한 뒤 한 트랜잭션에서 저장소 설정의 `blobStore`를 바꿉니다. 이전 store의 사본은 다음 compact 작업이 지웁니다(default store는 어느 저장소든 참조하는 blob을 모두 보관하므로 default에서 옮긴 사본은 남습니다).
+
+- 이동이 실패하거나 중지되거나 서버 재시작으로 끊기면 미완료(`failed`, 재시작 뒤에는 `interrupted`)로 남아 계속 양쪽에서 읽고 새 store에 씁니다. 작업을 다시 실행하면 이어서 끝냅니다.
+- 이동이 끝나지 않은 동안에는 관련된 두 store를 삭제할 수 없고(409), 그 저장소의 컴포넌트를 스테이징할 수 없으며, 다른 대상으로의 이동도 거부합니다.
+- 이동을 시작할 때 진행 중이던 Docker 업로드 세션은 `BLOB_UPLOAD_UNKNOWN`으로 실패하므로 다시 올려야 합니다. 이동은 작업 실행기를 차지하므로 그동안 다른 예약 작업은 기다립니다.
+
+### Blob store 그룹과 S3 장애 조치
+
+**그룹**(`type: "group"`)은 blob을 여러 파일·S3 store(멤버)에 나눠 담는 store입니다. 저장소는 그룹을 다른 store처럼 고릅니다. `POST /-/api/blobstores`에 `{"name":"g","type":"group","members":["a",{"name":"b","readOnly":true}],"fillPolicy":"roundRobin"}`처럼 보냅니다. 멤버는 이름만 쓰거나 `{"name","readOnly"}`로 씁니다.
+
+- **쓰기**: `roundRobin`(기본)은 쓰기 가능한 멤버에 차례로, `writeToFirst`는 첫 번째 쓰기 가능한 멤버에 씁니다. 이미 가진 멤버가 알려진 blob은 그 멤버에 다시 씁니다. 쓰기 가능한 멤버가 하나는 있어야 합니다. 고른 멤버에 쓰지 못하면(S3 멤버 장애, 디스크 가득 참) 다른 멤버로 다시 시도하지 않고 업로드가 실패합니다.
+- **읽기 전용 멤버**는 읽기만 하고 새 blob을 받지 않습니다(비우는 중인 멤버). 바꾸는 요청이 끝나면 그 멤버로 가던 쓰기도 모두 끝난 상태입니다.
+- **읽기**는 그 blob을 마지막으로 준 멤버부터, 없으면 멤버 순서대로 찾습니다.
+- **멤버 조건**: 파일 또는 S3 store여야 하고(그룹 안에 그룹은 안 됩니다), 한 그룹에만 속하며, default store가 아니고, 그 store를 쓰는 저장소가 없어야 합니다. 멤버 store를 직접 고르는 저장소는 만들 수 없고, 멤버는 삭제할 수 없습니다(409). 그룹을 지우면(쓰는 저장소가 없을 때) 멤버는 따로 쓰는 store로 돌아갑니다.
+- **편집**: `PUT /-/api/blobstores/{name}`에 `members`와 `fillPolicy`(비우면 유지)를 보냅니다. 같은 요청에 `quota`도 보낼 수 있고, 멤버를 바꿔도 그룹의 쿼터는 유지됩니다. 멤버는 언제든 추가할 수 있습니다. blob이 든 멤버를 목록에서 빼면 400이며, 아래 작업으로 빼야 합니다. 빈 멤버는 바로 뺄 수 있습니다.
+- **멤버 제거 작업**(`blobstore.group-remove-member`, 파라미터 `group`, `member`): 멤버를 읽기 전용으로 바꾸고, 다른 멤버에 없는 blob을 쓰기 가능한 멤버로 복사하며 SHA-256을 확인한 뒤 그룹에서 뺍니다. 그동안 읽기는 계속됩니다. 손상된 사본이 있으면 실패하고 멤버는 읽기 전용으로 남으며, 다시 실행하면 이어서 합니다. 뺀 store는 따로 남고, 쓰는 저장소가 없으므로 다음 compact 작업이 그 사본을 지웁니다. 확인한 뒤 삭제하세요.
+- **그룹으로 바꾸기**: `POST /-/api/blobstores/{name}/convert-to-group`에 `{"newMemberName":"<새 이름>"}`을 보내면 기존 store가 그 이름의 멤버가 되고(디렉터리·버킷은 그대로), 원래 이름의 그룹이 생깁니다. 그 store를 쓰던 저장소와 작업은 그대로 그룹을 가리킵니다. default store도 바꿀 수 있습니다.
+- **용량·정리**: 그룹 화면의 blob 수·용량은 그룹 저장소의 에셋 기준이고, 파일시스템 용량은 표시하지 않습니다. `blobstore.recalculate-size`는 멤버별 실제 blob 수와 바이트, 그 합인 그룹 용량을 로그에 남깁니다. compact 작업은 그룹을 멤버마다 정리하며, 두 멤버에 같은 blob이 있으면 쓰이지 않을 때 둘 다 지웁니다. 멤버만 따로 compact할 수는 없습니다. 재시작 직후에는 어느 멤버가 blob을 가졌는지 기억하지 못하므로 `roundRobin`에서 같은 파일을 다시 올리면 다른 멤버에 사본이 하나 더 생길 수 있습니다(공간만 더 씁니다).
+- **상태 확인**: `GET /-/api/blobstores/{name}/health`가 디렉터리, S3 버킷(주 버킷과 장애 조치 버킷 각각), 그룹은 멤버마다 응답하는지 보여 줍니다. 이 결과는 `GET /-/api/status/checks`에는 들어가지 않습니다.
+- Nexus 호환 API: `GET/POST /service/rest/v1/blobstores/group`, `GET/PUT /service/rest/v1/blobstores/group/{name}`(`{"name","members":[...],"fillPolicy"}`).
+
+**S3 장애 조치**: S3 store의 `s3.failover`에 `[{"region":"eu-west-1","bucket":"replica","endpoint":"…"}]`처럼 복제 버킷을 최대 5개 적습니다(복제는 클라우드의 교차 리전 복제가 합니다. region을 비우면 주 버킷의 region이고, prefix·자격 증명·path style은 같습니다). 주 버킷이 응답하지 않거나 5xx로 응답하면 읽기가 장애 조치 버킷을 순서대로 시도합니다. 403·404는 넘기지 않으며, 이미 열린 파일은 처음 읽은 버킷에서 계속 읽습니다. 쓰기, 삭제, 목록, compact는 주 버킷에서만 하므로 주 버킷이 내려가 있으면 업로드와 compact는 실패합니다.
+
+**서버 측 암호화**: `s3.encryption`에 `{"type":"s3ManagedEncryption"}`(SSE-S3, `AES256`) 또는 `{"type":"kmsManagedEncryption","kmsKeyId":"<키 ID·ARN·alias>"}`(SSE-KMS)를 줍니다. KMS 키를 주면 업로드마다 `x-amz-server-side-encryption-aws-kms-key-id` 헤더를 보내고, 비우면 버킷의 AWS 관리 키를 씁니다. 기존 `s3.sse`와 함께 주면 같은 값이어야 합니다.
+
+그룹을 모르는 이전 버전(구조 버전 3 이하)은 그룹을 빈 디렉터리로 열고 멤버의 blob을 지우므로, 이 버전은 DB 구조 버전 4를 기록하고 이전 버전은 시작을 거부합니다("업그레이드" 참고).
 
 ## 일반 설정
 
@@ -1148,6 +1308,9 @@ blob(파일 내용)은 **blob store** 디렉터리에 sha256 이름으로 저장
 | `http.retries` | `0` | 네트워크 오류(연결 끊김·시간 초과)가 났을 때 GET/HEAD 요청을 1초 간격으로 다시 보내는 횟수(0..10). 4xx·5xx 응답은 다시 보내지 않습니다. |
 | `http.proxy.host`, `http.proxy.port` | 빈 값 | 모든 외부 HTTP·HTTPS 요청이 거치는 forward proxy. 호스트가 비어 있으면 환경 변수 `HTTP_PROXY`·`HTTPS_PROXY`·`NO_PROXY`를 그대로 씁니다. |
 | `http.proxy.username`, `http.proxy.password` | 빈 값 | 프록시 인증(Basic). 비밀번호는 저장만 되고 API가 돌려주지 않으며(`passwordSet`), 바꾸지 않을 때는 비워 보내고 지우려면 `clearPassword: true`를 보냅니다. 비밀값 키가 있으면 암호화해 저장합니다. |
+| `defaultRoles` | `[]` | 로그인한 모든 사용자에게 자기 역할에 더해 주는 역할 id 목록(Nexus의 Default Role Realm). 로컬 사용자(비밀번호·세션·API 토큰), LDAP, OIDC, Crowd, RUT, SAML 사용자가 받으며 익명 사용자는 받지 않습니다. 없는 역할, 중복, `admin`은 400입니다. 이 목록에 있는 역할은 지울 수 없습니다(409). 바꾸면 활동 이벤트 `settings.defaultRoles`가 남습니다. |
+| `userTokens` | `{"enabled":false,"required":false,"expirationDays":0}` | 사용자 토큰 켜기, 저장소 접근에 토큰 필수, 만료 일수(0은 만료 없음, 3650까지). 한 묶음으로 보냅니다("사용자 토큰" 참고). |
+| `terraformDefaultRepository` | 빈 값 | 호스트 루트의 `/.well-known/terraform.json`이 가리킬 terraform 저장소. 비우면 이름순으로 첫 terraform 저장소입니다. terraform 저장소가 아닌 이름은 400입니다("Terraform 설정" 참고). |
 | `http.proxy.nonProxyHosts` | `[]` | 프록시를 거치지 않고 직접 연결할 호스트 패턴: `mirror.corp.local`, `*.corp.local`(하위 도메인 전체), `10.*`(주소 앞부분) |
 
 `http` 값은 한 묶음으로 보냅니다(`PUT /-/api/settings`에 `"http": {...}` 전체). 저장 즉시 원격 저장소 가져오기·웹훅·OIDC 연결에 적용되고, 열려 있던 유휴 연결은 끊고 새 설정으로 다시 맺습니다. 활동 이벤트 `settings.http`에는 바뀐 키 이름만 남습니다. 프록시를 거치는 요청도 원격 egress 정책("설정 레퍼런스"의 원격 접속 제한 참고)을 따르되, 주소를 해석하는 쪽이 프록시이므로 IP 리터럴만 검사할 수 있습니다.
@@ -1165,7 +1328,7 @@ SMTP 설정(`GET/PUT /-/api/settings/smtp`, 관리자)으로 예약 작업 실�
 
 ## Webhook
 
-Command Center는 Nexus Repository의 webhook처럼 서버에서 일어난 일을 HTTP POST로 외부 시스템에 알립니다. 관리자 화면의 Webhook 페이지(또는 `/-/api/webhooks` API)에서 등록하며, 전역 webhook은 모든 저장소의 이벤트를, 저장소 webhook은 그 저장소의 이벤트만 받습니다. 구독할 이벤트 종류는 `GET /-/api/webhooks/events`가 설명과 함께 나열하며 `*`는 전부를 뜻합니다. 주요 종류는 `component.created/deleted`, `asset.created/deleted`, `repository.created/updated/deleted`, `user.*`, `role.*`, `token.*`, `realm.updated`, `task.finished`, `cleanup.finished`, `webhook.*`입니다. 활동(activity) 목록에 기록되는 모든 이벤트가 webhook으로도 나가며, 이 버전이 모르는 새 종류는 이름 그대로 `*` 구독자에게 전달됩니다.
+Command Center는 Nexus Repository의 webhook처럼 서버에서 일어난 일을 HTTP POST로 외부 시스템에 알립니다. 관리자 화면의 Webhook 페이지(또는 `/-/api/webhooks` API)에서 등록하며, 전역 webhook은 모든 저장소의 이벤트를, 저장소 webhook은 그 저장소의 이벤트만 받습니다. 구독할 이벤트 종류는 `GET /-/api/webhooks/events`가 설명과 함께 나열하며 `*`는 전부를 뜻합니다. 주요 종류는 `component.created/deleted`, `asset.created/deleted`, `repository.created/updated/deleted`, `user.*`, `role.*`, `token.*`, `realm.updated`, `task.finished`, `cleanup.finished`, `webhook.*`, `blobstore.updated`, `staging.move`, `staging.delete`, `firewall.blocked`, `firewall.released`, `vulnerability.updated`입니다. 활동(activity) 목록에 기록되는 모든 이벤트가 webhook으로도 나가며, 이 버전이 모르는 새 종류는 이름 그대로 `*` 구독자에게 전달됩니다.
 
 요청은 `Content-Type: application/json`이고 `X-Command-Center-Event`(이벤트 종류), `X-Command-Center-Delivery`(전달 ID) 헤더가 붙습니다. 비밀값(secret)을 설정하면 본문 전체의 HMAC-SHA256을 `X-Command-Center-Signature: sha256=<hex>`로, Nexus 호환용으로 HMAC-SHA1을 `X-Nexus-Webhook-Signature`로 함께 보냅니다(`X-Nexus-Webhook-Id`, `X-Nexus-Webhook-Delivery` 헤더도 붙지만 본문은 Command Center 고유 형식이므로 Nexus용 수신기는 본문 처리를 맞춰야 합니다). 본문은 다음과 같습니다.
 
@@ -1193,6 +1356,36 @@ import hmac, hashlib
 expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 assert hmac.compare_digest(expected, request.headers["X-Command-Center-Signature"])
 ```
+
+## 취약점 데이터와 방화벽(OSV)
+
+Command Center는 OSV(https://osv.dev)의 공개 데이터로 컴포넌트의 알려진 취약점과 악성 패키지를 보고하고, 프록시 저장소에 방화벽(격리)을 적용합니다. Nexus Pro의 Repository Health Check·Firewall에 해당하는 기능이며 별도 라이선스가 필요 없습니다.
+
+대상 포맷과 OSV 생태계는 npm(npm), PyPI(PyPI), Maven(Maven, 이름은 groupId:artifactId), Go(Go), Cargo(crates.io), NuGet(NuGet), RubyGems(RubyGems), Composer(Packagist), Conan(ConanCenter), R(CRAN)입니다. Docker, conda, apt, yum, Helm, raw, Git LFS는 OSV 데이터가 없거나 배포판 정보가 필요해 대상이 아닙니다.
+
+### 취약점 데이터 설정
+
+관리자 설정(`GET/PUT /-/api/vulnerability/settings`, PUT은 보낸 값만 바꿉니다)에서 켭니다. 기본값은 꺼짐입니다. 상태는 `GET /-/api/vulnerability/status`(권고 수, 생태계별 개수, 마지막 가져오기, 조회 실패 수)로 봅니다.
+
+- `mode: online`(기본): 로컬 DB에 없는 정보를 OSV API(`apiURL`, 기본 https://api.osv.dev)에 묻고 답을 `cacheHours`(기본 24시간) 동안 재사용합니다. 요청은 일반 설정의 HTTP 프록시와 SSL 신뢰 저장소를 따릅니다.
+- `mode: offline`: 로컬 DB만 씁니다. `vulnerability.sync` 작업이 `<dumpURL>/<생태계>/all.zip`을 내려받거나(대상은 `ecosystems`, 비우면 전체), 폐쇄망에서는 관리자가 all.zip을 `POST /-/api/vulnerability/import`(본문이 zip 파일)로 올립니다. 업로드는 `maxImportMiB`(기본 1024)와 일반 설정의 `maxUploadMiB` 중 작은 값으로 제한되며, 경로가 `..`나 절대 경로인 항목이 있는 압축 파일은 거부됩니다. 업로드는 HTTP 요청 안에서 처리되므로 큰 덤프는 리버스 프록시의 시간 제한에 걸릴 수 있습니다. 그럴 때는 sync 작업을 쓰세요.
+- 설정 변경과 가져오기는 활동 이벤트 `vulnerability.settings`, `vulnerability.import`(webhook `vulnerability.updated`)로 남습니다.
+
+### 방화벽(격리)
+
+프록시 저장소 설정의 `firewall`을 켜면 그 저장소가 내주는 파일을 컴포넌트 단위로 검사합니다("저장소 키" 참고).
+
+- `blockMalicious`(기본 true): OpenSSF malicious-packages(MAL-로 시작하는 ID)에 오른 패키지를 막습니다.
+- `blockSeverityAtLeast`: `none`(기본, 심각도로는 막지 않음), `low`, `medium`, `high`, `critical`. 심각도는 CVSS 3.x 기본 점수(직접 계산)나 권고가 주는 점수·등급입니다(CVSS 4는 권고가 준 점수나 등급만 씁니다). 등급이 없는 권고는 기준에 걸리지 않습니다.
+- `allowList`: `name@version`에 맞추는 RE2 정규식 목록(Maven은 `groupId:artifactId@version`, npm 스코프는 `@scope/name@version`)입니다.
+
+막힌 파일은 403과 함께 권고 ID를 본문(일반 텍스트)에 담아 응답합니다. 이미 캐시된 파일도 나중에 취약점이 알려지면 다음 다운로드부터 막히며, group을 거쳐도 그 proxy 멤버의 정책이 적용됩니다. 파일은 격리 상태로 캐시에 남으며, 격리 목록(`GET /-/api/firewall/quarantine`)에서 해제(`POST /-/api/firewall/quarantine/release`, 관리자)하면 allowList에 `^name@version$` 항목이 추가되고 다시 제공됩니다. 처음 격리될 때마다 `firewall.blocked` 이벤트(webhook)가 기록됩니다. hosted 저장소는 막지 않고 보고만 합니다.
+
+온라인 조회가 실패하면(시간 초과 15초 포함) 파일을 내주고 결과를 `unknown`으로 표시합니다(fail open). 이때도 로컬 DB(내려받거나 올린 데이터, 이전 조회에서 저장된 권고)는 그대로 적용되므로, 로컬에 있는 악성 패키지는 API가 응답하지 않아도 막힙니다. 방화벽은 취약점 데이터가 켜져 있을 때만 동작합니다.
+
+### 취약점 보고
+
+`vulnerability.scan` 작업이 hosted·프록시 저장소의 컴포넌트를 검사해 결과를 저장합니다. 저장소 목록에는 심각도별 개수가, 저장소 요약(`GET /-/api/repositories/{name}/vulnerabilities/summary`)에는 상위 컴포넌트가, 컴포넌트 화면(`GET /-/api/repositories/{name}/components/vulnerabilities?group=&name=&version=`)에는 권고 목록(수정 버전, osv.dev 링크 포함)이 표시됩니다. group 저장소는 자기 컴포넌트가 없으므로 요약이 비어 있습니다.
 
 ## 저장소 Online/Offline
 
@@ -1270,7 +1463,7 @@ npm login --registry http://localhost:8081/repository/npm-all/
 ```
 
 `npm publish`는 그룹의 `writeMember`(npm-hosted)에 저장됩니다. 같은 버전을 다시 publish하면 거부됩니다(403).
-`npm install`, `npm dist-tag`, `npm deprecate`, `npm unpublish`, `npm whoami`, `npm logout`(그 토큰을 폐기)을 지원하며, `npm search`(404)와 `npm audit`(501)은 지원하지 않습니다.
+`npm install`, `npm dist-tag`, `npm deprecate`, `npm unpublish`, `npm whoami`, `npm logout`(그 토큰을 폐기)을 지원하며, `npm search`(404)는 지원하지 않습니다(`npm audit`은 아래 참고).
 `npm ping`과 `npm audit`도 저장소 읽기 권한이 필요합니다(익명 읽기가 꺼져 있으면 토큰 필요). `npm login`은 토큰 없이 됩니다. 헬스 체크에는 `npm ping` 대신 인증 없이 200을 주는 `GET /service/rest/v1/status`를 쓰세요.
 새 버전은 SemVer 2.0 형식(`1.2.3`, `1.2.3-beta.1`)이어야 하고 빌드 메타데이터(`3.0.0+a`처럼 `+…`)는 붙일 수 없습니다(400). npm은 `+…`를 무시하므로 `3.0.0`과 같은 버전이 둘이 되어 `npm install X@3.0.0`이 실패하기 때문입니다. dist-tag 이름은 버전이나 범위처럼 보이면(`1.0.0`, `^1`, `1.x`) 거부됩니다.
 publish는 저장한 tarball도 검사합니다. gzip으로 압축한 tar여야 하고, 맨 위 디렉터리 바로 아래에 일반 파일 `package.json`이 하나만 있어야 하며, 그 `name`과 `version`이 publish 문서와 같아야 합니다. npm은 압축을 풀 때 경로의 첫 요소를 떼므로 맨 위 디렉터리 이름은 `npm pack`이 쓰는 `package/`가 아니어도 됩니다. `version`은 npm이 publish할 때처럼 앞의 `v`·`=`와 빌드 메타데이터(`+…`)를 뗀 값으로도 비교하므로, `package.json`에 `1.2.3+ci.5`처럼 적은 패키지도 `npm publish`로 올라갑니다. publish 문서의 새 버전마다 `versions.<버전>.name`도 패키지 이름과 같아야 합니다. 빈 파일, gzip이나 tar가 아닌 파일, `package.json`이 없거나 둘 이상인 tarball, `package.json`이 1 MiB를 넘는 tarball은 400입니다. 압축을 푼 크기는 publish 문서 하나에 든 새 tarball을 모두 합쳐 1 GiB까지만 읽고, 넘으면 400(`more than 1073741824 bytes uncompressed in this publish`)입니다. `npm publish`는 문서 하나에 버전 하나를 보내므로 tarball 하나가 1 GiB까지입니다. 버전 형식, `versions.<버전>.name`, shasum·integrity는 tarball을 읽기 전에 검사합니다. 처음 publish하는 패키지 이름은 npm이 새 패키지에 요구하는 대로 소문자여야 하고 `node_modules`, `favicon.ico`는 쓸 수 없습니다(400). 점(`.`)이나 밑줄(`_`)로 시작하는 이름, 214자를 넘는 이름, URL에 그대로 쓸 수 없는 문자가 든 이름은 이전부터 400입니다. 다만 npm처럼 scope 이름은 scope나 패키지 부분이 밑줄로 시작해도 되므로, `@acme/_internal` 같은 패키지도 publish할 수 있고 proxy와 group으로 받을 수 있습니다. scope나 패키지 부분이 점으로 시작하는 이름(`@acme/.x`)은 계속 400입니다. 이미 저장된 패키지는 대문자 이름이어도(예전 빌드에서 올린 경우) 새 버전을 계속 publish할 수 있고, `JSONStream`처럼 예전 규칙으로 만든 공개 패키지도 proxy와 group으로 그대로 받을 수 있습니다.
@@ -1278,6 +1471,8 @@ publish는 저장한 tarball도 검사합니다. gzip으로 압축한 tar여야 
 그 패키지를 처음 가진 멤버보다 앞선 멤버가 "없음"(404)이 아닌 오류를 내면 그룹은 5xx(502 또는 그 멤버의 5xx)로, Offline이면 503으로 답합니다. hosted의 일시 오류나 점검 때문에 proxy에 있는 같은 이름의 공개 패키지가 대신 나가지 않게 하기 위해서입니다. 패키지를 가진 멤버보다 뒤에 있는 멤버는 조회하지 않으므로, hosted 뒤의 proxy가 장애이거나 Offline이어도 hosted 패키지는 계속 받을 수 있습니다(반대로 proxy를 hosted보다 앞에 두면 proxy 장애 때 그룹이 5xx를 냅니다).
 tarball 요청은 packument를 읽지 않아도 됩니다. 그룹은 멤버 순서대로 그 tarball을 찾아 처음 가진 멤버로 답하고(hosted는 DB, proxy는 캐시에 있으면 캐시, 없으면 원격에서 그 tarball만 받음), tarball이 없는 멤버에게만 그 패키지를 가졌는지 packument로 묻습니다. 가졌다면 그 멤버가 주인이므로 404이고 뒤 멤버의 tarball은 나가지 않습니다. 마지막 멤버에게는 묻지 않습니다. 그래서 `npm ci`처럼 lockfile로 tarball만 받는 설치에는 packument가 필요 없고, proxy에 캐시된 tarball은 원격 레지스트리가 장애이거나 원격에서 패키지가 삭제된 뒤에도 proxy URL로 받을 때처럼 그룹으로 받을 수 있습니다. 마지막이 아닌 proxy 멤버에 그 tarball이 없으면 그 멤버의 packument로 판단합니다. 캐시가 만료되었는데 원격이 장애이면 만료된 캐시를 쓰고(주인이면 404), 원격이 404·410이면 그 멤버에는 패키지가 없는 것으로 보고 다음 멤버로 넘어갑니다(그룹 packument와 같은 판단). tarball이 캐시에 없고 원격에도 닿지 않으면 packument 캐시가 있어도 그룹은 502로 실패합니다.
 `npm unpublish <패키지>@<버전>`은 그 버전을 지우고, `npm unpublish <패키지> --force`는 모든 버전과 dist-tag를 지워 패키지가 404가 됩니다. 저장소(그룹이면 `writeMember`)에 `delete` 권한이 있어야 합니다(없으면 403). proxy나 `writeMember`가 없는 group에서는 `405`(빈 `Allow` 헤더, 메시지 `unpublish is not supported in <유형> repository "<이름>": unpublish from its hosted repository`)로 실패하므로, npm이 "삭제했다"고 잘못 보고하지 않습니다. 지운 버전을 가리키던 dist-tag는 지워지고, `latest`가 지운 버전을 가리켰다면 남은 버전 중 가장 높은 정식 버전(정식 버전이 없으면 가장 높은 프리릴리스)으로 옮겨집니다. npm이 보낸 dist-tag 값은 쓰지 않습니다. npm은 읽어 간 패키지 문서에서 그 버전을 뺀 문서를 보내는데, 그사이 다른 사람이 새 버전을 올렸다면 그 버전까지 지우지 않도록 `409`로 거부하니 다시 실행하세요. npm은 읽어 간 문서의 `_rev`도 요청 주소(`/-rev/<rev>`)에 넣어 보냅니다. hosted 패키지 문서의 `_rev`는 그 문서에서 가장 나중에 게시된 버전의 게시 시각(밀리초)입니다. 요청이 지울 버전 중 이보다 나중에 게시된 버전, 즉 npm이 읽은 뒤 게시되었거나 지워졌다가 다시 게시된 버전이 있으면 아무것도 지우지 않고 `409`로 거부합니다. 문서를 보내지 않는 `npm unpublish <패키지> --force`(버전이 하나뿐인 패키지의 `npm unpublish <패키지>@<버전>`도 같습니다)도 이 규칙을 따릅니다. 그사이 다른 사람이 다른 버전을 지웠거나 dist-tag를 바꿨거나 `npm deprecate`를 한 것은 거부 사유가 아니므로, 서로 다른 버전을 지우는 `npm unpublish`를 동시에 여러 개 실행해도 모두 성공합니다. 이전 버전이 저장한 문서에는 `_rev`가 없어 npm이 `undefined`를 보내며, 이처럼 숫자가 아닌 `_rev`는 비교하지 않습니다. 그 패키지가 한 번 바뀌면(publish, dist-tag 변경, deprecate, 버전 삭제) `_rev`가 생깁니다. 이 문서는 10 MiB까지 받으며(넘으면 413), 그보다 큰 패키지의 버전은 웹 UI나 API로 지우세요("컴포넌트 삭제" 참고). hosted 패키지 문서는 `Cache-Control: no-cache`로 보내므로 npm이 캐시에 남은 옛 문서로 지운 버전을 고르지 않습니다. 지우지 않고 쓰지 말라고만 알리려면 `npm deprecate`를 쓰세요(설치할 때 경고가 나옵니다).
+
+**`npm audit`**: proxy 저장소는 감사 요청(`POST …/-/npm/v1/security/audits`, `…/audits/quick`, `…/advisories/bulk`)을 원격 레지스트리에 그대로 전달하고 원격의 상태 코드와 본문을 그대로 돌려줍니다. 그룹은 멤버 순서상 첫 proxy 멤버(그룹 안의 그룹 포함)의 원격으로 보냅니다. 결과는 캐시하지 않고, 요청과 응답 본문은 각각 16 MiB까지입니다(요청이 넘으면 413, 응답이 넘으면 502). hosted 저장소와 proxy 멤버가 없는 그룹은 취약점 0건인 빈 보고서(`advisories/bulk`는 `{}`)를 돌려주므로 `npm install`의 감사 단계가 실패하지 않습니다. 이것은 검사 결과가 아니라 검사하지 않았다는 뜻입니다. 저장소 읽기 권한이 필요하며, 원격이 차단(`blocked` 또는 자동 차단)되어 있으면 502입니다.
 
 **baseURL 주의**: config.yaml의 `baseURL`은 클라이언트가 실제로 접속하는 레지스트리 주소(스킴, 호스트, 포트)와 정확히 같아야 합니다.
 응답의 tarball URL이 `baseURL`로 만들어지기 때문입니다. 예를 들어 다른 컨테이너의 클라이언트가 접속한다면
@@ -1798,6 +1993,77 @@ export HF_TOKEN=<Command Center API 토큰>
 - 지원하지 않는 것: `/`가 든 리비전(`refs/pr/1`), `POST …/paths-info`(405), Xet 전송(클라이언트가 HTTP로 받습니다), 업로드.
 - **정리**: 컴포넌트는 `<repo id>@<커밋 sha>`이고 데이터셋·스페이스는 그룹이 `datasets`·`spaces`입니다(라벨 `datasets/org/ds@<sha>`, Cleanup `namePattern`은 `datasets:org/ds`). 한 커밋의 파일(하위 디렉터리 포함)이 한 컴포넌트입니다. Cleanup 정책(`format: huggingface`, 예: `lastDownloadedDays`)으로 오래 쓰지 않은 모델을 지우며 api 문서는 남습니다. 역할 권한 대상으로 `format:huggingface`를 쓸 수 있고, 메타데이터 탭은 `pipeline_tag (library_name)`, license, Hub 페이지 주소를 보여 줍니다.
 
+### Terraform 설정
+
+Command Center는 Terraform/OpenTofu 레지스트리 프로토콜(modules.v1, providers.v1)을 `terraform` 형식 저장소로 제공합니다. hosted는 모듈 아카이브와 프로바이더 릴리스를 업로드받고, proxy는 registry.terraform.io를 캐시하며, group은 모듈·프로바이더마다 그것을 가진 첫 멤버가 답합니다. 아래 명령은 레지스트리 프로토콜을 재현한 테스트로만 확인했고, 실제 `terraform`·`tofu` 클라이언트로는 아직 검증하지 않았습니다.
+
+**HTTPS가 필요합니다.** Terraform은 레지스트리를 호스트 이름으로만 찾으며 항상 `https://<호스트>/.well-known/terraform.json`을 읽습니다. 따라서 Command Center를 클라이언트가 신뢰하는 인증서로 HTTPS(기본 443 포트, 다른 포트라면 소스 주소에 `호스트:포트`)로 노출해야 하고, 일반 설정 `baseURL`도 그 https 주소로 맞춰야 합니다. HTTP로는 동작하지 않습니다.
+
+**루트 디스커버리는 기본 저장소를 가리킵니다.** 호스트 루트의 `/.well-known/terraform.json`은 terraform 저장소 하나만 가리킵니다. 일반 설정 `terraformDefaultRepository`에 지정한 저장소이며, 지정하지 않았으면 이름순으로 첫 terraform 저장소입니다. 한 호스트에는 저장소 하나만 노출되므로 hosted와 proxy를 묶은 group을 기본 저장소로 두는 것을 권장합니다. 저장소마다 `/repository/<repo>/.well-known/terraform.json`도 응답하지만 Terraform은 루트만 읽습니다. 디스커버리 문서는 인증 없이 공개됩니다.
+
+**인증(~/.terraformrc).** API 토큰을 Bearer로 보냅니다.
+
+```hcl
+credentials "cc.example.com" {
+  token = "<API 토큰>"
+}
+```
+
+환경 변수 `TF_TOKEN_cc_example_com`(점은 `_`)도 같습니다. `terraform login`은 지원하지 않습니다. 저장소가 익명 읽기(anonymousRead)를 허용하면 토큰 없이 읽을 수 있습니다.
+
+주의: Terraform은 모듈 아카이브와 프로바이더 zip을 받을 때 위 토큰을 보내지 않고 `~/.netrc`(`machine cc.example.com login <사용자> password <API 토큰>`)만 사용하며, 프로바이더의 SHA256SUMS와 서명 파일은 자격 증명 없이 받습니다. 그래서 익명 읽기를 끈 저장소에서 모듈을 쓰려면 `~/.netrc`도 설정해야 하고, 프로바이더를 쓰려면 그 저장소(또는 group)에 `anonymousRead: true`가 필요합니다.
+
+**사용 예.**
+
+```hcl
+module "vpc" {
+  source  = "cc.example.com/acme/vpc/aws"   # 호스트/네임스페이스/이름/프로바이더
+  version = "1.2.0"
+}
+
+terraform {
+  required_providers {
+    demo = {
+      source  = "cc.example.com/acme/demo"  # 호스트/네임스페이스/타입
+      version = "2.0.0"
+    }
+  }
+}
+```
+
+**모듈 업로드.** *.tf 파일이 루트(또는 최상위 디렉터리 하나)에 있는 tar.gz 또는 zip을 올리며, add 권한이 필요합니다.
+
+```sh
+tar -czf vpc-1.2.0.tgz -C vpc .
+curl -fsS -X PUT -H "Authorization: Bearer $TOKEN" --data-binary @vpc-1.2.0.tgz \
+  https://cc.example.com/repository/terraform-hosted/v1/modules/acme/vpc/aws/1.2.0
+# 경로 형식(확장자가 형식을 정합니다): …/repository/terraform-hosted/modules/acme/vpc/aws/1.2.0.tgz
+```
+
+삭제는 같은 v1 경로에 `DELETE`를 보냅니다(delete 권한).
+
+**프로바이더 업로드.** 플랫폼별 zip, SHA256SUMS, 그 서명, (선택) 매니페스트를 버전 경로 아래로 올립니다. 저장 이름이 `terraform-provider-<type>_<version>_<os>_<arch>.zip`이므로 SHA256SUMS에 적힌 파일 이름도 이와 같아야 합니다(goreleaser 기본 출력 그대로입니다).
+
+```sh
+B=https://cc.example.com/repository/terraform-hosted/v1/providers/acme/demo/2.0.0
+H="Authorization: Bearer $TOKEN"
+curl -fsS -X PUT -H "$H" --data-binary @terraform-provider-demo_2.0.0_linux_amd64.zip  $B/linux/amd64
+curl -fsS -X PUT -H "$H" --data-binary @terraform-provider-demo_2.0.0_darwin_arm64.zip $B/darwin/arm64
+curl -fsS -X PUT -H "$H" --data-binary @terraform-provider-demo_2.0.0_SHA256SUMS      $B/shasums
+curl -fsS -X PUT -H "$H" --data-binary @terraform-provider-demo_2.0.0_SHA256SUMS.sig  $B/shasums.sig
+curl -fsS -X PUT -H "$H" --data-binary @terraform-registry-manifest.json            $B/manifest
+```
+
+서명은 `gpg --detach-sign terraform-provider-demo_2.0.0_SHA256SUMS`로 만들고, 공개 키(`gpg --armor --export <키>`)를 저장소 설정 `gpgPublicKey`에 넣습니다. 다운로드 문서가 이 키(key_id, ascii_armor)를 알려 주며, 키가 없으면 Terraform이 프로바이더를 거부합니다. 매니페스트가 없으면 프로토콜은 5.0입니다. 삭제는 `curl -X DELETE -H "$H" $B`입니다.
+
+**writePolicy.** allow_once는 같은 파일의 재업로드는 그대로 받고 내용이 다르면 409로 거부합니다. allow는 덮어쓰기에 edit 권한이 필요하고, deny는 읽기 전용입니다.
+
+**registry.terraform.io 프록시.** remote를 `https://registry.terraform.io/`로 둔 proxy는 원격 디스커버리를 읽고 버전 목록을 metadataMaxAge 동안 캐시합니다. 모듈의 http(s) 아카이브 주소는 프록시 경로로 바꾸어 요청이 올 때 받아 캐시합니다. 프로바이더의 download_url, shasums_url, shasums_signature_url도 프록시 경로로 바꾸어 요청이 올 때 받으며, zip은 shasum으로 검증합니다. 원격 자격 증명은 레지스트리 호스트에만 보내고 releases.hashicorp.com이나 GitHub에는 보내지 않습니다. 원격이 내려가도 이미 캐시된 모듈과 프로바이더는 설치됩니다.
+
+**git:: 소스의 한계.** 업스트림이 `git::`처럼 http(s) 아카이브가 아닌 소스를 주면(registry.terraform.io 공개 모듈 대부분이 GitHub `git::`입니다) 그대로 전달하므로 캐시되지 않으며, 클라이언트가 그 Git 호스트에 직접 접근할 수 있어야 합니다. 폐쇄망에서는 그런 모듈을 아카이브로 받아 hosted에 올려 사용합니다.
+
+**정리.** 모듈 컴포넌트는 `<네임스페이스>/<이름>/<프로바이더>@<버전>`, 프로바이더는 `<네임스페이스>/<타입>@<버전>`입니다. 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: terraform`)으로 하고, 역할 권한 대상으로 `format:terraform`을 쓸 수 있습니다. 컴포넌트 메타데이터 탭은 모듈 README의 첫 문단, 프로바이더의 프로토콜과 플랫폼을 보여 줍니다(hosted만).
+
 ## 운영
 
 | 작업 | 명령 |
@@ -1873,9 +2139,17 @@ curl -u admin -o support.zip https://commandcenter.example.com/-/api/support/zip
 curl -u admin https://commandcenter.example.com/-/api/support/threads | head
 ```
 
+### OpenAPI 문서
+
+`GET /-/api/openapi.json`은 Command Center API(`/-/api/*`)와 Nexus REST API 호환 계층(`/service/rest/v1/*`)의 모든 경로를 OpenAPI 3.0 문서로 돌려줍니다. 인증 없이 받을 수 있으며, Nexus가 Swagger 2.0 문서를 두는 `GET /service/rest/swagger.json`도 같은 문서를 돌려줍니다. 경로마다 메서드, 경로·쿼리 파라미터, 필요한 권한, 응답 코드를 적었지만 본문 스키마는 이름만 있는 자유 형식 객체이므로 필드는 이 가이드를 보세요. Swagger UI, Postman, `openapi-generator` 같은 도구에 이 URL을 넣으면 경로 목록을 볼 수 있습니다.
+
+```bash
+curl -s http://localhost:8081/-/api/openapi.json | jq '.paths | keys | length'
+```
+
 ### Cleanup 정책
 
-오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs`, `p2`, `swift`, `cocoapods`, `huggingface` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
+오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs`, `p2`, `swift`, `cocoapods`, `huggingface`, `terraform` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
 
 | 기준 | 의미 |
 |---|---|
@@ -1884,7 +2158,7 @@ curl -u admin https://commandcenter.example.com/-/api/support/threads | head
 | `releaseType` | `any`, `release`, `prerelease`(SNAPSHOT 또는 semver 프리릴리스). |
 | `namePattern` | `group:name`에 맞추는 RE2 정규식(선택, 200자 이하). |
 
-- 두 기간 중 **하나 이상**은 정해야 하며, 정한 기준은 모두 **AND**로 결합합니다. 모든 기준을 만족하는 컴포넌트만 후보입니다.
+- 두 기간과 `retain`(아래) 중 **하나 이상**은 정해야 하며, 정한 기준은 모두 **AND**로 결합합니다. 모든 기준을 만족하는 컴포넌트만 후보입니다.
 - **미리보기**(정책 화면의 "후보 목록 보기")는 후보 개수·용량과 최대 500개의 목록을 보여 줍니다. 저장소마다 에셋을 20 000개까지만 훑으므로 목록이 잘렸거나 저장소가 그보다 크면 `truncated`가 켜지고, 이때 개수와 용량은 **하한**입니다.
 - **Cargo hosted 저장소는 제외**됩니다. `Cargo.lock`에 고정된 crate를 자동으로 지우지 않기 위해서입니다. yank로 숨기거나, 지울 버전은 웹 UI·API로 하나씩 지우세요("컴포넌트 삭제" 참고). 정책은 Cargo hosted를 건너뛰고 UI에도 안내가 나옵니다. Cargo proxy는 대상입니다.
 - hosted의 `writePolicy`는 정리에서 **무시**됩니다. `deny`인 저장소에서도 정리는 지웁니다.
@@ -1895,6 +2169,17 @@ curl -u admin https://commandcenter.example.com/-/api/support/threads | head
 - 실행 중에도 편집을 따릅니다. 컴포넌트마다 저장소 정의를 다시 보고(메모리), 정책은 50개마다 또는 정책이 수정될 때 다시 읽어, 저장소가 바뀌었거나 정책이 해제·변경되었으면 그 저장소의 삭제를 멈춥니다.
 - 지운 에셋의 **blob은 바로 반환되지 않습니다.** 다음 `blobstore.compact` 작업이 회수합니다.
 - 설정 PUT에서 `cleanupPolicy`를 빼면 기존 값이 유지됩니다.
+
+#### 버전 유지(retain), 제외, 미리보기
+
+- **`retain`**(1–1000, 0이면 사용 안 함)은 컴포넌트(같은 저장소의 같은 group과 name)마다 가장 새로운 N개 버전을 다른 기준과 상관없이 남깁니다. 그보다 오래된 버전만 나머지 기준으로 평가합니다. `retain`만 정한 정책도 만들 수 있습니다(가장 새로운 N개를 빼고 모두 지움).
+- **`retainSortBy`**는 `version`(기본값)이나 `date`입니다. `version`은 포맷의 버전 규칙으로 정렬합니다. Maven은 ComparableVersion 규칙(1.0-rc1 < 1.0-SNAPSHOT < 1.0 < 1.0-sp1), PyPI는 PEP 440(1.0.dev1 < 1.0a1 < 1.0 < 1.0.post1), yum은 rpm 비교(epoch:version-release, 아키텍처 무시), apt는 Debian 규칙(1.0~rc1 < 1.0), RubyGems는 Gem::Version, R은 숫자 비교, Composer는 dev < alpha < beta < RC < 안정판 < patch, conda는 VersionOrder와 빌드 번호, npm·Cargo·Helm·Go·NuGet·Conan은 SemVer입니다. `date`는 컴포넌트의 가장 새로운 에셋이 만들어진 시각입니다. docker·raw·gitlfs는 버전 순서가 없어 날짜로 정렬하며, raw와 gitlfs는 컴포넌트마다 버전이 하나라 retain이 있으면 아무것도 지우지 않습니다.
+- 순위는 제외된 버전과 다른 기준에 맞지 않는 버전까지 모든 버전으로 매깁니다. 같다고 비교되는 버전(같은 EVR의 여러 아키텍처, 같은 gem의 플랫폼별 파일)은 같은 순위로 함께 남습니다.
+- 한 컴포넌트의 버전은 한 번의 스캔에서 모두 보아야 순위를 매깁니다. 스캔 예산에 잘린 컴포넌트는 그 실행에서 건너뛰고, 다음 실행이 그 컴포넌트 처음부터 다시 훑습니다. 한 컴포넌트의 에셋이 스캔 예산(20 000개)보다 많으면 retain으로는 정리되지 않습니다. apt는 패키지가 pool의 여러 곳에 있을 수 있어 pool 전체가 한 번의 스캔에 들어올 때만 retain을 적용합니다.
+- **`exclude`**의 `namePattern`(`group:name`)과 `versionPattern`(버전)은 문자열 전체에 맞추는 RE2 정규식(각 200자 이하)이며, 맞는 컴포넌트는 절대 지우지 않습니다.
+- **`pathPattern`**은 컴포넌트의 에셋 경로 중 하나라도 전체가 맞아야 하는 정규식입니다(Nexus의 `criteriaAssetRegex`, 앞의 `/`는 있어도 됩니다). **`notes`**(1000자 이하)는 정책 설명입니다.
+- 정책 PUT은 모든 필드를 바꾸므로 빠진 필드는 지워집니다.
+- **저장 전 미리보기**: `POST /-/api/cleanup/preview`(관리자, 본문은 정책과 `"repository"`)는 저장하지 않은 정책을 한 저장소에 적용해 봅니다. 정리 작업과 같은 평가 코드를 쓰고 저장소 끝까지 훑으므로, 바로 작업을 실행하면 미리보기 목록이 그대로 지워집니다(그 사이 바뀐 컴포넌트는 남김). 1000개까지의 목록과 전체 개수·용량, 컴포넌트마다 선택된 이유를 돌려주고, `?format=csv`는 모든 후보를 CSV로 내려받습니다. 미리보기는 아무것도 지우지 않습니다.
 
 ### 예약 작업
 
@@ -1909,8 +2194,15 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 | `maven.purge-snapshots` | Maven hosted 저장소의 SNAPSHOT 버전을 GA마다 최신 `minimumRetained`개만 남기고, 나머지 중 `snapshotRetentionDays`보다 오래된(0이면 나이 무관) 버전을 디렉터리째 지움. `lastDownloadedDays`를 주면 그 기간 동안 내려받지 않은(한 번도 없으면 저장된 지 그만큼 지난) 버전만 지움. `removeIfReleased`면 같은 GA에 정식 `X`가 있는 `X-SNAPSHOT`은 남길 개수와 무관하게, 정식 버전이 `gracePeriodDays`보다 오래됐을 때 지움. 삭제는 컴포넌트 삭제 경로를 지나므로 `maven-metadata.xml`이 다시 만들어지고 `delete` 활동이 남으며, 평가 뒤 바뀐 버전은 건너뜀. `writePolicy: deny` 저장소는 만들 때 400, 실행 때 Failed | `repository`(Maven hosted, 필수), `minimumRetained`(기본 1), `snapshotRetentionDays`(기본 30), `lastDownloadedDays`(기본 0), `removeIfReleased`, `gracePeriodDays`, `preview`(지울 것을 로그에만 남김) |
 | `blobstore.recalculate-size` | blob store의 blob 수를 세어 에셋이 참조하는 수·바이트와 비교해 로그에 남김. 화면의 용량은 에셋 행에서 실시간으로 계산하므로 저장할 값은 없고, 다음 compaction이 지울 blob 수를 미리 봄 | `blobStore`(선택) |
 | `blobstore.delete-temp-files` | 각 store `tmp/`의 1시간 넘은 임시 파일(`up-*`)과 24시간 넘게 쓰지 않은 Docker 업로드 세션(`ses-*`)을 지움(compact가 시작할 때 하는 정리와 같음). S3 store의 multipart 잔여물은 다루지 않음 | `blobStore`(선택) |
+| `blobstore.group-remove-member` | 그룹 멤버를 읽기 전용으로 바꾸고 그 멤버에만 있는 blob을 다른 쓰기 가능한 멤버로 복사(SHA-256 확인)한 뒤 그룹에서 뺌. 그동안 읽기는 계속되고, 실패하면 멤버는 읽기 전용으로 남아 다시 실행하면 이어 감("Blob store 그룹과 S3 장애 조치" 참고) | `group`, `member`(필수. 다른 쓰기 가능한 멤버가 있어야 함) |
+| `repository.change-blobstore` | 저장소의 blob을 다른 blob store로 옮기고 설정을 바꿈("저장소의 blob store 바꾸기" 참고). 보통 `POST /-/api/repositories/<이름>/blobstore`가 만들고 실행함 | `repo`, `target`(필수) |
+| `repository.export` | 저장소를 `exportRoot` 아래로 내보냄("저장소 내보내기와 가져오기" 참고) | `repositories`(목록 또는 `*`), `destination`(필수), `includeProxies`(기본 꺼짐), `since`(RFC 3339, 증분), `hardLinks`(기본 켬) |
+| `repository.import` | 내보낸 디렉터리를 가져옴 | `source`(필수, `<destination>/<내보내기 ID>`), `repositories`(내보낸 이름 → 대상 이름, 비우면 같은 이름), `createMissing`, `overwrite` |
+| `vulnerability.sync` | OSV 덤프(`<dumpURL>/<생태계>/all.zip`)를 내려받아 로컬 취약점 DB에 저장("취약점 데이터와 방화벽(OSV)" 참고) | 없음 |
+| `vulnerability.scan` | hosted·proxy 저장소의 컴포넌트를 검사해 결과를 저장 | `repository`(선택. 비우면 대상 포맷의 모든 hosted·proxy 저장소) |
+| `security.purge-expired-user-tokens` | 만료된 사용자 토큰을 지움. `expirationDays`가 0이면 아무것도 지우지 않음("사용자 토큰" 참고) | 없음 |
 
-작업 목록 API(`GET /-/api/tasks`)의 `types[]`에는 종류마다 `params`(이름·형식·기본값)가 함께 옵니다. Nexus 호환 API(`GET /service/rest/v1/tasks`)는 `type`을 Nexus 이름으로 바꿔 줍니다(`repository.maven.rebuild-metadata`, `repository.maven.remove-snapshots`, `blobstore.delete-temp-files`).
+작업 목록 API(`GET /-/api/tasks`)의 `types[]`에는 종류마다 `params`(이름·형식·기본값)가 함께 옵니다. Nexus 호환 API(`GET /service/rest/v1/tasks`)는 `type`을 Nexus 이름으로 바꿔 줍니다(`repository.maven.rebuild-metadata`, `repository.maven.remove-snapshots`, `blobstore.delete-temp-files`). 같은 API로 작업을 만들고 고치고 실행·중지할 수도 있습니다("Nexus REST API 호환" 참고).
 
 첫 시작 때 작업이 하나도 없으면 `compact-blobstore`(`blobstore.compact`, `daily:03:00`, 사용)를 만듭니다. 이 기본 작업은 지울 수 없습니다(`DELETE`는 409). 지우면 재시작해도 다시 생기지 않아 compaction이 조용히 멈추기 때문이며, 끄고 싶으면 "사용"을 끄세요.
 
@@ -1933,6 +2225,16 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 - 실행 로그는 최대 200줄·64 KiB이고 넘치면 **앞부분과 뒷부분**만 남기고 가운데를 생략했다는 줄을 넣습니다. 그래서 마지막 줄(성공·실패)은 항상 보입니다. 로그는 시스템 로그에도 함께 기록됩니다.
 - 기존 `POST /-/api/gc`는 compact 실행의 별칭으로 남아 있습니다. "지금 실행"과 달리 실행이 끝난 뒤 200으로 응답하며(실패하면 500), `removed`와 `bytes`는 지운 blob의 수와 바이트 수입니다(작업의 `lastRemoved`·`lastBytes`와 같음).
 
+### 저장소 내보내기와 가져오기
+
+저장소 내보내기(`repository.export`)와 가져오기(`repository.import`)는 예약 작업으로 실행하며, 라이선스 없이 쓸 수 있습니다. 먼저 설정 파일의 `exportRoot` 또는 환경 변수 `COMMANDCENTER_EXPORT_ROOT`에 절대 경로를 지정합니다(둘 다 주면 시작하지 않습니다). 내보내기와 가져오기는 이 디렉터리 아래에서만 읽고 쓰며, `../`나 바깥을 가리키는 심볼릭 링크는 거부합니다.
+
+내보내기는 `<destination>/<작업 ID>/`에 `manifest.json`, 저장소별 `assets.jsonl`(파일 메타데이터, 패키지 행, 태그), `blobs/`를 씁니다. 같은 파일 시스템의 파일 blob store라면 blob을 하드 링크로 만들고(`hardLinks`, 기본 켬), 그렇지 않으면 복사합니다. `manifest.json`은 마지막에 쓰므로, 이 파일이 없는 디렉터리는 끝나지 않은 내보내기입니다. 같은 작업을 다시 실행하면 같은 디렉터리를 다시 쓰고 이미 있는 blob은 건너뜁니다. `since`를 지정하면 그 시각 이후 바뀐 파일만 내보냅니다(증분). 프록시는 `includeProxies`를 켠 경우에만 포함하고, group은 내보내지 않습니다(멤버를 내보내세요).
+
+가져오기는 `source`에 `<destination>/<내보내기 ID>`를 지정합니다. 모든 blob의 SHA-256을 확인하며, 손상되거나 없는 blob이 있는 컴포넌트는 건너뛰고 작업 결과를 실패로 남깁니다. 다른 내용의 파일이 이미 있으면 `overwrite`를 켜지 않는 한 그대로 두고 로그에 남깁니다. 시각과 다운로드 수는 내보낸 값 그대로 가져옵니다. `createMissing`을 켜면 없는 저장소를 내보낸 설정으로 만듭니다(없는 blob store는 default, 없는 Cleanup 정책·라우팅 규칙은 빼고 경고를 남깁니다). 비밀값(원격 비밀번호·토큰, 원격 URL의 사용자 정보와 쿼리, apt `signingKey`)은 내보내지 않으므로 가져온 뒤 다시 입력하며, apt 저장소는 대상의 키로 다시 서명합니다. 비어 있는 저장소로 전체 내보내기를 가져오면 인덱스 문서(maven-metadata.xml, index.yaml, repodata 등)를 그대로 복사하고, 그 밖의 경우에는 가져온 뒤 다시 생성합니다.
+
+진행 상황과 결과는 작업 로그(저장소마다 파일·바이트·행 수, 1만 파일마다 한 줄)에서 확인합니다. API로는 `POST /-/api/export`, `POST /-/api/import`(관리자, 비밀번호·세션 로그인과 `X-Command-Center-UI: 1` 헤더)에 파라미터를 보내면 수동 작업이 만들어져 바로 실행되고 202와 작업 ID가 돌아옵니다. 이렇게 만든 작업도 작업 개수 한도(100개)에 들어가므로 다 쓴 작업은 지우세요. 중지한 내보내기는 `manifest.json`을 남기지 않고, 중지한 가져오기는 그때까지 가져온 컴포넌트를 남깁니다.
+
 ### 로그·활동
 
 - **로그**: SYSTEM → 시스템 상태·로그에서 서버 로그를 봅니다. 최근 **2 000건 또는 1 MiB** 중 먼저 닿는 한도까지 메모리에 보관하며, 재시작하면 사라집니다(표준 출력의 JSON 로그는 그대로 `docker compose logs`로 남습니다). 수준(INFO/WARN/ERROR)과 텍스트로 거르고, "다운로드"는 `commandcenter.log` 텍스트 파일을 내려줍니다(`GET /-/api/logs`, `/-/api/logs/download`, 관리자 전용).
@@ -1950,6 +2252,11 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
   | `cleanup` | 정리 결과(개수, 용량) |
   | `policy.create` / `policy.update` / `policy.delete` | 정책 변경 |
   | `routingrule.*` / `selector.*` / `webhook.*` | 라우팅 규칙, 컨텐츠 셀렉터, webhook 변경 |
+  | `usertoken.create` / `usertoken.reset` / `usertoken.delete` / `settings.userTokens` / `settings.defaultRoles` | 사용자 토큰 발급·재설정·삭제와 설정, 기본 역할 변경 |
+  | `realms.ldap.update` / `realms.oidc.update` / `realms.crowd.update` / `realms.rutauth.update` / `realms.saml.update` / `realms.crowd.test` | Realm 설정 변경(바뀐 키 이름만), Crowd 연결 테스트 |
+  | `tag.create` / `tag.update` / `tag.delete` / `tag.associate` / `tag.dissociate` / `staging.move` / `staging.delete` | 태그 변경과 연결, 스테이징 이동·삭제 |
+  | `blobstore.update` / `blobstore.convert` / `blobstore.quota` / `repo.blobstore` / `repo.import` | blob store 쿼터·그룹 변경, 그룹으로 바꾸기, 소프트 쿼터 위반·해소, 저장소의 blob store 이동 시작·끝, 저장소 가져오기 |
+  | `firewall.blocked` / `firewall.release` / `vulnerability.settings` / `vulnerability.import` | 방화벽 격리·해제, 취약점 데이터 설정·가져오기 |
   | `settings.http` / `logging.level` / `support.zip` / `ssl.add` / `ssl.remove` | 외부 HTTP 설정 변경, 로그 레벨 변경, 지원 번들 내려받기, 신뢰 저장소 변경 |
 
 ### 다운로드 수·요청 추이
@@ -2050,7 +2357,7 @@ Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이�
    데이터 볼륨은 그대로 유지되고, 새 버전은 처음 시작할 때 `meta.db`를 필요한 만큼 새 구조로 바꿉니다. 구조 변경과 DB 구조 버전 기록은 한 트랜잭션으로 하므로, 도중에 중단되어도 `meta.db`는 이전 상태로 남고 다음 시작 때 다시 바꿉니다.
 4. 시작 로그에 ERROR가 없는지 보고, 로그인·다운로드·업로드를 한 번씩 확인합니다. UI 세션은 재시작으로 끊기고 API 토큰은 유지됩니다.
 
-**다운그레이드는 지원하지 않습니다.** 이 버전부터 `meta.db`에 DB 구조 버전(SQLite `PRAGMA user_version`, 지금은 1)을 기록하고, 자기보다 새 버전이 기록한 `meta.db`로는 시작하지 않습니다. 이때 시작 오류는 `/data/meta.db was written by a newer version of Command Center (database schema 2; this version supports up to 1) …`처럼 두 구조 버전을 알려 주며, `meta.db`는 건드리지 않습니다. 되돌려야 하면 업그레이드 전에 받은 백업을 이전 버전의 이미지와 함께 복원하세요("백업과 복원" 참고). 백업 뒤에 올라온 패키지와 바뀐 설정은 사라집니다.
+**다운그레이드는 지원하지 않습니다.** 이 버전부터 `meta.db`에 DB 구조 버전(SQLite `PRAGMA user_version`, 지금은 4)을 기록하고, 자기보다 새 버전이 기록한 `meta.db`로는 시작하지 않습니다. 이때 시작 오류는 `/data/meta.db was written by a newer version of Command Center (database schema 2; this version supports up to 1) …`처럼 두 구조 버전을 알려 주며, `meta.db`는 건드리지 않습니다. 되돌려야 하면 업그레이드 전에 받은 백업을 이전 버전의 이미지와 함께 복원하세요("백업과 복원" 참고). 백업 뒤에 올라온 패키지와 바뀐 설정은 사라집니다.
 
 이 검사가 없는 이전 버전(구조 버전을 기록하지 않음)은 새 버전이 쓴 데이터로도 경고 없이 시작해 잘못 동작합니다. 사용자를 `config.yaml`에서 읽던 버전으로 내리면 인증이 `config.yaml`의 해시로 돌아가 UI에서 바꾼 비밀번호가 통하지 않습니다. 이름 붙은 blob store를 모르는 버전으로 내리면 기본이 아닌 store에 둔 저장소는 기존 파일을 찾지 못하고, 새로 올린 파일은 default store(`<dataDir>/blobs`)에 씁니다. 비밀값 키를 정해 두었다면 암호화된 값을 그대로 비밀번호로 보내 원격·SMTP·LDAP 인증이 실패합니다. 그렇게 돌린 뒤 이 버전으로 다시 올렸다면, default store의 GC는 어느 저장소든 참조하는 blob을 지우지 않으므로 그동안 쓴 파일은 남아 있습니다("Blob Store" 참고). 서버를 멈추고 default store의 blob을 그 저장소의 store로 복사하면 다시 받을 수 있습니다. 내용 주소 방식이라 이름이 같으면 내용도 같으므로 덮어써도 무해하고, 그 store의 저장소가 참조하지 않는 사본은 다음 compact 작업이 지웁니다. 경로를 비워 만든 store라면 아래와 같이 합니다(절대 경로로 만든 store는 그 경로를 마운트해 바꿔 쓰세요).
 
@@ -2088,15 +2395,19 @@ docker compose start
 
 ## 제한 사항
 
-- 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML과 Go·Cargo 업로드 화면은 없습니다(Go·Cargo는 클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. 포맷 고유의 검색(`npm search` 포함)도 없습니다.
-- **지원하지 않는 포맷**: Terraform은 없습니다(진행 중).
+- 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. Go·Cargo 업로드 화면은 없습니다(클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. 포맷 고유의 검색(`npm search` 포함)도 없습니다.
+- **Terraform의 알려진 제한**: Terraform은 레지스트리를 `https://<호스트>`로만 찾으므로 HTTPS가 필요하고, 한 호스트에는 기본 저장소(`terraformDefaultRepository`) 하나만 보입니다. Terraform은 모듈 아카이브·프로바이더 zip을 받을 때 `~/.terraformrc` 토큰을 보내지 않으므로(모듈은 `~/.netrc`만, 프로바이더의 `SHA256SUMS`·서명은 자격 증명 없이) 비공개 프로바이더는 그 저장소(또는 group)에 `anonymousRead: true`가 필요하고, 비공개 모듈은 `~/.netrc`가 필요합니다. 업스트림의 `git::` 모듈 소스는 캐시하지 않습니다("Terraform 설정" 참고).
+- **SAML의 알려진 제한**: Single Logout이 없어 로그아웃은 Command Center 세션만 끝냅니다. 진행 중인 로그인, 재전송 방지 기록, SAML 사용자 항목이 메모리에만 있으므로 인스턴스는 하나여야 하고, 재시작하면 SAML 사용자의 세션·토큰은 다시 로그인할 때까지 거부됩니다. IdP-initiated 로그인은 `allowIdpInitiated`를 켰을 때만 받습니다("SAML 설정" 참고).
+- **방화벽(OSV)의 알려진 제한**: 격리는 파일을 받아 캐시한 뒤 내줄 때 거부하는 방식이라 메타데이터(npm packument, PyPI 인덱스, `maven-metadata.xml`)에는 격리된 버전이 그대로 나오고, 클라이언트가 그 버전을 고르면 403(일반 텍스트 본문)을 받습니다. 온라인 모드에서 각 버전의 첫 다운로드는 OSV API를 기다립니다(최대 15초, 그 뒤 fail open). conda, Docker, apt, yum, Helm, raw, Git LFS는 대상이 아닙니다("취약점 데이터와 방화벽(OSV)" 참고).
+- **스테이징의 알려진 제한**: 스테이징 이동은 maven, npm, raw, pypi, nuget, helm, yum만 되고 docker를 포함한 나머지 포맷은 거부합니다. npm은 대상의 `latest`만 갱신하고 다른 dist-tag는 옮기지 않습니다. 프로토콜 클라이언트로 지운 컴포넌트는 태그 연결이 남습니다("태그와 스테이징" 참고).
+- **내보내기·가져오기의 알려진 제한**: 저장소 설정의 비밀값(원격 비밀번호·토큰, 원격 URL의 사용자 정보와 쿼리, apt `signingKey`)은 내보내지 않으므로 가져온 뒤 다시 넣어야 합니다. 증분 내보내기(`since`)는 바뀐 파일만 담으므로 행만 바뀐 변경(npm dist-tag, 더 오래된 매니페스트로 옮긴 docker 태그, yank)은 전체 내보내기가 필요합니다("저장소 내보내기와 가져오기" 참고).
 - **Conan·R·Git LFS의 알려진 제한**: Conan v1 API에는 `remove_files`와 `packages/delete`가 없어 리비전 없는 Conan 1.x의 `conan remove -p`와 원격에만 있는 파일을 지우는 재업로드가 실패합니다(Conan 2와 리비전을 켠 Conan 1은 해당 없음). R group은 미러의 `PACKAGES.rds`를 읽지 않고 병합한 `PACKAGES`에서 `.gz`·`.rds`를 만듭니다. Git LFS는 hosted만 되고 잠금(`locks`) API는 501입니다("Conan 설정", "R 설정", "Git LFS 설정" 참고).
 - **p2·Swift·CocoaPods·HuggingFace의 알려진 제한**: p2는 Nexus와 같이 proxy·group만 되고(hosted 없음), 복합 사이트의 `.xml.xz` 문서는 풀지 않고 그대로 전달하므로 그 안의 자식 위치는 바뀌지 않습니다. Swift의 `swift package-registry` 명령은 레지스트리 명세를 따라 적은 것으로 실제 SwiftPM 클라이언트로는 아직 검증하지 않았고, SwiftPM은 레지스트리를 HTTPS로 열므로 운영에서는 `baseURL`을 `https://`로 두어야 합니다. CocoaPods는 트렁크 CDN 소스만 proxy하며 `source.git`(svn·hg 포함) Pod는 proxy하지 않으므로 클라이언트가 원본 git 서버에 직접 접속해야 합니다. HuggingFace는 한 파일을 원본에서 30분 안에 받아야 하고, 큰 파일의 첫 요청은 클라이언트가 먼저 시간 초과할 수 있으므로 `HF_HUB_DOWNLOAD_TIMEOUT`을 늘리세요. `/`가 든 리비전(`refs/pr/*`), `POST …/paths-info`, Xet 전송, 업로드는 지원하지 않습니다("p2 설정", "Swift 설정", "CocoaPods 설정", "HuggingFace 설정" 참고).
 - **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브가 gzip(`control.tar.gz`)이나 무압축 tar인 `.deb`만 받습니다(xz·zstd는 400). Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
 - **RubyGems·Composer·Conda의 알려진 제한**: RubyGems group은 `versions`·`names`만 병합하고 Marshal 인덱스(`specs.4.8.gz` 등)는 그 파일을 처음 가진 멤버 것을 그대로 냅니다. Conda hosted는 `.conda` 파일의 zstd 메타데이터를 읽지 않아 이름·버전·빌드·해시만 기록하고(의존성 없음), `repodata.json.bz2`·`.zst`·`.jlap`를 만들지 않습니다(클라이언트는 `repodata.json`으로 넘어갑니다). Composer는 v1 `providers-url`과 `notify-batch`·`security-advisories`를 제공하지 않으며(Composer 2 전용), `/`가 든 브랜치 버전은 올릴 수 없습니다("RubyGems 설정", "Composer 설정", "Conda 설정" 참고).
 - **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
 - HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
-- **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**, 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기, 이미 만든 저장소의 blob store 이동.
+- **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**(blob store의 소프트 쿼터는 있습니다), 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, LDAP 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기.
 - Go 체크섬 DB(`sumdb/`)는 프록시하지 않습니다. 사내 모듈에는 `GONOSUMDB`를 쓰세요.
 - Go zip 검사는 go 명령의 규칙을 전부 옮기지는 않았습니다. 하위 디렉터리의 `go.mod`, 루트의 `GO.MOD`처럼 대소문자가 다른 `go.mod`, 파일 이름의 `*`·`?`·`"`·`'`·`<`·`>`·`|`·백틱과 제어 문자, `.`으로 끝나는 이름, 다른 항목의 상위 디렉터리와 이름이 같은 파일(`a`와 `a/b.go`)은 받아들이지만, go 명령은 이런 zip을 내려받을 때 거부합니다. 이런 zip은 올리지 마세요.
 - 삭제는 hosted 저장소에서만 됩니다(`npm unpublish`와 Go `DELETE`는 group으로 보내면 `writeMember`에서 지웁니다). proxy의 캐시는 Cleanup 정책으로만 지웁니다. twine과 cargo에는 삭제 명령이 없으므로 PyPI와 Cargo는 웹 UI나 API로 지우고, 패키지 문서가 10 MiB를 넘는 npm 패키지는 버전 하나를 지우는 `npm unpublish`가 413이므로 역시 웹 UI나 API로 지웁니다("컴포넌트 삭제" 참고).
@@ -2115,6 +2426,7 @@ docker compose start
   | R (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
   | Git LFS | 200 (같은 oid는 같은 내용이므로 멱등) |
   | Swift (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
+  | Terraform (`allow_once`) | 같은 내용이면 201, 다른 내용이면 409 (`writePolicy: allow`이면 허용) |
 
   Cargo는 `-`/`_`와 대소문자만 다른 이름, 빌드 메타데이터(`+…`)만 다른 버전도 같은 것으로 보고 409로 거부합니다.
 - **group과 의존성 혼동**: group은 멤버를 순서대로 조회합니다. Maven과 Go는 `latest`를 멤버 전체 중 가장 새로운 버전으로 고르므로, hosted 멤버를 앞에 두어도 proxy 쪽에 더 높은 버전이 있으면 그것이 `latest`가 됩니다. npm·PyPI·Cargo group은 그 패키지(프로젝트, crate)를 처음 가진 멤버 하나만으로 답하므로, hosted를 proxy보다 앞에 두면 같은 이름의 공개 버전이 섞이지 않습니다. npm과 PyPI는 앞선 멤버가 Offline이거나 오류를 내면 503·5xx로 실패하고, tarball·파일 URL을 직접 요청해도 그 멤버의 것만 줍니다. Cargo group은 Offline 멤버를 건너뛰고, crate 파일 다운로드 URL은 멤버 순서대로 찾습니다. Maven·Go·Cargo에서 사내 패키지 이름을 공개 저장소에서 선점당하지 않으려면 사내 전용 group을 따로 두거나 proxy 멤버를 넣지 마세요.

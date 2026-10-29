@@ -189,12 +189,163 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Authorization is not forwarded. Hosted and group are refused. Components are `<repo id>@<commit sha>`
   (group `datasets`/`spaces`); cleanup takes `format: huggingface`, roles `format:huggingface`, and the
   metadata tab shows pipeline_tag, library_name and license.
+- The `terraform` format: Terraform/OpenTofu registries (modules.v1 and providers.v1) at
+  `/repository/<repo>/`, with service discovery at the host root `/.well-known/terraform.json` (the
+  general setting `terraformDefaultRepository`, else the first terraform repository by name) and per
+  repository. Hosted repositories take module archives (tar.gz or zip with `*.tf` at the root or in one
+  top-level directory, `PUT v1/modules/<ns>/<name>/<provider>/<version>` or
+  `PUT modules/…/<version>.tgz`) and provider releases (platform zips, `SHA256SUMS`, its signature and an
+  optional `terraform-registry-manifest.json`, under `PUT v1/providers/<ns>/<type>/<version>/…`), and
+  list the repository's new `gpgPublicKey` (key id read from the OpenPGP key packet) in the download
+  documents. `writePolicy` applies as elsewhere: allow_once accepts the same file again and refuses other
+  content. Clients authenticate with `~/.terraformrc` API tokens (Bearer). Proxies cache
+  registry.terraform.io: version lists as metadata, module http(s) archives and provider files fetched on
+  demand under the proxy's own URLs (zips checked against `shasum`, `git::` sources passed through), and
+  the last module source is kept for when the remote is down. Groups answer from the first member that
+  has the module or provider. Components are `ns/name/provider@version` (modules) and `ns/type@version`
+  (providers), with cleanup policies (format `terraform`), `format:terraform` privileges, the web UI's
+  delete, and metadata (module README paragraph; provider protocols and platforms). Terraform fetches
+  archives and zips with `~/.netrc` only and `SHA256SUMS` without credentials, so private providers need
+  `anonymousRead` on their repository.
+- npm audit: proxy repositories forward `npm audit` (`-/npm/v1/security/audits`, `audits/quick`,
+  `advisories/bulk`) to their remote and pass the answer through uncached, with request and response
+  bodies bounded at 16 MiB. Groups use their first proxy member. Hosted repositories answer an empty
+  report (`{}` for bulk) instead of 501, so `npm install` no longer fails its audit step.
+- Blob store soft quotas: `quota {type: spaceUsedBytes|spaceRemainingBytes, limitBytes}` on create or
+  through the new `PUT /-/api/blobstores/{name}` (which also takes a group's `members` and `fillPolicy`
+  in the same call; a group keeps its quota when its members change). A health check
+  `Blob store quota: <name>` per store, plus `quota`/`quotaViolated` in the blob store API and a
+  `blobstore.quota` event on each flip; uploads are never refused. Nexus compat: `softQuota` on
+  `GET /service/rest/v1/blobstores`, `POST /blobstores/file` and `PUT /blobstores/file/{name}`, and
+  `GET /service/rest/v1/blobstores/{name}/quota-status`.
+- An OpenAPI 3.0 document of every `/-/api` route and the Nexus compat API at `GET /-/api/openapi.json`,
+  also served at `GET /service/rest/swagger.json`, public. A test fails the build when a registered route
+  has no description.
+- General setting `defaultRoles`: roles granted to every signed-in user (local, LDAP, OIDC, Crowd, RUT, SAML, and
+  their API tokens), validated against existing roles (`admin` refused). A role it names cannot be
+  deleted, and changes record `settings.defaultRoles`.
+- The `rutauth` realm (Nexus Rut Auth) authenticates the user named in a header (default `REMOTE_USER`)
+  on requests that come directly from `trustedProxies` CIDRs (RemoteAddr only, never forwarded addresses)
+  and carry no `Authorization`. Roles come from an optional group header with mappings, realm default
+  roles and `source: "rutauth"` override rows, and API tokens are supported. Configured at
+  `GET/PUT /-/api/realms/rutauth`.
+- Per-repository `strictContentTypeValidation` (hosted): raw and Maven uploads whose content contradicts
+  their extension or declared Content-Type are refused with 400 (npm, PyPI, NuGet and Helm already check
+  every package). `contentDisposition` (`inline`/`attachment`) for raw and gitlfs downloads. Both are
+  also in the Nexus compat API (`storage.strictContentTypeValidation`, `raw.contentDisposition`); hosted
+  raw and Maven repositories created through it with `strictContentTypeValidation: true`, as the Nexus
+  examples and the Terraform provider send, now validate.
+- Proxy auto-block: after three consecutive remote failures (connection errors, timeouts or 5xx; not 404,
+  401, 403 or 429), a proxy stops asking its remote for 30 s, doubling up to 5 min. It serves stale cache
+  or fails fast with 502, and resets on the first answer. A manual `blocked` setting never asks the
+  remote. `autoBlock`/`blocked` and the live `remoteStatus {blocked, auto, until, lastError}` (signed-in
+  users only) are in the repository API, and the Nexus compat API maps them to
+  `httpClient.blocked/autoBlock`.
+- User tokens (Sonatype Nexus Pro's "user token", free): each user (local, LDAP, OIDC, Crowd) may hold
+  one name code (8 characters, does not reveal the user name) and pass code (44 characters, shown once,
+  only its SHA-256 hash stored) that replace the user name and password as Basic credentials wherever
+  Basic is accepted (Maven, npm `_auth` and `npm login`, pip, `docker login`, the Nexus API). The general
+  setting `userTokens` turns them on (`enabled`), sets an expiry counted from creation (`expirationDays`,
+  0 = never, up to 3650; changes apply to existing tokens) and can make `/repository/*` and `/v2/*`
+  refuse user name and password for everyone (`required`; tokens and API tokens only, the web UI login is
+  unaffected). Self service at `GET/POST/DELETE /-/api/me/usertoken`; admins list and reset at
+  `/-/api/usertokens` (reset all needs `?confirm=true`); Nexus
+  `GET/PUT /service/rest/v1/security/user-tokens` (`protectContent`), `DELETE` (invalidate all),
+  `.../user-tokens/tokens` and `.../security/users/{userId}/{realm}/user-token`. A failed pass code
+  counts in the sign-in throttle, a disabled or deleted user's token stops at once, and the maintenance
+  task `security.purge-expired-user-tokens` deletes expired ones. Events `usertoken.create`,
+  `usertoken.reset`, `usertoken.delete` and `settings.userTokens`.
+- An Atlassian Crowd realm (`crowd`): password sign-in (web UI, Basic, `npm login`) checked with Crowd's
+  REST API as a configured application, roles from the user's nested Crowd groups through group mappings
+  and default roles plus `source: crowd` override rows, successes cached for `cacheMinutes` (keyed by a
+  password hash, never the password), sessions and tokens of `crowd:<id>` re-checked after that, and
+  every Crowd user denied while Crowd is unreachable. Configure it at `GET/PUT /-/api/realms/crowd` (the
+  application password is sealed with the secret key and never returned), check it with
+  `POST /-/api/realms/crowd/test`, and watch the new "Crowd reachable" status check. Calls go through the
+  outbound proxy settings and the SSL trust store.
+- A SAML 2.0 realm (`saml`): SP-initiated web single sign-on (AuthnRequest over HTTP-Redirect, Response
+  posted to `<baseURL>/-/sso/saml/acs`) against an identity provider described by pasted or fetched
+  metadata (`idpMetadataXML` or `idpMetadataURL`, https only, re-fetched daily through the outbound proxy
+  settings and the SSL trust store). Responses are verified with built-in exclusive canonicalization and
+  XML Signature code against the certificates in the IdP metadata only (RSA-SHA256 and ECDSA-SHA256;
+  RSA-SHA1 only with `allowSHA1Signatures`), reading only the bytes a signature covers: exactly one
+  assertion, no DTD, destination, recipient, InResponseTo, issuer, audience and validity windows
+  (`clockSkewSeconds`) checked, and assertion IDs remembered against replay. Encrypted assertions
+  (RSA-OAEP with AES-CBC or AES-GCM) are decrypted with a service provider key generated on the first
+  save (sealed with the secret key, never returned), which can also sign AuthnRequests
+  (`signAuthnRequests`). The user id comes from the NameID or an attribute, roles from a groups attribute
+  through group mappings and default roles plus `source: saml` override rows; sessions and API tokens of
+  `saml:<id>` last until a restart or a SAML configuration change, as for OIDC. SP metadata at
+  `GET /-/sso/saml/metadata` (and `GET /-/api/realms/saml/sp-metadata` for admins), configuration at
+  `GET/PUT /-/api/realms/saml`. IdP-initiated logins are refused unless `allowIdpInitiated` is set;
+  single logout is not implemented.
+- Blob store groups (`type: "group"` in `POST /-/api/blobstores`): a store whose blobs live in member
+  file or S3 stores, written round robin or to the first writable member (`fillPolicy`), with read-only
+  members being drained, reads from the member that last served a blob and then every member, compaction
+  and verify-blobs over every member, and per-member sizes in recalculate-size.
+  `PUT /-/api/blobstores/{name}` edits members and fill policy (and the quota, in the same call),
+  `POST .../convert-to-group` turns a store (the default one too) into a group keeping its repositories
+  and files, the `blobstore.group-remove-member` task copies a member's blobs to the others (SHA-256
+  checked) before dropping it, and the Nexus API serves `/service/rest/v1/blobstores/group`.
+- S3 failover buckets (`s3.failover`): reads fall back to replica buckets in other regions while the
+  primary endpoint does not answer or answers 5xx; writes stay on the primary.
+  `GET /-/api/blobstores/{name}/health` shows which directory, bucket or member answers.
+- S3 server-side encryption in Nexus's shape (`s3.encryption`: `s3ManagedEncryption`, or
+  `kmsManagedEncryption` with an optional `kmsKeyId` sent as
+  `x-amz-server-side-encryption-aws-kms-key-id`).
+- Cleanup policies keep the newest N versions of every component (`retain`, sorted by `version` with each
+  format's own ordering — Maven, PEP 440, RPM, Debian, Gem, Composer, conda, SemVer — or by `date`),
+  never select components matching `exclude.namePattern`/`exclude.versionPattern`, and can match asset
+  paths with `pathPattern`; policies take `notes`.
+- `POST /-/api/cleanup/preview` previews an unsaved policy on a repository with the cleanup task's own
+  evaluation over the whole repository: up to 1000 components with the reason each is selected, or every
+  candidate as CSV with `?format=csv`.
+- Nexus-compatible cleanup policy API: `GET/POST /service/rest/v1/cleanup-policies` and
+  `GET/PUT/DELETE /service/rest/v1/cleanup-policies/{name}` with Nexus's field names.
+- Nexus-compatible task API: `POST /service/rest/v1/tasks`, `GET/PUT/DELETE /service/rest/v1/tasks/{id}`
+  and `POST .../{id}/run|stop`, mapping Nexus task types, properties and frequencies (cron included) to
+  Command Center tasks and schedules.
+- `GET /service/rest/atlas/system-information` reports status, configuration, runtime, time and blob
+  store free space in Nexus's sections, without secrets.
+- Component tags: named tags with free-form attributes, associated with components selected by the search
+  API's parameters (`/-/api/tags`, Nexus `/service/rest/v1/tags` and `tags/associate`); searches filter
+  by `tag=` and components list their tags.
+- Staging: move components between hosted repositories of one format by tag or search, with metadata
+  rebuilt in both, tags carried over and per-component results, and staging delete
+  (`/service/rest/v1/staging/move/{destination}`, `/service/rest/v1/staging/delete`); maven, npm, raw,
+  pypi, nuget, helm and yum.
+- Change a repository's blob store in the background (`POST /-/api/repositories/{name}/blobstore`, the
+  `repository.change-blobstore` task): reads keep working and uploads go to the new store during the
+  move; blobs are sha256-checked and the switch is atomic.
+- Repository export and import tasks (`repository.export`, `repository.import`; `POST /-/api/export`,
+  `/-/api/import`): portable, verifiable exports under `exportRoot` (or `COMMANDCENTER_EXPORT_ROOT`;
+  manifest, per-repository asset list with package rows and tags, hard-linked or copied blobs, secrets
+  stripped), delta exports with `since`, and imports that keep timestamps, verify every blob, lock like
+  uploads and regenerate index documents when needed.
+- Vulnerability data from OSV (osv.dev): component lookups for npm, PyPI, Maven, Go, Cargo, NuGet,
+  RubyGems, Composer, Conan and R, online through the OSV API (cached) or offline from the OSV dumps
+  (`vulnerability.sync` task, or an all.zip upload for air-gapped sites); affected ranges evaluated with
+  each ecosystem's version order, CVSS 3.x base scores computed. Settings at
+  `/-/api/vulnerability/settings`.
+- Proxy firewall: a proxy's `firewall` policy quarantines components with a malicious-package advisory or
+  one rated at least a chosen severity, cached ones included (403 naming the advisories), with an allow
+  list, a quarantine list and release, and `firewall.blocked` events.
+- `vulnerability.scan` task and repository vulnerability summaries: counts by severity in the repository
+  list, top components per repository, advisories on the component view.
+
+### Fixed
+- Yum hosted repositories accept RPM files built by rpmbuild: 0.2.0 looked for the wrong header magic
+  (`8d ad e8 01` instead of `8e ad e8 01`) and refused every real RPM.
+- Webhooks no longer send a delivery twice when a poll read it while a worker was sending it.
 
 ### Upgrade notes
-- The database schema version is now 3 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`
-  and `content_selectors`, created on the first start of this version on SQLite and PostgreSQL). An
-  older version refuses to start on the upgraded database, so back up before upgrading; downgrades
-  are not supported ("업그레이드" in the operations guide).
+- The database schema version is now 4 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`,
+  `content_selectors`, `user_tokens`, `tags`, `component_tags`, `blob_store_moves`, `vuln_advisories`,
+  `vuln_queries`, `vuln_findings` and `firewall_quarantine`, created on the first start of this version
+  on SQLite and PostgreSQL; blob store groups and the `retain`, `exclude` and `pathPattern` cleanup
+  criteria are stored in existing rows an older build would misread). An older version refuses to start
+  on the upgraded database, so back up before upgrading; downgrades are not supported ("업그레이드" in the
+  operations guide).
 
 ## [0.2.0] - 2026-10-27
 
