@@ -34,7 +34,7 @@
 - **같은 운영 모델.** hosted · proxy · group, 사용자 · 역할 · 권한, Cleanup 정책, 예약 작업, blob store. Nexus를 써 본 사람에게 설명이 필요 없는 구조입니다.
 - **Nexus REST API 호환과 이전 도구.** 기존 스크립트와 Terraform 프로바이더가 `/service/rest/v1`로 그대로 동작하고, `import-nexus`가 hosted 저장소를 통째로 옮겨 줍니다.
 - **작습니다.** CGO 없는 Go 바이너리 하나. 128 MiB 컨테이너에서 돌고, 부하 테스트 최대 RSS는 43 MiB입니다.
-- **에디션이 없습니다.** LDAP, OIDC(SSO), S3 blob store, PostgreSQL은 물론 Nexus Pro 기능(SAML, 사용자 토큰, 스테이징 · 태그, blob store 그룹, retain 정리, 내보내기 · 가져오기)까지 전부 들어 있고, 라이선스는 MIT 또는 Apache-2.0 중 고르면 됩니다.
+- **에디션이 없습니다.** LDAP, OIDC(SSO), S3 blob store, PostgreSQL은 물론 Nexus Pro 기능(SAML, 사용자 토큰, 스테이징 · 태그, blob store 그룹, retain 정리, 내보내기 · 가져오기, active-active 고가용성)까지 전부 들어 있고, 라이선스는 MIT 또는 Apache-2.0 중 고르면 됩니다.
 
 ## 지원 포맷
 
@@ -85,7 +85,7 @@
 - **Webhook**: 전역 또는 저장소별로 모든 활동 이벤트를 HTTP POST로 전달(HMAC 서명, 재시도, 전달 기록).
 - **라우팅 규칙**: proxy가 원격에 물어볼 경로를 정규식으로 BLOCK/ALLOW(사내 아티팩트 유출 방지).
 - **컨텐츠 셀렉터**: CSEL 식(`format`, `path`, `coordinate.groupId`)으로 역할 권한을 경로 단위로 제한.
-- **Kubernetes 우선**: Helm 차트(StatefulSet, values 스키마, PostgreSQL · NFS · HTTPRoute 지원, `helm test`), 참조 매니페스트, 릴리스마다 amd64 · arm64 이미지와 SBOM · provenance.
+- **Kubernetes 우선**: Helm 차트(StatefulSet, `replicaCount`로 여러 Pod를 띄우는 Deployment, values 스키마, PostgreSQL · NFS · HTTPRoute 지원, `helm test`), 참조 매니페스트, 릴리스마다 amd64 · arm64 이미지와 SBOM · provenance.
 - **Nexus 호환**: `/service/rest/v1`의 repositories · components · assets · search · status · blobstores · cleanup-policies · tasks · tags · staging · user-tokens API, `commandcenter import-nexus`.
 - **OpenAPI 문서**: 모든 관리 API와 Nexus 호환 API를 설명하는 OpenAPI 3.0 문서(`/-/api/openapi.json`, `/service/rest/swagger.json`).
 
@@ -170,7 +170,7 @@ docker compose up -d
 - TLS는 Ingress나 리버스 프록시에서 끝내고 `baseURL`을 `https://` 주소로 둡니다.
 - 사내 전용이면 익명 읽기(`anonymousRead`)를 끕니다. CI에는 비밀번호 대신 API 토큰을 줍니다.
 - 저장된 비밀값(SMTP · LDAP · OIDC · Crowd · SAML · 원격 인증 · S3)을 암호화하는 키(`COMMANDCENTER_SECRET_KEY` 또는 `secretKeyFile`)를 두고 백업과 따로 보관합니다.
-- 메타데이터는 PostgreSQL이나 블록 스토리지의 SQLite에 둡니다(SQLite를 NFS에 두지 마세요). 인스턴스는 하나입니다.
+- 메타데이터는 PostgreSQL에 둡니다. 여러 대를 함께(active-active) 띄우려면 모든 노드가 같은 PostgreSQL DB와 공유 스토리지(ReadWriteMany)를 씁니다.
 - 중지 대기 시간 60초(차트와 compose에 들어 있음), 정기 백업, 업그레이드 전 백업. 다운그레이드는 지원하지 않습니다.
 
 전체 목록은 [프로덕션 배포](docs/guide.md#프로덕션-배포)에 있습니다.
@@ -187,7 +187,7 @@ docker compose up -d
 
 ## 현황과 제한
 
-- 인스턴스 하나로 돌도록 만들었습니다. 이중화 · 수평 확장은 없습니다(Nexus OSS와 같습니다).
+- 여러 대를 함께 띄우는 active-active 구성을 지원합니다. 모든 노드가 같은 PostgreSQL DB와 공유 스토리지(ReadWriteMany)를 씁니다. 쓰기는 DB에서 하나씩 처리되므로 늘어나는 것은 가용성과 읽기 처리량입니다.
 - Nexus REST API는 저장소 · 컴포넌트 · 자산 · 검색 · 상태 · blob store · Cleanup 정책 · 작업 · 태그 · 스테이징 · 사용자 토큰 엔드포인트를 지원합니다. 사용자 · 역할 쓰기, 스크립트 API는 없습니다.
 - 알려진 제한은 [제한 사항](docs/guide.md#제한-사항), 릴리스마다 고친 것과 바뀐 것은 [CHANGELOG](CHANGELOG.md)에 있습니다.
 - 버그는 이슈로, 보안 문제는 [보안 정책](SECURITY.md)대로 비공개로 알려 주세요.

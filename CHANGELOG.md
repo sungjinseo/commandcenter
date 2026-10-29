@@ -9,6 +9,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- High availability (active-active): any number of `serve` processes on one PostgreSQL
+  database and one shared `dataDir` (ReadWriteMany: NFS, CephFS, EFS) serve every request together behind
+  a load balancer, without session affinity. Blob store moves and blob store group member changes now
+  reach every node: a node learns of a move from the database and a notification and routes the
+  repository's writes to the target at once. `repository.change-blobstore` and
+  `blobstore.group-remove-member` wait, before they copy, until every live node has applied the change
+  and finished the writes it began before. Compaction first re-reads the stores, moves and repositories
+  every node left.
+- Helm chart `replicaCount`: `1` (default) renders the single-pod StatefulSet as before. Above 1 it
+  renders a Deployment (rolling updates start a new pod first), one ReadWriteMany claim kept on uninstall
+  (or `persistence.existingClaim`), a PodDisruptionBudget of one pod, and, while `affinity` is empty, a
+  preferred anti-affinity on `kubernetes.io/hostname`. The chart refuses `replicaCount` above 1 without
+  a ReadWriteMany volume (or `persistence.existingClaim`).
+- `test/ha/ha-smoke.sh` (`test/e2e.sh --ha`): PostgreSQL and two nodes on one volume in Docker. It covers
+  formats, sessions and Docker chunks across nodes, a task run once, webhooks delivered once, a `kill -9`
+  under load and a rolling restart under load.
 - Cluster-wide locks and cache invalidation on PostgreSQL (HA groundwork): every format's per-path,
   per-package and per-index locks (uploads, deletes, metadata rebuilds, repository import, Docker upload
   sessions) and repository, blob store, cleanup policy, routing rule, user, role, realm and settings
@@ -360,6 +376,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `serve` no longer refuses to start beside another live node: the single-writer guard is gone. The
+  `Cluster` status check no longer reports more than one live node as unhealthy.
+- The reference manifest `deploy/kubernetes/commandcenter.yaml` uses
+  `GET /service/rest/v1/status/writable` for readiness, as the chart does.
+- On a node other than the one running a repository's blob store move, the repository list shows the move
+  as `copying` while its task runs on any node, and `interrupted` otherwise. The copy counts are only on
+  the node running the task.
 - `commandcenter user reset-password` and `token create` take effect at once on servers using PostgreSQL.
 - Webhook deliveries are sent only by `serve`. CLI commands store the deliveries their events make and
   leave them to the running server, or to the next one started. Before, a CLI command beside a server
@@ -388,6 +411,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Webhooks no longer send a delivery twice when a poll read it while a worker was sending it.
 
 ### Upgrade notes
+- No schema change: the database stays at schema 6, compat 6.
+- Older builds refuse to start beside a running node, but this one starts beside an older one. Upgrade
+  every node and do not mix versions except during a rolling upgrade. Blob store moves and group member
+  removals wait until every node answers, which an older node never does.
+- From one instance to several: back up, stop, copy `blobs/` and `blobstores/` to a ReadWriteMany volume,
+  then start every node with the same config, database and secret key. For the chart: `replicaCount` and
+  `persistence.existingClaim`.
+- The chart's `persistence.accessModes` now accepts `ReadWriteMany`.
 - The database schema version is now 6: the columns `tasks.running_node`, `tasks.running_since`,
   `webhook_deliveries.claimed_by`, `webhook_deliveries.claim_until` and the index
   `webhook_deliveries_due`, the column `repositories.gen` (existing repositories keep 0 until re-created or
@@ -408,10 +439,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   older versions refuse the upgraded database as before: back up before upgrading. On PostgreSQL, nodes
   that start at once upgrade one after the other with no lock timeout (the startup probe bounds the wait),
   and an upgrade is refused while a live node of a build older than compat is registered.
-- `serve` on PostgreSQL refuses to start while another live server is registered on the same database
-  (it waits up to 30 s for a crashed predecessor's heartbeat to expire): stop the old instance before
-  starting the new one. The Helm chart's readinessProbe now asks `GET /service/rest/v1/status/writable`,
-  and on PostgreSQL a stopping server stays unready for 5 s before it stops taking connections.
+- The Helm chart's readinessProbe asks `GET /service/rest/v1/status/writable`, and a stopping server stays
+  unready for 5 s before it stops taking connections.
 - The database schema version is now 4 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`,
   `content_selectors`, `user_tokens`, `tags`, `component_tags`, `blob_store_moves`, `vuln_advisories`,
   `vuln_queries`, `vuln_findings` and `firewall_quarantine`, created on the first start of this version

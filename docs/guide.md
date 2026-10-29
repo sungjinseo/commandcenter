@@ -101,7 +101,7 @@ Kubernetes에는 Helm 차트로 설치합니다("Kubernetes" 참고). 여기서�
 
 ## Kubernetes
 
-Kubernetes에는 Helm 차트로 설치합니다. 차트는 서버 Pod 하나(StatefulSet), `/data`의 ReadWriteOnce 볼륨, `config.yaml`을 담은 Secret, Service, 그리고 켜면 Ingress를 만듭니다. 차트는 릴리스마다 `oci://ghcr.io/sungjinseo/charts/commandcenter`에 올라갑니다. 차트 버전은 릴리스 버전(`v1.2.3`이면 `1.2.3`)과 같고, 기본 이미지도 같은 버전의 `ghcr.io/sungjinseo/commandcenter`입니다. OCI 레지스트리의 차트를 받으려면 Helm 3.8 이상이 필요합니다. 차트의 원본은 [`deploy/helm/commandcenter`](../deploy/helm/commandcenter)이고, Helm 없이 설치하려면 "참조 매니페스트"를 보세요.
+Kubernetes에는 Helm 차트로 설치합니다. 차트는 기본으로 서버 Pod 하나(StatefulSet), `/data`의 ReadWriteOnce 볼륨, `config.yaml`을 담은 Secret, Service, 그리고 켜면 Ingress를 만듭니다. `replicaCount`를 2 이상으로 두면 PostgreSQL과 ReadWriteMany 볼륨 하나를 함께 쓰는 Deployment로 여러 Pod를 띄웁니다("고가용성(여러 노드)" 참고). 차트는 릴리스마다 `oci://ghcr.io/sungjinseo/charts/commandcenter`에 올라갑니다. 차트 버전은 릴리스 버전(`v1.2.3`이면 `1.2.3`)과 같고, 기본 이미지도 같은 버전의 `ghcr.io/sungjinseo/commandcenter`입니다. OCI 레지스트리의 차트를 받으려면 Helm 3.8 이상이 필요합니다. 차트의 원본은 [`deploy/helm/commandcenter`](../deploy/helm/commandcenter)이고, Helm 없이 설치하려면 "참조 매니페스트"를 보세요.
 
 이 절의 명령은 네임스페이스와 릴리스 이름으로 모두 `commandcenter`를 씁니다. 그러면 StatefulSet과 Service는 `commandcenter`, Pod는 `commandcenter-0`, PVC는 `data-commandcenter-0`, 설정 Secret은 `commandcenter-config`입니다. 릴리스 이름에 `commandcenter`가 들어 있지 않으면 이름이 `<릴리스 이름>-commandcenter`가 됩니다.
 
@@ -164,7 +164,8 @@ Kubernetes에는 Helm 차트로 설치합니다. 차트는 서버 Pod 하나(Sta
 
 - **`config.baseURL`(필수)**: 클라이언트가 접속하는 주소입니다. TLS를 Ingress에서 끝내면 그 `https://` 주소입니다("TLS와 리버스 프록시" 참고).
 - **`config.adminPasswordHash`(필수)**: `admin` 사용자의 bcrypt 해시(`hash-password`의 출력)입니다. 필수 값이 비어 있으면 차트가 설치를 거부합니다.
-- **`persistence.storageClass`(반드시 정하기)**: `/data` 볼륨의 StorageClass입니다. **블록 스토리지만 됩니다.** `meta.db`는 WAL 모드의 SQLite라서 NFS·SMB 같은 네트워크 파일시스템에서는 깨질 수 있습니다("저장 공간과 인스턴스" 참고). 비워 두면 클러스터의 기본 StorageClass를 쓰는데 그것이 NFS인 클러스터도 있으니 이름을 직접 적으세요. `kubectl get storageclass`의 PROVISIONER를 보고 고릅니다.
+- **`replicaCount`(기본 `1`)**: 1이면 지금과 같은 StatefulSet(Pod 하나)을 만듭니다. 2 이상이면 Deployment(롤링 업데이트는 새 Pod를 먼저 띄우고 이전 Pod를 하나씩 멈춥니다. `maxSurge: 1`, `maxUnavailable: 0`), 모든 Pod가 마운트하는 ReadWriteMany PVC 하나(`<이름>-data`. `helm.sh/resource-policy: keep`이라 `helm uninstall`로 지워지지 않습니다. `persistence.existingClaim`을 주면 그 PVC), PodDisruptionBudget(`maxUnavailable: 1`), 그리고 `affinity`가 비어 있으면 Pod를 서로 다른 노드에 두려는 preferred podAntiAffinity(`kubernetes.io/hostname`)를 만듭니다. 2 이상인데 `persistence.accessModes: [ReadWriteMany]`(또는 `persistence.existingClaim`)가 없으면 차트가 설치를 거부합니다.
+- **`persistence.storageClass`(반드시 정하기)**: `/data` 볼륨의 StorageClass입니다. **블록 스토리지만 됩니다.** `meta.db`는 WAL 모드의 SQLite라서 NFS·SMB 같은 네트워크 파일시스템에서는 깨질 수 있습니다("저장 공간과 인스턴스" 참고). 비워 두면 클러스터의 기본 StorageClass를 쓰는데 그것이 NFS인 클러스터도 있으니 이름을 직접 적으세요. `kubectl get storageclass`의 PROVISIONER를 보고 고릅니다. `replicaCount`가 2 이상이면 반대로 ReadWriteMany를 주는 클래스(NFS, CephFS, EFS 등)를 고릅니다.
   - 됩니다: 클라우드 블록 디스크(AWS EBS `ebs.csi.aws.com`, GCE PD `pd.csi.storage.gke.io`, Azure Disk `disk.csi.azure.com`, NKS의 `nks-block-storage`), Ceph RBD, Longhorn, iSCSI, 로컬 볼륨
   - 안 됩니다: NFS(`nfs.csi.k8s.io`, nfs-subdir-external-provisioner), NAS 상품, AWS EFS, Azure Files, GKE Filestore, CephFS
   - `-`를 적으면 `storageClassName: ""`이 되어 미리 만들어 둔 PV에 묶입니다.
@@ -179,7 +180,7 @@ Kubernetes에는 Helm 차트로 설치합니다. 차트는 서버 Pod 하나(Sta
 - `extraEnv`: 예약 작업의 시간대(`TZ`, "예약 작업" 참고) 같은 환경변수입니다. 예: `extraEnv: [{name: TZ, value: Asia/Seoul}]`
 - `extraVolumes`, `extraVolumeMounts`: 이름 붙은 blob store를 둘 볼륨입니다. blob은 NFS에 둘 수 있지만 `meta.db`는 안 됩니다("저장 공간과 인스턴스" 참고).
 - `terminationGracePeriodSeconds`(기본 60), `startupProbe`, `readinessProbe`, `livenessProbe`, `podSecurityContext`, `securityContext`: 바꿀 일이 거의 없습니다("동작 방식" 참고).
-- 그 밖에 `service`, `serviceAccount`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `nameOverride`, `fullnameOverride`가 있습니다. 릴리스 이름과 `nameOverride`·`fullnameOverride`는 처음 설치할 때 정합니다. 바꾸면 빈 볼륨을 가진 새 StatefulSet이 생깁니다. Pod 수를 정하는 값은 일부러 두지 않았습니다.
+- 그 밖에 `service`, `serviceAccount`, `nodeSelector`, `tolerations`, `affinity`, `priorityClassName`, `podAnnotations`, `podLabels`, `nameOverride`, `fullnameOverride`가 있습니다. 릴리스 이름과 `nameOverride`·`fullnameOverride`는 처음 설치할 때 정합니다. 바꾸면 빈 볼륨을 가진 새 StatefulSet이 생깁니다. Pod 수는 `replicaCount`로 정합니다.
 
 ### Ingress와 큰 업로드
 
@@ -216,6 +217,7 @@ helm test commandcenter -n commandcenter
    ```
 
 - StatefulSet은 이전 Pod가 끝난 뒤에(최대 60초, "정상 종료" 참고) 새 Pod를 띄우므로 그사이 서비스가 잠시 멈춥니다. 새 버전은 처음 시작할 때 `meta.db`를 새 구조로 바꾸며, startupProbe가 5분까지 기다립니다.
+- `replicaCount`가 2 이상이면 Deployment가 새 Pod를 먼저 띄우고 이전 Pod를 하나씩 멈추므로 서비스가 멈추지 않습니다. 새 버전이 이전 버전과 함께 돌 수 없는 DB 변경을 하면(CHANGELOG의 Upgrade notes가 compat을 알려 줍니다) 새 Pod는 이유를 로그에 남기고 시작을 거부하며, 이전 Pod가 계속 요청을 받는 채로 롤아웃이 멈춥니다. 그런 버전은 `kubectl -n commandcenter scale deployment commandcenter --replicas=0`으로 모두 멈춘 뒤 올립니다.
 - 이미지는 차트 버전을 따라갑니다. `image.tag`를 정해 두었다면 함께 바꾸세요.
 - `persistence`의 값(`storageClass`, `size`, `accessModes`)은 바꾸지 않습니다. StatefulSet의 볼륨 템플릿은 만든 뒤 바꿀 수 없어서 `helm upgrade`가 `Forbidden: updates to statefulset spec for fields other than …` 오류로 실패합니다. 볼륨을 늘리려면 StorageClass가 `allowVolumeExpansion: true`일 때 PVC를 직접 늘리고, 값 파일의 `size`는 그대로 둡니다.
 
@@ -331,10 +333,10 @@ kubectl -n commandcenter delete pvc data-commandcenter-0
 
 ### 동작 방식
 
-- **StatefulSet, Pod 하나**: StatefulSet은 이전 Pod가 완전히 끝난 뒤에 새 Pod를 띄우므로 업데이트 중에도 두 프로세스가 같은 `meta.db`를 열지 않습니다(Deployment의 롤링 업데이트는 겹칠 수 있습니다). `replicas`를 늘리면 Pod마다 빈 볼륨이 따로 생겨, 데이터가 서로 다른 서버가 여러 대 생깁니다. 차트에 Pod 수를 정하는 값이 없는 것도 이 때문입니다.
-- **볼륨**: `/data`는 ReadWriteOnce PVC(`data-commandcenter-0`, 기본 50Gi)이며 블록 스토리지여야 합니다("차트 값"의 `persistence.storageClass`).
-- **노드 장애**: Pod가 `Terminating`이나 `Unknown`에 머물러도 `kubectl delete pod --force --grace-period=0`으로 지우지 마세요. 이전 노드에서 프로세스가 아직 돌고 있으면 같은 볼륨을 두 프로세스가 쓰게 될 수 있습니다.
-- **프로브**: startupProbe는 `GET /service/rest/v1/status`(인증 없이 200)로 HTTP 서버가 응답하는지만 봅니다. readinessProbe는 `GET /service/rest/v1/status/writable`로, DB가 응답하고 노드가 종료 중이 아니며 스키마가 맞고 (PostgreSQL) 잠금·알림 연결이 살아 있을 때만 200입니다("노드와 준비 상태" 참고. 참조 매니페스트는 아직 `/service/rest/v1/status`를 씁니다). 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. livenessProbe는 포트에 TCP 연결만 해 봅니다(`tcpSocket`). TCP 연결은 서버의 연결 자리 1024개가 모두 차 있어도 커널이 받아 주므로(커널 대기열이 넘치지 않는 한), 서버가 바쁘거나 공격을 받아 느려졌다고 Pod가 재시작되어 진행 중인 전송이 모두 끊기지는 않습니다. 그동안 readinessProbe가 실패하면 Pod는 Service에서 잠시 빠졌다가 다시 들어옵니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
+- **StatefulSet, Pod 하나(기본)**: StatefulSet은 이전 Pod가 완전히 끝난 뒤에 새 Pod를 띄우므로 업데이트 중에도 두 프로세스가 같은 ReadWriteOnce 볼륨을 쓰지 않습니다. StatefulSet의 `replicas`를 직접 늘리면 Pod마다 빈 볼륨이 따로 생겨 데이터가 서로 다른 서버가 여러 대 생기므로, 여러 대는 `replicaCount`로 띄웁니다. 그러면 StatefulSet 대신 Deployment가 되어 모든 Pod가 같은 PostgreSQL DB와 같은 ReadWriteMany 볼륨을 씁니다("고가용성(여러 노드)" 참고).
+- **볼륨**: `/data`는 ReadWriteOnce PVC(`data-commandcenter-0`, 기본 50Gi)이며 블록 스토리지여야 합니다("차트 값"의 `persistence.storageClass`). `replicaCount`가 2 이상이면 모든 Pod가 함께 마운트하는 ReadWriteMany PVC(`commandcenter-data`)입니다.
+- **노드 장애**: Pod가 `Terminating`이나 `Unknown`에 머물러도 `kubectl delete pod --force --grace-period=0`으로 지우지 마세요. 이전 노드에서 프로세스가 아직 돌고 있으면 같은 볼륨을 두 프로세스가 쓰게 될 수 있습니다. `replicaCount`가 2 이상이면 다른 Pod가 계속 요청을 받으므로 그대로 기다리면 됩니다.
+- **프로브**: startupProbe는 `GET /service/rest/v1/status`(인증 없이 200)로 HTTP 서버가 응답하는지만 봅니다. readinessProbe는 `GET /service/rest/v1/status/writable`로, DB가 응답하고 노드가 종료 중이 아니며 스키마가 맞고 (PostgreSQL) 잠금·알림 연결이 살아 있을 때만 200입니다("노드와 준비 상태" 참고. 참조 매니페스트도 같습니다). 여러 Pod일 때 DB나 알림 연결이 끊긴 Pod와 종료 중인 Pod를 Service에서 빼는 것이 이 프로브입니다. 디스크는 보지 않습니다(관리자 화면의 시스템 상태에서 확인합니다). 처음 시작하거나 업그레이드로 DB를 바꾸는 데 시간이 걸려도 재시작되지 않도록 startupProbe가 5분까지 기다립니다. livenessProbe는 포트에 TCP 연결만 해 봅니다(`tcpSocket`). TCP 연결은 서버의 연결 자리 1024개가 모두 차 있어도 커널이 받아 주므로(커널 대기열이 넘치지 않는 한), 서버가 바쁘거나 공격을 받아 느려졌다고 Pod가 재시작되어 진행 중인 전송이 모두 끊기지는 않습니다. 그동안 readinessProbe가 실패하면 Pod는 Service에서 잠시 빠졌다가 다시 들어옵니다. `commandcenter healthcheck`를 exec 프로브로 쓰지 않는 것은 128 MiB 한도 안에서 프로세스를 하나 더 띄우지 않기 위해서입니다.
 - **보안**: UID 65532(non-root), 읽기 전용 루트 파일시스템, 모든 capability 제거, seccomp `RuntimeDefault`로 Pod Security Standards의 `restricted` 기준에 맞습니다. SQLite 임시 파일은 `/tmp`(emptyDir)에 씁니다. 이름 붙은 blob store는 경로를 비우면 `/data/blobstores/<이름>`에 만들어지고, `/data` 밖의 절대 경로에 두려면 그 경로에 볼륨을 따로 마운트해야 합니다(`extraVolumes`, `extraVolumeMounts`). 루트 파일시스템이 읽기 전용이라 다른 경로에는 만들 수 없고, `/tmp`는 Pod가 다시 만들어지면 비워집니다.
 - **리소스**: 메모리 요청과 한도 128Mi, `GOMEMLIMIT=80MiB`(`goMemLimit`)입니다. CPU는 요청(100m)만 두고 한도는 두지 않습니다.
 - **운영 명령**: "운영"의 `docker compose exec commandcenter …`는 `kubectl -n commandcenter exec commandcenter-0 -- …`로 바꿔 씁니다(예: `kubectl -n commandcenter exec commandcenter-0 -- commandcenter token create -user ci`). 로그는 `kubectl -n commandcenter logs commandcenter-0`입니다.
@@ -360,7 +362,7 @@ kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
 2. TLS는 리버스 프록시에서 끝내고, 일반 설정의 `baseURL`을 `https://` 주소로 둡니다. 서버 포트 8081은 프록시에서만 닿게 합니다.
 3. 사내 전용 저장소라면 익명 읽기를 끕니다. 일반 설정의 `anonymousRead`와 저장소별 `anonymousRead`를 확인하세요. `config.example.yaml`은 시험하기 편하도록 `anonymousRead: true`입니다. 권한이 없는 로그인 사용자의 읽기까지 막으려면 `authenticatedRead`도 끕니다("읽기 권한" 참고).
 4. 프록시에서 요청 본문 크기, 본문 수신·응답 전송 타임아웃, 클라이언트당 연결 수를 제한합니다.
-5. `meta.db`가 있는 `dataDir`는 로컬 디스크나 블록 스토리지에 둡니다. NFS·SMB에는 두지 않습니다. 인스턴스는 하나만 띄웁니다.
+5. `dataDir`는 영구 볼륨에 둡니다. 여러 대를 함께 띄우려면 모든 노드가 같은 PostgreSQL DB와 같은 `dataDir`(ReadWriteMany 공유 스토리지)를 씁니다("고가용성(여러 노드)" 참고).
 6. 메모리 한도와 `GOMEMLIMIT`을 함께 정합니다.
 7. 중지 대기 시간을 60초로 둡니다(compose 파일, Helm 차트, 참조 매니페스트에는 들어 있습니다. "정상 종료" 참고).
 8. 정기 백업을 돌리고, 복원도 한 번 해 봅니다("백업과 복원" 참고).
@@ -411,9 +413,9 @@ nginx는 기본적으로 요청 본문을 끝까지 받은 다음 서버로 넘�
 ### 저장 공간과 인스턴스
 
 - **`meta.db`는 로컬 디스크나 블록 스토리지에**: `dataDir`(기본 `/data`)에는 `meta.db`(SQLite, WAL 모드)와 default blob store(`blobs/`)가 있습니다. WAL은 같은 호스트의 공유 메모리 파일(`meta.db-shm`)과 파일 잠금에 기대므로, NFS나 SMB(CIFS) 같은 네트워크 파일시스템에서는 잠금이 보장되지 않고 DB가 깨질 수 있습니다. 로컬 디스크, 클라우드 블록 디스크, iSCSI, Kubernetes의 ReadWriteOnce 블록 볼륨을 쓰세요.
-- **NFS에는 blob만**: blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로, 이름 붙은 blob store("Blob Store" 참고)는 NFS 경로에 둘 수 있습니다. compact 작업이 파일의 수정 시각으로 진행 중인 업로드를 보호하므로 NFS 서버와 시계를 맞춰 두세요(NTP).
+- **NFS에는 blob만**: blob은 내용 주소 방식이라 한 번 쓰면 바뀌지 않으므로, 이름 붙은 blob store("Blob Store" 참고)는 NFS 경로에 둘 수 있습니다. compact 작업이 파일의 수정 시각으로 진행 중인 업로드를 보호하므로 NFS 서버와 시계를 맞춰 두세요(NTP). 여러 노드는 `dataDir` 전체를 공유 스토리지에 둡니다("고가용성(여러 노드)" 참고).
 - **blob store 경로는 영구 볼륨에**: 컨테이너 안의 경로(예: `/tmp/…`)에 store를 만들면 컨테이너를 다시 만들 때 blob이 사라지고 DB 기록만 남습니다.
-- **인스턴스는 하나만**: proxy 자동 차단 상태와 일부 캐시가 프로세스 안에 있고, 두 번째 `serve`는 시작을 거부합니다(PostgreSQL에서 업로드 잠금, 캐시, 세션, SSO 상태, 예약 작업은 노드 사이에 맞춰집니다. "노드와 준비 상태" 참고). 같은 `dataDir`나 blob store를 두 프로세스가 함께 쓰면 안 되고, 이중화(active-active)나 여러 대로 늘리는 구성은 지원하지 않습니다. 컨테이너를 바꿀 때는 이전 컨테이너가 완전히 멈춘 뒤에 새 컨테이너를 띄우세요. 대신 재시작은 빠릅니다(중지와 기동 모두 보통 1초 안쪽). PostgreSQL을 쓰면 두 번째 `serve`는 시작을 거부합니다("노드와 준비 상태" 참고).
+- **인스턴스 수**: 노드 여러 대가 같은 PostgreSQL DB와 같은 `dataDir`(ReadWriteMany 공유 스토리지)를 함께 써서 모두 요청을 받을 수 있습니다(active-active, "고가용성(여러 노드)" 참고). 한 대로 돌려도 재시작은 빠릅니다(중지와 기동 모두 보통 1초 안쪽).
 - **디스크 여유**: proxy 캐시는 계속 커집니다. Cleanup 정책과 compact 작업으로 정리하고, Blob Store 화면에서 파일시스템의 남은 용량을 지켜보세요.
 
 ### 리소스
@@ -436,17 +438,56 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
 ### 노드와 준비 상태
 
 - **노드 등록**: `serve`로 띄운 서버는 시작할 때 메타데이터 DB의 `nodes` 테이블에 자신을 노드로 등록합니다. 노드 ID는 `<호스트 이름>-<16진수 4자리>`이며 시작할 때마다 새로 정해집니다. 노드는 10초마다 DB 서버의 시계로 하트비트를 갱신하고, 마지막 하트비트가 30초 안이면 살아 있는 노드로 봅니다. 정상 종료하면 행을 지우고, 비정상 종료로 남은 행은 24시간이 지나면 정리됩니다. 노드 ID는 모든 로그 레코드의 `node` 속성, `/-/metrics/prometheus`의 `commandcenter_node_info{node,version} 1`, 시스템 정보의 `commandcenter-status.node`, 지원 번들의 `info.json`과 `nodes.json`에 들어갑니다. 등록된 노드는 `GET /-/api/nodes`(관리자)로 봅니다. `self`는 응답한 노드이고, 노드마다 `id`, `hostname`, `version`, `schema`(빌드의 스키마 버전), `startedAt`, `heartbeatAt`, `alive`, `draining`, `leader`(예약 작업 임대를 가진 노드), `runningTask`(그 노드가 실행 중인 예약 작업의 ID, 없으면 빈 문자열)가 있습니다.
-- **두 번째 인스턴스는 시작을 거부합니다; HA는 아직 아닙니다**: PostgreSQL을 쓸 때 같은 DB에 살아 있는 다른 노드가 있으면, `serve`는 그 노드의 ID, 호스트, 버전, 마지막 하트비트를 알리는 오류를 내고 시작하지 않습니다. 일부 상태(proxy 자동 차단, Blob Store 이동 중 경로 등)가 아직 프로세스 안에 있어서, 두 프로세스가 한 DB를 함께 쓰면 갱신이 사라지기 때문입니다(이전 버전은 경고 없이 시작했습니다). 이전 프로세스가 비정상 종료해 행이 남아 있으면 그 하트비트가 만료될 때까지(최대 30초) 로그를 남기고 기다린 뒤 시작합니다. 기다리는 동안 하트비트가 갱신되면 다른 서버가 실제로 돌고 있는 것이므로 거부합니다. 컨테이너를 바꿀 때는 이전 서버를 먼저 멈추세요. SQLite는 한 프로세스만 파일을 열므로 이 검사가 없습니다. `token create`, `gc`, `migrate-db` 같은 CLI 명령은 노드로 등록하지 않으므로 실행 중인 서버 옆에서 그대로 쓸 수 있습니다.
-- **노드 사이의 잠금과 캐시(PostgreSQL)**: PostgreSQL을 쓰면 서버의 잠금이 DB의 advisory lock이 되어 같은 DB를 쓰는 모든 노드에 걸칩니다. 같은 경로·패키지·인덱스를 건드리는 업로드와 삭제(모든 포맷, 메타데이터 재생성, 저장소 가져오기, Docker 업로드 세션 포함), 저장소·blob store·정리 정책·라우팅 규칙의 변경, 사용자·역할·Realm·설정의 변경은 어느 노드로 들어오든 한 번에 하나씩 처리됩니다. 한 노드에서 저장소, 라우팅 규칙, blob store, 웹훅, 사용자·역할·설정, 정리 정책, 로그 수준을 바꾸면 다른 노드는 DB 알림(LISTEN/NOTIFY)을 받아 곧바로 DB에서 다시 읽습니다. 알림을 놓쳐도 5초마다 다시 읽으므로 늦어도 몇 초 안에 맞춰집니다. 다른 노드에서 방금 만든 저장소를 가리키는 요청(`/repository/…`, `/v2/…`)은 그 자리에서 DB를 확인하므로 바로 처리됩니다. 저장소마다 세대 번호(`gen`)를 DB에 두므로, 요청이 진행되는 동안 어느 노드에서든 같은 이름의 저장소를 지우고 다시 만들면 그 요청이 트랜잭션으로 쓰는 내용은 새 저장소에 들어가지 않고 `503 repository "<이름>" changed during the request; retry`로 거절됩니다. 다시 시도하면 됩니다(raw 파일과 Maven 아티팩트 파일 하나를 올리는 쓰기는 이 검사 대상이 아닙니다). SQLite는 이전과 같이 프로세스 안의 잠금만 씁니다. 두 번째 `serve`를 거부하는 검사는 그대로이므로 여러 노드 구성은 아직 지원하지 않습니다.
-- **여러 노드의 예약 작업과 webhook(PostgreSQL)**: 아직은 두 번째 `serve`가 거부되지만, 예약 작업과 webhook 전달은 같은 DB를 쓰는 노드가 여럿이어도 한 번씩만 실행되도록 DB로 조정합니다. SQLite에서는 동작이 바뀌지 않습니다.
+- **여러 노드**: 같은 PostgreSQL DB에 `serve`를 여러 개 띄우면 모두 노드로 등록하고 함께 요청을 처리합니다(active-active, "고가용성(여러 노드)" 참고). 시작할 때 다른 노드를 기다리거나 거부하지 않습니다(이전 버전은 살아 있는 다른 노드가 있으면 시작을 거부했습니다). `token create`, `gc`, `migrate-db` 같은 CLI 명령은 노드로 등록하지 않으므로 실행 중인 서버 옆에서 그대로 쓸 수 있습니다.
+- **노드 사이의 잠금과 캐시(PostgreSQL)**: PostgreSQL을 쓰면 서버의 잠금이 DB의 advisory lock이 되어 같은 DB를 쓰는 모든 노드에 걸칩니다. 같은 경로·패키지·인덱스를 건드리는 업로드와 삭제(모든 포맷, 메타데이터 재생성, 저장소 가져오기, Docker 업로드 세션 포함), 저장소·blob store·정리 정책·라우팅 규칙의 변경, 사용자·역할·Realm·설정의 변경은 어느 노드로 들어오든 한 번에 하나씩 처리됩니다. 한 노드에서 저장소, 라우팅 규칙, blob store, 웹훅, 사용자·역할·설정, 정리 정책, 로그 수준을 바꾸면 다른 노드는 DB 알림(LISTEN/NOTIFY)을 받아 곧바로 DB에서 다시 읽습니다. 알림을 놓쳐도 5초마다 다시 읽으므로 늦어도 몇 초 안에 맞춰집니다. 다른 노드에서 방금 만든 저장소를 가리키는 요청(`/repository/…`, `/v2/…`)은 그 자리에서 DB를 확인하므로 바로 처리됩니다. 저장소마다 세대 번호(`gen`)를 DB에 두므로, 요청이 진행되는 동안 어느 노드에서든 같은 이름의 저장소를 지우고 다시 만들면 그 요청이 트랜잭션으로 쓰는 내용은 새 저장소에 들어가지 않고 `503 repository "<이름>" changed during the request; retry`로 거절됩니다. 다시 시도하면 됩니다(raw 파일과 Maven 아티팩트 파일 하나를 올리는 쓰기는 이 검사 대상이 아닙니다). Blob Store 이동과 blob store 그룹 멤버 변경도 모든 노드에 맞춰집니다("고가용성(여러 노드)" 참고).
+- **여러 노드의 예약 작업과 webhook(PostgreSQL)**: 예약 작업과 webhook 전달은 같은 DB를 쓰는 노드가 여럿이어도 한 번씩만 실행되도록 DB로 조정합니다.
   - 예정된 작업은 예약 작업 임대를 가진 노드(`leader`)만 실행합니다. 요청 통계, 네거티브 캐시, 활동 기록의 오래된 행도 리더만 정리합니다. 리더가 죽으면 임대는 30초 안에 다른 노드로 넘어갑니다.
   - 작업은 모든 노드를 통틀어 한 번에 하나만 실행됩니다(클러스터 잠금 `tasks.run`). 다른 노드에서 작업이 실행 중이면 "지금 실행"과 `POST /-/api/gc`는 409입니다. 실행 중인 작업은 어느 노드의 작업 화면에서나 Running으로 보이고, 어느 노드에서나 중지할 수 있으며, 지울 수 없습니다.
   - 작업을 실행하던 노드가 결과를 기록하기 전에 죽으면 잠금이 풀립니다. 작업은 여전히 예정 시각이 지난 상태이므로 다음 리더가 다시 실행합니다(최소 한 번 실행). compact, cleanup, 메타데이터 재생성은 다시 실행해도 결과가 같습니다. 죽은 노드가 남긴 실행 표시는 무시됩니다.
   - `lastDownloadedDays`를 쓰는 cleanup(미리보기 포함)과 SNAPSHOT 정리는 시작할 때 다른 노드들에게 메모리에 쌓인 다운로드 수를 DB에 쓰게 하고 2초 기다립니다. cleanup 정책을 고치면, 어느 노드에서 실행 중인 cleanup이든 다음 컴포넌트 전에 정책을 다시 읽습니다. `PUT /-/api/logging`으로 바꾼 로그 레벨은 모든 노드에 적용됩니다.
   - webhook 전달은 노드 하나가 60초 동안 가져가서(claim) 보내므로, 노드가 여럿이어도 한 번만 나갑니다. 보낸 뒤 기록하기 전에 노드가 죽으면 60초 뒤 다른 노드가 다시 보냅니다(최소 한 번 전달).
-- **준비 상태(readiness)**: `GET /service/rest/v1/status/writable`은 서버가 요청을 받아도 될 때만 200을, 아니면 503을 돌려줍니다. DB가 응답하고, 노드가 종료 중(draining)이 아니며, DB 스키마가 이 버전이 돌 수 있는 것이고, PostgreSQL에서는 잠금 연결과 변경 알림 연결(`LISTEN cc_changed`)도 살아 있어야 200입니다. 더 새 버전이 DB를 업그레이드해 이 버전이 함께 돌 수 없게 되면, 실행 중인 노드는 다음 하트비트에서 이를 알아채고 오류 로그를 남긴 뒤 준비되지 않은 상태가 됩니다. Helm 차트의 readinessProbe가 이 경로를 씁니다(startupProbe는 `/service/rest/v1/status`, livenessProbe는 TCP 연결 그대로입니다). 관리자 화면 시스템 상태의 `Cluster` 항목(`/service/rest/v1/status/check`, `commandcenter_health_check{name="Cluster"}`에도 나옵니다)이 살아 있는 노드와 리더를 보여 주고, 이 노드가 준비되지 않았거나 살아 있는 노드가 둘 이상이면 실패로 표시합니다.
+- **준비 상태(readiness)**: `GET /service/rest/v1/status/writable`은 서버가 요청을 받아도 될 때만 200을, 아니면 503을 돌려줍니다. DB가 응답하고, 노드가 종료 중(draining)이 아니며, DB 스키마가 이 버전이 돌 수 있는 것이고, PostgreSQL에서는 잠금 연결과 변경 알림 연결(`LISTEN cc_changed`)도 살아 있어야 200입니다. 더 새 버전이 DB를 업그레이드해 이 버전이 함께 돌 수 없게 되면, 실행 중인 노드는 다음 하트비트에서 이를 알아채고 오류 로그를 남긴 뒤 준비되지 않은 상태가 됩니다. Helm 차트와 참조 매니페스트의 readinessProbe가 이 경로를 씁니다(startupProbe는 `/service/rest/v1/status`, livenessProbe는 TCP 연결 그대로입니다). 관리자 화면 시스템 상태의 `Cluster` 항목(`/service/rest/v1/status/check`, `commandcenter_health_check{name="Cluster"}`에도 나옵니다)이 살아 있는 노드와 리더를 보여 주고, 이 노드가 준비되지 않았으면 실패로 표시합니다.
 - **종료 순서(drain)**: SIGTERM을 받으면 먼저 노드를 draining으로 표시해 준비 상태를 503으로 바꿉니다. PostgreSQL에서는 그 뒤 5초 동안 요청을 계속 받으며 Service 엔드포인트와 로드밸런서가 이 Pod를 빼기를 기다립니다(이미지에 셸이 없어 preStop `sleep`을 쓸 수 없으므로 서버가 직접 기다립니다). 이어서 이전과 같이 진행 중인 요청을 최대 30초 기다리고 통계, 메일, 활동 기록을 쓴 다음, 노드 행을 지우고 임대를 내놓습니다. 모두 합쳐 약 45초로 `terminationGracePeriodSeconds: 60` 안에 끝납니다. SQLite는 5초를 기다리지 않습니다.
 - **DB 연결 수**: PostgreSQL에서 노드 하나는 연결 풀(기본 10개) 외에 잠금 연결 1개와 알림 연결 1개를 더 씁니다. 두 연결은 TCP keepalive(30초 뒤 10초 간격으로 3회)를 켜 두므로, DB와 끊긴 노드의 잠금은 약 1분 안에 풀립니다.
+
+### 고가용성(여러 노드)
+
+서버 여러 대(노드)를 같은 PostgreSQL DB와 같은 저장소 데이터로 함께 띄워 모두 요청을 받게 할 수 있습니다(active-active). 앞에 로드밸런서를 두고, 세션 고정(sticky session)은 필요 없습니다. 노드 하나가 죽거나 업그레이드로 내려가도 다른 노드가 계속 응답합니다. 쓰기는 PostgreSQL에서 하나씩 처리되므로 노드를 늘리면 가용성과 읽기 처리량이 늘고 쓰기 처리량은 늘지 않습니다.
+
+**요구 사항**
+
+- **같은 PostgreSQL DB**: 모든 노드가 같은 DB(PostgreSQL 13 이상)를 씁니다(`database.url` 또는 `COMMANDCENTER_DATABASE_URL`). 노드 하나는 연결 풀(기본 10개)에 잠금·알림 연결 2개를 더 쓰므로 노드 3대면 약 36개가 필요합니다.
+- **공유 스토리지**: `dataDir`를 모든 노드가 같은 경로로 마운트하는 ReadWriteMany 파일시스템(NFS, CephFS, EFS 등)에 둡니다. default blob store(`blobs/`)와 모든 store의 임시 파일·Docker 업로드 세션(`tmp/`)이 여기 있으므로, 이름 붙은 store를 S3에 두더라도 `dataDir`는 공유해야 합니다(S3 store의 임시 파일도 `dataDir` 아래에 있습니다). 이름 붙은 파일 store를 `dataDir` 밖의 절대 경로에 두면 그 경로도 모든 노드에 같은 경로로 공유 마운트합니다. 한 노드에만 있는 경로에 store를 만들면 노드마다 다른 파일을 보게 됩니다. 내보내기와 가져오기 작업은 다른 노드에서 돌 수 있으므로 `exportRoot`도 공유 경로에 둡니다.
+- **시계**: 노드와 NFS 서버의 시계를 NTP로 맞춥니다. 임대와 하트비트는 DB 서버의 시계를 쓰지만, compact 작업은 blob 파일의 수정 시각을 노드의 시계와 비교합니다.
+- **같은 설정과 같은 비밀값 키**: 모든 노드에 같은 `config.yaml`과 같은 `COMMANDCENTER_SECRET_KEY`(또는 `secretKeyFile`)를 줍니다. 다른 키로, 또는 키 없이 시작한 노드는 시작을 거부합니다. `secret-key rotate`는 모든 노드를 멈추고 실행합니다.
+- **같은 버전**: 노드는 같은 버전으로 돌립니다. 두 버전은 롤링 업그레이드 동안에만 함께 돕니다. 이전 버전 노드는 Blob Store 이동과 그룹 멤버 제거의 확인 요청에 답하지 않으므로, 그 작업은 업그레이드를 마친 뒤에 실행합니다.
+
+**띄우는 방법**
+
+- Kubernetes: Helm 차트에서 `replicaCount`를 2 이상으로 두고 `persistence.accessModes: [ReadWriteMany]`(또는 `persistence.existingClaim`)를 정합니다("차트 값" 참고).
+- 그 밖: 같은 설정으로 `serve`를 여러 대 띄우고, 로드밸런서의 헬스 체크를 `GET /service/rest/v1/status/writable`(200이면 정상)로 둡니다. SIGTERM을 받은 노드는 5초 동안 503을 내면서도 요청을 계속 받으므로, 그사이 로드밸런서가 그 노드를 뺍니다.
+- 관리자 화면 시스템 상태의 `Cluster` 항목과 `GET /-/api/nodes`로 살아 있는 노드와 리더를 확인합니다.
+
+**노드 사이에 맞추는 것**: 업로드·삭제·메타데이터 재생성의 잠금, 저장소·blob store·라우팅 규칙·웹훅·사용자·역할·설정과 그 캐시, 세션과 로그인 제한, SSO 상태, Docker·Conan 토큰, 예약 작업(모든 노드를 통틀어 하나씩, 예정된 실행은 리더만), webhook 전달, Blob Store 이동, blob store 그룹 멤버 변경입니다("노드와 준비 상태" 참고). 저장소의 blob store를 옮기는 작업은 모든 노드가 이동을 알고 이전 store로 가던 쓰기를 마칠 때까지 기다린 뒤 복사를 시작합니다. 그룹 멤버 제거 작업은 모든 노드가 그 멤버를 읽기 전용으로 바꿀 때까지 기다린 뒤 복사합니다. 응답하지 않는 노드(하트비트는 살아 있는데 DB 알림 연결이 끊긴 노드 등)가 있으면, 그 노드가 응답하거나 하트비트가 끊길 때까지 기다리며 30초마다 로그에 남깁니다. 웹 UI에서 그룹 멤버를 바꾸는 요청은 다른 노드를 최대 30초 기다립니다.
+
+**노드마다 따로인 것**(결과는 맞고, 잠시 다를 수 있습니다): proxy 원격 요청의 동시 수 제한과 같은 파일 요청 합치기(캐시가 비어 있으면 노드 수만큼 원격에 갈 수 있습니다), proxy 자동 차단 상태(노드마다 원격 장애를 따로 감지합니다), 원격 레지스트리 토큰 캐시, LDAP·OIDC 공급자 캐시, 비밀번호 확인 캐시, 통계 화면 캐시, 활동 기록과 메일 대기열, 로그 뷰어와 스레드 덤프, 지원 번들, `/-/metrics/prometheus`의 누적 값(노드마다 따로 수집합니다. 대시보드의 요청 통계는 DB에서 합칩니다), IP별 로그인 시도 제한(노드 수만큼 느슨해집니다), 취약점 인덱스(다른 노드의 가져오기를 몇 초 안에 반영합니다), Blob Store 이동의 진행 수치(작업을 돌리는 노드만 복사 수를 보여 줍니다. 다른 노드는 작업이 도는 동안 `copying`으로만 보여 줍니다), blob store 소프트 쿼터 이벤트(노드마다 한 번씩 기록될 수 있습니다).
+
+**장애 시 동작**
+
+- **노드가 죽음**: 그 노드에서 진행 중이던 요청은 실패하고 클라이언트가 다시 시도합니다. 반쯤 쓴 DB 기록은 남지 않습니다. 그 노드의 잠금은 DB 세션과 함께 풀립니다(네트워크가 끊긴 경우 약 1분 안에). Docker 업로드 세션은 공유 `tmp/`에 있으므로 다른 노드로 이어서 올릴 수 있습니다.
+- **실행 중이던 작업**: 결과를 기록하지 못한 작업은 다음 리더가 처음부터 다시 실행합니다(최소 한 번). 죽은 노드가 리더였다면 임대가 30초 뒤 다른 노드로 넘어갑니다.
+- **webhook**: 보낸 뒤 기록하기 전에 노드가 죽으면 60초 뒤 다른 노드가 다시 보냅니다(최소 한 번. 같은 `X-Nexus-Webhook-Delivery`로 중복을 거를 수 있습니다). 그 노드 메모리에 있던 최근 30초의 다운로드 수, 아직 쓰지 못한 활동 기록과 메일, 아직 저장하지 못한 webhook 이벤트는 사라집니다(한 대일 때의 강제 종료와 같습니다).
+- **PostgreSQL 재시작·장애 조치**: 모든 노드의 쓰기가 실패하고 준비 상태가 503이 됩니다. 다시 연결되면 노드마다 캐시를 모두 다시 읽습니다. 로그인 실패 횟수(UNLOGGED 테이블)는 초기화됩니다.
+- **DB와 끊긴 노드**: 쓰지 못하므로 데이터가 갈라지지 않습니다(split brain 없음). 준비 상태가 503이 되어 로드밸런서가 뺍니다.
+- **쓰기 몰림**: 쓰기는 DB에서 하나씩 처리되므로 업로드가 몰리거나 긴 인덱스 재생성이 겹치면 5초의 잠금 대기 뒤 5xx가 날 수 있습니다. 노드가 많으면 DB URL에 `lock_timeout=15000`(밀리초)을 붙여 늘리고 오류율을 지켜보세요.
+
+**한 대에서 여러 대로**(한 번의 점검 시간이 필요합니다)
+
+1. 백업하고 서버를 멈춥니다(Kubernetes: `kubectl -n commandcenter scale statefulset commandcenter --replicas=0`).
+2. ReadWriteMany 볼륨을 만들고 이전 볼륨의 `/data/blobs`와 `/data/blobstores`(이름 붙은 파일 store)를 `cp -a`로 복사합니다(예: 두 PVC를 함께 마운트한 busybox Pod).
+3. 모든 노드를 같은 설정, 같은 비밀값 키, 같은 DB와 공유 볼륨으로 띄웁니다. Helm이라면 `--set replicaCount=3,persistence.existingClaim=<RWX PVC>`로 `helm upgrade`합니다. Helm이 StatefulSet을 Deployment로 바꾸고, 이전 PVC `data-commandcenter-0`은 직접 지울 때까지 남습니다.
+
+다시 한 대로 돌아가려면 `replicaCount: 1`로 둡니다. 그러면 같은 PostgreSQL DB를 쓰는 StatefulSet이 다시 만들어집니다(볼륨은 새 claim 템플릿, 또는 `persistence.existingClaim`).
 
 ## repolite에서 이전하기
 
@@ -1016,7 +1057,7 @@ database:
 - PostgreSQL 13 이상. 데이터베이스는 서버가 쓰는 역할을 소유자로 미리 만들어 두어야 하며(`CREATE DATABASE commandcenter OWNER <역할>`; PostgreSQL 15부터는 소유자가 아니면 `public` 스키마에 테이블을 만들 수 없습니다), 테이블은 첫 시작 때 그 역할이 만듭니다. 테이블을 만들고 업그레이드할 때만 소유자 권한이 필요하고, 스키마 버전이 현재 버전과 같은 데이터베이스는 테이블에 대한 SELECT/INSERT/UPDATE/DELETE와 스키마 USAGE만 있는 역할로도 열립니다. 권한이 모자라면 시작 오류에 `SQLSTATE 42501`과 함께 소유자가 필요하다는 안내가 나옵니다. 스키마 버전은 `schema_version` 테이블에 기록되고, 더 새 버전이 쓴 데이터베이스는 SQLite와 같이 시작을 거부합니다.
 - 모든 CLI 명령(`token create`, `user reset-password`, `gc`, `secret-key rotate`, `migrate-db`)이 같은 설정을 읽습니다.
 - 백업은 `pg_dump`로 합니다. 시스템 정보 화면의 메타데이터 DB 크기는 PostgreSQL에서는 `pg_database_size` 값입니다.
-- 쓰기는 한 번에 하나씩 처리합니다(SQLite와 같은 규칙). 인스턴스는 여전히 하나만 띄웁니다.
+- 쓰기는 한 번에 하나씩 처리합니다. 같은 DB와 공유 스토리지로 여러 노드를 함께 띄울 수 있습니다("고가용성(여러 노드)" 참고).
 - **SQLite에서 PostgreSQL로 옮기기**: `commandcenter migrate-db -config <설정 파일> -to <postgres URL>`이 설정이 가리키는 `meta.db`의 모든 테이블을 비어 있는 PostgreSQL 데이터베이스로 복사합니다. 대상 데이터베이스는 미리 만들어 두고(`CREATE DATABASE commandcenter`), 테이블은 명령이 만듭니다. `-to` URL에는 서버가 쓸 바로 그 역할을 지정하십시오. 관리자 역할로 옮기면 테이블의 소유자가 관리자가 되어, 다음 스키마 업그레이드 때 서버 역할로는 시작하지 못합니다(그 경우 `ALTER TABLE ... OWNER TO <역할>`로 소유자를 넘기거나 업그레이드를 소유자로 한 번 실행하십시오). 서버를 먼저 멈추고 백업을 받은 뒤 실행하세요. 대상 데이터베이스에 행이 하나라도 있거나 스키마 버전이 다르면 아무것도 쓰지 않고 거부합니다. 복사는 대상의 한 트랜잭션으로 하고 테이블마다 행 수를 확인한 뒤에만 커밋하므로 중간에 실패해도 대상은 비어 있는 그대로입니다. ID, 시각, JSON 문서, 암호화된 비밀값(`enc:v1:…`)은 바이트 그대로 복사되므로 **같은 비밀값 키**로 서버를 시작해야 합니다. blob은 옮기지 않으며 `dataDir`의 blob 저장소를 그대로 씁니다. 끝나면 테이블별 행 수를 출력합니다. URL과 비밀번호는 출력이나 오류 메시지에 남지 않습니다. 그 뒤 `database.url`(또는 `COMMANDCENTER_DATABASE_URL`)을 대상으로 바꾸고 서버를 시작합니다. 반대 방향(PostgreSQL → SQLite)은 `-to`에 새 SQLite 파일 경로를 주면 됩니다(설정은 PostgreSQL을 가리킨 채로). 예:
   ```sh
   docker compose stop commandcenter
@@ -2421,7 +2462,7 @@ docker compose start
 
 - 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. Go·Cargo 업로드 화면은 없습니다(클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. 포맷 고유의 검색(`npm search` 포함)도 없습니다.
 - **Terraform의 알려진 제한**: Terraform은 레지스트리를 `https://<호스트>`로만 찾으므로 HTTPS가 필요하고, 한 호스트에는 기본 저장소(`terraformDefaultRepository`) 하나만 보입니다. Terraform은 모듈 아카이브·프로바이더 zip을 받을 때 `~/.terraformrc` 토큰을 보내지 않으므로(모듈은 `~/.netrc`만, 프로바이더의 `SHA256SUMS`·서명은 자격 증명 없이) 비공개 프로바이더는 그 저장소(또는 group)에 `anonymousRead: true`가 필요하고, 비공개 모듈은 `~/.netrc`가 필요합니다. 업스트림의 `git::` 모듈 소스는 캐시하지 않습니다("Terraform 설정" 참고).
-- **SAML의 알려진 제한**: Single Logout이 없어 로그아웃은 Command Center 세션만 끝냅니다. 진행 중인 로그인, 재전송 방지 기록, SAML 사용자 항목이 메모리에만 있으므로 인스턴스는 하나여야 하고, 재시작하면 SAML 사용자의 세션·토큰은 다시 로그인할 때까지 거부됩니다. IdP-initiated 로그인은 `allowIdpInitiated`를 켰을 때만 받습니다("SAML 설정" 참고).
+- **SAML의 알려진 제한**: Single Logout이 없어 로그아웃은 Command Center 세션만 끝냅니다. IdP-initiated 로그인은 `allowIdpInitiated`를 켰을 때만 받습니다("SAML 설정" 참고).
 - **방화벽(OSV)의 알려진 제한**: 격리는 파일을 받아 캐시한 뒤 내줄 때 거부하는 방식이라 메타데이터(npm packument, PyPI 인덱스, `maven-metadata.xml`)에는 격리된 버전이 그대로 나오고, 클라이언트가 그 버전을 고르면 403(일반 텍스트 본문)을 받습니다. 온라인 모드에서 각 버전의 첫 다운로드는 OSV API를 기다립니다(최대 15초, 그 뒤 fail open). conda, Docker, apt, yum, Helm, raw, Git LFS는 대상이 아닙니다("취약점 데이터와 방화벽(OSV)" 참고).
 - **스테이징의 알려진 제한**: 스테이징 이동은 maven, npm, raw, pypi, nuget, helm, yum만 되고 docker를 포함한 나머지 포맷은 거부합니다. npm은 대상의 `latest`만 갱신하고 다른 dist-tag는 옮기지 않습니다. 프로토콜 클라이언트로 지운 컴포넌트는 태그 연결이 남습니다("태그와 스테이징" 참고).
 - **내보내기·가져오기의 알려진 제한**: 저장소 설정의 비밀값(원격 비밀번호·토큰, 원격 URL의 사용자 정보와 쿼리, apt `signingKey`)은 내보내지 않으므로 가져온 뒤 다시 넣어야 합니다. 증분 내보내기(`since`)는 바뀐 파일만 담으므로 행만 바뀐 변경(npm dist-tag, 더 오래된 매니페스트로 옮긴 docker 태그, yank)은 전체 내보내기가 필요합니다("저장소 내보내기와 가져오기" 참고).
@@ -2429,7 +2470,7 @@ docker compose start
 - **p2·Swift·CocoaPods·HuggingFace의 알려진 제한**: p2는 Nexus와 같이 proxy·group만 되고(hosted 없음), 복합 사이트의 `.xml.xz` 문서는 풀지 않고 그대로 전달하므로 그 안의 자식 위치는 바뀌지 않습니다. Swift의 `swift package-registry` 명령은 레지스트리 명세를 따라 적은 것으로 실제 SwiftPM 클라이언트로는 아직 검증하지 않았고, SwiftPM은 레지스트리를 HTTPS로 열므로 운영에서는 `baseURL`을 `https://`로 두어야 합니다. CocoaPods는 트렁크 CDN 소스만 proxy하며 `source.git`(svn·hg 포함) Pod는 proxy하지 않으므로 클라이언트가 원본 git 서버에 직접 접속해야 합니다. HuggingFace는 한 파일을 원본에서 30분 안에 받아야 하고, 큰 파일의 첫 요청은 클라이언트가 먼저 시간 초과할 수 있으므로 `HF_HUB_DOWNLOAD_TIMEOUT`을 늘리세요. `/`가 든 리비전(`refs/pr/*`), `POST …/paths-info`, Xet 전송, 업로드는 지원하지 않습니다("p2 설정", "Swift 설정", "CocoaPods 설정", "HuggingFace 설정" 참고).
 - **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브의 압축 해제 창이 8 MiB를 넘는 `.deb`(`xz -7` 이상 등)를 400으로 거부합니다. Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
 - **RubyGems·Composer·Conda의 알려진 제한**: RubyGems group은 `versions`·`names`만 병합하고 Marshal 인덱스(`specs.4.8.gz` 등)는 그 파일을 처음 가진 멤버 것을 그대로 냅니다. Conda hosted는 `repodata.json.bz2`·`.zst`·`.jlap`를 만들지 않습니다(클라이언트는 `repodata.json`으로 넘어갑니다). Composer는 v1 `providers-url`과 `notify-batch`·`security-advisories`를 제공하지 않으며(Composer 2 전용), `/`가 든 브랜치 버전은 올릴 수 없습니다("RubyGems 설정", "Composer 설정", "Conda 설정" 참고).
-- **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
+- **여러 대의 쓰기 처리량**: 같은 PostgreSQL DB와 공유 스토리지로 여러 대를 함께 띄울 수 있지만(active-active), 쓰기는 DB에서 하나씩 처리되므로 노드를 늘려도 쓰기 처리량은 늘지 않습니다("고가용성(여러 노드)" 참고).
 - HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
 - **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**(blob store의 소프트 쿼터는 있습니다), 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, LDAP 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기.
 - Go 체크섬 DB(`sumdb/`)는 프록시하지 않습니다. 사내 모듈에는 `GONOSUMDB`를 쓰세요.

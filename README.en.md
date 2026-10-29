@@ -34,7 +34,7 @@ Most in-house package repositories start as Nexus Repository OSS, and then meet 
 - **The same operating model.** hosted, proxy and group repositories, users, roles and privileges, cleanup policies, scheduled tasks, blob stores: nothing to relearn.
 - **Nexus REST API compatibility and a migration tool.** Existing scripts and the Terraform provider keep working against `/service/rest/v1`, and `import-nexus` copies hosted repositories wholesale.
 - **Small.** One Go binary without CGO. It runs in a 128 MiB container; the load test peaks at 43 MiB RSS.
-- **No editions.** LDAP, OIDC (SSO), S3 blob stores and PostgreSQL are all included, and so are Nexus Pro features (SAML, user tokens, staging and tags, group blob stores, retain-N cleanup, export and import), under MIT or Apache-2.0, your choice.
+- **No editions.** LDAP, OIDC (SSO), S3 blob stores and PostgreSQL are all included, and so are Nexus Pro features (SAML, user tokens, staging and tags, group blob stores, retain-N cleanup, export and import, active-active high availability), under MIT or Apache-2.0, your choice.
 
 ## Formats
 
@@ -85,7 +85,7 @@ Known limits per format are listed under [limitations](docs/guide.md#제한-사�
 - **Webhooks**: global or per-repository HTTP POST of every activity event (HMAC signatures, retries, delivery history).
 - **Routing rules**: BLOCK/ALLOW regex rules on the paths a proxy may ask its remote for (keeps internal artifacts from leaking).
 - **Content selectors**: CSEL expressions (`format`, `path`, `coordinate.groupId`) that scope role privileges to paths.
-- **Kubernetes first**: a Helm chart (StatefulSet, values schema, PostgreSQL, NFS and HTTPRoute support, `helm test`), a reference manifest, and amd64/arm64 images with SBOM and provenance on every release.
+- **Kubernetes first**: a Helm chart (StatefulSet, or a multi-pod Deployment with `replicaCount`, values schema, PostgreSQL, NFS and HTTPRoute support, `helm test`), a reference manifest, and amd64/arm64 images with SBOM and provenance on every release.
 - **Nexus compatibility**: the repositories, components, assets, search, status, blob store, cleanup policy, task, tag, staging and user token endpoints of `/service/rest/v1`, and `commandcenter import-nexus`.
 - **OpenAPI document**: an OpenAPI 3.0 description of every management API and the Nexus compatibility API (`/-/api/openapi.json`, `/service/rest/swagger.json`).
 
@@ -170,7 +170,7 @@ Details: [Nexus에서 이전하기](docs/guide.md#nexus에서-이전하기) and 
 - Terminate TLS at the Ingress or reverse proxy and set `baseURL` to the `https://` address.
 - Turn off anonymous read (`anonymousRead`) for internal use; give CI API tokens, not passwords.
 - Set a key for stored secrets (SMTP, LDAP, OIDC, Crowd, SAML, remote credentials, S3) with `COMMANDCENTER_SECRET_KEY` or `secretKeyFile`, and keep it apart from backups.
-- Keep metadata in PostgreSQL or in SQLite on block storage (never SQLite on NFS). Run one instance.
+- Metadata lives in PostgreSQL. To run several nodes (active-active), give them all the same PostgreSQL database and shared storage (ReadWriteMany).
 - A 60-second stop grace period (already in the chart and compose file), regular backups, and a backup before every upgrade. Downgrades are not supported.
 
 The full list is under [프로덕션 배포](docs/guide.md#프로덕션-배포).
@@ -187,7 +187,7 @@ The default container limit is 128 MiB (`GOMEMLIMIT=80MiB`).
 
 ## Status and limits
 
-- Designed for a single instance; no high availability or horizontal scaling (the same as Nexus OSS).
+- Active-active: several nodes share the same PostgreSQL database and shared storage (ReadWriteMany). More nodes add availability and read capacity, not write throughput (writes are serialized in the database).
 - The Nexus REST API covers repositories, components, assets, search, status, blob stores, cleanup policies, tasks, tags, staging and user tokens. User and role writes and the script API are not available.
 - Known limitations are listed in the guide ([제한 사항](docs/guide.md#제한-사항)); every release's fixes and changes are in the [CHANGELOG](CHANGELOG.md).
 - Report bugs as issues and security problems privately per the [security policy](SECURITY.md).
