@@ -4,7 +4,7 @@
 
 <p align="center">
   Nexus Repository를 대신하는, 작고 단단한 오픈소스 아티팩트 레지스트리.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT를 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda를 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
 </p>
 
 <p align="center">
@@ -51,6 +51,9 @@
 | Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata 자동 생성) |
 | NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) |
 | APT | ✅ | ✅ | ✅ | apt (signed Release 지원) |
+| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
+| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
+| Conda | ✅ | ✅ | ✅ | conda, mamba |
 
 지원하지 않는 포맷은 [제한 사항](docs/guide.md#제한-사항)에 있습니다.
 
@@ -61,6 +64,9 @@
 - **운영 가시성**: 저장소별 요청 수 · 오류율 · 응답 시간 · 원격 실패 · 캐시 적중률, 요청 추이, 활동 로그, 상태 점검, 로그 뷰어, 실패 알림 메일.
 - **스토리지**: 파일 또는 **S3 호환** blob store(여러 개), 내용 주소 저장으로 중복 제거, blob GC. 메타데이터는 **SQLite** 또는 **PostgreSQL**, 둘 사이의 이전 도구 포함.
 - **정리와 자동화**: Cleanup 정책(나이 · 마지막 다운로드 · 이름 패턴), 예약 작업, 저장소 Online/Offline 전환.
+- **Webhook**: 전역 또는 저장소별로 모든 활동 이벤트를 HTTP POST로 전달(HMAC 서명, 재시도, 전달 기록).
+- **라우팅 규칙**: proxy가 원격에 물어볼 경로를 정규식으로 BLOCK/ALLOW(사내 아티팩트 유출 방지).
+- **컨텐츠 셀렉터**: CSEL 식(`format`, `path`, `coordinate.groupId`)으로 역할 권한을 경로 단위로 제한.
 - **Kubernetes 우선**: Helm 차트(StatefulSet, values 스키마, PostgreSQL · NFS · HTTPRoute 지원, `helm test`), 참조 매니페스트, 릴리스마다 amd64 · arm64 이미지와 SBOM · provenance.
 - **Nexus 호환**: `/service/rest/v1`의 repositories · components · assets · search · status API, `commandcenter import-nexus`.
 
@@ -163,7 +169,7 @@ docker compose up -d
 ## 현황과 제한
 
 - 인스턴스 하나로 돌도록 만들었습니다. 이중화 · 수평 확장은 없습니다(Nexus OSS와 같습니다).
-- RubyGems, Conan, Conda, Composer는 아직 없습니다.
+- Conan, R, Git LFS, p2, CocoaPods, Swift, Terraform, HuggingFace는 아직 없습니다(진행 중).
 - Nexus REST API는 저장소 · 컴포넌트 · 자산 · 검색 · 상태 엔드포인트를 지원합니다. 사용자 · 역할 쓰기, 스크립트 API는 없습니다.
 - 알려진 제한은 [제한 사항](docs/guide.md#제한-사항), 릴리스마다 고친 것과 바뀐 것은 [CHANGELOG](CHANGELOG.md)에 있습니다.
 - 버그는 이슈로, 보안 문제는 [보안 정책](SECURITY.md)대로 비공개로 알려 주세요.

@@ -8,7 +8,76 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- The `rubygems` format: RubyGems repositories at `/repository/<repo>/` for Bundler and `gem` (the
+  compact index `versions`, `names` and `info/<gem>` with the md5 `ETag`, `Repr-Digest` and byte
+  ranges Bundler uses to fetch increments; the legacy `specs.4.8.gz`, `latest_specs.4.8.gz`,
+  `prerelease_specs.4.8.gz`, `quick/Marshal.4.8/*.gemspec.rz` and `api/v1/dependencies`, written by
+  a built-in Ruby Marshal 4.8 encoder; `gems/*.gem`). Hosted repositories take `gem push` (`POST
+  api/v1/gems`, the API key being an API token sent bare in `Authorization`, or Basic auth), read
+  the YAML `Gem::Specification` out of the `.gem`'s `metadata.gz`, derive every index from their
+  rows and keep `versions` as an append-only asset updated in the push and delete transactions
+  (`writePolicy` as for NuGet; `gem yank` = `DELETE api/v1/gems/yank` deletes the version). Proxies
+  cache rubygems.org or another server as is (`metadataMaxAge` for the indexes, 256 MiB bound).
+  Groups merge their members' `versions` and `names` (a gem an earlier member has hides later
+  members' versions; cached 60 s) and answer `info`, gemspec and gem requests from the first member
+  that has the gem; the Marshal specs indexes come from the first member. Cleanup policies (format
+  `rubygems`), the web UI's component delete and metadata (summary, licenses, homepage,
+  runtime/development dependencies) and `format:rubygems` role privileges cover rubygems
+  repositories; a component is the gem at `<version>[-<platform>]`.
+- The `composer` format: Composer v2 repositories at `/repository/<repo>/packages.json` for Composer
+  2.x (per-package metadata under `p2/`, with `~dev.json` for branch versions, dist archives and
+  `search.json`). Hosted repositories take `PUT packages/upload/<vendor>/<package>/<version>` with
+  the package zip as the body, read `composer.json` out of it (root or first directory), normalize
+  the version as Composer's VersionParser does and derive the metadata from the rows; `writePolicy`
+  applies as for NuGet (409 on a re-upload under `allow_once`, overwriting under `allow` needs
+  edit); `DELETE` on the same path removes the version. Proxies of repo.packagist.org, Satis or
+  Private Packagist (`remote` = the repository root) cache `packages.json`, the package metadata
+  (minified deltas expanded, `source` dropped, `dist.url` rewritten to the proxy) and search
+  results, and fetch each archive from its upstream URL on first request, checking the `shasum`;
+  groups answer from the first member that has the package, merge search results and upload to their
+  `writeMember`. Cleanup policies (format `composer`), the web UI's component delete and metadata
+  (`require` / `require-dev`), and `format:composer` role privileges cover composer repositories.
+- The `conda` format: conda channels at `/repository/<repo>/` for conda, mamba and micromamba
+  (`conda config --add channels <url>`, `conda install -c <url>`). Hosted channels take packages by
+  `PUT <subdir>/<name>-<version>-<build>.tar.bz2` (or `.conda`), read `info/index.json` and
+  `info/about.json` out of a `.tar.bz2` and regenerate `<subdir>/repodata.json`,
+  `current_repodata.json` and `channeldata.json` in the transaction of every upload and delete;
+  `writePolicy` applies as for Yum. A `.conda` package is listed with what its file name and hashes
+  give only (no `depends`: its index is zstd-compressed, which the server does not read). No
+  `repodata.json.bz2`/`.zst` are made; clients fall back to `repodata.json`. Proxies cache a remote
+  channel (conda-forge, repo.anaconda.com) at its paths, streaming the large `repodata.json`, with
+  the documents re-checked every `metadataMaxAge`; groups answer files from the first member that
+  has them and merge the members' `repodata.json` and `channeldata.json` (hosted first, cached until
+  a member's document changes). Components are `<subdir>/<name>@<version>-<build>`; cleanup
+  policies, the component delete and `format:conda` privileges apply, and the metadata tab shows
+  summary, license, home and depends/constrains.
+- Webhooks (Nexus-style global and per-repository): admin API under `/-/api/webhooks`
+  (create/update/delete, event-kind list, test ping, delivery history, redeliver). Every activity
+  event is delivered as JSON with `X-Command-Center-Event`/`-Delivery` headers and, with a secret,
+  HMAC-SHA256 (`X-Command-Center-Signature`) plus Nexus-compatible HMAC-SHA1
+  (`X-Nexus-Webhook-Signature`); retries at 30 s/2 m/10 m/1 h persisted in the database and resumed
+  after a restart. Secrets are sealed with the secret key. Database schema version 3 (tables
+  `webhooks`, `webhook_deliveries`).
+- Routing rules for proxy repositories (Nexus semantics): a named rule with mode `BLOCK` or `ALLOW`
+  and RE2 matchers against the request path, connected with the repository's `routingRule`. A
+  blocked path is refused before the cache (403 on the proxy, skipped as a group member, no remote
+  request). Managed at `/-/api/routing-rules` (with `…/test`), imported once from `routingRules:` in
+  config.yaml, and served at `/service/rest/v1/routing-rules` with the repository bodies'
+  `routingRule`. Schema version 3.
+- Content selectors (path-scoped privileges): a named CSEL expression (`format`, `path`,
+  `coordinate.groupId`; `==`, `!=`, `=^`, `=~`; `and`/`or`/`not`) that a role privilege targets as
+  `selector:<name>` with a `repos` scope; the action is granted only on matching paths (listings
+  stay repository-level). Managed at `/-/api/content-selectors` (with `…/preview`), imported once
+  from `contentSelectors:`, and served at `/service/rest/v1/security/content-selectors` plus
+  `security/privileges/repository-content-selector`, which maps a Nexus privilege onto the role
+  `priv:<name>`.
+
+### Upgrade notes
+- The database schema version is now 3 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`
+  and `content_selectors`, created on the first start of this version on SQLite and PostgreSQL). An
+  older version refuses to start on the upgraded database, so back up before upgrading; downgrades
+  are not supported ("업그레이드" in the operations guide).
 
 ## [0.2.0] - 2026-10-27
 

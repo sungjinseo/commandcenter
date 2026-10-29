@@ -4,7 +4,7 @@
 
 <p align="center">
   A small, solid open-source artifact registry that takes the place of Nexus Repository.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT in one binary, running as a single Kubernetes pod.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda in one binary, running as a single Kubernetes pod.
 </p>
 
 <p align="center">
@@ -51,6 +51,9 @@ Most in-house package repositories start as Nexus Repository OSS, and then meet 
 | Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) |
 | NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) |
 | APT | ✅ | ✅ | ✅ | apt (signed Release) |
+| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
+| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
+| Conda | ✅ | ✅ | ✅ | conda, mamba |
 
 Unsupported formats are listed under [limitations](docs/guide.md#제한-사항).
 
@@ -61,6 +64,9 @@ Unsupported formats are listed under [limitations](docs/guide.md#제한-사항).
 - **Operational visibility**: per-repository requests, error rate, latency, upstream failures and cache hit rate; request trends, activity log, health checks, log viewer, failure e-mails.
 - **Storage**: file or **S3-compatible** blob stores (several at once), content-addressed deduplication, blob GC. Metadata in **SQLite** or **PostgreSQL**, with a migration command between them.
 - **Housekeeping**: cleanup policies (age, last download, name pattern), scheduled tasks, per-repository online/offline.
+- **Webhooks**: global or per-repository HTTP POST of every activity event (HMAC signatures, retries, delivery history).
+- **Routing rules**: BLOCK/ALLOW regex rules on the paths a proxy may ask its remote for (keeps internal artifacts from leaking).
+- **Content selectors**: CSEL expressions (`format`, `path`, `coordinate.groupId`) that scope role privileges to paths.
 - **Kubernetes first**: a Helm chart (StatefulSet, values schema, PostgreSQL, NFS and HTTPRoute support, `helm test`), a reference manifest, and amd64/arm64 images with SBOM and provenance on every release.
 - **Nexus compatibility**: the repositories, components, assets, search and status endpoints of `/service/rest/v1`, and `commandcenter import-nexus`.
 
@@ -163,7 +169,7 @@ The default container limit is 128 MiB (`GOMEMLIMIT=80MiB`).
 ## Status and limits
 
 - Designed for a single instance; no high availability or horizontal scaling (the same as Nexus OSS).
-- RubyGems, Conan, Conda and Composer are not available yet.
+- Conan, R, Git LFS, p2, CocoaPods, Swift, Terraform and HuggingFace are not available yet (in progress).
 - The Nexus REST API covers repositories, components, assets, search and status. User and role writes and the script API are not available.
 - Known limitations are listed in the guide ([제한 사항](docs/guide.md#제한-사항)); every release's fixes and changes are in the [CHANGELOG](CHANGELOG.md).
 - Report bugs as issues and security problems privately per the [security policy](SECURITY.md).

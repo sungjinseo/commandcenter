@@ -18,7 +18,19 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted", "gems-hosted", "composer-hosted", "conda-hosted"] }
+
+# 라우팅 규칙: proxy가 원격에 물어볼 수 있는 경로. RE2 정규식, 요청 경로 앞에 "/"가 붙습니다. 첫 시작 때만 가져옵니다.
+# routingRules:
+#   - name: no-internal
+#     description: 사내 그룹과 SNAPSHOT은 원격에 묻지 않음
+#     mode: BLOCK                      # BLOCK | ALLOW
+#     matchers: ["^/com/mycompany/", ".*-SNAPSHOT.*"]
+# 컨텐츠 셀렉터: 역할 권한의 selector:<이름> 대상이 가리키는 경로 식. 첫 시작 때만 가져옵니다.
+# contentSelectors:
+#   - name: acme
+#     description: acme 팀 아티팩트
+#     expression: 'format == "maven2" and path =^ "/org/acme/"'
 
 repositories:
   - name: maven-central
@@ -26,6 +38,7 @@ repositories:
     type: proxy
     remote: "https://repo1.maven.org/maven2/"
     metadataMaxAge: "24h"
+    # routingRule: no-internal          # 이 proxy에 적용할 라우팅 규칙 이름(없으면 모두 통과)
   - name: maven-releases
     format: maven
     type: hosted
@@ -181,6 +194,47 @@ repositories:
     type: group
     members: [apt-hosted, apt-proxy]
     writeMember: apt-hosted
+  - name: gems-hosted                 # gem push demo-1.0.0.gem --host <host>/repository/gems-hosted --key cc  (~/.gem/credentials 의 :cc: 에 API 토큰)
+    format: rubygems
+    type: hosted
+    writePolicy: allow_once
+  - name: gems-proxy                  # gem sources --add <host>/repository/gems-proxy/
+    format: rubygems
+    type: proxy
+    remote: "https://rubygems.org/"   # 루트 URL (compact index · gems/ · quick/ 가 그 아래)
+  - name: gems-all                    # bundle config mirror.https://rubygems.org <host>/repository/gems-all/ — versions·names 병합, 같은 이름은 앞 멤버가 답
+    format: rubygems
+    type: group
+    members: [gems-hosted, gems-proxy]
+    writeMember: gems-hosted
+  - name: composer-hosted              # curl -u ci:pw -T demo-1.2.0.zip <host>/repository/composer-hosted/packages/upload/acme/demo/1.2.0
+    format: composer
+    type: hosted
+    writePolicy: allow_once           # allow: 같은 버전 덮어쓰기 허용(edit 권한)
+  - name: composer-proxy               # composer config repositories.cc composer <host>/repository/composer-proxy/
+    format: composer
+    type: proxy
+    remote: "https://repo.packagist.org/"   # Composer v2 저장소 루트(Satis, Private Packagist도 가능)
+    metadataMaxAge: "1h"              # packages.json·패키지 메타데이터·검색 재확인 주기. zip은 영구 캐시
+  - name: composer-all                 # composer config repositories.cc composer <host>/repository/composer-all/ — hosted가 가진 패키지는 hosted 버전만
+    format: composer
+    type: group
+    members: [composer-hosted, composer-proxy]
+    writeMember: composer-hosted
+  - name: conda-hosted                # curl -u ci:pw --upload-file foo-1.0-py_0.tar.bz2 <host>/repository/conda-hosted/noarch/
+    format: conda
+    type: hosted
+    writePolicy: allow_once           # allow: 같은 파일 덮어쓰기 허용(edit 권한). .conda는 이름·버전·빌드·해시만 기록(의존성 없음)
+  - name: conda-proxy                 # conda config --add channels <host>/repository/conda-proxy
+    format: conda
+    type: proxy
+    remote: "https://conda.anaconda.org/conda-forge/"   # 채널 URL. 경로를 그대로 캐시
+    metadataMaxAge: "1h"              # repodata.json·channeldata.json 재확인 주기. 패키지는 영구 캐시
+  - name: conda-all                   # repodata.json·channeldata.json은 멤버 것을 합쳐서 답함(hosted 먼저)
+    format: conda
+    type: group
+    members: [conda-hosted, conda-proxy]
+    writeMember: conda-hosted
 
 # database:
 #   url: postgres://cc:password@db.example:5432/commandcenter?sslmode=require

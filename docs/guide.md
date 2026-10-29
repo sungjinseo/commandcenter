@@ -22,6 +22,9 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
 | NuGet | O | O | O |
 | APT | O | O | O |
 | Yum / DNF | O | O | O |
+| RubyGems | O | O | O |
+| Composer | O | O | O |
+| Conda | O | O | O |
 
 - **hosted**: 직접 업로드한 패키지를 저장합니다.
 - **proxy**: 원격 저장소(Maven Central, npmjs, pypi.org, proxy.golang.org, crates.io 등)를 처음 요청할 때 가져와 캐시합니다.
@@ -494,12 +497,14 @@ Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, T
 |---|---|
 | `GET /repositories`, `GET /repositories/{name}` | 읽을 수 있는 저장소의 `name`, `format`, `type`, `url`, `attributes.proxy.remoteUrl` |
 | `GET /repositorySettings`, `GET /repositories/{format}/{type}/{name}` | admin. `online`, `storage`, `cleanup`, `proxy`, `negativeCache`, `httpClient.authentication`(사용자 이름만), `group`, `maven` 등 Command Center에 대응 값이 있는 항목 |
-| `POST /repositories/{format}/{type}` → 201, `PUT /repositories/{format}/{type}/{name}` → 204, `DELETE /repositories/{name}` → 204 | admin. maven, npm, pypi, raw, docker, helm, go, cargo, nuget, apt, yum |
+| `POST /repositories/{format}/{type}` → 201, `PUT /repositories/{format}/{type}/{name}` → 204, `DELETE /repositories/{name}` → 204 | admin. maven, npm, pypi, raw, docker, helm, go, cargo, nuget, apt, yum, rubygems, composer, conda. proxy 본문의 `routingRule`(응답에는 `routingRuleName`도) |
 | `GET /components?repository=`, `GET /components/{id}`, `DELETE /components/{id}` | 50개씩, `continuationToken`으로 다음 페이지 |
 | `GET /assets?repository=`, `GET /assets/{id}`, `DELETE /assets/{id}` | 삭제는 raw 파일만(아래 차이점) |
 | `GET /search`, `GET /search/assets`, `GET /search/assets/download` | `q`, `repository`, `format`, `group`, `name`, `version`(`*` 와일드카드), `sort`, `direction`, `maven.groupId/artifactId/baseVersion/extension/classifier`, `npm.scope`, `docker.imageName/imageTag` |
 | `GET /status`, `GET /status/writable`, `GET /status/check` | check는 admin, 상태 화면의 점검 결과를 Nexus 형식으로 |
 | `GET /security/users?userId=`, `GET /security/roles`, `GET /blobstores`, `GET /tasks` | admin, 읽기 전용 |
+| `GET/POST /routing-rules`, `GET/PUT/DELETE /routing-rules/{name}` | admin. `name`, `description`, `mode`(`BLOCK`/`ALLOW`), `matchers`("라우팅 규칙" 참고) |
+| `GET/POST /security/content-selectors`, `GET/PUT/DELETE /security/content-selectors/{name}`, `POST/PUT /security/privileges/repository-content-selector[/{name}]` | admin. `name`, `description`, `expression`; 권한은 `priv:<이름>` 역할로 만들어집니다("컨텐츠 셀렉터" 참고) |
 
 포맷 이름은 Nexus 표기를 따릅니다. Maven 저장소는 응답에서 `"format": "maven2"`이고, 생성·수정 경로는 Nexus와 같이 `/repositories/maven/hosted`처럼 씁니다. `search`의 `format=` 파라미터는 `maven2`와 `maven` 둘 다 받습니다.
 
@@ -549,12 +554,12 @@ Nexus와 다른 점:
 - 컴포넌트와 자산의 `id`는 서버가 만든 불투명한 값입니다(컴포넌트는 저장소·그룹·이름·버전, 자산은 저장소·경로를 base64url로 묶은 것). 응답에서 받은 값을 그대로 쓰면 되고, 저장소를 지우고 다시 만들어도 같은 값이 나오지만 Nexus처럼 값의 형식에 기대지는 마세요.
 - `DELETE /assets/{id}`는 raw 파일만 지웁니다. Command Center는 파일 하나가 아니라 컴포넌트 단위로 지우므로 다른 포맷은 `400`으로 답하고 `DELETE /components/{id}`를 쓰라고 알려 줍니다. 컴포넌트 삭제는 웹 UI의 컴포넌트 삭제와 같은 경로로 처리되어 hosted 저장소에서만, `writePolicy: deny`가 아닐 때만 되고 활동 이벤트에 남습니다.
 - 저장소 생성·수정·삭제는 웹 UI의 저장소 API를 그대로 호출하므로 검증 규칙과 메시지가 UI와 같고, 비밀번호 또는 세션 로그인이 필요합니다(API 토큰으로는 `403`). 같은 이름이 이미 있으면 `409`가 아니라 `400` 검증 오류입니다.
-- 본문 가운데 Command Center에 대응 값이 없는 항목(`docker`, `component.proprietaryComponents`, `httpClient.connection`, `routingRule`, `storage.strictContentTypeValidation` 등)은 무시합니다. `cleanup.policyNames`는 첫 번째 정책만 적용되고(저장소당 하나), `negativeCache.enabled: false`는 무시되며 `timeToLive`만 반영됩니다. 그룹 본문의 `storage.blobStoreName`은 버립니다(그룹에는 blob store가 없습니다). 응답의 `httpClient.authentication`에는 사용자 이름만 있고 비밀번호는 나오지 않습니다.
+- 본문 가운데 Command Center에 대응 값이 없는 항목(`docker`, `component.proprietaryComponents`, `httpClient.connection`, `storage.strictContentTypeValidation` 등)은 무시합니다. `cleanup.policyNames`는 첫 번째 정책만 적용되고(저장소당 하나), `negativeCache.enabled: false`는 무시되며 `timeToLive`만 반영됩니다. 그룹 본문의 `storage.blobStoreName`은 버립니다(그룹에는 blob store가 없습니다). 응답의 `httpClient.authentication`에는 사용자 이름만 있고 비밀번호는 나오지 않습니다.
 - 시간 값은 Nexus처럼 분 단위 정수이고 `-1`은 만료 없음입니다(`contentMaxAge: -1`은 설정의 `contentMaxAge: "-1"`).
 - Docker 컴포넌트는 Nexus처럼 `name`이 이미지, `version`이 태그이며, 삭제는 그 태그가 가리키는 매니페스트(다이제스트)를 지웁니다. raw 컴포넌트는 `name`이 경로, `group`이 디렉터리(`/docs`, 최상위는 `/`), `version`은 `null`입니다. npm의 `group`은 `@` 없는 스코프입니다.
 - `search/assets/download`는 자산이 둘 이상이면 Nexus처럼 `400`으로 거절하며, `sort`를 주면 정렬 뒤 첫 번째로 보냅니다(`sort=version&direction=desc`가 최신). `sort=version`의 기본 방향은 desc입니다.
 - 컴포넌트 목록과 검색은 요청마다 저장소의 자산 경로를 모두 읽어 파생하므로 자산이 수십만 개인 저장소에서는 한 페이지에 수 초가 걸릴 수 있습니다. 전체 목록에 `continuationToken`으로 이어 받습니다.
-- `security/*`, `blobstores`, `tasks`는 읽기 전용이고 역할의 `privileges`는 `"<대상>:<동작>"` 문자열입니다. 스크립트 API, 정리 정책 API, 라우팅 규칙, `swagger.json`은 없습니다. 모르는 경로는 JSON `404`입니다.
+- `security/users`, `security/roles`, `blobstores`, `tasks`는 읽기 전용이고 역할의 `privileges`는 `"<대상>:<동작>"` 문자열입니다(컨텐츠 셀렉터 권한은 `selector:<이름>:<동작>`). 스크립트 API, 정리 정책 API, `swagger.json`은 없습니다. 모르는 경로는 JSON `404`입니다.
 
 ## 웹 UI
 
@@ -680,10 +685,10 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 
 관리자는 저장소 설정에서 저장소를 만들고, 고치고, 지울 수 있습니다. 서버를 재시작하지 않아도 바로 반영됩니다.
 
-> **경고: `config.yaml`의 `repositories:`는 첫 시작 때 한 번만 읽습니다.** 저장소 정의는 `meta.db`(SQLite)로 옮겨지고, 그 뒤로는 `config.yaml`의 `repositories:`를 고쳐도 **무시**됩니다(시작할 때 파일 이름을 밝히는 경고 로그가 남습니다). 저장소는 UI(또는 `/-/api/repositories` API)로 바꾸세요. 사용자, 역할, 일반 설정도 첫 시작 때 한 번만 가져오며 이후 UI에서 관리합니다("업그레이드" 참고).
+> **경고: `config.yaml`의 `repositories:`는 첫 시작 때 한 번만 읽습니다.** 저장소 정의는 `meta.db`(SQLite)로 옮겨지고, 그 뒤로는 `config.yaml`의 `repositories:`를 고쳐도 **무시**됩니다(시작할 때 파일 이름을 밝히는 경고 로그가 남습니다). 저장소는 UI(또는 `/-/api/repositories` API)로 바꾸세요. 사용자, 역할, 일반 설정, 라우팅 규칙, 컨텐츠 셀렉터도 첫 시작 때 한 번만 가져오며 이후 UI에서 관리합니다("업그레이드" 참고).
 
 - **만들기**: "Create repository"를 누르면 레시피 선택 화면(`maven2`, `npm`, `pypi`, `go`, `cargo` 각각 hosted, proxy, group)이 나오고, 고르면 해당 유형의 폼이 열립니다. 검증은 `config.yaml`과 같고 오류는 폼 맨 위에 표시됩니다. 새 저장소 이름은 영문자와 숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만 쓸 수 있으며 최대 64자입니다. `create`는 예약어라 쓸 수 없습니다(이미 저장된 이름은 그대로 동작합니다).
-- **편집**: `name`, `format`, `type`은 만든 뒤 바꿀 수 없습니다(폼에서 비활성). 나머지(remote, 인증, 최대 보관 시간, negative cache TTL, group 멤버와 순서, writeMember, versionPolicy, 배포 정책(writePolicy), anonymousRead, Online/Offline)는 고칠 수 있습니다. 저장소의 Blob Store(`blobStore`)는 만들 때만 고르며 바꿀 수 없습니다("Blob Store" 참고). proxy의 `remote`를 바꿔도 캐시된 파일은 유지되지만, 이전 remote에서 받은 "없음" 기록(negative cache)은 지워집니다.
+- **편집**: `name`, `format`, `type`은 만든 뒤 바꿀 수 없습니다(폼에서 비활성). 나머지(remote, 인증, 최대 보관 시간, negative cache TTL, 라우팅 규칙(routingRule), group 멤버와 순서, writeMember, versionPolicy, 배포 정책(writePolicy), anonymousRead, Online/Offline)는 고칠 수 있습니다. 저장소의 Blob Store(`blobStore`)는 만들 때만 고르며 바꿀 수 없습니다("Blob Store" 참고). proxy의 `remote`를 바꿔도 캐시된 파일은 유지되지만, 이전 remote에서 받은 "없음" 기록(negative cache)은 지워집니다.
 - **삭제**: 저장소 이름을 직접 입력해야 삭제됩니다. 다음 규칙이 있습니다.
   - group의 멤버(또는 writeMember)인 저장소는 409로 거부하며 메시지에 group 이름이 나옵니다. group에서 먼저 빼세요.
   - 삭제하면 그 저장소의 정의와 자산, 패키지, dist-tag, negative cache 행이 한 트랜잭션으로 지워집니다. blob 파일은 다음 GC(Compact blob store)에서 회수됩니다.
@@ -693,6 +698,33 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - **원격 인증 정보**: proxy의 비밀번호와 Bearer 토큰은 DB에 저장되지만(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) **어떤 API와 화면에도 다시 보이지 않습니다**(설정되어 있는지 여부만 표시). 편집 때 비워 두면 기존 값을 유지하고, "clear" 체크로 지웁니다. `remote`의 **호스트가 바뀌면 인증 정보를 다시 입력해야 합니다**(토큰을 새 호스트로 옮길 수 없습니다).
 - **권한**: 만들기, 편집, 삭제는 관리자이면서 비밀번호 또는 세션으로 인증한 경우에만 됩니다(API 토큰으로는 403). 쓰기 요청에는 `X-Command-Center-UI: 1` 헤더가 필요합니다.
 - **백업**: 저장소 정의가 `meta.db`에 있으므로 **백업에 `meta.db`가 반드시 포함되어야 합니다**(데이터 볼륨 전체를 백업하면 됩니다). 정의 없이 blob만 복원하면 저장소가 없는 상태가 됩니다.
+
+### 라우팅 규칙
+
+라우팅 규칙은 proxy 저장소가 원격에 **어떤 경로를 물어볼 수 있는지** 정합니다(Nexus의 Routing Rules). 규칙은 이름, 설명, 모드, 매처(정규식) 목록으로 이루어지며, proxy 저장소 설정의 `routingRule`에 규칙 이름 하나를 연결합니다. Nexus는 Java 정규식을 쓰지만 Command Center는 Go의 RE2 문법입니다(후방 참조·lookaround 없음). 매처는 요청 경로(`/repository/<저장소>/` 뒤, 앞에 `/`를 붙인 형태, 예 `/org/acme/lib/1.0/lib.jar`)와 `MatchString`으로 비교하므로 앞뒤를 고정하려면 `^`, `$`를 쓰세요.
+
+- **BLOCK**: 매처 중 하나라도 맞는 경로는 원격에 보내지 않습니다. 나머지는 통과합니다.
+- **ALLOW**: 매처에 맞는 경로만 원격에 보내고 나머지는 모두 막습니다.
+- 막힌 경로는 **캐시를 확인하기 전에** 거부하므로, 이미 캐시된 파일도 규칙이 생기면 더 이상 내려받을 수 없습니다. proxy에 직접 요청하면 권한 검사 뒤에 403(`blocked by routing rule`)이고, group을 통해 오면 그 멤버는 그 경로를 "없는 것"으로 보고 다음 멤버로 넘어갑니다. Docker(`/v2/`)는 proxy 직접 요청도 404입니다.
+- 규칙 이름은 1~64자의 영문자, 숫자, `.`, `_`, `-`이고 매처는 1~50개, 각 256자 이하의 올바른 정규식이어야 합니다(400). proxy가 쓰는 규칙은 지울 수 없습니다(409, 메시지에 저장소 이름). proxy 설정에서 없는 규칙 이름을 쓰면 400이고 hosted·group에는 `routingRule`을 쓸 수 없습니다.
+- 관리 화면(또는 `/-/api/routing-rules`)의 "테스트"로 경로 하나를 넣어 통과 여부와 어떤 매처가 결정했는지 확인할 수 있습니다. 변경은 활동 기록에 `routingrule.create/update/delete`로 남습니다.
+- `config.yaml`의 `routingRules:`와 저장소의 `routingRule:`은 사용자·역할처럼 **첫 시작 때 한 번** 가져오며 이후 UI에서 관리합니다. 없는 규칙을 가리키는 저장소는 시작 시 경고 로그를 남기고 모든 경로를 원격에 보냅니다.
+- Nexus REST API: `GET/POST/PUT/DELETE /service/rest/v1/routing-rules[/{name}]`(`name, description, mode, matchers`), 저장소 본문의 `routingRule`(응답에는 `routingRuleName`도 같이).
+
+예: 사내 아티팩트가 공개 저장소로 새어 나가지 않게 막기
+```yaml
+routingRules:
+  - name: no-internal
+    description: 사내 그룹은 원격에 묻지 않음
+    mode: BLOCK
+    matchers: ["^/com/mycompany/", ".*-SNAPSHOT.*"]
+repositories:
+  - name: maven-central
+    format: maven
+    type: proxy
+    remote: "https://repo1.maven.org/maven2/"
+    routingRule: no-internal
+```
 
 ## 업로드
 
@@ -740,13 +772,14 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 | 키 | 대상 | 기본값 | 설명 |
 |---|---|---|---|
 | `name` | 모두 | 필수 | 저장소 이름. URL의 `/repository/<name>/`. `/`, 공백, `\` 불가, 중복 불가. UI/API로 만들 때는 영문자·숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만, 최대 64자, `create`는 예약어. |
-| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum` 중 하나. |
+| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum`, `rubygems`, `composer`, `conda` 중 하나. |
 | `type` | 모두 | 필수 | `hosted`, `proxy`, `group` 중 하나. |
 | `remote` | proxy | 필수 | 원격 저장소의 `http(s)` URL. Cargo는 `sparse+` 없는 sparse index URL. 원격 인증 정보는 URL에 넣지 말고 `remoteAuth`에 넣으세요(URL은 암호화하지 않습니다. "저장된 비밀값 암호화" 참고). |
 | `remoteAuth` | proxy | 없음 | 원격 인증: `username`/`password` 또는 `bearerToken`(둘 다 있으면 토큰 우선). 설정한 `remote`와 스킴·호스트·포트가 같은 곳에만 보내며, 리다이렉트를 따라갈 때도 같습니다. 예외는 같은 호스트의 `http`(80)에서 `https`(443)로 옮기는 리다이렉트로, 첫 요청이 이미 그 호스트에 보냈으므로 자격 증명을 유지합니다. 그 밖에 포트나 스킴이 다른 곳(`https`에서 `http`로 내려가는 경우 포함)과 하위 도메인으로 가는 리다이렉트는 자격 증명 없이 따라갑니다. |
-| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`, NuGet 서비스 인덱스·registration·검색 결과, APT `dists/`, Yum `repodata/`)를 다시 확인하기까지의 시간. |
+| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`, NuGet 서비스 인덱스·registration·검색 결과, APT `dists/`, Yum `repodata/`, RubyGems compact index·specs, Composer `packages.json`·`p2`, Conda `repodata.json`·`channeldata.json`)를 다시 확인하기까지의 시간. |
 | `contentMaxAge` | proxy | `"-1"` | 아티팩트 본문(jar, tgz, 휠, zip, crate, nupkg, deb, rpm)의 재확인 주기. 기본은 영구 캐시. |
 | `negativeCacheTTL` | proxy | `"10m"` | 원격이 404/410을 준 경로, 그리고 체크섬이 맞지 않은 다운로드를 다시 묻지 않는 시간. 만료된 기록은 서버가 시작할 때와 그 뒤 하루에 한 번 DB에서 지웁니다. |
+| `routingRule` | proxy | 없음 | 이 proxy에 적용할 라우팅 규칙 이름 하나. 없는 이름은 400이고 hosted·group에는 쓸 수 없습니다("라우팅 규칙" 참고). |
 | `members` | group | 필수 | 멤버 저장소 이름 목록. 순서대로 조회하며 같은 포맷이어야 하고 순환할 수 없습니다. |
 | `writeMember` | group | 없음 | 업로드를 받을 hosted 멤버(`members`에 포함되어야 함). 없으면 group에 쓰기는 405. |
 | `versionPolicy` | Maven hosted | `release` | `release`, `snapshot`, `mixed`. Maven에서만 쓸 수 있습니다. |
@@ -775,7 +808,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - 거절되면 클라이언트는 502(만료된 캐시가 있으면 그 캐시)를 받습니다. 로그의 `remote fetch failed` 줄에는 `address refused by the remote egress policy`가 남습니다.
 - `HTTPS_PROXY`/`HTTP_PROXY`의 사내 프록시를 거치는 요청은 프록시가 대신 접속하므로 IP 주소로 적힌 목적지만 검사합니다(위의 다른 IPv4 표기와 ASCII가 아닌 호스트의 거절 포함). 호스트 이름으로 적힌 목적지는 내부 주소로 해석되더라도 프록시가 그대로 접속하므로, 프록시에서 내부 대역으로 가는 요청을 막거나 사내 도메인과 대역을 `NO_PROXY`에 넣으세요. 프록시 자체의 주소는 막지 않습니다. `NO_PROXY`에 넣은 호스트에는 직접 접속하므로 위 검사를 모두 받습니다.
 
-**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
+**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum, RubyGems, Composer, Conda도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정", "RubyGems 설정", "Composer 설정", "Conda 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
 
 ## 인증과 권한
 
@@ -794,7 +827,7 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 
 역할은 **권한(privilege)** 목록입니다. 권한 하나는 **대상**과 **동작**의 묶음입니다.
 
-- **대상**: `*`(모든 저장소), `format:<포맷>`(`maven`, `npm`, `pypi`, `go`, `cargo`), `repo:<저장소 이름>`.
+- **대상**: `*`(모든 저장소), `format:<포맷>`(`maven`, `npm`, `pypi`, `go`, `cargo` 등 저장소 포맷 이름), `repo:<저장소 이름>`, `selector:<셀렉터 이름>`(경로 단위 권한. 적용 저장소를 `repos`에 함께 적습니다. "컨텐츠 셀렉터" 참고).
 - **동작**: `browse`, `read`, `add`, `edit`, `delete`. 여러 권한과 여러 역할은 합쳐지며(어느 하나라도 허용하면 허용) 거부 규칙은 없습니다.
   - **browse**: UI의 저장소 목록, 탐색, 파일 정보, 검색, 컴포넌트 검색. 내용 다운로드(`/repository/`)는 안 되며 파일 화면의 Download 버튼도 나오지 않습니다. `read`가 있으면 browse도 됩니다.
   - **read**: 다운로드(GET/HEAD)와 메타데이터 조회.
@@ -806,6 +839,41 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 - 역할을 지우려는데 사용자가 쓰고 있거나 LDAP 설정의 `groupMappings[].roles` 또는 `defaultRoles`에 들어 있으면 409입니다(LDAP 참조는 메시지에 어느 매핑인지 나옵니다).
 - **입력 검사**: `repo:<이름>` 대상은 그 이름의 저장소가 있어야 하며, 없으면 400(`unknown repository "<이름>"`)입니다. 이미 저장된 역할에 있던 대상은 저장소가 없어도(이전 버전이 저장소를 지울 때 남긴 권한 등) 그 역할을 편집할 때 그대로 둘 수 있습니다(새로 넣는 대상만 검사합니다). 저장소를 지우면 그 대상도 역할에서 지워지므로("저장소 관리"의 삭제 참고), 삭제 전에 열어 둔 역할 편집 화면을 그대로 저장하면 400입니다. 한 역할에 같은 대상을 두 번 쓰면 400(`duplicate target`)입니다. 역할 ID도 사용자 ID처럼 이미 있는 ID와 대소문자만 다른 ID는 만들 수 없고(409, `config.yaml` 첫 가져오기에서는 시작 실패), `admin`은 대소문자와 관계없이 예약어입니다. 설명에는 제어 문자를 쓸 수 없습니다. 이전 버전이 저장한 설명은 바꾸지 않는 한 다시 검사하지 않습니다.
 - 예: `repo:maven-releases`에 `browse`, `read`, `add`만 있는 역할의 사용자가 Maven에 `PUT`하면 201, `DELETE`하면 403입니다.
+
+### 컨텐츠 셀렉터
+
+컨텐츠 셀렉터는 **경로 단위 권한**을 위한 이름 붙은 식입니다(Nexus의 Content Selectors). 셀렉터를 만든 뒤 역할의 권한에 대상 `selector:<셀렉터 이름>`과 적용 저장소 `repos`(저장소 이름 목록 또는 `["*"]`)를 넣으면, 그 저장소 안에서 셀렉터 식이 맞는 경로에만 동작이 허용됩니다.
+
+식 문법(Nexus CSEL의 부분집합):
+
+- 필드: `format`(Nexus 표기, Maven은 `maven2`), `path`(`/repository/<저장소>/` 뒤 경로, 앞에 `/`가 붙음), `coordinate.groupId`(Maven만, `org.acme` → `/org/acme` 접두어로 바꿔 비교).
+- 연산자: `==`, `!=`, `=^`(시작 문자열), `=~`(RE2 정규식, 경로 전체가 맞아야 함).
+- 결합: `and`, `or`, `not`, 괄호. `not`이 가장 강하게, 그다음 `and`, 그다음 `or`가 묶입니다. 문자열은 `"…"` 또는 `'…'`이고 최대 1024자입니다.
+
+예:
+```
+format == "maven2" and path =^ "/org/acme/"
+path =~ "/org/acme/.*-SNAPSHOT/.*"
+coordinate.groupId == "org.acme" or path == "/readme.txt"
+not path =^ "/internal/"
+```
+동작 규칙:
+
+- 동작은 다른 권한과 같이 `browse`, `read`, `add`, `edit`, `delete`이며 여러 권한과 역할이 합쳐집니다. 요청 경로에 셀렉터가 맞으면 허용, 아니면 403입니다(group에 적용하려면 `repos`에 group 이름을 넣어야 합니다. Docker는 이미지 이름이 경로입니다).
+- **목록은 저장소 단위입니다.** 셀렉터 권한이 있는 저장소는 UI 목록·탐색·검색에 보이고, 파일 이름도 셀렉터와 관계없이 나옵니다. 내려받을 수 있는지는 파일 화면의 Download 버튼(`canDownload`)과 실제 `/repository/` 요청에서 경로별로 판단합니다. 즉 셀렉터 사용자는 내려받을 수 없는 이름도 볼 수 있습니다.
+- 컴포넌트 삭제(웹 UI, Nexus API)는 파일 여러 개를 지우므로 저장소 전체 delete 권한이 필요합니다. 셀렉터로만 delete를 받은 사용자는 403이고 경로별 `DELETE /repository/...`는 됩니다.
+- 역할이 쓰는 셀렉터는 지울 수 없습니다(409, 메시지에 역할 이름). 식을 고치면 바로 적용됩니다. "미리보기"(`POST /-/api/content-selectors/preview`)로 저장소 하나에서 식에 맞는 경로를 최대 100개 확인할 수 있습니다. 변경은 활동 기록에 `selector.create/update/delete`로 남습니다.
+- `config.yaml`의 `contentSelectors:`는 첫 시작 때 한 번 가져옵니다.
+- Nexus REST API: `/service/rest/v1/security/content-selectors[/{name}]`(`name, description, expression`)과 `POST/PUT /service/rest/v1/security/privileges/repository-content-selector[/{name}]`(`name, description, actions, format, repository, contentSelector`). Nexus의 권한은 독립 객체이지만 여기서는 역할 안에 있으므로, 이 권한은 **`priv:<권한 이름>`** 역할(권한 하나짜리)로 만들어지고 사용자에게 역할로 배정합니다. `repository: "*"`는 모든 저장소이며 `format`은 저장하지 않습니다(식의 `format ==`으로 제한하세요).
+
+예: `org.acme` 아래만 읽고 올릴 수 있는 역할
+```yaml
+contentSelectors:
+  - name: acme
+    description: acme 팀 아티팩트
+    expression: 'format == "maven2" and path =^ "/org/acme/"'
+```
+역할 권한(JSON): `{"target":"selector:acme","repos":["maven-releases"],"actions":["browse","read","add"]}`
 
 ### 읽기 권한
 
@@ -1065,6 +1133,37 @@ SMTP 설정(`GET/PUT /-/api/settings/smtp`, 관리자)으로 예약 작업 실�
 - **비밀번호**: 저장만 되고(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) 응답·로그·이벤트에 나오지 않습니다(`passwordSet`만 표시). 비워서 보내면 기존 값을 유지하고 `clearPassword: true`로 지웁니다. **서버(host나 port)를 바꾸거나 `tls`/`starttls`에서 `none`으로 낮출 때는 비밀번호를 다시 입력해야 합니다**(400). 저장된 비밀번호가 다른 서버나 암호화되지 않은 연결로 새어 나가지 않게 하는 규칙입니다.
 - **테스트 메일**: `POST /-/api/settings/smtp/test`(`{to}`)는 저장된 설정으로 한 통을 바로 보내고 성공하면 200입니다. 이메일이 꺼져 있으면 400, **10초 안에 다시 호출하면 429**, 발송 실패는 502입니다. 10초 창은 이메일이 켜져 있는지 확인한 뒤 **보내기 전에** 잡으므로 실패한 발송도 한 번으로 셉니다.
 - **작업 실패 알림**: 작업의 `notifyEmail`(최대 20개 주소)에 수신자를 넣으면, 그 작업의 실행이 **Failed**로 끝날 때만(성공, 중지, 서버 종료 중 실패는 제외) 이메일이 켜져 있을 때 메일을 보냅니다. 제목에 작업 이름이 들어가고 본문에는 시각, 결과 메시지, **마지막 로그 20줄**이 담깁니다. 언어는 `defaultLanguage`를 따릅니다. 메일은 백그라운드로 보내므로 작업을 지연시키지 않고, 큐(256건)가 차면 버립니다. 발송 실패는 서버 로그(WARN)에 남고 활동 기록에 `email.failed` 이벤트(제목과 오류 메시지)로도 기록됩니다.
+
+## Webhook
+
+Command Center는 Nexus Repository의 webhook처럼 서버에서 일어난 일을 HTTP POST로 외부 시스템에 알립니다. 관리자 화면의 Webhook 페이지(또는 `/-/api/webhooks` API)에서 등록하며, 전역 webhook은 모든 저장소의 이벤트를, 저장소 webhook은 그 저장소의 이벤트만 받습니다. 구독할 이벤트 종류는 `GET /-/api/webhooks/events`가 설명과 함께 나열하며 `*`는 전부를 뜻합니다. 주요 종류는 `component.created/deleted`, `asset.created/deleted`, `repository.created/updated/deleted`, `user.*`, `role.*`, `token.*`, `realm.updated`, `task.finished`, `cleanup.finished`, `webhook.*`입니다. 활동(activity) 목록에 기록되는 모든 이벤트가 webhook으로도 나가며, 이 버전이 모르는 새 종류는 이름 그대로 `*` 구독자에게 전달됩니다.
+
+요청은 `Content-Type: application/json`이고 `X-Command-Center-Event`(이벤트 종류), `X-Command-Center-Delivery`(전달 ID) 헤더가 붙습니다. 비밀값(secret)을 설정하면 본문 전체의 HMAC-SHA256을 `X-Command-Center-Signature: sha256=<hex>`로, Nexus 호환용으로 HMAC-SHA1을 `X-Nexus-Webhook-Signature`로 함께 보냅니다(`X-Nexus-Webhook-Id`, `X-Nexus-Webhook-Delivery` 헤더도 붙지만 본문은 Command Center 고유 형식이므로 Nexus용 수신기는 본문 처리를 맞춰야 합니다). 본문은 다음과 같습니다.
+
+```json
+{"id":"<uuid>","timestamp":"2026-10-29T09:00:00Z","event":"component.created","repository":"npm-hosted","actor":"alice",
+ "data":{"format":"npm","label":"@scope/util@2.0.0","group":"@scope","name":"util","version":"2.0.0"}}
+```
+
+`data`는 종류별로 다릅니다: 컴포넌트는 `format, group, name, version`, 파일(asset)은 `path, size, sha256`, 저장소는 `name, format, type`, 작업은 `name, type, result`(OK 또는 Failed)입니다. `repository`는 저장소와 무관한 이벤트에서는 `null`입니다.
+
+전달은 백그라운드에서 4개의 작업자가 요청당 10초 제한으로 보내며, 2xx 응답이면 성공입니다. 그 외 응답이나 연결 실패는 30초, 2분, 10분, 1시간 뒤에 다시 시도하고(최대 5회) 리다이렉트는 따라가지 않습니다. 대기 중인 전달은 데이터베이스에 저장되므로 서버를 재시작해도 이어서 보냅니다. 비활성화한 webhook에는 보내지 않으며(대기 중인 전달은 다시 활성화할 때까지 멈춥니다), webhook을 지우면 그 전달 기록도 지워집니다. webhook마다 최근 200건의 전달 기록(상태, 시도 횟수, 응답 코드, 오류)을 보관하며 화면이나 `GET /-/api/webhooks/{id}/deliveries`에서 확인하고 `redeliver`로 다시 보낼 수 있습니다. "테스트" 버튼(`POST /-/api/webhooks/{id}/test`)은 `ping` 이벤트를 즉시 보내고 응답 코드를 알려 줍니다. 대상 URL은 프록시 원격과 같은 송신 정책을 따릅니다: 사설 주소도 허용되지만 `10.1`처럼 숫자로만 적은 IPv4 주소나 ASCII가 아닌 호스트 이름은 거부됩니다. 비밀값은 다른 비밀값과 같이 비밀값 키로 암호화해 저장하고 API로 돌려주지 않으며(`secretSet`만 알려 줍니다), 로그에도 본문과 비밀값은 남지 않습니다.
+
+등록 예:
+
+```bash
+curl -u admin -H 'X-Command-Center-UI: 1' -H 'Content-Type: application/json' \
+  -d '{"name":"ci","url":"https://ci.example/hook","secret":"s3cret","events":["component.created","component.deleted"],"repo":"npm-hosted"}' \
+  https://repo.example/-/api/webhooks
+```
+
+수신 쪽 서명 검증(Python):
+
+```python
+import hmac, hashlib
+expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+assert hmac.compare_digest(expected, request.headers["X-Command-Center-Signature"])
+```
 
 ## 저장소 Online/Offline
 
@@ -1354,6 +1453,54 @@ dotnet nuget delete Demo.Pkg 1.0.0 -s http://localhost:8081/repository/nuget-hos
 - group은 멤버 순서상 그 패키지 id를 처음 가진 멤버만으로 답합니다(hosted를 proxy보다 앞에 두세요). 소유 멤버에 없는 버전은 뒤 멤버에 있어도 404입니다. 검색은 멤버 결과를 합치되 같은 id는 앞 멤버 것만 냅니다. `writeMember`가 있으면 group에 push한 패키지는 그 hosted로 갑니다.
 - 삭제는 `dotnet nuget delete`(delete 권한), 웹 UI·API의 컴포넌트 삭제, Cleanup 정책(nuget hosted·proxy)으로 하며 row와 파일만 지우면 registration이 바로 갱신됩니다. 역할 권한 대상으로 `format:nuget`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 description·license·projectUrl·repository와 대상 프레임워크별 dependencies를 보여 줍니다.
 
+### RubyGems 설정
+
+RubyGems 저장소(Nexus의 rubygems 포맷)입니다. Bundler와 RubyGems 3 이상의 `gem`이 쓰는 compact index(`versions`, `names`, `info/<gem>`), 옛 `gem`이 쓰는 Marshal 인덱스(`specs.4.8.gz`, `latest_specs.4.8.gz`, `prerelease_specs.4.8.gz`, `quick/Marshal.4.8/<gem>.gemspec.rz`, `api/v1/dependencies`), gem 파일(`gems/<이름>-<버전>[-<플랫폼>].gem`), push API(`api/v1/gems`, `api/v1/gems/yank`)를 `/repository/<저장소>/` 아래에서 제공합니다. compact index에는 URL이 들어가지 않으므로 `baseURL`과 무관합니다.
+
+```bash
+gem sources --add http://localhost:8081/repository/gems-all/ --remove https://rubygems.org/
+bundle config set --global mirror.https://rubygems.org http://localhost:8081/repository/gems-all/   # Gemfile의 source는 그대로 두고 미러로 쓸 때
+bundle config set --global http://localhost:8081/repository/gems-all/ ci:<비밀번호 또는 API 토큰>   # 읽기에 인증이 필요할 때
+bundle install
+
+# 올리기: API 키 자리에 API 토큰을 씁니다("API 토큰 발급" 참고). add 권한이 필요합니다.
+gem push demo-1.0.0.gem --host http://localhost:8081/repository/gems-hosted --key cc   # ~/.gem/credentials 에 ":cc: <API 토큰>" 한 줄
+GEM_HOST_API_KEY=<API 토큰> gem push demo-1.0.0.gem --host http://localhost:8081/repository/gems-hosted
+curl -u ci:<비밀번호> -H 'Content-Type: application/octet-stream' --data-binary @demo-1.0.0.gem http://localhost:8081/repository/gems-hosted/api/v1/gems
+gem yank demo -v 1.0.0 --host http://localhost:8081/repository/gems-hosted --key cc   # delete 권한. 플랫폼 gem은 -p java 를 붙입니다
+```
+
+- hosted는 올린 `.gem`(tar)의 `metadata.gz`(YAML Gem::Specification, 압축 해제 8 MiB 이하)를 읽어 `name`, `version`, `platform`, `authors`, `summary`, `description`, `homepage`, `licenses`, `required_ruby_version`, `required_rubygems_version`, `dependencies`(runtime/development), `metadata`, sha256를 저장하고, 파일은 `gems/<이름>-<버전>[-<플랫폼>].gem`에 둡니다. 버전은 Gem::Version 규칙대로 `-`를 `.pre.`로 바꾸고(`1.0.0-rc1` → `1.0.0.pre.rc1`), 컴포넌트 버전은 플랫폼을 포함합니다(`1.0.0-java`). `info/<gem>`, `names`, specs 인덱스, `gemspec.rz`, `api/v1/dependencies`는 행에서 바로 만들고, `versions`만 파일로 두어 push·삭제 때 같은 트랜잭션에서 줄을 덧붙입니다(append-only: Bundler는 `Range`로 늘어난 부분만 받고, `ETag`는 파일 전체의 md5, `Repr-Digest`는 sha-256으로 검증합니다). tar가 아니거나 `metadata.gz`가 없거나 이름·버전·플랫폼이 올바르지 않으면 400이며 업로드 본문은 `maxUploadMiB`를 따릅니다.
+- push 인증은 `gem push`가 보내는 `Authorization: <API 키>`(API 토큰 그대로), 또는 Basic(비밀번호나 토큰)입니다. Bundler는 `bundle config set <저장소 URL> 사용자:비밀번호`로 인증 정보를 둡니다.
+- `writePolicy`: `allow_once`(기본)는 같은 버전 재push를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요, `versions`에 새 md5 줄 추가), `deny`는 읽기 전용(400)입니다.
+- `gem yank`(`DELETE api/v1/gems/yank`, delete 권한)는 그 버전을 삭제합니다(파일과 행을 지우고 `versions`에 `-<버전>` 줄을 덧붙임). 없는 버전은 404입니다.
+- proxy의 `remote`는 `https://rubygems.org/`(또는 다른 RubyGems 서버의 루트 URL)입니다. `versions`(약 20 MiB)·`names`·`info/*`·specs 인덱스·`api/v1/dependencies` 응답은 `metadataMaxAge`마다 다시 확인하고, `.gem`과 `gemspec.rz`는 처음 받을 때 캐시합니다(`contentMaxAge`). 내용을 바꾸지 않고 그대로 전달하므로 Bundler의 증분 받기도 그대로 동작하며, 256 MiB를 넘는 인덱스 문서는 502입니다. 원격이 응답하지 않으면 캐시된 문서를 `Warning: 110`과 함께 제공하고, 캐시에 없는 것은 502입니다. rubygems.org는 `api/v1/dependencies`를 더 이상 제공하지 않으므로(404) 옛 `gem`은 다른 서버의 proxy에서만 이 API를 씁니다.
+- group은 `versions`와 `names`를 멤버 순서대로 병합합니다. 앞 멤버가 가진 gem 이름은 뒤 멤버의 버전을 숨기므로(내부 gem이 공개 저장소의 같은 이름에 가려지지 않도록) hosted를 proxy보다 앞에 두세요. 병합 결과는 group마다 60초 동안 메모리에 캐시합니다. `info/<gem>`, `gems/`, `quick/`는 그 이름을 처음 가진 멤버만으로 답하고 소유 멤버에 없는 버전은 뒤 멤버에 있어도 404입니다. `api/v1/dependencies`는 앞 멤버가 답한 gem을 빼고 다음 멤버에 묻습니다. `specs.4.8.gz` 등 Marshal 인덱스는 병합하지 않고 그 파일을 처음 가진 멤버 것을 그대로 냅니다. `writeMember`가 있으면 group에 push한 gem은 그 hosted로 갑니다.
+- 삭제는 `gem yank`, 웹 UI·API의 컴포넌트 삭제, Cleanup 정책(`format: rubygems`, hosted·proxy 모두)으로 하며 지우면 모든 인덱스가 바로 갱신됩니다. 컴포넌트는 gem 이름과 `<버전>[-<플랫폼>]`으로 나타나고(prerelease 판정은 버전에 글자가 있는지로 하므로 `1.0.0-java`는 release), 역할 권한 대상으로 `format:rubygems`를 쓸 수 있습니다. 컴포넌트 메타데이터 탭은 summary·description, licenses, homepage, `source_code_uri`와 runtime/development dependencies를 보여 줍니다.
+
+### Composer 설정
+
+Composer v2 저장소(Nexus의 composer 포맷은 proxy만 있지만 여기서는 hosted·group도 됩니다)입니다. Composer 2.x가 읽는 `packages.json`, 패키지별 메타데이터 `p2/<vendor>/<package>.json`(개발 버전은 `~dev.json`), 배포 파일 `dist/…zip`, 검색 `search.json`을 `/repository/<저장소>/` 아래에서 제공합니다. 문서는 `baseURL`로 만든 절대 URL을 담으므로 `baseURL`이 클라이언트가 여는 주소와 같아야 합니다.
+
+```bash
+# 프로젝트에 저장소 추가(또는 ~/.composer/config.json에 -g로 전역 설정)
+composer config repositories.commandcenter composer http://localhost:8081/repository/composer-all/
+composer config -g repo.packagist false            # Packagist 대신 proxy/group만 쓸 때
+composer config -g http-basic.localhost:8081 ci <비밀번호 또는 API 토큰>   # 읽기에 인증이 필요할 때
+composer require monolog/monolog
+
+# 올리기: 패키지 루트(또는 첫 디렉터리)에 composer.json이 있는 zip을 PUT 합니다. add 권한이 필요합니다.
+git archive --format=zip --prefix=demo-1.2.0/ -o demo-1.2.0.zip v1.2.0
+curl -u ci:<비밀번호> -T demo-1.2.0.zip http://localhost:8081/repository/composer-hosted/packages/upload/acme/demo/1.2.0
+curl -u ci:<비밀번호> -X DELETE http://localhost:8081/repository/composer-hosted/packages/upload/acme/demo/1.2.0   # delete 권한
+```
+
+- hosted는 올린 zip의 `composer.json`(1 MiB 이하)을 읽어 `name`이 URL의 `<vendor>/<package>`와 같은지 확인하고, 버전은 URL 것을 Composer 규칙으로 정규화합니다(`v1.2`→`1.2.0.0`, `1.0.0-beta1`→`1.0.0.0-beta1`, `dev-main`은 그대로, `1.x-dev`→`1.9999999.9999999.9999999-dev`; `composer.json`에 `version`이 있으면 같은 값이어야 합니다). 파일은 `dist/<vendor>/<package>/<정규화 버전>.zip`에 두고 메타데이터는 행에서 바로 만듭니다. `packages.json`의 `available-packages`에 저장소의 패키지 목록을 실으므로 Composer는 여기 있는 패키지만 이 저장소에 묻습니다. zip이 아니거나 `composer.json`이 없으면 400이며 업로드 본문은 `maxUploadMiB`를 따릅니다. `/`가 든 브랜치 버전(`dev-feature/x`)은 올릴 수 없습니다.
+- `writePolicy`: `allow_once`(기본)는 같은 버전 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.
+- proxy의 `remote`는 Composer 저장소 루트입니다(예: `https://repo.packagist.org/`, Satis·Private Packagist도 됩니다; `packages.json`까지 적어도 됩니다). `packages.json`·패키지 메타데이터·검색 결과는 `metadataMaxAge`마다 다시 확인하고, `metadata-url`·`search`를 proxy 주소로 바꾸며 v1 `providers-url`과 `notify-batch`·`security-advisories`는 뺍니다. 각 버전의 `dist.url`은 `dist/<vendor>/<package>/<버전>/<원본 URL의 sha1>.zip`으로 바꾸고 `source`(git)는 제거하므로 Composer는 proxy만 봅니다. zip은 처음 요청될 때 원본 URL(GitHub 등)에서 받아 영구 캐시하며 메타데이터의 `shasum`이 있으면 검증합니다(불일치는 502). `remote`에 `packages.json`이 없거나 `metadata-url`이 없는 v1 전용 저장소면 502로 알려 줍니다.
+- group은 멤버 순서상 그 패키지를 처음 가진 멤버만으로 답합니다(hosted를 proxy보다 앞에 두세요). 검색은 멤버 결과를 합치되 같은 이름은 앞 멤버 것만 냅니다. `writeMember`가 있으면 group에 올린 패키지는 그 hosted로 갑니다.
+- 삭제는 `DELETE packages/upload/<vendor>/<package>/<버전>`(delete 권한), 웹 UI·API의 컴포넌트 삭제, Cleanup 정책(composer hosted·proxy)으로 합니다. 역할 권한 대상으로 `format:composer`를 쓸 수 있고, 컴포넌트 메타데이터 탭은 description·license·homepage·`support.source`와 `require`(scope require)·`require-dev`(scope require-dev, optional)를 보여 줍니다.
+
 ### APT 설정
 
 Debian·Ubuntu 패키지 저장소(Nexus의 apt 포맷)입니다. `.deb` 파일은 `pool/` 아래에, apt가 읽는 메타데이터는 `dists/<distribution>/` 아래에 두며, hosted는 `Release`, `<component>/binary-<arch>/Packages`(와 `.gz`)를 서버가 직접 만들어 유지합니다(패키지를 올리거나 지울 때마다 같은 트랜잭션에서 다시 생성). 서명 키가 있으면 `Release.gpg`(분리 서명)와 `InRelease`(클리어 서명)도 함께 만듭니다.
@@ -1410,6 +1557,38 @@ dnf --repo cc-el9 makecache && dnf install demo
 - group은 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다. Nexus와 같이 멤버의 `repodata/`를 병합하지 않으므로 hosted와 proxy의 패키지를 한 `baseurl`로 합치려 하지 말고, 디렉터리(`depth: 1`)나 저장소별로 `.repo` 항목을 나누세요. `writeMember`가 있으면 group에 올린 RPM은 그 hosted로 갑니다.
 - 컴포넌트는 디렉터리를 포함한 이름(`el9/x/demo`)과 `<버전>-<릴리스>.<아키>`(`1.0-1.el9.x86_64`)로 나타나며, 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: yum`, hosted·proxy 모두)으로 하고 지우면 `repodata/`가 바로 갱신됩니다. 역할 권한 대상으로 `format:yum`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 summary·description, license, url, requires/provides를 보여 줍니다.
 
+### Conda 설정
+
+conda·mamba·micromamba가 쓰는 Conda 채널(Nexus의 conda 포맷)입니다. `/repository/<저장소>/`가 채널이고, 그 아래 `noarch`, `linux-64`, `osx-arm64`, `win-64` 같은 subdir 디렉터리에 패키지(`.tar.bz2`, `.conda`)와 목록인 `repodata.json`을 두며, 채널 루트의 `channeldata.json`이 패키지별 최신 버전을 요약합니다. hosted는 서버가 이 문서들을 직접 만들어 유지합니다(패키지를 올리거나 지울 때마다 같은 트랜잭션에서 다시 생성).
+
+```bash
+# 채널로 등록: .condarc 또는 conda config
+conda config --add channels http://localhost:8081/repository/conda-hosted
+# 또는 한 번만: -c <채널 URL>
+conda install -c http://localhost:8081/repository/conda-hosted foo
+micromamba install -c http://localhost:8081/repository/conda-all numpy
+
+# 올리기: 파일 PUT(curl). add 권한이 필요합니다. 경로는 <subdir>/<이름>-<버전>-<빌드>.tar.bz2 또는 .conda 입니다.
+curl -u ci:<비밀번호> --upload-file foo-1.0-py_0.tar.bz2 http://localhost:8081/repository/conda-hosted/noarch/
+curl -u ci:<비밀번호> -T bar-2.1-h1234_0.conda http://localhost:8081/repository/conda-hosted/linux-64/bar-2.1-h1234_0.conda
+```
+
+`.condarc`에 직접 적을 때:
+
+```yaml
+channels:
+  - http://localhost:8081/repository/conda-all
+  - defaults
+```
+
+- hosted는 올린 `.tar.bz2`의 `info/index.json`과 `info/about.json`을 읽어 name, version, build, build_number, depends, constrains, license, noarch, timestamp 등 index.json의 모든 항목에 md5·sha256·size를 더해 `<subdir>/repodata.json`과 `current_repodata.json`(같은 내용)의 `packages`에 싣고, about.json의 summary·description·home·license·dev_url·doc_url로 `channeldata.json`을 만듭니다. 파일 이름이 index.json의 이름·버전·빌드와 다르거나 subdir이 index.json의 `subdir`과 다르면 400입니다. 업로드 본문은 `maxUploadMiB`를 따릅니다. 아직 패키지가 없는 subdir의 `repodata.json`은 빈 문서로 답하므로(conda는 subdir의 404를 오류로 봅니다) noarch 패키지만 올린 채널도 바로 쓸 수 있습니다.
+- **`.conda` 파일의 제한**: `.conda`는 zip 안에 index.json을 zstd로 압축해 담는데 서버는 zstd를 풀지 않습니다. 그래서 `.conda`는 zip 구조와 `metadata.json`만 확인하고 `packages.conda`에 파일 이름이 주는 이름·버전·빌드와 md5·sha256·size만 싣습니다(`build_number: 0`, `depends: []`, license·timestamp 없음). conda는 그 패키지를 설치하지만 그 패키지의 의존성은 풀지 않으니, 의존성 해결이 필요한 패키지는 `.tar.bz2`로 올리거나(`conda build --no-anaconda-upload`, `cph transmute foo.conda .tar.bz2`) 의존성을 함께 올려 두세요. 같은 빌드를 `.tar.bz2`와 `.conda` 둘 다 올리면 하나의 컴포넌트(파일 두 개)로 다루고 메타데이터는 `.tar.bz2`에서 읽습니다.
+- `repodata.json.bz2`·`.zst`·`.jlap`는 hosted가 만들지 않습니다(404). conda·mamba는 이때 `repodata.json`으로 넘어가므로 설정은 필요 없습니다.
+- `writePolicy`: `allow_once`(기본)는 같은 경로 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요, repodata도 갱신), `deny`는 읽기 전용(400)입니다.
+- proxy의 `remote`는 채널 URL입니다(예: `https://conda.anaconda.org/conda-forge/`, `https://repo.anaconda.com/pkgs/main/`). 요청 경로를 그대로 원격에 붙여 캐시하며 `repodata.json`(과 `.bz2`·`.zst`·`.jlap`), `current_repodata.json`, `channeldata.json`은 `metadataMaxAge`마다 다시 확인하고 패키지는 `contentMaxAge`(기본 영구)로 캐시합니다. conda-forge linux-64의 `repodata.json`은 수백 MB이지만 메모리에 담지 않고 그대로 저장소로 흘려보냅니다. 내용은 바꾸지 않습니다(repodata에는 URL이 없음). 원격이 응답하지 않으면 만료된 메타데이터를 `Warning: 110`과 함께 제공합니다.
+- group은 패키지 파일은 멤버 순서상 그 파일을 처음 가진 멤버가 답하고, `<subdir>/repodata.json`·`current_repodata.json`·`channeldata.json`은 **멤버들의 문서를 합쳐서** 답합니다(hosted를 앞에 두면 hosted 패키지 우선, 같은 파일 이름은 앞 멤버 것). 합친 문서는 group 저장소에 저장해 두고 멤버 문서가 바뀔 때(hosted 업로드·삭제, proxy의 원격 갱신)만 다시 만듭니다. group은 `repodata.json.zst`·`.bz2`·`.jlap`를 404로 답해 클라이언트가 합친 `repodata.json`을 쓰게 합니다. `writeMember`가 있으면 group에 올린 패키지는 그 hosted로 갑니다.
+- 컴포넌트는 subdir을 그룹으로, 이름과 `<버전>-<빌드>`(`1.0-py_0`)를 버전으로 나타나며(라벨 `noarch/foo@1.0-py_0`, Cleanup `namePattern`은 `noarch:foo`처럼 `subdir:이름`에 맞춥니다), 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: conda`, hosted·proxy 모두)으로 하고 지우면 `repodata.json`·`channeldata.json`이 바로 갱신됩니다. 역할 권한 대상으로 `format:conda`를 쓸 수 있고, 컴포넌트 메타데이터 탭은 summary·description, license, home, dev_url과 depends(`depends`)·constrains(`constrains`)를 보여 줍니다.
+
 ## 운영
 
 | 작업 | 명령 |
@@ -1442,7 +1621,7 @@ curl -u admin http://localhost:8081/-/metrics
 
 ### Cleanup 정책
 
-오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
+오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
 
 | 기준 | 의미 |
 |---|---|
@@ -1475,7 +1654,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 
 첫 시작 때 작업이 하나도 없으면 `compact-blobstore`(`blobstore.compact`, `daily:03:00`, 사용)를 만듭니다. 이 기본 작업은 지울 수 없습니다(`DELETE`는 409). 지우면 재시작해도 다시 생기지 않아 compaction이 조용히 멈추기 때문이며, 끄고 싶으면 "사용"을 끄세요.
 
-**실패 알림**: 작업의 `notifyEmail`에 주소를 넣으면 실행이 Failed로 끝날 때 메일을 보냅니다("이메일 알림" 참고). 편집 화면의 "실패 알림 이메일" 입력란에 쉼표나 줄바꿈으로 구분해 적습니다.
+**실패 알림**: 작업의 `notifyEmail`에 주소를 넣으면 실행이 Failed로 끝날 때 메일을 보냅니다("이메일 알림" 참고). 실행 결과는 성공·실패 모두 `task.finished` 이벤트로 webhook에도 나갑니다("Webhook" 참고). 편집 화면의 "실패 알림 이메일" 입력란에 쉼표나 줄바꿈으로 구분해 적습니다.
 **일정 문법**
 
 | 일정 | 뜻 |
@@ -1498,7 +1677,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 
 - **로그**: SYSTEM → 시스템 상태·로그에서 서버 로그를 봅니다. 최근 **2 000건 또는 1 MiB** 중 먼저 닿는 한도까지 메모리에 보관하며, 재시작하면 사라집니다(표준 출력의 JSON 로그는 그대로 `docker compose logs`로 남습니다). 수준(INFO/WARN/ERROR)과 텍스트로 거르고, "다운로드"는 `commandcenter.log` 텍스트 파일을 내려줍니다(`GET /-/api/logs`, `/-/api/logs/download`, 관리자 전용).
 - 로그에는 비밀 값이 들어가지 않습니다. 요청 경로의 토큰은 가려지고 NUL 같은 제어 문자는 `\x00` 꼴로 바뀌어 기록되며, proxy 원격 URL의 **자격 증명(userinfo)과 쿼리 값은 제거**하며, 인증 헤더는 기록하지 않습니다. 작업 로그에 나오는 URL도 같은 처리를 합니다.
-- **활동(Events)**: 대시보드의 "최근 운영 활동"과 `GET /-/api/events`(관리자, 최대 200건씩, `before`·`kind`로 페이징·필터). DB에 최근 10 000건만 남기며, 기록은 비동기라 큐(1 000건)가 가득 차면 요청을 막지 않고 그 이벤트를 버립니다. 종류:
+- **활동(Events)**: 대시보드의 "최근 운영 활동"과 `GET /-/api/events`(관리자, 최대 200건씩, `before`·`kind`로 페이징·필터). DB에 최근 10 000건만 남기며, 기록은 비동기라 큐(1 000건)가 가득 차면 요청을 막지 않고 그 이벤트를 버립니다. 모든 활동 이벤트는 등록한 webhook에도 HTTP POST로 전달됩니다("Webhook" 참고). 종류:
 
   | kind | 시점 |
   |---|---|
@@ -1510,6 +1689,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
   | `task.run` | 작업 실행(결과와 요약) |
   | `cleanup` | 정리 결과(개수, 용량) |
   | `policy.create` / `policy.update` / `policy.delete` | 정책 변경 |
+  | `routingrule.*` / `selector.*` / `webhook.*` | 라우팅 규칙, 컨텐츠 셀렉터, webhook 변경 |
 
 ### 다운로드 수·요청 추이
 
@@ -1646,8 +1826,9 @@ docker compose start
 ## 제한 사항
 
 - 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML과 Go·Cargo 업로드 화면은 없습니다(Go·Cargo는 클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. 포맷 고유의 검색(`npm search` 포함)도 없습니다.
-- **지원하지 않는 포맷**: RubyGems, Conan, Conda, Composer, p2, Git LFS는 없습니다.
+- **지원하지 않는 포맷**: Conan, R, Git LFS, p2, CocoaPods, Swift, Terraform, HuggingFace는 없습니다.
 - **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브가 gzip(`control.tar.gz`)이나 무압축 tar인 `.deb`만 받습니다(xz·zstd는 400). Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
+- **RubyGems·Composer·Conda의 알려진 제한**: RubyGems group은 `versions`·`names`만 병합하고 Marshal 인덱스(`specs.4.8.gz` 등)는 그 파일을 처음 가진 멤버 것을 그대로 냅니다. Conda hosted는 `.conda` 파일의 zstd 메타데이터를 읽지 않아 이름·버전·빌드·해시만 기록하고(의존성 없음), `repodata.json.bz2`·`.zst`·`.jlap`를 만들지 않습니다(클라이언트는 `repodata.json`으로 넘어갑니다). Composer는 v1 `providers-url`과 `notify-batch`·`security-advisories`를 제공하지 않으며(Composer 2 전용), `/`가 든 브랜치 버전은 올릴 수 없습니다("RubyGems 설정", "Composer 설정", "Conda 설정" 참고).
 - **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
 - HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
 - **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**, 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기, 이미 만든 저장소의 blob store 이동.
@@ -1664,6 +1845,7 @@ docker compose start
   | Go | 409 (`writePolicy: allow`이면 허용) |
   | Cargo | 409 |
   | NuGet, APT, Yum (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
+  | RubyGems, Composer, Conda (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
 
   Cargo는 `-`/`_`와 대소문자만 다른 이름, 빌드 메타데이터(`+…`)만 다른 버전도 같은 것으로 보고 409로 거부합니다.
 - **group과 의존성 혼동**: group은 멤버를 순서대로 조회합니다. Maven과 Go는 `latest`를 멤버 전체 중 가장 새로운 버전으로 고르므로, hosted 멤버를 앞에 두어도 proxy 쪽에 더 높은 버전이 있으면 그것이 `latest`가 됩니다. npm·PyPI·Cargo group은 그 패키지(프로젝트, crate)를 처음 가진 멤버 하나만으로 답하므로, hosted를 proxy보다 앞에 두면 같은 이름의 공개 버전이 섞이지 않습니다. npm과 PyPI는 앞선 멤버가 Offline이거나 오류를 내면 503·5xx로 실패하고, tarball·파일 URL을 직접 요청해도 그 멤버의 것만 줍니다. Cargo group은 Offline 멤버를 건너뛰고, crate 파일 다운로드 URL은 멤버 순서대로 찾습니다. Maven·Go·Cargo에서 사내 패키지 이름을 공개 저장소에서 선점당하지 않으려면 사내 전용 group을 따로 두거나 proxy 멤버를 넣지 마세요.
