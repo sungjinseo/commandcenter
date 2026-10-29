@@ -456,3 +456,19 @@ func TestCloseLeavesPending(t *testing.T) {
 		t.Fatalf("a closed dispatcher stored %+v", list)
 	}
 }
+
+// A delivery read by a poll before an earlier attempt was recorded is not
+// sent again when that stale copy reaches a worker.
+func TestStaleDeliveryNotResent(t *testing.T) {
+	e := newEnv(t)
+	rc := newReceiver(t)
+	e.hook(t, meta.Webhook{Name: "h", URL: rc.URL, Events: []string{"*"}, Enabled: true})
+	e.d.Emit("upload", "u", "r", "a@1", "")
+	waitFor(t, "1 delivery", func() bool { return len(rc.requests()) == 1 })
+	stale := e.delivery(t, "h", 1)
+	stale.Status, stale.Attempts = meta.DeliveryPending, 0 // as a poll read it before the attempt was recorded
+	e.d.attempt(stale)
+	if n := len(rc.requests()); n != 1 {
+		t.Fatalf("stale copy sent again: %d requests", n)
+	}
+}

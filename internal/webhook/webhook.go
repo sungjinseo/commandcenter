@@ -306,6 +306,12 @@ func (d *Dispatcher) attempt(dl meta.WebhookDelivery) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
 	defer cancel()
+	// A poll that read the row just before an earlier attempt was recorded
+	// hands it over again once that attempt's worker is done: send only
+	// while the row is still pending at the attempt count it was read with.
+	if cur, err := d.DB.GetDelivery(ctx, dl.ID); err != nil || cur.Status != meta.DeliveryPending || cur.Attempts != dl.Attempts {
+		return
+	}
 	code, err := d.send(ctx, w, dl)
 	attempts := dl.Attempts + 1
 	status, errText, next := meta.DeliveryOK, "", time.Time{}
