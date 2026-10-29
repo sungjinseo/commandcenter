@@ -271,6 +271,7 @@ func TestValidateRepositoriesCatchesEveryRule(t *testing.T) {
 		"missing member":      {[]Repository{{Name: "g", Format: "maven", Type: "group", Members: []string{"x"}}}, `repository "g": unknown member "x"`},
 		"gitlfs proxy":        {[]Repository{{Name: "a", Format: "gitlfs", Type: "proxy", Remote: "https://x.example/"}}, `repository "a": gitlfs supports hosted repositories only`},
 		"gitlfs group":        {[]Repository{{Name: "h", Format: "gitlfs", Type: "hosted"}, {Name: "g", Format: "gitlfs", Type: "group", Members: []string{"h"}}}, `repository "g": gitlfs supports hosted repositories only`},
+		"p2 hosted":           {[]Repository{{Name: "a", Format: "p2", Type: "hosted"}}, `repository "a": p2 supports proxy and group repositories only`},
 		"cross format member": {[]Repository{{Name: "n", Format: "npm", Type: "hosted"}, {Name: "g", Format: "maven", Type: "group", Members: []string{"n"}}}, `repository "g": member "n" has format npm`},
 		"bad writeMember": {[]Repository{{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/"},
 			{Name: "g", Format: "maven", Type: "group", Members: []string{"p"}, WriteMember: "p"}}, `repository "g": writeMember "p" must be a hosted member`},
@@ -298,6 +299,8 @@ func TestValidateRepositoriesCatchesEveryRule(t *testing.T) {
 		{Name: "dh", Format: "docker", Type: "hosted"},
 		{Name: "dp", Format: "docker", Type: "proxy", Remote: "https://registry-1.docker.io"},
 		{Name: "dg", Format: "docker", Type: "group", Members: []string{"dh", "dp"}},
+		{Name: "p2p", Format: "p2", Type: "proxy", Remote: "https://download.eclipse.org/releases/2024-09/", CleanupPolicy: "pol"},
+		{Name: "p2g", Format: "p2", Type: "group", Members: []string{"p2p"}},
 	}
 	if err := ValidateRepositories(ok); err != nil {
 		t.Fatalf("valid list: %v", err)

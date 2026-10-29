@@ -206,6 +206,16 @@ func TestDeriveAsset(t *testing.T) {
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"unknown", "a/b", "", "", "", false},
+		{"p2", "plugins/org.eclipse.core.runtime_3.31.0.v20240813-0735.jar", "plugins", "org.eclipse.core.runtime", "3.31.0.v20240813-0735", true},
+		{"p2", "features/org.eclipse.platform_4.33.0.v20240903-0240.jar", "features", "org.eclipse.platform", "4.33.0.v20240903-0240", true},
+		{"p2", "binary/org.eclipse.platform_root_4.33.0.v20240903-0240", "binary", "org.eclipse.platform_root", "4.33.0.v20240903-0240", true}, // "_" in the id
+		{"p2", ".remote/da39a3ee5e6b4b0d3255bfef95601890afd80709/plugins/a_1.0.0.jar", "plugins", "a", "1.0.0", true},                          // a composite child's mirror
+		{"p2", "plugins/a_1.0.0.jar.pack200.gz", "", "", "", false},
+		{"p2", "plugins/sub/a_1.0.0.jar", "", "", "", false},
+		{"p2", "plugins/_1.0.0.jar", "", "", "", false},
+		{"p2", "plugins/a.jar", "", "", "", false},
+		{"p2", "content.jar", "", "", "", false},
+		{"p2", ".remote/index.json", "", "", "", false},
 	}
 	for _, tc := range tests {
 		g, n, v, ok := DeriveAsset(tc.format, tc.path)

@@ -337,6 +337,7 @@ func TestRoleValidationAndAdminImmutable(t *testing.T) {
 		{"duplicate action", `{"id":"r1","privileges":[{"target":"*","actions":["read","read"]}]}`, http.StatusBadRequest},
 		{"all formats ok", `{"id":"r2","privileges":[{"target":"format:maven","actions":["read"]},{"target":"format:npm","actions":["read"]},{"target":"format:pypi","actions":["read"]},{"target":"format:go","actions":["read"]},{"target":"format:cargo","actions":["read"]}]}`, http.StatusCreated},
 		{"no privileges ok", `{"id":"r3"}`, http.StatusCreated},
+		{"p2 format ok", `{"id":"r3p2","privileges":[{"target":"format:p2","actions":["read"]}]}`, http.StatusCreated},
 		{"unknown field", `{"id":"r4","x":1}`, http.StatusBadRequest},
 		// QA N-17, N-18, N-25, L-9
 		{"admin reserved in any case", `{"id":"Admin","privileges":[]}`, http.StatusBadRequest},

@@ -15,6 +15,7 @@ import (
 	"commandcenter/internal/format/gitlfs"
 	"commandcenter/internal/format/golang"
 	"commandcenter/internal/format/maven"
+	"commandcenter/internal/format/p2"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -33,7 +34,7 @@ type componentMetadata struct {
 	License       *string        `json:"license"`
 	Homepage      *string        `json:"homepage"`
 	RepositoryURL *string        `json:"repositoryUrl"`
-	Maintainer    *string        `json:"maintainer,omitempty"` // apt only: the control file's Maintainer
+	Maintainer    *string        `json:"maintainer,omitempty"` // apt: the control file's Maintainer; p2: Bundle-Vendor
 	BugReports    *string        `json:"bugReports,omitempty"` // r only: DESCRIPTION's BugReports
 	Collected     bool           `json:"collected"`
 	Dependencies  []dependencyJS `json:"dependencies"`
@@ -113,6 +114,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.rMetadata(r.Context(), rp, group, name, version, &m)
 	case "conan":
 		found, err = u.conanMetadata(r.Context(), rp, group, name, version, &m)
+	case "p2":
+		found, err = u.p2Metadata(r.Context(), rp, group, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -810,6 +813,47 @@ func (u *UI) conanMetadata(ctx context.Context, rp *repo.Repository, group, name
 			n, req, _ := strings.Cut(dep, "/")
 			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: kind, Name: n, Requirement: req})
 		}
+	}
+	return true, nil
+}
+
+// p2Metadata reads the OSGi manifest of a cached bundle (the group is the
+// directory: plugins, features or binary): Bundle-Name, Bundle-Vendor,
+// Bundle-License and Require-Bundle (scope "require-bundle", the
+// bundle-version range as the requirement). A feature or binary has no
+// manifest with these: found, nothing collected.
+func (u *UI) p2Metadata(ctx context.Context, rp *repo.Repository, group, name, version string, m *componentMetadata) (bool, error) {
+	p := group + "/" + name + "_" + version
+	if group != "binary" {
+		p += ".jar"
+	}
+	if group != "plugins" && group != "features" && group != "binary" {
+		return false, nil
+	}
+	a, err := u.DB.GetAsset(ctx, rp.Name, p)
+	if errors.Is(err, meta.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if u.Store == nil || group != "plugins" {
+		return true, nil
+	}
+	f, err := u.Store.Open(a)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	mf := p2.ReadManifest(f, a.Size)
+	if mf == nil {
+		return true, nil
+	}
+	m.Collected = true
+	m.Description, m.Maintainer, m.License = optStr(mf["Bundle-Name"]), optStr(mf["Bundle-Vendor"]), optStr(mf["Bundle-License"])
+	names, versions := p2.SplitHeader(mf["Require-Bundle"])
+	for i, n := range names {
+		m.Dependencies = append(m.Dependencies, dependencyJS{Scope: "require-bundle", Name: n, Requirement: versions[i]})
 	}
 	return true, nil
 }

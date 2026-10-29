@@ -248,7 +248,7 @@ type Repository struct {
 func (r Repository) IsOnline() bool { return r.Online == nil || *r.Online }
 
 var (
-	knownFormats = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true}
+	knownFormats = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true}
 	// aptNameRE is a distribution or component name: path segments, as
 	// apt's sources.list takes them ("stable", "bookworm-updates", "main").
 	aptNameRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9][A-Za-z0-9._+-]*)*$`)
@@ -655,6 +655,9 @@ func ValidateRepositories(list []Repository) error {
 		}
 		if r.Format == "gitlfs" && r.Type != "hosted" {
 			add("repository %q: gitlfs supports hosted repositories only", r.Name)
+		}
+		if r.Format == "p2" && r.Type == "hosted" {
+			add("repository %q: p2 supports proxy and group repositories only", r.Name)
 		}
 	}
 

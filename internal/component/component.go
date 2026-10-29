@@ -303,6 +303,41 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return SplitR(p)
 	case "conan": // v2/conans/<name>/<version>/<user>/<channel>/revisions/<rrev>/...: user/channel is the group
 		return SplitConan(p)
+	case "p2": // [.remote/<sha1>/]{features,plugins}/<id>_<version>.jar, binary/<id>_<version>: the directory is the group
+		return SplitP2(p)
+	}
+	return "", "", "", false
+}
+
+// SplitP2 maps a p2 artifact path to its component: features/<id>_<version>.jar,
+// plugins/<id>_<version>.jar or binary/<id>_<version>, each possibly under
+// a proxy's .remote/<sha1>/ mirror of a composite child. The version
+// starts at the first "_" followed by a digit, as an id may hold "_"
+// (a.b_c_1.0.0.v20240901). The directory is the group.
+func SplitP2(p string) (group, name, version string, ok bool) {
+	if rest, cut := strings.CutPrefix(p, ".remote/"); cut {
+		if _, rest, cut = strings.Cut(rest, "/"); !cut {
+			return "", "", "", false
+		}
+		p = rest
+	}
+	dir, file, cut := strings.Cut(p, "/")
+	if !cut || strings.Contains(file, "/") {
+		return "", "", "", false
+	}
+	switch dir {
+	case "features", "plugins":
+		if file, cut = strings.CutSuffix(file, ".jar"); !cut {
+			return "", "", "", false
+		}
+	case "binary":
+	default:
+		return "", "", "", false
+	}
+	for i := 1; i+1 < len(file); i++ {
+		if file[i] == '_' && file[i+1] >= '0' && file[i+1] <= '9' {
+			return dir, file[:i], file[i+1:], true
+		}
 	}
 	return "", "", "", false
 }
