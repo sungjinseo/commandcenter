@@ -317,18 +317,20 @@ async function userDetail(view, id) {
 
 // ---- roles -----------------------------------------------------------------------
 
-const targetKind = (tg) => (tg === "*" ? "all" : tg.startsWith("format:") ? "format" : "repo");
+const targetKind = (tg) => (tg === "*" ? "all" : tg.startsWith("format:") ? "format" : tg.startsWith("selector:") ? "selector" : "repo");
 const targetValue = (tg) => (tg === "*" ? "" : tg.slice(tg.indexOf(":") + 1));
 const scopeText = (tg) => {
   const k = targetKind(tg), v = targetValue(tg);
-  return k === "all" ? t("roles.scopeAll") : k === "format" ? t("roles.scopeFormat", { v: FORMAT_NAMES[v] || v }) : t("roles.scopeRepo", { v });
+  return k === "all" ? t("roles.scopeAll") : k === "format" ? t("roles.scopeFormat", { v: FORMAT_NAMES[v] || v }) : k === "selector" ? t("roles.scopeSelector", { v }) : t("roles.scopeRepo", { v });
 };
 
 export async function viewRoles(view, id) {
   const isLive = alive();
-  const [rd, repos] = await Promise.all([api("roles"), loadRepos(true)]);
+  // The selectors list only fills the selector target select; without it a stored name is still offered.
+  const [rd, repos, sd] = await Promise.all([api("roles"), loadRepos(true), api("content-selectors").catch(() => null)]);
   if (!isLive()) return;
   const roles = rd.roles || [];
+  const selNames = ((sd && sd.contentSelectors) || []).map((x) => x.name);
   const creating = id === "create";
   let cur = creating ? { id: "", description: "", privileges: [] } : roles.find((r) => r.id === id) || (id === undefined ? roles[0] : null);
   const add = h("a", { class: "btn primary", href: roleLink("create") }, t("roles.create"));
@@ -360,14 +362,23 @@ export async function viewRoles(view, id) {
   const rowsBox = h("div");
   const privs = [];
   const addPriv = (p) => {
-    const kind = sel([["all", t("roles.scopeAll")], ["format", t("roles.kFormat")], ["repo", t("roles.kRepo")]], targetKind(p.target));
+    const kind = sel([["all", t("roles.scopeAll")], ["format", t("roles.kFormat")], ["repo", t("roles.kRepo")], ["selector", t("roles.kSelector")]], targetKind(p.target));
     const val = h("select", { "aria-label": t("roles.target") });
+    // withKept lists names plus a stored one the list no longer has (the "kept" rule).
+    const withKept = (names, keep) => (names.includes(keep) || !keep ? names : names.concat(keep)).map((n) => [n, n]);
+    // A selector privilege also names the repositories it applies to ("*" = any).
+    const stored = p.repos || [];
+    const reposSel = h("select", { multiple: true, size: 4, "aria-label": t("roles.repos") },
+      [["*", t("roles.anyRepo")]].concat(withKept(repoNames.filter((n) => n !== "*"), stored.find((n) => n !== "*" && !repoNames.includes(n))))
+        .map(([v, l]) => h("option", { value: v, selected: stored.includes(v) }, l)));
+    const reposF = h("div", { class: "field" }, h("span", { class: "flabel" }, t("roles.repos")), reposSel);
     const fill = () => {
       const k = kind.value, keep = val.value || targetValue(p.target);
-      const opts = k === "format" ? FORMATS.map((f) => [f, FORMAT_NAMES[f]]) : k === "repo" ? (repoNames.includes(keep) || !keep ? repoNames : repoNames.concat(keep)).map((n) => [n, n]) : [];
+      const opts = k === "format" ? FORMATS.map((f) => [f, FORMAT_NAMES[f]]) : k === "repo" ? withKept(repoNames, keep) : k === "selector" ? withKept(selNames, keep) : [];
       put(val, opts.map(([v, l]) => h("option", { value: v }, l)));
       if (opts.some(([v]) => v === keep)) val.value = keep;
       val.hidden = k === "all";
+      reposF.hidden = k !== "selector";
     };
     kind.id = uid("k");
     fill();
@@ -375,8 +386,9 @@ export async function viewRoles(view, id) {
     const ag = checkGroup(ACTIONS.map((a) => [a, a]), p.actions || []);
     const rm = button(t("roles.removePriv"), "small danger");
     const el = h("div", { class: "edit-row" }, h("div", { class: "row" },
-      h("div", { class: "field" }, h("label", { for: kind.id }, t("roles.scope")), kind), h("div", { class: "field grow" }, h("span", { class: "flabel" }, t("roles.target")), val), rm), ag.el);
-    const item = { el, target: () => (kind.value === "all" ? "*" : kind.value === "format" ? "format:" + val.value : "repo:" + val.value), actions: ag.values, kind };
+      h("div", { class: "field" }, h("label", { for: kind.id }, t("roles.scope")), kind), h("div", { class: "field grow" }, h("span", { class: "flabel" }, t("roles.target")), val), rm), reposF, ag.el);
+    const item = { el, target: () => (kind.value === "all" ? "*" : kind.value + ":" + val.value), actions: ag.values, kind,
+      repos: () => (kind.value === "selector" ? [...reposSel.selectedOptions].map((o) => o.value) : undefined) };
     rm.addEventListener("click", () => { privs.splice(privs.indexOf(item), 1); el.remove(); fs.dirty(); });
     privs.push(item);
     rowsBox.appendChild(el);
@@ -407,7 +419,7 @@ export async function viewRoles(view, id) {
       }
       const pc = card(t("roles.privs"), t("roles.privsSub"), null);
       pc.append(tbl([t("roles.target"), t("roles.scope"), t("roles.actions")],
-        (cur.privileges || []).map((p) => h("tr", null, h("td", null, h("code", null, p.target)), h("td", null, scopeText(p.target)),
+        (cur.privileges || []).map((p) => h("tr", null, h("td", null, h("code", null, p.target), p.repos ? h("div", { class: "tiny muted" }, p.repos.join(", ")) : null), h("td", null, scopeText(p.target)),
           h("td", null, (p.actions || []).join(" · ")))), t("roles.noPrivs")));
       put(main, fs.err, fs.ok,
         card(cur.id, admin ? t("roles.adminSub") : t("roles.infoSub"), [
@@ -436,15 +448,21 @@ export async function viewRoles(view, id) {
       ev.preventDefault();
       fs.clear();
       const rid = creating ? idIn.value.trim() : cur.id;
-      const body = { description: descIn.value.trim(), privileges: privs.map((p) => ({ target: p.target(), actions: p.actions() })) };
+      const body = { description: descIn.value.trim(), privileges: privs.map((p) => {
+        const o = { target: p.target(), actions: p.actions() };
+        if (p.repos()) o.repos = p.repos();
+        return o;
+      }) };
       const errs = [];
       if (!rid) errs.push(t("roles.e.id"));
       const seen = new Set();
       body.privileges.forEach((p, i) => {
-        if (/^(format|repo):$/.test(p.target)) errs.push(t("roles.e.target", { n: i + 1 }));
+        if (/^(format|repo|selector):$/.test(p.target)) errs.push(t("roles.e.target", { n: i + 1 }));
         if (!p.actions.length) errs.push(t("roles.e.actions", { n: i + 1 }));
-        if (seen.has(p.target)) errs.push(t("roles.e.dup", { n: i + 1 }));
-        seen.add(p.target);
+        if (p.repos && !p.repos.length) errs.push(t("roles.e.repos", { n: i + 1 }));
+        const key = p.target + (p.repos ? "|" + p.repos.join(",") : ""); // the same selector may apply to other repositories
+        if (seen.has(key)) errs.push(t("roles.e.dup", { n: i + 1 }));
+        seen.add(key);
       });
       if (errs.length) { fs.show(errs, t("roles.errOne")); return; }
       save.disabled = true;

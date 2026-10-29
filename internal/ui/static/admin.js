@@ -9,7 +9,7 @@ import {
 import { t } from "./i18n.js";
 import { confirmDelete, viewRepos } from "./browse.js";
 import { viewRepoForm, DEFAULT_RECIPE } from "./repoform.js";
-import { viewTasks, viewPolicies, trendCard, logsCard } from "./ops.js";
+import { viewTasks, viewPolicies, trendCard, logsCard, viewRoutingRules, viewSelectors, viewWebhooks } from "./ops.js";
 import { viewUsers, viewRoles, viewRealms } from "./access.js";
 import { viewBlobStores, viewGeneral } from "./settings.js";
 
@@ -345,6 +345,9 @@ export function showSettings(view, key, p0, p1, criteria) {
     case "admin/repository/cleanuppolicies": return viewPolicies(view, p0);
     case "admin/repository/blobstores": return viewBlobStores(view, p0);
     case "admin/system/general": return viewGeneral(view);
+    case "admin/repository/routingrules": return viewRoutingRules(view, p0);
+    case "admin/security/contentselectors": return viewSelectors(view, p0);
+    case "admin/system/webhooks": return viewWebhooks(view, p0);
   }
   return null;
 }

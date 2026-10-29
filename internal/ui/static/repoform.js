@@ -18,7 +18,7 @@ const tk = (base, k) => t(base + "." + k);
 const createLink = (recipe) => adminRepoLink("create") + (recipe ? ":" + encodeURIComponent(recipe) : "");
 
 // Recipe names: "maven2" is our "maven" format.
-const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"]];
+const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"], ["rubygems", "rubygems"], ["conda", "conda"], ["composer", "composer"]];
 const TYPES = ["hosted", "proxy", "group"];
 const RECIPES = RECIPE_FORMATS.flatMap(([label, format]) => TYPES.map((type) => ({ id: label + "-" + type, format, type })));
 const recipeOf = (format, type) => RECIPES.find((r) => r.format === format && r.type === type);
@@ -34,6 +34,7 @@ const REMOTE_EXAMPLE = {
   maven: "https://repo1.maven.org/maven2/", npm: "https://registry.npmjs.org/", pypi: "https://pypi.org/",
   go: "https://proxy.golang.org/", cargo: "https://index.crates.io/", docker: "https://registry-1.docker.io", helm: "https://charts.helm.sh/stable/",
   nuget: "https://api.nuget.org/v3/index.json", apt: "https://deb.debian.org/debian/", yum: "https://dl.rockylinux.org/pub/",
+  rubygems: "https://rubygems.org/", conda: "https://conda.anaconda.org/conda-forge/", composer: "https://repo.packagist.org/",
 };
 const ANON = [["", "rf.anonInherit"], ["true", "rf.anonAllow"], ["false", "rf.anonDeny"]];
 
@@ -252,8 +253,11 @@ export async function viewRepoForm(view, o) {
       distribution: r.format === "apt" && r.type === "hosted" ? "stable" : "", component: r.format === "apt" && r.type === "hosted" ? "main" : "", depth: 0,
     };
   }
+  // Routing rule (proxy only): the rule names; null when the list fails, so the stored name is kept.
+  const rrP = cfg.type === "proxy" ? api("routing-rules").catch(() => null) : null;
   const all = ((await listP).repositories || []);
   const pols = await polP;
+  const rules = rrP ? await rrP : null;
   const stores = bsP ? await bsP : null;
   if (!isLive()) return;
   const isProxy = cfg.type === "proxy", isGroup = cfg.type === "group", isHosted = cfg.type === "hosted";
@@ -324,6 +328,14 @@ export async function viewRepoForm(view, o) {
     for (const [c, inp] of [[clrPass, pass], [clrBearer, bearer]]) {
       if (c) c.box.addEventListener("change", () => { inp.disabled = c.box.checked; if (c.box.checked) inp.value = ""; });
     }
+  }
+  const storedRule = cfg.routingRule || "";
+  let rule = null, ruleHint = null;
+  if (isProxy && rules) {
+    const names = (rules.routingRules || []).map((r) => r.name);
+    if (storedRule && !names.includes(storedRule)) names.unshift(storedRule);
+    if (names.length) rule = select([["", t("rf.none")]].concat(names.map((n) => [n, n])), storedRule);
+    else ruleHint = h("div", { class: "field full" }, h("small", null, t("rf.ruleNone"), " ", h("a", { href: "#admin/repository/routingrules" }, t("rf.ruleLink"))));
   }
 
   // Group
@@ -406,7 +418,8 @@ export async function viewRepoForm(view, o) {
           hidden ? h("div", { class: "field full" }, hidden.el, h("small", null, t("rf.hiddenHelp"))) : null,
           field(t("rf.ctAge"), ctAge, t("rf.ageHelp")),
           field(t("rf.mdAge"), mdAge, t("rf.ageHelp")),
-          field(t("rf.negTTL"), negTTL, t("rf.negHelp")))) : null,
+          field(t("rf.negTTL"), negTTL, t("rf.negHelp")),
+          rule ? field(t("rf.rule"), rule, t("rf.ruleHelp"), { full: true }) : ruleHint)) : null,
         authCard,
         isGroup ? card(t("rf.group"), t("rf.groupSub"), fields(
           field(t("rf.memberRepos"), picker.el, t("rf.membersHelp"), { group: true, full: true }),
@@ -460,6 +473,7 @@ export async function viewRepoForm(view, o) {
       b.contentMaxAge = ctAge.value.trim();
       b.negativeCacheTTL = negTTL.value.trim();
       if (hidden && hidden.box.checked) b.clearRemoteHiddenParts = true;
+      b.routingRule = rule ? rule.value : storedRule;
       const a = { username: user.value.trim(), password: pass.value, bearerToken: bearer.value };
       if (clrPass && clrPass.box.checked) a.clearPassword = true;
       if (clrBearer && clrBearer.box.checked) a.clearBearerToken = true;

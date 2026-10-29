@@ -374,6 +374,8 @@ async function versionList(r, c) {
     case "docker":
     case "helm":
     case "nuget":
+    case "rubygems":
+    case "composer":
     case "yum": return pkgVersions(c.name);
     case "maven": {
       const dir = (c.group ? c.group.split(".").join("/") + "/" : "") + c.name + "/";
@@ -620,6 +622,22 @@ function setupSnippets(r) {
       const base = url.replace(/\/$/, "") + (hosted ? (r.depth === 1 ? "/<dir>" : "") : "/<path on the mirror>");
       const out = [[r.name + ".repo", "[" + r.name + "]\nname=" + r.name + "\nbaseurl=" + base + "/\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=0"]];
       if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <name>-<version>-<release>.<arch>.rpm " + url + (r.depth === 1 ? "<dir>/" : "")]);
+      return out;
+    }
+    case "rubygems": {
+      const out = [["gem sources", "gem sources --add " + url],
+        ["bundle config", "bundle config mirror.https://rubygems.org " + url + (local ? "" : "\nbundle config " + url + " ci:<" + t("setup.password") + ">")]];
+      if (hosted || r.writeMember) out.push(["gem push", "gem push <gem>.gem --host " + url.replace(/\/$/, "") + " --key <" + t("setup.token") + ">"]);
+      return out;
+    }
+    case "conda": {
+      const out = [["conda config", "conda config --add channels " + url], [".condarc", "channels:\n  - " + url], ["conda install", "conda install -c " + url + " <package>"]];
+      if (hosted || r.writeMember) out.push(["upload", "curl -u ci --upload-file <file> " + url + "<subdir>/"]);
+      return out;
+    }
+    case "composer": {
+      const out = [["composer config", "composer config repositories.commandcenter composer " + url + (local ? "" : "\ncomposer config -g http-basic." + host + " ci <" + t("setup.password") + ">")]];
+      if (hosted || r.writeMember) out.push(["upload", "curl -u ci:<" + t("setup.password") + "> -T <package>.zip " + url + "packages/upload/<vendor>/<package>/<version>"]);
       return out;
     }
   }

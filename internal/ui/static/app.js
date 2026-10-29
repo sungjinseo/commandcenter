@@ -27,6 +27,9 @@ const ADMIN_SCREENS = {
   "admin/repository/cleanuppolicies": true,
   "admin/repository/blobstores": true,
   "admin/system/general": false,
+  "admin/repository/routingrules": true,
+  "admin/security/contentselectors": true,
+  "admin/system/webhooks": true,
 }; // value: whether the screen takes a ":<id>" parameter
 
 function dec(x) {
@@ -166,7 +169,8 @@ async function show(view, r) {
   if (!state.me.admin) {
     const titles = { "admin/repository/repositories": t("nav.repositories"), "admin/security/users": t("nav.users"), "admin/security/roles": t("nav.roles"), "admin/security/realms": t("nav.realms"), "admin/security/usertoken": t("nav.tokens"),
       "admin/support/status": t("nav.status"), "admin/support/systeminformation": t("nav.sysinfo"), "admin/system/tasks": t("nav.tasks"),
-      "admin/repository/cleanuppolicies": t("nav.cleanup"), "admin/repository/blobstores": t("nav.blobstores"), "admin/system/general": t("nav.general") };
+      "admin/repository/cleanuppolicies": t("nav.cleanup"), "admin/repository/blobstores": t("nav.blobstores"), "admin/system/general": t("nav.general"),
+      "admin/repository/routingrules": t("nav.routingrules"), "admin/security/contentselectors": t("nav.selectors"), "admin/system/webhooks": t("nav.webhooks") };
     return needAdmin(view, titles[r.key] || t("need.admin"));
   }
   const out = showSettings(view, r.key, p0, p1, r.criteria);

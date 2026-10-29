@@ -330,6 +330,9 @@ function pageTitle(key) {
     case "admin/repository/cleanuppolicies": return t("nav.cleanup");
     case "admin/repository/blobstores": return t("nav.blobstores");
     case "admin/system/general": return t("nav.general");
+    case "admin/repository/routingrules": return t("nav.routingrules");
+    case "admin/security/contentselectors": return t("nav.selectors");
+    case "admin/system/webhooks": return t("nav.webhooks");
     case "admin/security/users": return t("nav.users");
     case "admin/security/roles": return t("nav.roles");
     case "admin/security/realms": return t("nav.realms");
@@ -406,6 +409,7 @@ function navSections() {
       ["#admin/repository/repositories", t("nav.repositories"), "settings", is("admin/repository/repositories")],
       ["#admin/repository/blobstores", t("nav.blobstores"), "blob", is("admin/repository/blobstores")],
       ["#admin/repository/cleanuppolicies", t("nav.cleanup"), "cleanup", is("admin/repository/cleanuppolicies")],
+      ["#admin/repository/routingrules", t("nav.routingrules"), "custom", is("admin/repository/routingrules")],
       ["#admin/system/tasks", t("nav.tasks"), "tasks", is("admin/system/tasks")],
     ]]);
   }
@@ -414,12 +418,14 @@ function navSections() {
       me.admin ? ["#admin/security/users", t("nav.users"), "users", is("admin/security/users")] : null,
       me.admin ? ["#admin/security/roles", t("nav.roles"), "roles", is("admin/security/roles")] : null,
       me.admin ? ["#admin/security/realms", t("nav.realms"), "realms", is("admin/security/realms")] : null,
+      me.admin ? ["#admin/security/contentselectors", t("nav.selectors"), "browse", is("admin/security/contentselectors")] : null,
       [me.admin ? "#admin/security/usertoken" : "#user/usertoken", t("nav.tokens"), "token", is("admin/security/usertoken", "user/usertoken")],
     ]]);
   }
   if (me.admin) {
     out.push([t("nav.sec.system"), [
       ["#admin/system/general", t("nav.general"), "settings", is("admin/system/general")],
+      ["#admin/system/webhooks", t("nav.webhooks"), "upload", is("admin/system/webhooks")],
       ["#admin/support/status", t("nav.status"), "health", is("admin/support/status", "admin/support/systeminformation")],
     ]]);
   }

@@ -864,3 +864,331 @@ async function taskForm(view, id) {
         card(t("task.logTitle"), t("task.logSub"), logBox))));
   if (task.status === "Running") track(null); // a run started elsewhere: follow it to its end
 }
+
+// ---- routing rules, content selectors and webhooks ---------------------------------
+//   #admin/repository/routingrules[:create|:<name>]
+//   #admin/security/contentselectors[:create|:<name>]
+//   #admin/system/webhooks[:create|:<id>]
+// Each screen is a list, a create/edit form and a "try it" box that sends the
+// form's current values (unsaved) to the server's test or preview endpoint.
+
+const rrLink = (name) => "#admin/repository/routingrules" + (name ? ":" + enc(name) : "");
+const csLink = (name) => "#admin/security/contentselectors" + (name ? ":" + enc(name) : "");
+const whLink = (id) => "#admin/system/webhooks" + (id ? ":" + enc(id) : "");
+const lines = (ta) => ta.value.split("\n").map((x) => x.trim()).filter(Boolean);
+const MODE_KEYS = { BLOCK: "rr.block", ALLOW: "rr.allow" };
+const modeBadge = (m) => badge(MODE_KEYS[m] ? t(MODE_KEYS[m]) : m, m === "BLOCK" ? "amber" : "blue");
+const amber = (text) => h("div", { class: "notice amber" }, text);
+const checks = (items, selected) => {
+  const boxes = items.map(([v, label]) => ({ v, box: h("input", { type: "checkbox", value: v, checked: selected.includes(v) }), label }));
+  return { el: h("div", { class: "checks" }, boxes.map((b) => h("label", { class: "check" }, b.box, b.label))), values: () => boxes.filter((b) => b.box.checked).map((b) => b.v) };
+};
+
+// saver is the submit handler of a create (POST path) or edit (PUT path/id)
+// form; body() gives {body, errs}, link(out) the hash to show afterwards.
+function saver(fs, isLive, save, creating, path, id, body, link, msgs) {
+  return async (ev) => {
+    ev.preventDefault();
+    fs.clear();
+    const b = body();
+    if (b.errs.length) { fs.show(b.errs); return; }
+    save.disabled = true;
+    try {
+      const out = creating ? await api(path, { method: "POST", body: b.body }) : await api(path + "/" + encSeg(id), { method: "PUT", body: b.body });
+      if (!isLive()) return;
+      fs.done(link(out), creating ? msgs[0] : msgs[1]);
+    } catch (e) {
+      save.disabled = false;
+      if (!isLive()) return;
+      if (e.status === 401 || e.status === 403) { handleError(e); return; }
+      fs.show(errList(e));
+    }
+  };
+}
+// deleter is the delete button; inUse(data) turns a 409 reply into the message to show.
+function deleter(isLive, path, id, text, title, back, inUse) {
+  const del = button(t("common.delete"), "danger");
+  del.addEventListener("click", async () => {
+    if (!(await confirmDelete(text, title))) return;
+    del.disabled = true;
+    try {
+      await api(path + "/" + encSeg(id), { method: "DELETE" });
+    } catch (e) {
+      del.disabled = false;
+      const msg = e.status === 409 ? inUse(e.data || {}) : "";
+      if (msg) showError(msg); else handleError(e);
+      return;
+    }
+    if (isLive()) location.hash = back;
+  });
+  return del;
+}
+// tryBox runs fn() on a click (or Enter in input) and shows what it returns.
+function tryBox(isLive, run, input, fn) {
+  const result = h("div", { class: "pv-result", "aria-live": "polite" });
+  const go = async () => {
+    run.disabled = true;
+    put(result, loading());
+    try {
+      const nodes = await fn();
+      if (isLive()) put(result, nodes);
+    } catch (e) {
+      if (!isLive()) return;
+      put(result, amber(errList(e).join(" ")));
+      if (e.status === 401 || e.status === 403) handleError(e);
+    } finally { run.disabled = false; }
+  };
+  run.addEventListener("click", go);
+  if (input) input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); go(); } });
+  return { result, go };
+}
+const listOf = (links) => (links.length ? links.map((a) => h("div", { class: "listrow" }, a)) : null);
+
+export async function viewRoutingRules(view, name) {
+  const isLive = alive();
+  const creating = name === "create";
+  const list = (await api("routing-rules")).routingRules || [];
+  if (!isLive()) return;
+  const back = h("a", { class: "btn", href: rrLink() }, t("rr.back"));
+  if (name === undefined) {
+    put(view, pageHead(t("nav.routingrules"), sub(t("rr.sub")), acts(h("a", { class: "btn primary", href: rrLink("create") }, t("rr.create"))), polEyebrow()),
+      h("section", { class: "card" }, tbl([t("col.name"), t("rr.mode"), { t: t("rr.matchers"), cls: "num" }, t("rr.repos"), actHead()],
+        list.map((r) => h("tr", null,
+          h("td", { class: "name" }, h("a", { href: rrLink(r.name) }, h("strong", null, r.name)), r.description ? h("div", { class: "tiny muted" }, r.description) : null),
+          h("td", null, modeBadge(r.mode)),
+          h("td", { class: "num" }, fmtNum((r.matchers || []).length)),
+          h("td", null, (r.repositories || []).length ? r.repositories.join(", ") : dash),
+          h("td", { class: "act" }, h("a", { class: "btn small", href: rrLink(r.name) }, t("col.open"))))), t("rr.none"))));
+    return;
+  }
+  const cur = creating ? { name: "", description: "", mode: "BLOCK", matchers: [], repositories: [] } : list.find((r) => r.name === name);
+  if (!cur) { put(view, pageHead(t("nav.routingrules"), null, acts(back), polEyebrow()), notFound(t("rr.notFound", { name }))); return; }
+  const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 64, class: "mono" });
+  const descIn = textIn(cur.description, { maxlength: 200 });
+  const mode = sel([["BLOCK", t("rr.block")], ["ALLOW", t("rr.allow")]], cur.mode);
+  const matchers = h("textarea", { class: "mono", rows: 6, spellcheck: "false", placeholder: "^/com/mycompany/\n.*-SNAPSHOT.*" }, (cur.matchers || []).join("\n"));
+  const save = h("button", { type: "submit", class: "btn primary" }, creating ? t("rr.createBtn") : t("roles.save"));
+  const form = h("form", { novalidate: true });
+  const fs = formState(form);
+  put(form, fs.err, fields(
+    field(t("col.name"), nameIn, creating ? t("rr.nameHelp") : null, { req: creating }),
+    field(t("roles.desc"), descIn),
+    field(t("rr.mode"), mode, t("rr.modeHelp"), { full: true }),
+    field(t("rr.matchers"), matchers, t("rr.matchersHelp"), { full: true, req: true })),
+    h("div", { class: "actions end" }, save));
+  form.addEventListener("submit", saver(fs, isLive, save, creating, "routing-rules", cur.name, () => {
+    const b = { name: creating ? nameIn.value.trim() : cur.name, description: descIn.value.trim(), mode: mode.value, matchers: lines(matchers) };
+    const errs = [];
+    if (!b.name) errs.push(t("rr.e.name"));
+    if (!b.matchers.length) errs.push(t("rr.e.matchers"));
+    return { body: b, errs };
+  }, (o) => rrLink(o.name), [t("rr.created"), t("rr.saved")]));
+
+  const pathIn = textIn("", { class: "mono", placeholder: "/org/acme/lib/1.0/lib.jar" });
+  const run = button(t("rr.testRun"), "primary");
+  const tb = tryBox(isLive, run, pathIn, async () => {
+    const d = await api("routing-rules/test", { method: "POST", body: { path: pathIn.value.trim(), mode: mode.value, matchers: lines(matchers) } });
+    return [badge(d.allowed ? t("rr.allowed") : t("rr.blocked"), d.allowed ? "green" : "red"),
+      h("p", { class: "tiny muted" }, d.matchedBy ? [t("rr.matchedBy"), " ", h("code", null, d.matchedBy)] : t("rr.noMatch"))];
+  });
+  const test = card(t("rr.test"), t("rr.testSub"), [field(t("rr.path"), pathIn), h("div", { class: "actions" }, run), tb.result]);
+  const used = cur.repositories || [];
+  const conn = creating ? null : card(t("rr.repos"), t("rr.reposSub"), [
+    listOf(used.map((r) => h("a", { href: adminRepoLink(r) }, r))) || h("div", { class: "empty" }, t("rr.noRepos")),
+    h("p", { class: "hint" }, t("rr.connectHint"))]);
+  const del = creating ? null : deleter(isLive, "routing-rules", cur.name, t("rr.delText", { name: cur.name }), t("rr.delTitle"), rrLink(),
+    (d) => (Array.isArray(d.repositories) ? t("rr.inUse", { repos: d.repositories.join(", ") }) : ""));
+  put(view, pageHead(creating ? t("rr.createTitle") : cur.name, creating ? sub(t("rr.createSub")) : h("p", null, modeBadge(cur.mode), " ", t("rr.detailSub")), acts(back, del), polEyebrow()),
+    fs.ok, h("div", { class: "two" }, h("div", { class: "stack" }, card(t("rr.rule"), t("rr.ruleSub"), form), conn), test));
+  if (creating) nameIn.focus();
+}
+
+const CS_EXAMPLES = ['format == "maven2" and path =^ "/org/acme/"', 'path =~ "/org/acme/.*-SNAPSHOT/.*"', 'not path =^ "/internal/"'];
+
+export async function viewSelectors(view, name) {
+  const isLive = alive();
+  const creating = name === "create";
+  const [d, repos] = await Promise.all([api("content-selectors"), loadRepos(true)]);
+  if (!isLive()) return;
+  const list = d.contentSelectors || [];
+  const eb = { eyebrow: t("users.eyebrow") };
+  const back = h("a", { class: "btn", href: csLink() }, t("cs.back"));
+  if (name === undefined) {
+    put(view, pageHead(t("nav.selectors"), sub(t("cs.sub")), acts(h("a", { class: "btn primary", href: csLink("create") }, t("cs.create"))), eb),
+      h("section", { class: "card" }, tbl([t("col.name"), t("cs.expr"), t("cs.roles"), actHead()],
+        list.map((x) => h("tr", null,
+          h("td", { class: "name" }, h("a", { href: csLink(x.name) }, h("strong", null, x.name)), x.description ? h("div", { class: "tiny muted" }, x.description) : null),
+          h("td", null, h("code", null, x.expression)),
+          h("td", null, (x.roles || []).length ? x.roles.map((r) => badge(r, "blue")) : dash),
+          h("td", { class: "act" }, h("a", { class: "btn small", href: csLink(x.name) }, t("col.open"))))), t("cs.none"))));
+    return;
+  }
+  const cur = creating ? { name: "", description: "", expression: "", roles: [] } : list.find((x) => x.name === name);
+  if (!cur) { put(view, pageHead(t("nav.selectors"), null, acts(back), eb), notFound(t("cs.notFound", { name }))); return; }
+  const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 64, class: "mono" });
+  const descIn = textIn(cur.description, { maxlength: 200 });
+  const expr = h("textarea", { class: "mono", rows: 4, spellcheck: "false", placeholder: CS_EXAMPLES[0] }, cur.expression);
+  const save = h("button", { type: "submit", class: "btn primary" }, creating ? t("cs.createBtn") : t("roles.save"));
+  const form = h("form", { novalidate: true });
+  const fs = formState(form);
+  put(form, fs.err, fields(
+    field(t("col.name"), nameIn, creating ? t("cs.nameHelp") : null, { req: creating }),
+    field(t("roles.desc"), descIn),
+    field(t("cs.expr"), expr, t("cs.exprHelp"), { full: true, req: true })),
+    h("p", { class: "hint" }, t("cs.examples")), h("pre", { class: "code" }, CS_EXAMPLES.join("\n")),
+    h("div", { class: "actions end" }, save));
+  form.addEventListener("submit", saver(fs, isLive, save, creating, "content-selectors", cur.name, () => {
+    const b = { name: creating ? nameIn.value.trim() : cur.name, description: descIn.value.trim(), expression: expr.value.trim() };
+    const errs = [];
+    if (!b.name) errs.push(t("cs.e.name"));
+    if (!b.expression) errs.push(t("cs.e.expr"));
+    return { body: b, errs };
+  }, (o) => csLink(o.name), [t("cs.created"), t("cs.saved")]));
+
+  const repoSel = sel(repos.map((r) => [r.name, r.name]), repos.length ? repos[0].name : "");
+  const run = button(t("cs.previewRun"), "primary");
+  run.disabled = !repos.length;
+  const tb = tryBox(isLive, run, null, async () => {
+    const d = await api("content-selectors/preview", { method: "POST", body: { expression: expr.value.trim(), repo: repoSel.value } });
+    const paths = d.paths || [];
+    return [h("p", { class: "tiny muted" }, t("cs.previewCount", { n: fmtNum(paths.length), scanned: fmtNum(d.scanned) })),
+      d.truncated ? amber(t("cs.previewTrunc")) : null,
+      paths.length ? h("pre", { class: "code" }, paths.join("\n")) : h("div", { class: "empty" }, t("cs.previewNone"))];
+  });
+  const preview = card(t("cs.preview"), t("cs.previewSub"), [field(t("col.repo"), repoSel), h("div", { class: "actions" }, run), tb.result]);
+  const used = creating ? null : card(t("cs.roles"), t("cs.rolesSub"),
+    listOf((cur.roles || []).map((r) => h("a", { href: "#admin/security/roles:" + enc(r) }, r))) || h("div", { class: "empty" }, t("cs.noRoles")));
+  const del = creating ? null : deleter(isLive, "content-selectors", cur.name, t("cs.delText", { name: cur.name }), t("cs.delTitle"), csLink(),
+    (d) => (Array.isArray(d.roles) ? t("cs.inUse", { roles: d.roles.join(", ") }) : ""));
+  put(view, pageHead(creating ? t("cs.createTitle") : cur.name, sub(creating ? t("cs.createSub") : t("cs.detailSub")), acts(back, del), eb),
+    fs.ok, h("div", { class: "two" }, h("div", { class: "stack" }, card(t("cs.selector"), t("cs.selectorSub"), form), used), preview));
+  if (creating) nameIn.focus();
+}
+
+const DLV = { pending: ["wh.pending", "amber"], ok: ["wh.ok", "green"], failed: ["wh.failed", "red"] };
+const dlvBadge = (st) => (DLV[st] ? badge(t(DLV[st][0]), DLV[st][1]) : badge(st));
+const hookBody = (w) => ({ name: w.name, url: w.url, events: w.events || [], repo: w.repo || "", enabled: !!w.enabled });
+const whPath = (id, rest) => "webhooks/" + encSeg(id) + (rest || "");
+
+export async function viewWebhooks(view, id) {
+  const isLive = alive();
+  const creating = id === "create";
+  const eb = { eyebrow: t("sys.eyebrow") };
+  if (id === undefined) {
+    const list = (await api("webhooks")).webhooks || [];
+    if (!isLive()) return;
+    const rows = list.map((w) => {
+      const events = w.events || [];
+      const last = h("td", null, dash);
+      // The list carries no last delivery; the newest delivery row fills the cell.
+      api(whPath(w.id, "/deliveries")).then((d) => {
+        const x = (d.deliveries || [])[0];
+        if (x && isLive()) put(last, dlvBadge(x.status), h("div", { class: "tiny muted" }, fmtDate(x.created)));
+      }, () => {});
+      const toggle = button(w.enabled ? t("wh.on") : t("wh.off"), "small" + (w.enabled ? "" : " danger"));
+      toggle.setAttribute("aria-pressed", String(!!w.enabled));
+      toggle.addEventListener("click", async () => {
+        toggle.disabled = true;
+        try { await api(whPath(w.id), { method: "PUT", body: Object.assign(hookBody(w), { enabled: !w.enabled }) }); } catch (e) { toggle.disabled = false; handleError(e); return; }
+        if (isLive()) rerender();
+      });
+      return h("tr", null,
+        h("td", { class: "name" }, h("a", { href: whLink(w.id) }, h("strong", null, w.name)), h("div", { class: "tiny muted mono" }, w.url)),
+        h("td", null, w.repo ? h("a", { href: adminRepoLink(w.repo) }, w.repo) : badge(t("wh.global"))),
+        h("td", { class: "num" }, events.includes("*") ? t("wh.allEvents") : fmtNum(events.length)),
+        h("td", null, toggle), last,
+        h("td", { class: "act" }, h("a", { class: "btn small", href: whLink(w.id) }, t("col.open"))));
+    });
+    put(view, pageHead(t("nav.webhooks"), sub(t("wh.sub")), acts(h("a", { class: "btn primary", href: whLink("create") }, t("wh.create"))), eb),
+      h("section", { class: "card" }, tbl([t("col.name"), t("wh.scope"), { t: t("wh.events"), cls: "num" }, t("col.status"), t("wh.last"), actHead()], rows, t("wh.none"))));
+    return;
+  }
+  const [evd, repos, cur] = await Promise.all([api("webhooks/events").catch(() => ({})), loadRepos(true),
+    creating ? { name: "", url: "", secretSet: false, events: [], repo: "", enabled: true } : api(whPath(id))]);
+  if (!isLive()) return;
+  const back = h("a", { class: "btn", href: whLink() }, t("wh.back"));
+  const stored = cur.events || [];
+  const kinds = [["*", t("wh.allEvents")]].concat((evd.events || []).map((e) => [e.kind, h("span", { title: e.description }, e.kind)]));
+  for (const k of stored) if (!kinds.some(([v]) => v === k)) kinds.push([k, k]);
+  const names = repos.map((r) => r.name);
+  if (cur.repo && !names.includes(cur.repo)) names.push(cur.repo);
+  const nameIn = textIn(cur.name, { required: true, maxlength: 64 });
+  const urlIn = textIn(cur.url, { type: "url", class: "mono", placeholder: "https://ci.example/hook", required: true });
+  const secret = h("input", { type: "password", autocomplete: "new-password", placeholder: cur.secretSet ? t("rf.unchanged") : "" });
+  const clearSecret = cur.secretSet ? h("input", { type: "checkbox" }) : null;
+  if (clearSecret) clearSecret.addEventListener("change", () => { secret.disabled = clearSecret.checked; if (clearSecret.checked) secret.value = ""; });
+  const repoSel = sel([["", t("wh.global")]].concat(names.map((n) => [n, n])), cur.repo || "");
+  const ev = checks(kinds, stored);
+  const enabled = h("input", { type: "checkbox", checked: cur.enabled !== false });
+  const save = h("button", { type: "submit", class: "btn primary" }, creating ? t("wh.createBtn") : t("roles.save"));
+  const form = h("form", { novalidate: true });
+  const fs = formState(form);
+  put(form, fs.err, fields(
+    field(t("col.name"), nameIn, null, { req: true }),
+    field(t("wh.repo"), repoSel, t("wh.repoHelp")),
+    field(t("wh.url"), urlIn, t("wh.urlHelp"), { full: true, req: true }),
+    field(t("wh.secret"), secret, cur.secretSet ? [h("span", { class: "rf-set" }, t("wh.secretSet")), " — ", t("rf.keepEmpty")] : t("wh.secretHelp")),
+    clearSecret ? h("div", { class: "field" }, h("label", { class: "check" }, clearSecret, t("wh.clearSecret"))) : null,
+    h("div", { class: "field full" }, h("span", { class: "flabel" }, t("wh.events")), ev.el, h("small", null, t("wh.eventsHelp"))),
+    h("div", { class: "field" }, h("label", { class: "check" }, enabled, t("wh.enabled")))),
+    h("div", { class: "actions end" }, save));
+  form.addEventListener("submit", saver(fs, isLive, save, creating, "webhooks", cur.id, () => {
+    const b = { name: nameIn.value.trim(), url: urlIn.value.trim(), events: ev.values(), repo: repoSel.value, enabled: enabled.checked };
+    if (clearSecret && clearSecret.checked) b.secret = ""; // "" clears; absent keeps
+    else if (secret.value) b.secret = secret.value;
+    secret.value = ""; // the secret never stays in the page
+    const errs = [];
+    if (!b.name) errs.push(t("wh.e.name"));
+    if (!/^https?:\/\/.+/.test(b.url)) errs.push(t("wh.e.url"));
+    if (!b.events.length) errs.push(t("wh.e.events"));
+    return { body: b, errs };
+  }, (o) => whLink(o.id), [t("wh.created"), t("wh.saved")]));
+  const about = h("div", { class: "notice" }, icon("info", "hint-ico"), t("wh.about"));
+  const formCard = card(creating ? t("wh.createTitle") : t("wh.settings"), t("wh.settingsSub"), form);
+  if (creating) {
+    put(view, pageHead(t("wh.createTitle"), sub(t("wh.createSub")), acts(back), eb), fs.ok, h("div", { class: "two" }, formCard, about));
+    nameIn.focus();
+    return;
+  }
+
+  // Test ping and the delivery history (the test's ping is recorded there too).
+  const dbox = h("div", null, loading());
+  const refresh = button(t("wh.refresh"), "small");
+  const loadDlv = async () => {
+    refresh.disabled = true;
+    try {
+      const d = await api(whPath(cur.id, "/deliveries"));
+      if (!isLive()) return;
+      put(dbox, tbl([t("wh.event"), t("col.status"), { t: t("wh.attempts"), cls: "num" }, { t: t("wh.code"), cls: "num" }, t("wh.createdCol"), actHead()],
+        (d.deliveries || []).map((x) => {
+          const re = button(t("wh.redeliver"), "small");
+          re.addEventListener("click", async () => {
+            re.disabled = true;
+            try { await api(whPath(cur.id, "/deliveries/" + encSeg(x.id) + "/redeliver"), { method: "POST" }); } catch (e) { re.disabled = false; handleError(e); return; }
+            loadDlv();
+          });
+          return h("tr", null, h("td", null, h("code", null, x.event)),
+            h("td", null, dlvBadge(x.status), x.lastError ? h("div", { class: "tiny muted" }, x.lastError) : null),
+            h("td", { class: "num" }, fmtNum(x.attempts)), h("td", { class: "num" }, x.responseCode ? String(x.responseCode) : dash),
+            h("td", { class: "nowrap" }, fmtDate(x.created), x.status === "pending" && x.nextAt ? h("div", { class: "tiny muted" }, t("wh.nextAt", { time: fmtDate(x.nextAt) })) : null),
+            h("td", { class: "act" }, re));
+        }), t("wh.noDeliveries")));
+    } catch (e) {
+      if (isLive()) { put(dbox, h("div", { class: "empty" }, e.message)); handleError(e); }
+    } finally { refresh.disabled = false; }
+  };
+  refresh.addEventListener("click", loadDlv);
+  loadDlv();
+  const run = button(t("wh.test"), "primary");
+  const tb = tryBox(isLive, run, null, async () => {
+    const d = await api(whPath(cur.id, "/test"), { method: "POST" });
+    loadDlv();
+    return [badge(d.ok ? t("wh.testOk") : t("wh.testFail"), d.ok ? "green" : "red"),
+      h("p", { class: "tiny muted" }, d.status ? t("wh.testStatus", { code: d.status }) : t("wh.testNoResponse"), d.error ? " · " + d.error : "")];
+  });
+  const dcard = card(t("wh.deliveries"), t("wh.deliveriesSub"), null, refresh);
+  dcard.appendChild(dbox);
+  const del = deleter(isLive, "webhooks", cur.id, t("wh.delText", { name: cur.name }), t("wh.delTitle"), whLink(), () => "");
+  put(view, pageHead(cur.name, h("p", null, cur.repo ? badge(cur.repo, "blue") : badge(t("wh.global")), " ", cur.enabled ? badge(t("wh.on"), "green") : badge(t("wh.off"), "red"), " ", t("wh.detailSub")), acts(back, del), eb),
+    fs.ok, h("div", { class: "two" }, formCard, h("div", { class: "stack" }, card(t("wh.testTitle"), t("wh.testSub"), [h("div", { class: "actions" }, run), tb.result]), about)), dcard);
+}
