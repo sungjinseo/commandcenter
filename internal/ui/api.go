@@ -66,6 +66,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.userTokenRoutes(mux)
 	u.crowdRealmRoutes(mux)
 	u.stagingRoutes(mux)
+	u.transferRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }

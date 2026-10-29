@@ -125,6 +125,10 @@ type Config struct {
 	RoutingRules     []RoutingRule     `yaml:"routingRules"`
 	ContentSelectors []ContentSelector `yaml:"contentSelectors"`
 
+	// ExportRoot is the directory repository export and import tasks read
+	// and write under (or COMMANDCENTER_EXPORT_ROOT); empty disables them.
+	ExportRoot string `yaml:"exportRoot"`
+
 	// Present names the top-level keys the file sets, so the app can warn
 	// about keys that the database has superseded.
 	Present map[string]bool `yaml:"-"`

@@ -28,6 +28,7 @@ import (
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
+	"commandcenter/internal/transfer"
 )
 
 // Task types.
@@ -95,6 +96,8 @@ type Service struct {
 	Mail       Mailer         // failure e-mails (SendAsync never blocks); nil: none
 	Metrics    Flusher        // pending download counts, flushed before cleanup evaluates; nil: none
 	Log        *slog.Logger   // run logs go here too (and so to the log ring)
+
+	Transfer *transfer.Service // repository.export and repository.import; nil: not available
 
 	// Test hooks and limits; zero values mean the defaults.
 	Now           func() time.Time

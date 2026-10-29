@@ -295,6 +295,16 @@ func (d dir) open(sha string) (File, error) {
 	return f, err
 }
 
+// LocalPath is the file that holds blob sha in a filesystem store (to hard-link
+// it); ok is false for an S3 store.
+func (s *Store) LocalPath(sha string) (path string, ok bool) {
+	d, isDir := s.be.(dir)
+	if !isDir || !validSHA(sha) {
+		return "", false
+	}
+	return d.path(sha), true
+}
+
 // Remove deletes the blob. Removing a missing blob is not an error.
 func (s *Store) Remove(sha string) error {
 	if !validSHA(sha) {

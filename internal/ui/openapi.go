@@ -112,6 +112,8 @@ var apiDocs = []openapi.Route{
 	{Pattern: "PUT /-/api/realms/oidc", Summary: "Replaces the OIDC configuration", Tag: "realms", Auth: docAdminUI, Request: "OIDCRequest", Reply: "OIDC"},
 	{Pattern: "POST /-/api/realms/oidc/test", Summary: "Fetches the provider's discovery document", Tag: "realms", Auth: docAdminUI, Request: "OIDCRequest", Reply: "OIDCDiscovery"},
 	{Pattern: "GET /-/api/realms/rutauth", Summary: "The Remote User Token realm: header, groupHeader, trustedProxies, defaultRoles, groupMappings", Tag: "realms", Auth: docAdmin, Reply: "RUT"},
+	{Pattern: "POST /-/api/export", Summary: "Creates and starts a repository.export task (repositories, destination under exportRoot, includeProxies, since, hardLinks)", Tag: "tasks", Auth: docAdminUI, Request: "ExportParams", Reply: "TaskStarted", Replies: map[int]string{202: "started", 400: "Error", 409: "Error"}},
+	{Pattern: "POST /-/api/import", Summary: "Creates and starts a repository.import task (source under exportRoot, repositories mapping, createMissing, overwrite)", Tag: "tasks", Auth: docAdminUI, Request: "ImportParams", Reply: "TaskStarted", Replies: map[int]string{202: "started", 400: "Error", 409: "Error"}},
 	{Pattern: "GET /-/api/tags", Summary: "Component tags, 100 per page", Tag: "tags", Auth: docUser, Query: []string{"continuationToken"}, Reply: "TagList"},
 	{Pattern: "POST /-/api/tags", Summary: "Creates a tag (name, attributes)", Tag: "tags", Auth: docAdminUI, Request: "Tag", Reply: "Tag", Replies: map[int]string{201: "created", 400: "Error", 409: "Error"}},
 	{Pattern: "GET /-/api/tags/{name}", Summary: "One tag", Tag: "tags", Auth: docUser, Reply: "Tag", Replies: map[int]string{404: "Error"}},

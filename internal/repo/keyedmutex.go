@@ -1,6 +1,9 @@
 package repo
 
-import "sync"
+import (
+	"slices"
+	"sync"
+)
 
 // KeyedMutex is a set of mutexes addressed by string keys.
 // Entries are freed when no goroutine holds or waits for them.
@@ -37,5 +40,20 @@ func (k *KeyedMutex) Lock(key string) (unlock func()) {
 			delete(k.m, key)
 		}
 		k.mu.Unlock()
+	}
+}
+
+// LockAll locks every distinct key, in sorted order so that two callers
+// never deadlock, and returns one function that unlocks them all.
+func (k *KeyedMutex) LockAll(keys []string) (unlock func()) {
+	keys = slices.Compact(slices.Sorted(slices.Values(keys)))
+	unlocks := make([]func(), len(keys))
+	for i, key := range keys {
+		unlocks[i] = k.Lock(key)
+	}
+	return func() {
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
+		}
 	}
 }

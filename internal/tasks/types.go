@@ -43,6 +43,8 @@ var types = map[string]typeDef{
 	TypeTemp:   {name: "Delete blob store temp files", params: compactParams, run: runTemp, fields: blobStoreFields},
 
 	TypePurgeUserTokens: {name: "Purge expired user tokens", params: noParams, run: runPurgeUserTokens, fields: []ParamSpec{}},
+	TypeExport:          {name: "Export repositories", params: exportParamsOf, run: runExport, fields: exportFields},
+	TypeImport:          {name: "Import repositories", params: importParamsOf, run: runImport, fields: importFields},
 }
 
 var blobStoreFields = []ParamSpec{{Name: "blobStore", Type: "blobStore", Help: "empty: every blob store"}}

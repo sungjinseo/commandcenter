@@ -54,6 +54,7 @@ import (
 	"commandcenter/internal/resolve"
 	"commandcenter/internal/server"
 	"commandcenter/internal/tasks"
+	"commandcenter/internal/transfer"
 	"commandcenter/internal/ui"
 	"commandcenter/internal/webhook"
 )
@@ -398,6 +399,19 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	if err := taskSvc.Seed(context.Background()); err != nil {
 		return nil, err
 	}
+	if taskSvc.Transfer, err = newTransfer(cfg, db, store, handlers, map[string]transfer.RebuildFunc{
+		"maven": func(ctx context.Context, rp *repo.Repository, logf func(string, ...any)) error {
+			res, err := mavenH.RebuildMetadata(ctx, rp, 0, logf)
+			if err == nil && (res.Failed > 0 || res.Truncated) {
+				err = fmt.Errorf("%d maven-metadata.xml documents failed (truncated: %v): run repository.rebuild-metadata", res.Failed, res.Truncated)
+			}
+			return err
+		},
+		"npm": npmH.RebuildMetadata, "helm": helmH.RebuildMetadata, "yum": yumH.RebuildMetadata, "apt": aptH.RebuildMetadata,
+		"conda": condaH.RebuildMetadata, "r": rH.RebuildMetadata, "rubygems": gemsH.RebuildMetadata,
+	}); err != nil {
+		return nil, err
+	}
 
 	// Started only after the checks above can no longer fail, so an error return
 	// never leaves the writer running against a database New is about to close.
@@ -492,6 +506,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, Webhooks: hooks, log: log}
 	taskSvc.Repos, taskSvc.Events = registry, hooks
+	taskSvc.Transfer.Repos, taskSvc.Transfer.Events = registry, hooks
 	taskSvc.GC = func(ctx context.Context, store string) (int, int64, error) {
 		if store == "" {
 			return a.GC(ctx, time.Hour)
@@ -956,4 +971,27 @@ func (a *App) Close() error {
 	a.Webhooks.Close()
 	a.Events.Close()
 	return a.DB.Close()
+}
+
+// newTransfer builds repository export and import: under the export root in
+// COMMANDCENTER_EXPORT_ROOT or exportRoot (an absolute path; neither
+// disables them), with the formats' upload locks and index rebuilds.
+func newTransfer(cfg *config.Config, db *meta.DB, store *repo.Store, handlers map[string]repo.Handler, rebuild map[string]transfer.RebuildFunc) (*transfer.Service, error) {
+	root := os.Getenv(transfer.RootEnv)
+	switch {
+	case root != "" && cfg.ExportRoot != "":
+		return nil, fmt.Errorf("set %s or exportRoot, not both", transfer.RootEnv)
+	case root == "":
+		root = cfg.ExportRoot
+	}
+	if root != "" && !filepath.IsAbs(root) {
+		return nil, fmt.Errorf("exportRoot (%s) must be an absolute path", root)
+	}
+	lockers := map[string]transfer.Locker{}
+	for format, h := range handlers {
+		if l, ok := h.(transfer.Locker); ok {
+			lockers[format] = l
+		}
+	}
+	return &transfer.Service{DB: db, Store: store, Root: root, Version: Version, Lockers: lockers, Rebuild: rebuild}, nil
 }
