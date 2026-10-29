@@ -92,6 +92,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.composerMetadata(r.Context(), rp, name, version, &m)
 	case "conda":
 		found, err = u.condaMetadata(r.Context(), rp, group, name, version, &m)
+	case "rubygems":
+		found, err = u.rubygemsMetadata(r.Context(), rp, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -620,6 +622,45 @@ func (u *UI) composerMetadata(ctx context.Context, rp *repo.Repository, name, ve
 		for _, n := range names {
 			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: s.scope, Name: n, Requirement: s.links[n], Optional: s.opt})
 		}
+	}
+	return true, nil
+}
+
+// rubygemsMetadata reads what a rubygems hosted row holds of the gem's
+// specification: summary and description, licenses, homepage (and the
+// source_code_uri of its metadata) and the dependencies, whose scope is
+// their type (runtime or development).
+func (u *UI) rubygemsMetadata(ctx context.Context, rp *repo.Repository, name, version string, m *componentMetadata) (bool, error) {
+	p, ok, err := u.storedPackage(ctx, rp, name, version)
+	if err != nil || !ok {
+		return ok, err
+	}
+	var a struct {
+		Summary      string            `json:"summary"`
+		Description  string            `json:"description"`
+		Homepage     string            `json:"homepage"`
+		Licenses     []string          `json:"licenses"`
+		Metadata     map[string]string `json:"metadata"`
+		Dependencies []struct {
+			Name, Requirement, Type string
+		} `json:"dependencies"`
+	}
+	if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
+		return true, nil
+	}
+	m.Collected = true
+	desc := a.Description
+	if desc == "" {
+		desc = a.Summary
+	}
+	m.Description, m.Homepage = optStr(desc), optStr(a.Homepage)
+	m.License, m.RepositoryURL = optStr(strings.Join(a.Licenses, ", ")), optStr(a.Metadata["source_code_uri"])
+	for _, d := range a.Dependencies {
+		scope := d.Type
+		if scope == "" {
+			scope = "runtime"
+		}
+		m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: d.Name, Requirement: d.Requirement})
 	}
 	return true, nil
 }

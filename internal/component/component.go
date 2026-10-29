@@ -288,6 +288,14 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return "", name, version, ok
 	case "conda": // <subdir>/<name>-<version>-<build>.tar.bz2 or .conda: the subdir is the group
 		return SplitConda(p)
+	case "rubygems": // gems/<name>-<version>[-<platform>].gem, hosted and proxy alike
+		rest, cut := strings.CutPrefix(p, "gems/")
+		file, isGem := strings.CutSuffix(rest, ".gem")
+		if !cut || !isGem || strings.Contains(file, "/") {
+			return "", "", "", false
+		}
+		name, version, ok = SplitGem(file)
+		return "", name, version, ok
 	}
 	return "", "", "", false
 }
@@ -415,6 +423,8 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 			return subdir, cname, cversion, version
 		}
 		return "", name, version, ""
+	case "rubygems": // the version holds the platform (1.0.0-java), as the file name does
+		return "", name, version, "gems/" + name + "-" + version + ".gem"
 	}
 	return "", name, version, ""
 }
@@ -492,4 +502,30 @@ func SplitComposer(p string) (name, version string, ok bool) {
 	}
 	version = strings.Join(segs[3:len(segs)-1], "/")
 	return name, version, version != ""
+}
+
+// Gem versions as RubyGems normalizes them (Gem::Version turns "-" into
+// ".pre.", so a version never holds "-"), and platforms, which start with a
+// letter (java, x86_64-linux, arm64-darwin-22).
+var (
+	gemVersionRE  = regexp.MustCompile(`^[0-9]+(\.[0-9A-Za-z]+)*$`)
+	gemPlatformRE = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,63}$`)
+)
+
+// SplitGem splits a gem's full name, <name>-<version>[-<platform>], at the
+// first "-" followed by a digit whose remainder is a version and an optional
+// platform, as RubyGems does: names may hold "-" ("rack-test", "ruby-2d").
+// The version returned keeps the platform ("1.0.0-java"): it is what the
+// rubygems format stores as the row version.
+func SplitGem(full string) (name, version string, ok bool) {
+	for i := 1; i+1 < len(full); i++ {
+		if full[i] != '-' || full[i+1] < '0' || full[i+1] > '9' {
+			continue
+		}
+		v, platform, _ := strings.Cut(full[i+1:], "-")
+		if gemVersionRE.MatchString(v) && (platform == "" || gemPlatformRE.MatchString(platform)) {
+			return full[:i], full[i+1:], true
+		}
+	}
+	return "", "", false
 }

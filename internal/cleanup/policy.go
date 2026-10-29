@@ -50,7 +50,7 @@ const (
 )
 
 var (
-	policyFormats = map[string]bool{"all": true, "maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true}
+	policyFormats = map[string]bool{"all": true, "maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true}
 	releaseTypes  = map[string]bool{"any": true, "release": true, "prerelease": true}
 )
 
@@ -66,7 +66,7 @@ func (p *Policy) Validate() error {
 		}
 	}
 	if !policyFormats[p.Format] {
-		add("unknown format %q: use all, maven, npm, go, pypi, cargo, raw, helm, yum, nuget, apt, composer or conda", p.Format)
+		add("unknown format %q: use all, maven, npm, go, pypi, cargo, raw, helm, yum, nuget, apt, composer, conda or rubygems", p.Format)
 	}
 	for _, d := range []struct {
 		field string
@@ -128,6 +128,9 @@ func Prerelease(format, version string) bool {
 		return pypiPrerelease(version)
 	case "composer": // normalized: 1.0.0.0-beta1, 1.0.0.0-RC1, dev-main, 1.0.0.0-dev; -patch is a release
 		return strings.Contains(version, "-") && !strings.Contains(version, "-patch")
+	case "rubygems": // <version>[-<platform>]: a letter in the version part (1.0.0.pre.1), as Gem::Version has it
+		v, _, _ := strings.Cut(version, "-")
+		return strings.ContainsFunc(v, func(r rune) bool { return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' })
 	}
 	v, ok := semver.Parse(version)
 	return ok && !v.Release()

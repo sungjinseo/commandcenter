@@ -33,6 +33,7 @@ import (
 	"commandcenter/internal/format/nuget"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/format/raw"
+	"commandcenter/internal/format/rubygems"
 	"commandcenter/internal/format/yum"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
@@ -319,11 +320,12 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	aptH := apt.New(store, resolver, authn)
 	composerH := composer.New(store, fetcher, authn, baseURL)
 	condaH := conda.New(store, resolver, authn)
+	gemsH := rubygems.New(store, fetcher, authn)
 	dockerKey := make([]byte, 32)
 	rand.Read(dockerKey)
 	dockerH := docker.New(store, docker.NewFetcher(store, maxConcurrentFetches), authn, nil, baseURL, dockerKey) // Repos: the registry, below
 	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
-	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH}
+	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH}
 	// Hosted deletes go through the format handlers, which share their locks
 	// with uploads; proxies of every format use the generic deleter.
 	deleters := cleanup.NewRegistry(store)
@@ -340,6 +342,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("apt", "hosted", aptH)
 	deleters.Register("composer", "hosted", composerH)
 	deleters.Register("conda", "hosted", condaH)
+	deleters.Register("rubygems", "hosted", gemsH)
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)

@@ -272,6 +272,8 @@ func unitPrefix(format, p string) string {
 			return stem + "."
 		}
 		return strings.TrimSuffix(p, ".conda") + "."
+	case "rubygems": // one .gem file per version
+		return p
 	}
 	return homePrefix(format, p)
 }
@@ -309,6 +311,10 @@ func homePrefix(format, p string) string {
 	case "composer": // dist/<vendor>/<package>/
 		if segs := strings.SplitN(p, "/", 4); len(segs) == 4 {
 			return segs[0] + "/" + segs[1] + "/" + segs[2] + "/"
+		}
+	case "rubygems": // gems/<name>-: the versions of one gem are contiguous under it
+		if name, _, ok := component.SplitGem(strings.TrimPrefix(p, "gems/")); ok {
+			return "gems/" + name + "-"
 		}
 	}
 	return p

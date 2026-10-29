@@ -473,7 +473,7 @@ func (u *UI) asset(w http.ResponseWriter, r *http.Request) {
 }
 
 // packageFormats are the formats that record packages in the metadata db.
-var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true, "helm": true, "yum": true, "nuget": true, "composer": true}
+var packageFormats = map[string]bool{"npm": true, "pypi": true, "cargo": true, "docker": true, "helm": true, "yum": true, "nuget": true, "composer": true, "rubygems": true}
 
 func (u *UI) packages(w http.ResponseWriter, r *http.Request) {
 	rp, ok := u.lookup(w, r)
@@ -581,6 +581,8 @@ func (u *UI) packageVersions(w http.ResponseWriter, r *http.Request) {
 		u.helmVersionDetails(r.Context(), rp.Name, name, versions)
 	case "yum":
 		u.yumVersionDetails(r.Context(), rp.Name, name, versions)
+	case "rubygems":
+		u.yumVersionDetails(r.Context(), rp.Name, name, versions) // the gem's summary, stored under the same key
 	}
 	tags := map[string]string{}
 	if rp.Format == "npm" || rp.Format == "docker" {
