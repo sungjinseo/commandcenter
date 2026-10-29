@@ -127,12 +127,13 @@ func (u *UI) listTasks(w http.ResponseWriter, r *http.Request) {
 		out = append(out, u.toTaskJSON(t, running, false))
 	}
 	type typeJSON struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type   string            `json:"type"`
+		Name   string            `json:"name"`
+		Params []tasks.ParamSpec `json:"params"`
 	}
 	types := []typeJSON{}
 	for _, t := range tasks.Types() {
-		types = append(types, typeJSON{t, tasks.TypeName(t)})
+		types = append(types, typeJSON{t, tasks.TypeName(t), tasks.Params(t)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tasks": out, "types": types, "running": running})
 }

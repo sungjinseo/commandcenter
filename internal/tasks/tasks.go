@@ -35,6 +35,10 @@ const (
 	TypeCompact = "blobstore.compact"
 	TypeCleanup = "repository.cleanup"
 	TypeRebuild = "repository.rebuild-metadata"
+	TypeVerify  = "repository.verify-blobs"
+	TypePurge   = "maven.purge-snapshots"
+	TypeRecalc  = "blobstore.recalculate-size"
+	TypeTemp    = "blobstore.delete-temp-files"
 )
 
 // Seed task (Decision 7): created on the first start after plan 11 unless
@@ -80,11 +84,15 @@ type Service struct {
 	Repos    *repo.Registry
 	GC       func(ctx context.Context, store string) (int, int64, error) // blobstore.compact: blobs and bytes removed; store "" means all
 	Deleters *cleanup.Registry                                           // repository.cleanup
-	Maven    *maven.Handler                                              // repository.rebuild-metadata
-	Events   repo.EventSink                                              // task.run and cleanup events; nil records none
-	Mail     Mailer                                                      // failure e-mails (SendAsync never blocks); nil: none
-	Metrics  Flusher                                                     // pending download counts, flushed before cleanup evaluates; nil: none
-	Log      *slog.Logger                                                // run logs go here too (and so to the log ring)
+	Maven    *maven.Handler                                              // repository.rebuild-metadata, maven.purge-snapshots
+	Store    *repo.Store                                                 // blob stores: verify-blobs, recalculate-size, delete-temp-files
+	// Rebuilders are the hosted formats whose derived index files
+	// repository.rebuild-metadata regenerates, by format (Maven uses Maven).
+	Rebuilders map[string]repo.MetadataRebuilder
+	Events     repo.EventSink // task.run and cleanup events; nil records none
+	Mail       Mailer         // failure e-mails (SendAsync never blocks); nil: none
+	Metrics    Flusher        // pending download counts, flushed before cleanup evaluates; nil: none
+	Log        *slog.Logger   // run logs go here too (and so to the log ring)
 
 	// Test hooks and limits; zero values mean the defaults.
 	Now           func() time.Time
@@ -169,6 +177,18 @@ func TypeName(typ string) string {
 	}
 	return typ
 }
+
+// ParamSpec describes one parameter of a task type for a generic form.
+type ParamSpec struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"` // string, bool, int, bytes, repository, blobStore or format
+	Required bool   `json:"required,omitempty"`
+	Default  any    `json:"default,omitempty"`
+	Help     string `json:"help,omitempty"`
+}
+
+// Params lists the parameters of a task type, nil for an unknown type.
+func Params(typ string) []ParamSpec { return types[typ].fields }
 
 // Types lists the task types, sorted.
 func Types() []string {

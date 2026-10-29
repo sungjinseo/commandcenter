@@ -1305,8 +1305,25 @@ func (h *Handler) tasks(w http.ResponseWriter, r *http.Request) {
 		case "Failed":
 			result = "FAILED"
 		}
-		items = append(items, map[string]any{"id": t.ID, "name": t.Name, "type": t.Type, "message": t.LastMessage,
+		items = append(items, map[string]any{"id": t.ID, "name": t.Name, "type": nexusTaskType(t.Type), "message": t.LastMessage,
 			"currentState": strings.ToUpper(t.Status), "lastRunResult": result, "nextRun": nullable(t.NextRun), "lastRun": nullable(t.LastRun)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "continuationToken": nil})
+}
+
+// nexusTaskTypes maps Command Center task types to the Nexus type ids
+// scripts know; a type without one keeps its own id.
+var nexusTaskTypes = map[string]string{
+	"repository.rebuild-metadata": "repository.maven.rebuild-metadata",
+	"maven.purge-snapshots":       "repository.maven.remove-snapshots",
+	"blobstore.compact":           "blobstore.compact",
+	"blobstore.delete-temp-files": "blobstore.delete-temp-files",
+	"repository.cleanup":          "repository.cleanup",
+}
+
+func nexusTaskType(typ string) string {
+	if n, ok := nexusTaskTypes[typ]; ok {
+		return n
+	}
+	return typ
 }

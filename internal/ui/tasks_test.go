@@ -21,7 +21,7 @@ func TestTaskCRUD(t *testing.T) {
 	m := r.json(t)
 	id, _ := m["id"].(string)
 	if id == "" || m["status"] != "Waiting" || m["schedule"] != "weekly:sun:04:00" || m["enabled"] != true ||
-		m["nextRun"] == "" || m["typeName"] != "Rebuild Maven metadata" || m["params"].(map[string]any)["repo"] != "maven-releases" {
+		m["nextRun"] == "" || m["typeName"] != "Rebuild repository metadata" || m["params"].(map[string]any)["repo"] != "maven-releases" {
 		t.Fatalf("created: %s", r.body)
 	}
 	if got := sink.Events(); len(got) != 1 || got[0].Kind != "task.create" || got[0].Actor != "admin" || got[0].Subject != id {
@@ -32,7 +32,7 @@ func TestTaskCRUD(t *testing.T) {
 	r = e.get(t, "/-/api/tasks", "admin")
 	wantStatus(t, r, http.StatusOK)
 	list := r.json(t)
-	if n := len(list["tasks"].([]any)); n != 2 || strings.Contains(r.body, "lastLog") || len(list["types"].([]any)) != 3 {
+	if n := len(list["tasks"].([]any)); n != 2 || strings.Contains(r.body, "lastLog") || len(list["types"].([]any)) != 7 {
 		t.Fatalf("list: %s", r.body)
 	}
 	r = e.get(t, "/-/api/tasks/"+id, "admin")

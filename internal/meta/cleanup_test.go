@@ -107,7 +107,7 @@ func TestScanAssetsPages(t *testing.T) {
 	if err != nil || len(page) != 3 || page[0].Path != "p/0" || page[2].Path != "p/2" {
 		t.Fatalf("page 1: %+v %v", page, err)
 	}
-	if page[1].Size != 1 || !page[1].Created.Equal(t0.Add(time.Hour)) || !page[1].LastDownloaded.Equal(t0.Add(48*time.Hour)) {
+	if page[1].Size != 1 || page[1].BlobSHA256 != "x" || !page[1].Created.Equal(t0.Add(time.Hour)) || !page[1].LastDownloaded.Equal(t0.Add(48*time.Hour)) {
 		t.Fatalf("row: %+v", page[1])
 	}
 	if !page[0].LastDownloaded.IsZero() {

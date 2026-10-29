@@ -162,6 +162,7 @@ type ScanAsset struct {
 	Created        time.Time
 	Modified       time.Time // last_modified
 	LastDownloaded time.Time // zero if never downloaded
+	BlobSHA256     string
 }
 
 // ScanAssets returns up to limit assets of repo with a path greater than
@@ -177,7 +178,7 @@ func (d *DB) ScanAssetsFrom(ctx context.Context, repo, from string, limit int) (
 }
 
 func (d *DB) scanAssets(ctx context.Context, cond, repo, bound string, limit int) ([]ScanAsset, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT path, size, created_at, last_modified, last_downloaded FROM assets
+	rows, err := d.sql.QueryContext(ctx, `SELECT path, size, created_at, last_modified, last_downloaded, blob_sha256 FROM assets
 WHERE repo = ? AND `+cond+` ORDER BY path LIMIT ?`, repo, bound, limit)
 	if err != nil {
 		return nil, err
@@ -187,7 +188,7 @@ WHERE repo = ? AND `+cond+` ORDER BY path LIMIT ?`, repo, bound, limit)
 	for rows.Next() {
 		var a ScanAsset
 		var created, modified, lastDl int64
-		if err := rows.Scan(&a.Path, &a.Size, &created, &modified, &lastDl); err != nil {
+		if err := rows.Scan(&a.Path, &a.Size, &created, &modified, &lastDl, &a.BlobSHA256); err != nil {
 			return nil, err
 		}
 		a.Created, a.Modified, a.LastDownloaded = fromMs(created), fromMs(modified), fromMs(lastDl)

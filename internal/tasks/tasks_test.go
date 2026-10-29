@@ -42,6 +42,7 @@ type harness struct {
 	gcs   atomic.Int32
 	mvn   *maven.Handler
 	defs  []config.Repository
+	dir   string
 }
 
 // t0 is a Tuesday morning, UTC.
@@ -60,6 +61,9 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(func() { db.Close() })
 	ctx := context.Background()
+	if err := db.SeedBlobStore(ctx, repo.DefaultStore, dir); err != nil {
+		t.Fatal(err)
+	}
 	for _, p := range []cleanup.Policy{
 		{Name: "old", Format: "maven", Criteria: cleanup.Criteria{ComponentAgeDays: 30}},
 		{Name: "npm-only", Format: "npm", Criteria: cleanup.Criteria{ComponentAgeDays: 30}},
@@ -76,6 +80,8 @@ func newHarness(t *testing.T) *harness {
 		{Name: "mvn-group", Format: "maven", Type: "group", Members: []string{"mvn"}},
 		{Name: "crates", Format: "cargo", Type: "hosted"},
 		{Name: "mvn-npm-policy", Format: "maven", Type: "hosted", CleanupPolicy: "npm-only"}, // format mismatch
+		{Name: "mvn-ro", Format: "maven", Type: "hosted", WritePolicy: "deny"},
+		{Name: "charts", Format: "helm", Type: "hosted"},
 	}
 	reg := repo.NewRegistry(db, defs)
 	c := &clock{t: t0}
@@ -87,8 +93,8 @@ func newHarness(t *testing.T) *harness {
 	mvn.Now = c.Now
 	deleters := cleanup.NewRegistry(store)
 	deleters.Register("maven", "hosted", mvn)
-	h := &harness{db: db, store: store, reg: reg, sink: sink, clock: c, mvn: mvn, defs: defs}
-	h.s = &Service{DB: db, Repos: reg, Deleters: deleters, Maven: mvn, Events: sink,
+	h := &harness{db: db, store: store, reg: reg, sink: sink, clock: c, mvn: mvn, defs: defs, dir: dir}
+	h.s = &Service{DB: db, Repos: reg, Deleters: deleters, Maven: mvn, Store: store, Events: sink,
 		Log: slog.New(slog.DiscardHandler), Now: c.Now, Loc: time.UTC,
 		GC: func(context.Context, string) (int, int64, error) { h.gcs.Add(1); return 3, 30, nil }}
 	return h
@@ -518,7 +524,7 @@ func TestValidation(t *testing.T) {
 		{Def{Name: "x", Type: TypeCleanup, Schedule: "manual", Params: json.RawMessage(`{"repos":["mvn-group"]}`)}, "is a group"},
 		{Def{Name: "x", Type: TypeCleanup, Schedule: "manual", Params: json.RawMessage(`{"repos":["crates"]}`)}, "Cargo hosted"},
 		{Def{Name: "x", Type: TypeCleanup, Schedule: "manual", Params: json.RawMessage(`{"repos":"mvn"}`)}, "invalid params"},
-		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual"}, "params.repo is required"},
+		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"format":"npm"}`)}, "params.format"},
 		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"missing"}`)}, "does not exist"},
 		{Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"mvn-group"}`)}, "Maven hosted or proxy repository"},
 	}

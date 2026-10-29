@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
+	"strings"
 
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/repo"
 )
 
 // summary is what a run reports besides its error.
@@ -24,13 +27,23 @@ type typeDef struct {
 	name   string
 	params func(s *Service, raw json.RawMessage, check bool) (string, []string) // check: against the repositories
 	run    func(ctx context.Context, s *Service, t meta.Task, actor string, log *RunLog) (summary, error)
+	fields []ParamSpec // for the UI's form
 }
 
 var types = map[string]typeDef{
-	TypeCompact: {name: "Compact blob store", params: compactParams, run: runCompact},
-	TypeCleanup: {name: "Cleanup repositories", params: cleanupParamsOf, run: runCleanup},
-	TypeRebuild: {name: "Rebuild Maven metadata", params: rebuildParamsOf, run: runRebuild},
+	TypeCompact: {name: "Compact blob store", params: compactParams, run: runCompact, fields: blobStoreFields},
+	TypeCleanup: {name: "Cleanup repositories", params: cleanupParamsOf, run: runCleanup,
+		fields: []ParamSpec{{Name: "repos", Type: "repositories", Help: "empty: every repository with a cleanup policy"}}},
+	TypeRebuild: {name: "Rebuild repository metadata", params: rebuildParamsOf, run: runRebuild, fields: []ParamSpec{
+		{Name: "repo", Type: "repository", Help: "a Maven hosted or proxy, or an apt, yum, helm or conda hosted repository; empty: every one"},
+		{Name: "format", Type: "format", Help: "with an empty repo: only repositories of this format"}}},
+	TypeVerify: {name: "Verify blobs", params: verifyParamsOf, run: runVerify, fields: verifyFields},
+	TypePurge:  {name: "Remove Maven snapshots", params: purgeParamsOf, run: runPurge, fields: purgeFields},
+	TypeRecalc: {name: "Recalculate blob store size", params: compactParams, run: runRecalc, fields: blobStoreFields},
+	TypeTemp:   {name: "Delete blob store temp files", params: compactParams, run: runTemp, fields: blobStoreFields},
 }
+
+var blobStoreFields = []ParamSpec{{Name: "blobStore", Type: "blobStore", Help: "empty: every blob store"}}
 
 // ---- blobstore.compact ----
 
@@ -333,8 +346,31 @@ func cleanupDetail(sum summary) string {
 
 // ---- repository.rebuild-metadata ----
 
+// rebuildParams names one repository (repo; repository is accepted as an
+// alias) or, when empty, every repository the task can rebuild, optionally
+// of one format.
 type rebuildParams struct {
-	Repo string `json:"repo"`
+	Repo       string `json:"repo,omitempty"`
+	Repository string `json:"repository,omitempty"`
+	Format     string `json:"format,omitempty"`
+}
+
+// rebuildable reports whether the task can rebuild rp's metadata: a Maven
+// hosted or proxy repository, or a hosted one of a format with a rebuilder.
+func (s *Service) rebuildable(rp *repo.Repository) bool {
+	if rp.Format == "maven" {
+		return rp.Type == "hosted" || rp.Type == "proxy"
+	}
+	return rp.Type == "hosted" && s.Rebuilders[rp.Format] != nil
+}
+
+func (s *Service) rebuildFormats() []string {
+	out := []string{"maven"}
+	for f := range s.Rebuilders {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func rebuildParamsOf(s *Service, raw json.RawMessage, check bool) (string, []string) {
@@ -342,15 +378,22 @@ func rebuildParamsOf(s *Service, raw json.RawMessage, check bool) (string, []str
 	if err := decodeParams(raw, &p); err != nil {
 		return "", []string{err.Error()}
 	}
+	if p.Repo == "" {
+		p.Repo = p.Repository
+	}
+	p.Repository = ""
+	if p.Format != "" && !slices.Contains(s.rebuildFormats(), p.Format) {
+		return "", []string{fmt.Sprintf("params.format %q is not one of %s", p.Format, strings.Join(s.rebuildFormats(), ", "))}
+	}
 	rp := s.Repos.Get(p.Repo)
 	switch {
-	case p.Repo == "":
-		return "", []string{"params.repo is required"}
-	case !check:
+	case p.Repo == "" || !check:
 	case rp == nil:
 		return "", []string{fmt.Sprintf("repository %q does not exist", p.Repo)}
-	case rp.Format != "maven" || (rp.Type != "hosted" && rp.Type != "proxy"):
-		return "", []string{fmt.Sprintf("repository %q is %s %s: the task takes a Maven hosted or proxy repository", p.Repo, rp.Format, rp.Type)}
+	case !s.rebuildable(rp):
+		return "", []string{fmt.Sprintf("repository %q is %s %s: the task takes a Maven hosted or proxy repository, or a hosted repository of %s", p.Repo, rp.Format, rp.Type, strings.Join(s.rebuildFormats(), ", "))}
+	case p.Format != "" && p.Format != rp.Format:
+		return "", []string{fmt.Sprintf("repository %q is %s, not %s", p.Repo, rp.Format, p.Format)}
 	}
 	return encodeParams(p), nil
 }
@@ -360,15 +403,59 @@ func runRebuild(ctx context.Context, s *Service, t meta.Task, _ string, log *Run
 	if err := json.Unmarshal([]byte(t.Params), &p); err != nil {
 		return summary{msg: "invalid params"}, fmt.Errorf("decode params: %w", err)
 	}
+	var repos []*repo.Repository
+	if p.Repo != "" {
+		rp := s.Repos.Get(p.Repo)
+		switch {
+		case rp == nil:
+			return summary{}, fmt.Errorf("repository %q no longer exists: edit or delete this task", p.Repo)
+		case !s.rebuildable(rp):
+			return summary{}, fmt.Errorf("repository %q is now %s %s, which the task cannot rebuild: edit or delete this task", p.Repo, rp.Format, rp.Type)
+		}
+		return rebuildOne(ctx, s, rp, log)
+	}
+	for _, rp := range s.Repos.Snapshot().Sorted {
+		if s.rebuildable(rp) && (p.Format == "" || p.Format == rp.Format) {
+			repos = append(repos, rp)
+		}
+	}
+	var removed int64
+	failed := 0
+	for _, rp := range repos {
+		if err := ctx.Err(); err != nil {
+			return summary{msg: fmt.Sprintf("rebuilt the metadata of %d repositories", len(repos)), removed: removed}, err
+		}
+		sum, err := rebuildOne(ctx, s, rp, log)
+		removed += sum.removed
+		if err != nil {
+			failed++
+			log.Errorf("%s: %v", rp.Name, err)
+		}
+	}
+	sum := summary{msg: fmt.Sprintf("rebuilt the metadata of %d repositories (%d failed)", len(repos), failed), removed: removed}
+	log.Infof("%s", sum.msg)
+	if failed > 0 {
+		return sum, fmt.Errorf("%d repositories failed (see the log)", failed)
+	}
+	return sum, nil
+}
+
+// rebuildOne rebuilds rp's metadata with the right rebuilder.
+func rebuildOne(ctx context.Context, s *Service, rp *repo.Repository, log *RunLog) (summary, error) {
+	if rp.Format != "maven" {
+		r := s.Rebuilders[rp.Format]
+		if r == nil {
+			return summary{msg: "metadata rebuild is not available"}, errors.New("metadata rebuild is not available for " + rp.Format)
+		}
+		err := r.RebuildMetadata(ctx, rp, log.Infof)
+		sum := summary{msg: fmt.Sprintf("%s: rebuilt the %s metadata", rp.Name, rp.Format)}
+		if err == nil {
+			log.Infof("%s", sum.msg)
+		}
+		return sum, err
+	}
 	if s.Maven == nil {
 		return summary{msg: "metadata rebuild is not available"}, errors.New("metadata rebuild is not available")
-	}
-	rp := s.Repos.Get(p.Repo)
-	switch {
-	case rp == nil:
-		return summary{}, fmt.Errorf("repository %q no longer exists: edit or delete this task", p.Repo)
-	case rp.Format != "maven" || (rp.Type != "hosted" && rp.Type != "proxy"):
-		return summary{}, fmt.Errorf("repository %q is now %s %s, not Maven hosted or proxy: edit or delete this task", p.Repo, rp.Format, rp.Type)
 	}
 	if rp.Type == "proxy" {
 		// A proxy's metadata is the remote's: what is repaired is the cache,
