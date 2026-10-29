@@ -299,6 +299,8 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "gitlfs": // objects/<aa>/<bb>/<oid>: the object is a component named by its oid, without a version
 		name, ok = SplitLFS(p)
 		return "", name, "", ok
+	case "r": // <contrib dir>/<pkg>_<version>.tar.gz (.zip, .tgz): the contrib dir is the group
+		return SplitR(p)
 	}
 	return "", "", "", false
 }
@@ -312,6 +314,60 @@ func SplitLFS(p string) (oid string, ok bool) {
 	}
 	oid = segs[3]
 	return oid, segs[1] == oid[:2] && segs[2] == oid[2:4]
+}
+
+// R repositories (CRAN layout). rContribRE is a contrib directory, the
+// unit an R client reads PACKAGES from: src/contrib for sources,
+// bin/windows/contrib/<R.x> and bin/macosx[/<build>]/contrib/<R.x> for
+// binaries. rArchiveRE is CRAN's src/contrib/Archive/<pkg>, old sources a
+// proxy passes through.
+var (
+	rContribRE = regexp.MustCompile(`^(src/contrib|bin/windows/contrib/[0-9]+\.[0-9]+|bin/macosx(/[a-z0-9_.-]+)?/contrib/[0-9]+\.[0-9]+)$`)
+	rArchiveRE = regexp.MustCompile(`^src/contrib/Archive/[A-Za-z][A-Za-z0-9.]*$`)
+	rNameRE    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]$`) // "Writing R Extensions" 1.1.1
+	rVersionRE = regexp.MustCompile(`^[0-9]+([.-][0-9]+)+$`)
+)
+
+// RContribDir reports whether dir is a contrib directory of an R
+// repository (one with its own PACKAGES files).
+func RContribDir(dir string) bool { return rContribRE.MatchString(dir) }
+
+// RExt is the archive extension of the packages in dir: .zip under
+// bin/windows, .tgz under bin/macosx, .tar.gz for sources.
+func RExt(dir string) string {
+	switch {
+	case strings.HasPrefix(dir, "bin/windows/"):
+		return ".zip"
+	case strings.HasPrefix(dir, "bin/"):
+		return ".tgz"
+	}
+	return ".tar.gz"
+}
+
+// SplitR splits the path of an R package, <dir>/<pkg>_<version><ext>
+// where dir is a contrib directory (RContribDir) or an Archive directory
+// and ext the directory's (RExt), into its component: the directory is
+// the group, so a package built for several R versions is one component
+// per directory. Package names never hold "_". PACKAGES files are not
+// components.
+func SplitR(p string) (dir, name, version string, ok bool) {
+	i := strings.LastIndexByte(p, '/')
+	if i <= 0 {
+		return "", "", "", false
+	}
+	dir, file := p[:i], p[i+1:]
+	if !rContribRE.MatchString(dir) && !rArchiveRE.MatchString(dir) {
+		return "", "", "", false
+	}
+	stem, cut := strings.CutSuffix(file, RExt(dir))
+	if !cut {
+		return "", "", "", false
+	}
+	name, version, ok = strings.Cut(stem, "_")
+	if !ok || !rNameRE.MatchString(name) || !rVersionRE.MatchString(version) {
+		return "", "", "", false
+	}
+	return dir, name, version, true
 }
 
 // condaSubdirRE is a conda subdir (platform directory): noarch, linux-64,
@@ -439,6 +495,11 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, version, ""
 	case "rubygems": // the version holds the platform (1.0.0-java), as the file name does
 		return "", name, version, "gems/" + name + "-" + version + ".gem"
+	case "r": // the name is directory-qualified, <contrib dir>/<pkg>; the directory is the group
+		if i := strings.LastIndexByte(name, '/'); i > 0 {
+			return name[:i], name[i+1:], version, name + "_" + version + RExt(name[:i])
+		}
+		return "", name, version, ""
 	}
 	return "", name, version, ""
 }

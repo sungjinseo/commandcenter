@@ -298,3 +298,36 @@ func TestComponentMetadataConda(t *testing.T) {
 		}
 	}
 }
+
+// r: the DESCRIPTION fields of the hosted row (the contrib directory is
+// the group, the row's name <dir>/<pkg>): Title and Description, License,
+// the first URL, BugReports, and Depends/Imports/LinkingTo/Suggests.
+func TestComponentMetadataR(t *testing.T) {
+	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
+		c.Repositories = append(c.Repositories, config.Repository{Name: "r-hosted", Format: "r", Type: "hosted"})
+	})
+	ctx := context.Background()
+	attrs := `{"file":"src/contrib/foo_1.0.0.tar.gz","dir":"src/contrib","fields":[["Package","foo"],["Title","Foo Does Things"],["Version","1.0.0"],["Description","Longer text\nacross lines."],["License","MIT + file LICENSE"],["URL","https://example.org/foo, https://git.example.org/foo"],["BugReports","https://git.example.org/foo/issues"],["Depends","R (>= 4.1)"],["Imports","jsonlite (>= 1.8),\nhttr"],["Suggests","testthat (>= 3.0.0)"],["LinkingTo","Rcpp"]],"md5":"m","sha256":"s","size":1}`
+	if err := e.db.Tx(ctx, func(tx *meta.Tx) error {
+		return tx.InsertPackage(ctx, meta.Package{Repo: "r-hosted", Format: "r", Name: "src/contrib/foo", Version: "1.0.0", Attrs: attrs, CreatedAt: t0})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := e.req(t, "GET", "/-/api/repositories/r-hosted/components/metadata?group=src/contrib&name=foo&version=1.0.0", "", "admin", nil, false)
+	var m componentMetadata
+	if r.status != 200 || json.Unmarshal([]byte(r.body), &m) != nil || !m.Collected || *m.Description != "Foo Does Things\n\nLonger text across lines." || *m.License != "MIT + file LICENSE" || *m.Homepage != "https://example.org/foo" || *m.BugReports != "https://git.example.org/foo/issues" || m.RepositoryURL != nil {
+		t.Fatalf("r: %d %s", r.status, r.body)
+	}
+	var parts []string
+	for _, d := range m.Dependencies {
+		parts = append(parts, d.Scope+":"+d.Name+":"+d.Requirement+":"+map[bool]string{false: "req", true: "opt"}[d.Optional])
+	}
+	if got := strings.Join(parts, " "); got != "depends:R:>= 4.1:req imports:jsonlite:>= 1.8:req imports:httr::req linkingto:Rcpp::req suggests:testthat:>= 3.0.0:opt" {
+		t.Fatalf("r deps: %s", got)
+	}
+	for _, q := range []string{"group=bin/windows/contrib/4.4&name=foo&version=1.0.0", "name=foo&version=1.0.0", "group=src/contrib&name=foo&version=1.0.1"} {
+		if r := e.req(t, "GET", "/-/api/repositories/r-hosted/components/metadata?"+q, "", "admin", nil, false); r.status != 404 {
+			t.Fatalf("%s: %d", q, r.status)
+		}
+	}
+}

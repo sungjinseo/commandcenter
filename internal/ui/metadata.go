@@ -33,6 +33,7 @@ type componentMetadata struct {
 	Homepage      *string        `json:"homepage"`
 	RepositoryURL *string        `json:"repositoryUrl"`
 	Maintainer    *string        `json:"maintainer,omitempty"` // apt only: the control file's Maintainer
+	BugReports    *string        `json:"bugReports,omitempty"` // r only: DESCRIPTION's BugReports
 	Collected     bool           `json:"collected"`
 	Dependencies  []dependencyJS `json:"dependencies"`
 	Resolved      bool           `json:"resolved"`
@@ -107,6 +108,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 				err = nil
 			}
 		}
+	case "r":
+		found, err = u.rMetadata(r.Context(), rp, group, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -726,6 +729,56 @@ func (u *UI) condaMetadata(ctx context.Context, rp *repo.Repository, subdir, nam
 			spec, _ := d.(string)
 			dn, req, _ := strings.Cut(spec, " ")
 			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: dn, Requirement: req})
+		}
+	}
+	return true, nil
+}
+
+// rMetadata reads the DESCRIPTION fields an r hosted row holds (the group
+// is the contrib directory, the row's name <dir>/<pkg>): Title and
+// Description, License, URL (the first of a comma-separated list) as the
+// homepage, BugReports, and Depends, Imports, LinkingTo and Suggests as
+// dependencies with those scopes (Suggests optional). Version
+// requirements keep R's spelling without the parentheses: ">= 1.0".
+func (u *UI) rMetadata(ctx context.Context, rp *repo.Repository, dir, name, version string, m *componentMetadata) (bool, error) {
+	if dir == "" {
+		return false, nil
+	}
+	p, ok, err := u.storedPackage(ctx, rp, dir+"/"+name, version)
+	if err != nil || !ok {
+		return ok, err
+	}
+	var row struct {
+		Fields [][2]string `json:"fields"`
+	}
+	if err := json.Unmarshal([]byte(p.Attrs), &row); err != nil {
+		return true, nil
+	}
+	m.Collected = true
+	field := func(name string) string {
+		for _, f := range row.Fields {
+			if strings.EqualFold(f[0], name) {
+				return f[1]
+			}
+		}
+		return ""
+	}
+	desc := field("Title")
+	if d := strings.ReplaceAll(field("Description"), "\n", " "); d != "" && d != desc {
+		desc = strings.TrimSpace(desc + "\n\n" + d)
+	}
+	home, _, _ := strings.Cut(field("URL"), ",")
+	m.Description, m.License, m.Homepage, m.BugReports = optStr(desc), optStr(field("License")), optStr(strings.TrimSpace(home)), optStr(field("BugReports"))
+	for _, scope := range []string{"depends", "imports", "linkingto", "suggests"} {
+		for _, dep := range strings.Split(strings.ReplaceAll(field(scope), "\n", " "), ",") {
+			dep = strings.TrimSpace(dep)
+			if dep == "" {
+				continue
+			}
+			// "pkg (>= 1.0)": the requirement is what the parentheses hold
+			pkg, req, _ := strings.Cut(dep, "(")
+			req = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(req), ")"))
+			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: strings.TrimSpace(pkg), Requirement: req, Optional: scope == "suggests"})
 		}
 	}
 	return true, nil

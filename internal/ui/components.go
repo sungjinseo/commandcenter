@@ -149,6 +149,9 @@ func (c criteria) pathQuery(format string) string {
 }
 
 func (c criteria) rawPathQuery(format string) string {
+	if c.group != "" && format == "r" { // a contrib directory, with dots (bin/windows/contrib/4.4)
+		return c.group
+	}
 	switch {
 	case c.group != "":
 		return strings.ReplaceAll(c.group, ".", "/")

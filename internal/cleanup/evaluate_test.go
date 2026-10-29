@@ -380,6 +380,9 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 		{"conda", []string{ // a build's .conda and .tar.bz2 are one component; the documents are not components
 			"channeldata.json", "linux-64/a-1.0-0.tar.bz2", "noarch/a-1.0-0.conda", "noarch/a-1.0-0.tar.bz2", "noarch/repodata.json",
 		}, map[int]string{1: "", 2: "linux-64/a@1.0-0", 3: "linux-64/a@1.0-0", 4: "linux-64/a@1.0-0,noarch/a@1.0-0", 5: "linux-64/a@1.0-0,noarch/a@1.0-0"}},
+		{"r", []string{ // one file per package_version per contrib directory (the group); the index files are not components
+			"bin/windows/contrib/4.4/PACKAGES", "bin/windows/contrib/4.4/ab_1.0.zip", "src/contrib/PACKAGES.rds", "src/contrib/ab_1.0.tar.gz", "src/contrib/ab_1.1.tar.gz",
+		}, map[int]string{1: "", 2: "bin/windows/contrib/4.4/ab@1.0", 3: "bin/windows/contrib/4.4/ab@1.0", 4: "bin/windows/contrib/4.4/ab@1.0,src/contrib/ab@1.0", 5: "bin/windows/contrib/4.4/ab@1.0,src/contrib/ab@1.0,src/contrib/ab@1.1"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {

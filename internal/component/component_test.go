@@ -196,6 +196,13 @@ func TestDeriveAsset(t *testing.T) {
 		{"conda", "noarch/a/foo-1.0-0.conda", "", "", "", false},
 		{"conda", "noarch/repodata.json", "", "", "", false}, // metadata
 		{"conda", "channeldata.json", "", "", "", false},
+		{"r", "src/contrib/foo_1.0.0.tar.gz", "src/contrib", "foo", "1.0.0", true}, // the contrib directory is the group
+		{"r", "bin/windows/contrib/4.4/data.table_1.15-2.zip", "bin/windows/contrib/4.4", "data.table", "1.15-2", true},
+		{"r", "bin/macosx/big-sur-arm64/contrib/4.4/foo_1.0.0.tgz", "bin/macosx/big-sur-arm64/contrib/4.4", "foo", "1.0.0", true},
+		{"r", "src/contrib/Archive/foo/foo_0.9.tar.gz", "src/contrib/Archive/foo", "foo", "0.9", true}, // a proxy's cached old version
+		{"r", "src/contrib/foo_1.0.0.zip", "", "", "", false},                                          // the directory's extension
+		{"r", "src/contrib/PACKAGES.rds", "", "", "", false},                                           // the index
+		{"r", "foo_1.0.0.tar.gz", "", "", "", false},
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"unknown", "a/b", "", "", "", false},
