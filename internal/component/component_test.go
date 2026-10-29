@@ -184,6 +184,18 @@ func TestDeriveAsset(t *testing.T) {
 		{"composer", "dist/acme/demo.zip", "", "", "", false},
 		{"composer", "p2/acme/demo.json", "", "", "", false},
 		{"composer", "upstream/packages.json", "", "", "", false},
+		{"conda", "noarch/foo-1.0-py_0.tar.bz2", "noarch", "foo", "1.0-py_0", true},                                               // the subdir is the group, the version <version>-<build>
+		{"conda", "linux-64/scikit-learn-1.4.2-py312h1fcc3ea_0.conda", "linux-64", "scikit-learn", "1.4.2-py312h1fcc3ea_0", true}, // "-" in the name
+		{"conda", "osx-arm64/foo-1.0-0.conda", "osx-arm64", "foo", "1.0-0", true},
+		{"conda", "noarch/foo-1.0.tar.bz2", "", "", "", false}, // no build
+		{"conda", "noarch/foo.conda", "", "", "", false},
+		{"conda", "noarch/-1.0-0.conda", "", "", "", false}, // no name
+		{"conda", "noarch/foo--0.conda", "", "", "", false}, // no version
+		{"conda", "foo-1.0-0.conda", "", "", "", false},     // no subdir
+		{"conda", "Noarch/foo-1.0-0.conda", "", "", "", false},
+		{"conda", "noarch/a/foo-1.0-0.conda", "", "", "", false},
+		{"conda", "noarch/repodata.json", "", "", "", false}, // metadata
+		{"conda", "channeldata.json", "", "", "", false},
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"unknown", "a/b", "", "", "", false},

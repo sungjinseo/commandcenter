@@ -251,3 +251,50 @@ func TestComponentMetadataApt(t *testing.T) {
 		}
 	}
 }
+
+// conda: the index.json and about.json of the hosted row (the subdir is
+// the group, the version <version>-<build>); a build stored as both
+// .tar.bz2 and .conda is read from the .tar.bz2, which has the index.
+func TestComponentMetadataConda(t *testing.T) {
+	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
+		c.Repositories = append(c.Repositories, config.Repository{Name: "conda-hosted", Format: "conda", Type: "hosted"})
+	})
+	ctx := context.Background()
+	rows := map[string]string{
+		"noarch/foo-1.0-py_0.conda":   `{"file":"foo-1.0-py_0.conda","subdir":"noarch","index":{"build":"py_0","build_number":0,"depends":[],"md5":"m","name":"foo","sha256":"s","size":1,"subdir":"noarch","version":"1.0"}}`,
+		"noarch/foo-1.0-py_0.tar.bz2": `{"file":"foo-1.0-py_0.tar.bz2","subdir":"noarch","index":{"build":"py_0","build_number":0,"constrains":["pandas <3"],"depends":["python >=3.8,<3.13","numpy"],"license":"MIT","md5":"m","name":"foo","sha256":"s","size":1,"subdir":"noarch","version":"1.0"},"about":{"summary":"Foo does things","description":"Longer text.","license":"MIT","home":"https://example.test/foo","dev_url":"https://git.example.test/foo"}}`,
+		"linux-64/foo-1.0-py_0.conda": `{"file":"foo-1.0-py_0.conda","subdir":"linux-64","index":{"build":"py_0","build_number":0,"depends":[],"md5":"m","name":"foo","sha256":"s","size":1,"subdir":"linux-64","version":"1.0"}}`,
+	}
+	if err := e.db.Tx(ctx, func(tx *meta.Tx) error {
+		for version, attrs := range rows {
+			if err := tx.InsertPackage(ctx, meta.Package{Repo: "conda-hosted", Format: "conda", Name: "foo", Version: version, Attrs: attrs, CreatedAt: t0}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := e.req(t, "GET", "/-/api/repositories/conda-hosted/components/metadata?group=noarch&name=foo&version=1.0-py_0", "", "admin", nil, false)
+	var m componentMetadata
+	if r.status != 200 || json.Unmarshal([]byte(r.body), &m) != nil || !m.Collected || *m.Description != "Foo does things\n\nLonger text." || *m.License != "MIT" || *m.Homepage != "https://example.test/foo" || *m.RepositoryURL != "https://git.example.test/foo" {
+		t.Fatalf("conda: %d %s", r.status, r.body)
+	}
+	var parts []string
+	for _, d := range m.Dependencies {
+		parts = append(parts, d.Scope+":"+d.Name+":"+d.Requirement)
+	}
+	if got := strings.Join(parts, " "); got != "depends:python:>=3.8,<3.13 depends:numpy: constrains:pandas:<3" {
+		t.Fatalf("conda deps: %s", got)
+	}
+	// the linux-64 build is a .conda alone: collected, nothing known
+	r = e.req(t, "GET", "/-/api/repositories/conda-hosted/components/metadata?group=linux-64&name=foo&version=1.0-py_0", "", "admin", nil, false)
+	if r.status != 200 || json.Unmarshal([]byte(r.body), &m) != nil || !m.Collected || m.Description != nil || len(m.Dependencies) != 0 {
+		t.Fatalf("conda .conda: %d %s", r.status, r.body)
+	}
+	for _, q := range []string{"group=osx-64&name=foo&version=1.0-py_0", "name=foo&version=1.0-py_0", "group=noarch&name=foo&version=1.0"} {
+		if r := e.req(t, "GET", "/-/api/repositories/conda-hosted/components/metadata?"+q, "", "admin", nil, false); r.status != 404 {
+			t.Fatalf("%s: %d", q, r.status)
+		}
+	}
+}

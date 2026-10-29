@@ -377,6 +377,9 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 			"dist/a/b/1.0.0.0/0123456789abcdef0123456789abcdef01234567.zip", "dist/a/b/1.0.0.0/89abcdef0123456789abcdef0123456789abcdef.zip",
 			"dist/a/b/1.1.0.0/0123456789abcdef0123456789abcdef01234567.zip", "dist/a/c/0.1.0.0/0123456789abcdef0123456789abcdef01234567.zip", "p2/a/b.json",
 		}, map[int]string{1: "", 2: "a/b@1.0.0.0", 3: "a/b@1.0.0.0,a/b@1.1.0.0", 4: "a/b@1.0.0.0,a/b@1.1.0.0,a/c@0.1.0.0", 5: "a/b@1.0.0.0,a/b@1.1.0.0,a/c@0.1.0.0"}},
+		{"conda", []string{ // a build's .conda and .tar.bz2 are one component; the documents are not components
+			"channeldata.json", "linux-64/a-1.0-0.tar.bz2", "noarch/a-1.0-0.conda", "noarch/a-1.0-0.tar.bz2", "noarch/repodata.json",
+		}, map[int]string{1: "", 2: "linux-64/a@1.0-0", 3: "linux-64/a@1.0-0", 4: "linux-64/a@1.0-0,noarch/a@1.0-0", 5: "linux-64/a@1.0-0,noarch/a@1.0-0"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {
@@ -403,6 +406,13 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 				cands, _, _, _, _ := e.ev.Evaluate(context.Background(), rp, policy(Criteria{ComponentAgeDays: 30}), 2)
 				if len(cands) != 1 || len(cands[0].Assets) != 2 {
 					t.Fatalf("pypi assets: %+v", cands)
+				}
+			}
+			// so has a conda build stored as .conda and .tar.bz2
+			if c.format == "conda" {
+				cands, _, _, _, _ := e.ev.Evaluate(context.Background(), rp, policy(Criteria{ComponentAgeDays: 30}), 5)
+				if len(cands) != 2 || len(cands[1].Assets) != 2 {
+					t.Fatalf("conda assets: %+v", cands)
 				}
 			}
 		})

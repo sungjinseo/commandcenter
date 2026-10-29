@@ -286,8 +286,40 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "composer":
 		name, version, ok = SplitComposer(p)
 		return "", name, version, ok
+	case "conda": // <subdir>/<name>-<version>-<build>.tar.bz2 or .conda: the subdir is the group
+		return SplitConda(p)
 	}
 	return "", "", "", false
+}
+
+// condaSubdirRE is a conda subdir (platform directory): noarch, linux-64,
+// osx-arm64, emscripten-wasm32, ...
+var condaSubdirRE = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// SplitConda splits the path of a conda package as the conda format
+// stores it, <subdir>/<name>-<version>-<build>.tar.bz2 or .conda, into
+// its component: the subdir is the group, and the version is
+// "<version>-<build>", as conda itself names a build. Versions and build
+// strings never hold "-", so the name ends at the second-last one; the
+// repodata files are not components.
+func SplitConda(p string) (subdir, name, version string, ok bool) {
+	subdir, file, ok := strings.Cut(p, "/")
+	if !ok || !condaSubdirRE.MatchString(subdir) || strings.Contains(file, "/") {
+		return "", "", "", false
+	}
+	stem, cut := strings.CutSuffix(file, ".tar.bz2")
+	if !cut {
+		stem, cut = strings.CutSuffix(file, ".conda")
+	}
+	i := strings.LastIndexByte(stem, '-')
+	if !cut || i <= 0 {
+		return "", "", "", false
+	}
+	j := strings.LastIndexByte(stem[:i], '-')
+	if j <= 0 || j+1 == i || stem[0] == '.' {
+		return "", "", "", false
+	}
+	return subdir, stem[:j], stem[j+1:], true
 }
 
 // SplitRPM splits an RPM path, <dir>/<name>-<version>-<release>.<arch>.rpm,
@@ -378,6 +410,11 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, version, name + "/" + version + "/" + name + "." + version + ".nupkg"
 	case "composer": // the name is vendor/package, the version normalized
 		return "", name, version, "dist/" + name + "/" + version + ".zip"
+	case "conda": // a row's version is the file's path, <subdir>/<file> (SplitConda)
+		if subdir, cname, cversion, ok := SplitConda(version); ok && cname == name {
+			return subdir, cname, cversion, version
+		}
+		return "", name, version, ""
 	}
 	return "", name, version, ""
 }

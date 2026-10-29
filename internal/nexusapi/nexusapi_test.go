@@ -221,7 +221,7 @@ func TestRepositoriesCreateUpdateDelete(t *testing.T) {
 	if !strings.Contains(string(b), "duplicate") {
 		t.Fatalf("duplicate body = %s", b)
 	}
-	e.want("POST", v1+"/repositories/conda/hosted", "admin", `{"name":"conda-hosted","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true,"writePolicy":"ALLOW"}}`, 400)
+	e.want("POST", v1+"/repositories/cran/hosted", "admin", `{"name":"cran-hosted","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true,"writePolicy":"ALLOW"}}`, 400)
 
 	var s map[string]any
 	e.get(v1+"/repositories/npm/proxy/npm-proxy", "admin", &s)

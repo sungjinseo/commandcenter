@@ -267,6 +267,11 @@ func unitPrefix(format, p string) string {
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]
 		}
+	case "conda": // the file stem: a build's .tar.bz2 and .conda are one component
+		if stem, ok := strings.CutSuffix(p, ".tar.bz2"); ok {
+			return stem + "."
+		}
+		return strings.TrimSuffix(p, ".conda") + "."
 	}
 	return homePrefix(format, p)
 }

@@ -90,6 +90,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.aptMetadata(r.Context(), rp, group, name, version, &m)
 	case "composer":
 		found, err = u.composerMetadata(r.Context(), rp, name, version, &m)
+	case "conda":
+		found, err = u.condaMetadata(r.Context(), rp, group, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -617,6 +619,59 @@ func (u *UI) composerMetadata(ctx context.Context, rp *repo.Repository, name, ve
 		sort.Strings(names)
 		for _, n := range names {
 			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: s.scope, Name: n, Requirement: s.links[n], Optional: s.opt})
+		}
+	}
+	return true, nil
+}
+
+// condaMetadata reads the index.json and about.json a conda hosted row
+// holds (the group is the subdir, the version <version>-<build>): summary
+// and description, license, home, dev_url, and depends ("depends") and
+// constrains ("constrains") as dependencies. A build uploaded as both
+// .tar.bz2 and .conda is read from the .tar.bz2, which has the index.
+func (u *UI) condaMetadata(ctx context.Context, rp *repo.Repository, subdir, name, version string, m *componentMetadata) (bool, error) {
+	if subdir == "" {
+		return false, nil
+	}
+	pkgs, err := u.DB.ListPackages(ctx, rp.Name, name)
+	if err != nil {
+		return false, err
+	}
+	type row struct {
+		Index map[string]any `json:"index"`
+		About map[string]any `json:"about"`
+	}
+	str := func(m map[string]any, key string) string {
+		s, _ := m[key].(string)
+		return s
+	}
+	found := false
+	var best row
+	for _, p := range pkgs {
+		var r row
+		if !strings.HasPrefix(p.Version, subdir+"/") || json.Unmarshal([]byte(p.Attrs), &r) != nil || str(r.Index, "version")+"-"+str(r.Index, "build") != version {
+			continue
+		}
+		if !found || strings.HasSuffix(p.Version, ".tar.bz2") {
+			best = r
+		}
+		found = true
+	}
+	if !found {
+		return false, nil
+	}
+	m.Collected = true
+	desc := str(best.About, "summary")
+	if d := str(best.About, "description"); d != "" && d != desc {
+		desc = strings.TrimSpace(desc + "\n\n" + d)
+	}
+	m.Description, m.License, m.Homepage, m.RepositoryURL = optStr(desc), optStr(str(best.About, "license")), optStr(str(best.About, "home")), optStr(str(best.About, "dev_url"))
+	for _, scope := range []string{"depends", "constrains"} {
+		list, _ := best.Index[scope].([]any)
+		for _, d := range list {
+			spec, _ := d.(string)
+			dn, req, _ := strings.Cut(spec, " ")
+			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: dn, Requirement: req})
 		}
 	}
 	return true, nil
