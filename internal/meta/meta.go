@@ -118,6 +118,15 @@ CREATE TABLE IF NOT EXISTS content_selectors(
 CREATE TABLE IF NOT EXISTS user_tokens(
   owner TEXT PRIMARY KEY, name_code TEXT NOT NULL UNIQUE, hash TEXT NOT NULL,
   created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS tags(
+  name TEXT PRIMARY KEY, attributes TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS component_tags(
+  tag TEXT NOT NULL, repo TEXT NOT NULL, grp TEXT NOT NULL, name TEXT NOT NULL, version TEXT NOT NULL,
+  PRIMARY KEY(tag, repo, grp, name, version)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS component_tags_component ON component_tags(repo, grp, name, version);
+CREATE TABLE IF NOT EXISTS blob_store_moves(
+  repo TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL, started_at INTEGER NOT NULL);
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in
@@ -144,6 +153,10 @@ CREATE TABLE IF NOT EXISTS user_tokens(
 //	   stores no repository uses, deleting every blob they hold.
 //	4: cleanup_policies.config retain, exclude and pathPattern: an older
 //	   build would ignore them and delete the versions they keep.
+//	4: tags, component_tags and blob_store_moves: an older build would keep
+//	   the tags of deleted components and read a repository that is moving
+//	   to another blob store from its old store only (404 for what was
+//	   uploaded during the move).
 const schemaVersion = 4
 
 // Open opens the metadata database and creates or upgrades its tables:

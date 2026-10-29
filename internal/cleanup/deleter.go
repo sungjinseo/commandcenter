@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"sort"
 	"sync"
@@ -46,12 +47,13 @@ type Registry struct {
 	mu    sync.RWMutex
 	proxy ComponentDeleter
 	byKey map[deleterKey]ComponentDeleter
+	store *repo.Store
 }
 
 // NewRegistry returns a registry whose proxies of every format use the
 // generic proxy deleter. Hosted deleters are added with Register.
 func NewRegistry(store *repo.Store) *Registry {
-	return &Registry{proxy: &ProxyDeleter{Store: store}, byKey: map[deleterKey]ComponentDeleter{}}
+	return &Registry{proxy: &ProxyDeleter{Store: store}, byKey: map[deleterKey]ComponentDeleter{}, store: store}
 }
 
 // Register sets the deleter for repositories of format and type typ.
@@ -75,13 +77,20 @@ func (r *Registry) For(rp *repo.Repository) (ComponentDeleter, error) {
 	return nil, fmt.Errorf("%s %s repository %q: %w", rp.Format, rp.Type, rp.Name, ErrNotSupported)
 }
 
-// Delete deletes c from rp with the deleter For returns.
+// Delete deletes c from rp with the deleter For returns. A component that
+// lost files loses its tag associations too.
 func (r *Registry) Delete(ctx context.Context, rp *repo.Repository, c component.Component, actor string) (Result, error) {
 	d, err := r.For(rp)
 	if err != nil {
 		return Result{}, err
 	}
-	return d.DeleteComponent(ctx, rp, c, actor)
+	res, err := d.DeleteComponent(ctx, rp, c, actor)
+	if err == nil && res.Assets > 0 && r.store != nil && r.store.DB != nil {
+		if terr := r.store.DB.DropComponentTags(context.WithoutCancel(ctx), meta.ComponentKey{Repo: rp.Name, Group: c.Group, Name: c.Name, Version: c.Version}); terr != nil {
+			slog.Warn("could not drop the tag associations of a deleted component", "repo", rp.Name, "component", c.Label(), "err", terr.Error())
+		}
+	}
+	return res, err
 }
 
 // ProxyDeleter removes the cached asset rows of a proxy component; the

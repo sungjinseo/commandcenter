@@ -54,6 +54,11 @@ type Store struct {
 	// (the registry); nil is unknown. ServeAsset reads the contentDisposition
 	// of the asset's repository through it unless the handler set one.
 	Lookup func(name string) *Repository
+	// moves are the repositories whose blobs move to another store, and
+	// writes the blob writes each started before its move (stage.go).
+	moveMu sync.Mutex
+	moves  map[string]*Move
+	writes map[string]int
 }
 
 // Definition returns the live definition of the named repository, or nil.
@@ -183,6 +188,9 @@ func (s *Store) BlobStore(repo string) (*blob.Store, error) {
 	if s.StoreFor != nil {
 		name = s.StoreFor(repo)
 	}
+	if m, ok := s.MoveOf(repo); ok { // writes go to the store it moves to
+		name = m.Target
+	}
 	bs, err := s.blobsFor(name)
 	if err != nil {
 		slog.Error("repository names a blob store that does not exist; its blobs cannot be read or written",
@@ -270,18 +278,29 @@ func (s *Store) Get(ctx context.Context, repo, path string) (meta.Asset, error) 
 }
 
 // Open opens the asset's blob from the blob store of the asset's repository.
+// While the repository moves to another store, a blob not copied there yet
+// is read from the store it moves from.
 func (s *Store) Open(a meta.Asset) (blob.File, error) {
 	bs, err := s.BlobStore(a.Repo)
 	if err != nil {
 		return nil, err
 	}
-	return bs.Open(a.BlobSHA256)
+	f, err := bs.Open(a.BlobSHA256)
+	if errors.Is(err, blob.ErrNotFound) {
+		if m, ok := s.MoveOf(a.Repo); ok {
+			if src := s.StoreByName(m.Source); src != nil {
+				return src.Open(a.BlobSHA256)
+			}
+		}
+	}
+	return f, err
 }
 
 // WriteBlob streams r into repo's blob store. If verify rejects the content, its
 // error is returned and the blob stays unreferenced until `commandcenter gc`
 // removes it.
 func (s *Store) WriteBlob(repo string, r io.Reader, verify func(blob.Sums) error) (blob.Sums, error) {
+	defer s.writing(repo)()
 	bs, err := s.BlobStore(repo)
 	if err != nil {
 		return blob.Sums{}, err

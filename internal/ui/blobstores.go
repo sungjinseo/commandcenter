@@ -475,6 +475,11 @@ func (u *UI) deleteBlobStore(w http.ResponseWriter, r *http.Request) {
 		if err := u.refuseGroupMember(r.Context(), name); err != nil {
 			return err
 		}
+		if u.Store != nil { // a move from or to it is unfinished
+			if moving := u.Store.Moving(name); len(moving) > 0 {
+				return &errStoreInUse{name: name, repos: moving}
+			}
+		}
 		if blobStoreDeleteHook != nil {
 			blobStoreDeleteHook()
 		}

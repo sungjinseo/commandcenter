@@ -52,6 +52,8 @@ var Kinds = []Kind{
 	{"webhook.deleted", "A webhook was deleted"},
 	{"ping", "The test event sent from the webhook page"},
 	{"blobstore.updated", "A blob store group's members or fill policy changed, or a store was converted to a group"},
+	{"staging.move", "Components were moved to another hosted repository (staging); data.detail names the source and counts"},
+	{"staging.delete", "Components were deleted by a staging delete; data.detail has the counts"},
 }
 
 var known = func() map[string]bool {

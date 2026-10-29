@@ -63,6 +63,10 @@ type UI struct {
 	// Remote reports a proxy's live remote state (proxy.Fetcher.Remote);
 	// nil shows none.
 	Remote func(rp *repo.Repository) repo.RemoteStatus
+	// Tags and staging (staging.go): the search that selects components and
+	// the format importers of a staging move; nil serves 501 or refuses the format.
+	FindComponents ComponentFinder
+	Importers      map[string]repo.ComponentImporter
 
 	smtpTest       smtpTestState              // rate limit of the SMTP test send
 	settingsLoaded func()                     // test hook: runs between putSettings' read and its write

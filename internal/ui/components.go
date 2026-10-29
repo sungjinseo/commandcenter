@@ -48,6 +48,7 @@ type criteria struct {
 	keyword, group, name, version, baseVersion, classifier, extension string
 	format                                                            string
 	repo                                                              string
+	tag                                                               string         // only components with this tag (staging.go)
 	versionRE, baseVersionRE                                          *regexp.Regexp // set when the value has "*"
 }
 
@@ -268,6 +269,7 @@ type componentJSON struct {
 	Version     string               `json:"version"`
 	LastUpdated string               `json:"lastUpdated"`
 	Assets      []componentAssetJSON `json:"assets"`
+	Tags        []string             `json:"tags"`
 }
 
 type componentAssetJSON struct {
@@ -287,11 +289,11 @@ func (u *UI) searchComponents(w http.ResponseWriter, r *http.Request) {
 	c := criteria{
 		keyword: get("keyword"), group: get("group"), name: get("name"), version: get("version"),
 		baseVersion: get("baseVersion"), classifier: get("classifier"), extension: get("extension"),
-		format: get("format"), repo: get("repo"),
+		format: get("format"), repo: get("repo"), tag: get("tag"),
 	}
 	c.versionRE, c.baseVersionRE = compileGlob(c.version), compileGlob(c.baseVersion)
-	enough := false
-	for _, v := range []string{c.keyword, c.group, c.name, c.version, c.baseVersion, c.classifier, c.extension, c.format, c.repo} {
+	enough := c.tag != ""
+	for _, v := range []string{c.keyword, c.group, c.name, c.version, c.baseVersion, c.classifier, c.extension, c.format, c.repo, c.tag} {
 		if utf8.RuneCountInString(v) > maxQuery {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("parameters must be at most %d characters", maxQuery))
 			return
@@ -303,7 +305,7 @@ func (u *UI) searchComponents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !enough {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("give at least one of keyword, group, name, version, baseVersion, classifier or extension with %d or more characters", minQuery))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("give tag, or at least one of keyword, group, name, version, baseVersion, classifier or extension with %d or more characters", minQuery))
 		return
 	}
 	var after *compKey
@@ -354,6 +356,10 @@ func (u *UI) searchComponents(w http.ResponseWriter, r *http.Request) {
 				Version: comp.Version, LastUpdated: rfc3339(comp.LastUpdated), Assets: make([]componentAssetJSON, 0, len(comp.Assets))}
 			for _, a := range comp.Assets {
 				j.Assets = append(j.Assets, componentAssetJSON{Path: a.Path, Size: a.Size, Downloads: a.Downloads, LastDownloaded: rfc3339(a.LastDownloaded)})
+			}
+			if j.Tags, err = u.DB.ComponentTags(r.Context(), keyOfComponent(*comp)); err != nil {
+				u.fail(w, r, err)
+				return
 			}
 			out = append(out, j)
 		}
@@ -427,7 +433,11 @@ func (u *UI) deriveComponents(r *http.Request, repos []*repo.Repository, c crite
 	ctx, cancel := context.WithTimeout(r.Context(), componentsTimeout)
 	defer cancel()
 	b := &builder{byKey: map[compKey]*Component{}}
-	if err := u.scanComponents(ctx, b, repos, c); err != nil {
+	scan := u.scanComponents
+	if c.tag != "" {
+		scan = u.scanTagged
+	}
+	if err := scan(ctx, b, repos, c); err != nil {
 		// A deadline of our own keeps what was found; a cancelled request
 		// or any other failure is an error.
 		if !errors.Is(err, context.DeadlineExceeded) || r.Context().Err() != nil {

@@ -447,6 +447,11 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		log.Error("repository names a blob store that does not exist; its blobs cannot be read or written until the store is restored",
 			"repository", name, "blobStore", repo.StoreOf(registry.Get(name).Repository))
 	}
+	if err := restoreMoves(db, store, registry, log); err != nil {
+		hooks.Close()
+		evts.Close()
+		return nil, err
+	}
 	store.Live = func(rp *repo.Repository) bool {
 		cur := registry.Get(rp.Name)
 		return cur != nil && cur.Gen == rp.Gen
@@ -464,6 +469,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// registry's write lock is still held, so the live snapshot drops them
 	// before a repository of that name can be created again.
 	registry.OnDelete = func(ctx context.Context, name string, roles []string) {
+		store.EndMove(name) // its move row went with the repository
 		if len(roles) == 0 {
 			return
 		}
@@ -519,6 +525,10 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
 	nexus := &nexusapi.Handler{Repos: registry, Auth: authn, DB: db, BaseURL: baseURL, UI: webUI}
+	// Staging selects components with the search API's matching and moves
+	// them with the format handlers that can take one in.
+	webUI.FindComponents = nexus.Find
+	webUI.Importers = map[string]repo.ComponentImporter{"maven": mavenH, "npm": npmH, "raw": rawH, "pypi": pypiH, "nuget": nugetH, "helm": helmH, "yum": yumH}
 	srv := &server.Server{Registry: registry, Handlers: handlers, Auth: authn, Log: log,
 		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Nexus: nexus, Requests: recorder.Request, Docker: dockerH}
 	srv.TerraformDiscovery = func() []byte {
@@ -828,7 +838,23 @@ func (a *App) gcScope(storeName string) []string {
 			}
 		}
 	}
-	return out
+	return append(out, a.Store.Moving(storeName)...) // a move keeps its blobs in both stores
+}
+
+// restoreMoves routes the repositories whose change of blob store a
+// restart interrupted as during the move, so blobs written to the target
+// stay readable until the move's task runs again and finishes it.
+func restoreMoves(db *meta.DB, store *repo.Store, registry *repo.Registry, log *slog.Logger) error {
+	moves, err := db.ListBlobStoreMoves(context.Background())
+	if err != nil {
+		return fmt.Errorf("load blob store moves: %w", err)
+	}
+	for _, m := range moves {
+		store.BeginMove(m.Repo, m.Source, m.Target, "interrupted")
+		log.Warn("a repository's move to another blob store is unfinished: it reads from both stores and writes to the new one; run its repository.change-blobstore task to finish it",
+			"repository", m.Repo, "from", m.Source, "to", m.Target)
+	}
+	return nil
 }
 
 // GCStore removes blobs that no asset in the store's own repositories

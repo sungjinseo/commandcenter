@@ -358,4 +358,15 @@ CREATE TABLE IF NOT EXISTS content_selectors(
 CREATE TABLE IF NOT EXISTS user_tokens(
   owner TEXT COLLATE "C" PRIMARY KEY, name_code TEXT COLLATE "C" NOT NULL UNIQUE, hash TEXT COLLATE "C" NOT NULL,
   created_at BIGINT NOT NULL, last_used_at BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS tags(
+  name TEXT COLLATE "C" PRIMARY KEY, attributes TEXT COLLATE "C" NOT NULL DEFAULT '{}',
+  created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS component_tags(
+  tag TEXT COLLATE "C" NOT NULL, repo TEXT COLLATE "C" NOT NULL, grp TEXT COLLATE "C" NOT NULL,
+  name TEXT COLLATE "C" NOT NULL, version TEXT COLLATE "C" NOT NULL,
+  PRIMARY KEY(tag, repo, grp, name, version));
+CREATE INDEX IF NOT EXISTS component_tags_component ON component_tags(repo, grp, name, version);
+CREATE TABLE IF NOT EXISTS blob_store_moves(
+  repo TEXT COLLATE "C" PRIMARY KEY, source TEXT COLLATE "C" NOT NULL, target TEXT COLLATE "C" NOT NULL,
+  started_at BIGINT NOT NULL);
 `

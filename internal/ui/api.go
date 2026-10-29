@@ -65,6 +65,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.opsRoutes(mux)
 	u.userTokenRoutes(mux)
 	u.crowdRealmRoutes(mux)
+	u.stagingRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }
@@ -262,6 +263,8 @@ type repoJSON struct {
 
 	// BlobStore is the store StoreOf assigns (groups report the default); admin-only.
 	BlobStore string `json:"blobStore,omitempty"`
+	// BlobStoreMove is the unfinished move to another store; admin-only.
+	BlobStoreMove *moveJSON `json:"blobStoreMove,omitempty"`
 
 	// Policy fields come from the config and are admin-only (Decision 8).
 	VersionPolicy    string `json:"versionPolicy,omitempty"`
@@ -327,6 +330,7 @@ func (u *UI) describe(p auth.Principal, rp *repo.Repository, st meta.RepoStat) r
 	}
 	if p.Admin {
 		out.BlobStore = repo.StoreOf(rp.Repository)
+		out.BlobStoreMove = u.blobStoreMove(rp.Name)
 		addPolicy(&out, rp)
 	}
 	if rp.Type == "proxy" && !p.Anonymous() { // the remote's state helps every user, but anonymous callers do not learn it

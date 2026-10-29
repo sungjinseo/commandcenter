@@ -100,6 +100,10 @@ func runVerify(ctx context.Context, s *Service, t meta.Task, _ string, log *RunL
 			log.Warnf("%s: not checked: the byte budget was used up; the next run continues", rp.Name)
 			continue
 		}
+		if m, moving := s.Store.MoveOf(rp.Name); moving {
+			log.Warnf("%s: not checked: its move to blob store %q is unfinished", rp.Name, m.Target)
+			continue
+		}
 		bs, err := s.Store.BlobStore(rp.Name)
 		if err != nil {
 			c.failed++

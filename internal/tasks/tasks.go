@@ -106,6 +106,11 @@ type Service struct {
 	ScanBudget    int              // cleanup assets read per repository
 	RebuildScan   int              // rebuild-metadata assets read
 
+	// repository.change-blobstore: how long to wait for the rows of writes
+	// begun before a move (0: 5 s), and a hook after each blob copied.
+	MoveSettle    time.Duration
+	AfterMoveCopy func(repo, sha string)
+
 	runMu sync.Mutex // held for the whole of a run: one task at a time
 
 	// recordRun stores a run (DB.RecordTaskRun); a field so tests can fail it.

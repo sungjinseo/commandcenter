@@ -99,6 +99,7 @@ func (h *Handler) init() {
 	m.HandleFunc("DELETE "+p+"/security/ssl/truststore/{id}", h.sslRemove)
 	h.userTokenRoutes(m, p)
 	h.blobGroupRoutes(m, p)
+	h.stagingRoutes(m, p)
 	m.HandleFunc(p+"/", func(w http.ResponseWriter, r *http.Request) { writeMessage(w, http.StatusNotFound, "not found") })
 	h.proRoutes(m, p)
 	h.mux = m
@@ -727,8 +728,12 @@ func (h *Handler) componentJSON(ctx context.Context, rp *repo.Repository, c *com
 	if c.version != "" {
 		version = c.version
 	}
+	tags, err := h.DB.ComponentTags(ctx, c.metaKey())
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{"id": compID(c), "repository": c.repo, "format": nexusFormat(c.format),
-		"group": group, "name": c.name, "version": version, "assets": assets}, nil
+		"group": group, "name": c.name, "version": version, "assets": assets, "tags": tags}, nil
 }
 
 func (h *Handler) fail(w http.ResponseWriter, err error) {
@@ -1106,25 +1111,43 @@ func (h *Handler) searched(w http.ResponseWriter, r *http.Request) ([]*comp, cri
 		deny(w, p)
 		return nil, cr, false
 	}
+	out, err := h.find(r.Context(), repos, q)
+	if err != nil {
+		h.fail(w, err)
+		return nil, cr, false
+	}
+	return out, cr, true
+}
+
+// find runs a search in repos (groups skipped): the components that match
+// the parameters q, the format and tag included, in the requested order.
+func (h *Handler) find(ctx context.Context, repos []*repo.Repository, q url.Values) ([]*comp, error) {
+	cr := parseCriteria(q)
 	format := ccFormat(q.Get("format"))
+	tagged, err := h.tagged(ctx, q.Get("tag"))
+	if err != nil {
+		return nil, err
+	}
 	var out []*comp
 	for _, rp := range repos {
-		if rp.Type == "group" || (format != "" && rp.Format != format) {
+		if rp.Type == "group" || (format != "" && rp.Format != format) || (tagged != nil && !tagged[meta.ComponentKey{Repo: rp.Name}]) {
 			continue
 		}
-		comps, err := h.components(r.Context(), rp)
+		comps, err := h.components(ctx, rp)
 		if err != nil {
-			h.fail(w, err)
-			return nil, cr, false
+			return nil, err
 		}
 		for _, c := range comps {
+			if tagged != nil && !tagged[c.metaKey()] {
+				continue
+			}
 			if m := cr.matches(c); m != nil {
 				out = append(out, m)
 			}
 		}
 	}
 	cr.order(out)
-	return out, cr, true
+	return out, nil
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {

@@ -151,8 +151,8 @@ func (d *DB) UpdateRepository(ctx context.Context, def config.Repository) error 
 }
 
 // DeleteRepository removes the definition and, in the same transaction, every
-// assets, packages, dist_tags and negative_cache row of that repository
-// (plan 9 Decision 4) and every role privilege whose target is exactly
+// assets, packages, dist_tags, negative_cache, component_tags and
+// blob_store_moves row of that repository (plan 9 Decision 4) and every role privilege whose target is exactly
 // "repo:<name>", so a repository created later under the name does not get
 // them (QA N-25). It returns the ids of the roles it changed, ordered by id.
 // Blobs are left for the GC. ErrNotFound if there is no such definition.
@@ -206,7 +206,7 @@ func dropRepoPrivileges(ctx context.Context, q querier, name string) ([]string, 
 }
 
 func purgeRepository(ctx context.Context, q querier, name string) error {
-	for _, table := range []string{"assets", "packages", "dist_tags", "negative_cache"} {
+	for _, table := range []string{"assets", "packages", "dist_tags", "negative_cache", "component_tags", "blob_store_moves"} {
 		if _, err := q.ExecContext(ctx, `DELETE FROM `+table+` WHERE repo = ?`, name); err != nil {
 			return fmt.Errorf("purge %s of %q: %w", table, name, err)
 		}
