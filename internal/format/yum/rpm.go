@@ -15,7 +15,7 @@ import (
 
 // The RPM file format (rpm.org "Package File Format"): a 96-byte lead, the
 // signature header, padding to 8 bytes, the main header, the payload. Both
-// headers are "header structures": magic 8D AD E8 01, 4 reserved bytes, the
+// headers are "header structures": magic 8E AD E8 01, 4 reserved bytes, the
 // index entry count and the data size, then the entries (tag, type, offset,
 // count; 16 bytes) and the data.
 
@@ -85,7 +85,7 @@ const (
 	modeDir       = 0o040000
 )
 
-var headerMagic = [4]byte{0x8d, 0xad, 0xe8, 0x01}
+var headerMagic = [4]byte{0x8e, 0xad, 0xe8, 0x01}
 
 func badRPM(format string, args ...any) error {
 	return repo.Errorf(http.StatusBadRequest, "rpm: "+format, args...)

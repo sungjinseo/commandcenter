@@ -87,7 +87,7 @@ func hdr(entries []tv) []byte {
 		binary.Write(&index, binary.BigEndian, []int32{e.tag, typ, int32(off), count})
 	}
 	var out bytes.Buffer
-	out.Write(headerMagic[:])
+	out.Write([]byte{0x8e, 0xad, 0xe8, 0x01}) // the header structure magic, as rpm writes it (not the parser's constant)
 	out.Write([]byte{0, 0, 0, 0})
 	binary.Write(&out, binary.BigEndian, []int32{int32(len(entries)), int32(data.Len())})
 	out.Write(index.Bytes())
