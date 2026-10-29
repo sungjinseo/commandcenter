@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/format/conan"
 	"commandcenter/internal/format/gitlfs"
 	"commandcenter/internal/format/golang"
 	"commandcenter/internal/format/maven"
@@ -110,6 +111,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 	case "r":
 		found, err = u.rMetadata(r.Context(), rp, group, name, version, &m)
+	case "conan":
+		found, err = u.conanMetadata(r.Context(), rp, group, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -779,6 +782,33 @@ func (u *UI) rMetadata(ctx context.Context, rp *repo.Repository, dir, name, vers
 			pkg, req, _ := strings.Cut(dep, "(")
 			req = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(req), ")"))
 			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: scope, Name: strings.TrimSpace(pkg), Requirement: req, Optional: scope == "suggests"})
+		}
+	}
+	return true, nil
+}
+
+// conanMetadata scans the conanfile.py of a recipe revision (the group is
+// user/channel, the version <version>#<rrev>) as conan.ParseConanfile
+// does: description, license, homepage, url, and the requires,
+// tool_requires, build_requires and test_requires references as
+// dependencies of those scopes. The stored file counts for hosted and
+// proxy repositories alike; a revision without a conanfile.py is not found.
+func (u *UI) conanMetadata(ctx context.Context, rp *repo.Repository, group, name, version string, m *componentMetadata) (bool, error) {
+	ref, rrev, ok := conan.ComponentRef(group, name, version)
+	if !ok {
+		return false, nil
+	}
+	src, ok, err := u.readStored(ctx, rp, conan.RecipeFile(ref, rrev, "conanfile.py"))
+	if err != nil || !ok {
+		return ok, err
+	}
+	cf := conan.ParseConanfile(src)
+	m.Collected = true
+	m.Description, m.License, m.Homepage, m.RepositoryURL = optStr(cf.Description), optStr(cf.License), optStr(cf.Homepage), optStr(cf.URL)
+	for _, kind := range conan.RequireKinds {
+		for _, dep := range cf.Requires[kind] {
+			n, req, _ := strings.Cut(dep, "/")
+			m.Dependencies = append(m.Dependencies, dependencyJS{Scope: kind, Name: n, Requirement: req})
 		}
 	}
 	return true, nil

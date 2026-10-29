@@ -274,6 +274,10 @@ func unitPrefix(format, p string) string {
 		return strings.TrimSuffix(p, ".conda") + "."
 	case "rubygems": // one .gem file per version
 		return p
+	case "conan": // the recipe revision directory, .../revisions/<rrev>/, holds the recipe files and its packages
+		if dir, ok := component.ConanRevisionDir(p); ok {
+			return dir
+		}
 	}
 	return homePrefix(format, p)
 }
@@ -315,6 +319,10 @@ func homePrefix(format, p string) string {
 	case "rubygems": // gems/<name>-: the versions of one gem are contiguous under it
 		if name, _, ok := component.SplitGem(strings.TrimPrefix(p, "gems/")); ok {
 			return "gems/" + name + "-"
+		}
+	case "conan": // v2/conans/<name>/
+		if segs := strings.SplitN(p, "/", 4); len(segs) == 4 {
+			return segs[0] + "/" + segs[1] + "/" + segs[2] + "/"
 		}
 	}
 	return p

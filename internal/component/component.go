@@ -301,6 +301,8 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return "", name, "", ok
 	case "r": // <contrib dir>/<pkg>_<version>.tar.gz (.zip, .tgz): the contrib dir is the group
 		return SplitR(p)
+	case "conan": // v2/conans/<name>/<version>/<user>/<channel>/revisions/<rrev>/...: user/channel is the group
+		return SplitConan(p)
 	}
 	return "", "", "", false
 }
@@ -500,8 +502,63 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 			return name[:i], name[i+1:], version, name + "_" + version + RExt(name[:i])
 		}
 		return "", name, version, ""
+	case "conan": // a row per recipe revision: name/version[@user/channel], version = rrev; its file is the manifest
+		if group, cname, cversion, ok := SplitConan(ConanRowPath(name, version) + "files/conanmanifest.txt"); ok {
+			return group, cname, cversion, ConanRowPath(name, version) + "files/conanmanifest.txt"
+		}
+		return "", name, version, ""
 	}
 	return "", name, version, ""
+}
+
+// SplitConan maps a Conan asset path to its component: the recipe
+// reference's user/channel as the group ("" without one), the name, and
+// <version>#<rrev>. The paths are the v2 API's: v2/conans/<name>/<version>/
+// <user>/<channel>/revisions/<rrev>/files/<file> for a recipe file and
+// .../revisions/<rrev>/packages/<pkgid>/revisions/<prev>/files/<file> for
+// a binary's; the cached metadata documents (latest, revisions, files,
+// search) and a proxy's search/ answers are not components.
+func SplitConan(p string) (group, name, version string, ok bool) {
+	segs := strings.Split(p, "/")
+	if len(segs) < 9 || segs[0] != "v2" || segs[1] != "conans" || segs[6] != "revisions" {
+		return "", "", "", false
+	}
+	for _, s := range segs[2:8] {
+		if s == "" {
+			return "", "", "", false
+		}
+	}
+	switch {
+	case segs[8] == "files" && len(segs) >= 10:
+	case segs[8] == "packages" && len(segs) >= 14 && segs[10] == "revisions" && segs[12] == "files" && segs[9] != "" && segs[11] != "":
+	default:
+		return "", "", "", false
+	}
+	if segs[4] != "_" {
+		group = segs[4] + "/" + segs[5]
+	}
+	return group, segs[2], segs[3] + "#" + segs[7], true
+}
+
+// ConanRevisionDir is the directory of the recipe revision a Conan asset
+// path belongs to (cleanup's unit prefix).
+func ConanRevisionDir(p string) (string, bool) {
+	if _, _, _, ok := SplitConan(p); !ok {
+		return "", false
+	}
+	segs := strings.Split(p, "/")
+	return strings.Join(segs[:8], "/") + "/", true
+}
+
+// ConanRowPath is the recipe revision directory of a conan packages row
+// (name = name/version[@user/channel], version = the revision).
+func ConanRowPath(name, rrev string) string {
+	nv, uc, _ := strings.Cut(name, "@")
+	user, channel, ok := strings.Cut(uc, "/")
+	if !ok {
+		user, channel = "_", "_"
+	}
+	return "v2/conans/" + nv + "/" + user + "/" + channel + "/revisions/" + rrev + "/"
 }
 
 // The two helpers below mirror golang.Unescape and pypi.Normalize, which this

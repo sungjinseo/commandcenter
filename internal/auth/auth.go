@@ -147,6 +147,12 @@ type Authenticator struct {
 	// "format:<fmt>" privileges. Like AnonymousRead it follows the registry.
 	RepoFormat func(name string) string
 
+	// Bearers verify the Bearer tokens a format issues itself (the Conan
+	// login token): one that accepts a token returns the owner key
+	// (Principal.Owner) it was issued to, who must still be a principal. They
+	// are asked before the API token check.
+	Bearers []func(token string) (owner string, ok bool)
+
 	snap     atomic.Pointer[Snapshot]
 	reloadMu sync.Mutex // orders Reloads, so an older load never wins
 
@@ -326,7 +332,18 @@ func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 	scheme, tok, found := strings.Cut(h, " ")
 	switch {
 	case found && strings.EqualFold(scheme, "Bearer"):
-		return a.checkToken(r.Context(), strings.TrimSpace(tok), "")
+		tok = strings.TrimSpace(tok)
+		for _, verify := range a.Bearers {
+			if owner, ok := verify(tok); ok {
+				p, ok := a.lookup(r.Context(), owner)
+				if !ok {
+					return Principal{}, ErrBadCredentials
+				}
+				p.Via = ViaToken
+				return p, nil
+			}
+		}
+		return a.checkToken(r.Context(), tok, "")
 	case !found:
 		return a.checkToken(r.Context(), h, "") // cargo sends the raw token
 	}
