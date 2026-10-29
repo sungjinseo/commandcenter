@@ -4,7 +4,7 @@
 
 <p align="center">
   Nexus Repository를 대신하는, 작고 단단한 오픈소스 아티팩트 레지스트리.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS를 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace를 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@
 
 ## 지원 포맷
 
-| 포맷 | hosted | proxy | group | 검증한 클라이언트 |
+| 포맷 | hosted | proxy | group | 클라이언트 |
 |---|:-:|:-:|:-:|---|
 | Maven | ✅ | ✅ | ✅ | mvn, Gradle |
 | npm | ✅ | ✅ | ✅ | npm, pnpm, yarn |
@@ -48,15 +48,21 @@
 | Docker / OCI | ✅ | ✅ | ✅ | docker, skopeo, crane, helm push oci:// |
 | raw | ✅ | ✅ | ✅ | curl, 브라우저 (디렉터리 목록) |
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
-| Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata 자동 생성) |
-| NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) |
-| APT | ✅ | ✅ | ✅ | apt (signed Release 지원) |
-| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
-| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
-| Conda | ✅ | ✅ | ✅ | conda, mamba |
-| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) |
-| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL |
-| Git LFS | ✅ | ❌ | ❌ | git lfs |
+| Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata 자동 생성) ※ |
+| NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) ※ |
+| APT | ✅ | ✅ | ✅ | apt (signed Release 지원) ※ |
+| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) ※ |
+| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) ※ |
+| Conda | ✅ | ✅ | ✅ | conda, mamba ※ |
+| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) ※ |
+| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL ※ |
+| Git LFS | ✅ | ❌ | ❌ | git lfs ※ |
+| p2 | ❌ | ✅ | ✅ | Eclipse, Tycho ※ |
+| Swift | ✅ | ✅ | ✅ | swift package-registry ※ |
+| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN) ※ |
+| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers ※ |
+
+※ 표시한 포맷은 클라이언트 요청을 재현한 프로토콜 테스트로만 확인했고, 실제 클라이언트로는 아직 검증하지 않았습니다. 나머지는 실제 클라이언트로 E2E 시험을 거쳤습니다.
 
 지원하지 않는 포맷은 [제한 사항](docs/guide.md#제한-사항)에 있습니다.
 
@@ -173,7 +179,7 @@ docker compose up -d
 ## 현황과 제한
 
 - 인스턴스 하나로 돌도록 만들었습니다. 이중화 · 수평 확장은 없습니다(Nexus OSS와 같습니다).
-- p2, CocoaPods, Swift, Terraform, HuggingFace는 아직 없습니다(진행 중).
+- Terraform은 아직 없습니다(진행 중).
 - Nexus REST API는 저장소 · 컴포넌트 · 자산 · 검색 · 상태 엔드포인트를 지원합니다. 사용자 · 역할 쓰기, 스크립트 API는 없습니다.
 - 알려진 제한은 [제한 사항](docs/guide.md#제한-사항), 릴리스마다 고친 것과 바뀐 것은 [CHANGELOG](CHANGELOG.md)에 있습니다.
 - 버그는 이슈로, 보안 문제는 [보안 정책](SECURITY.md)대로 비공개로 알려 주세요.

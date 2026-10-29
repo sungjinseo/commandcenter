@@ -4,7 +4,7 @@
 
 <p align="center">
   A small, solid open-source artifact registry that takes the place of Nexus Repository.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS in one binary, running as a single Kubernetes pod.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace in one binary, running as a single Kubernetes pod.
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@ Most in-house package repositories start as Nexus Repository OSS, and then meet 
 
 ## Formats
 
-| Format | hosted | proxy | group | Verified with |
+| Format | hosted | proxy | group | Clients |
 |---|:-:|:-:|:-:|---|
 | Maven | ✅ | ✅ | ✅ | mvn, Gradle |
 | npm | ✅ | ✅ | ✅ | npm, pnpm, yarn |
@@ -48,15 +48,21 @@ Most in-house package repositories start as Nexus Repository OSS, and then meet 
 | Docker / OCI | ✅ | ✅ | ✅ | docker, skopeo, crane, helm push oci:// |
 | raw | ✅ | ✅ | ✅ | curl, browsers (directory listings) |
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
-| Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) |
-| NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) |
-| APT | ✅ | ✅ | ✅ | apt (signed Release) |
-| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
-| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
-| Conda | ✅ | ✅ | ✅ | conda, mamba |
-| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) |
-| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL |
-| Git LFS | ✅ | ❌ | ❌ | git lfs |
+| Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) ※ |
+| NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) ※ |
+| APT | ✅ | ✅ | ✅ | apt (signed Release) ※ |
+| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) ※ |
+| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) ※ |
+| Conda | ✅ | ✅ | ✅ | conda, mamba ※ |
+| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) ※ |
+| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL ※ |
+| Git LFS | ✅ | ❌ | ❌ | git lfs ※ |
+| p2 | ❌ | ✅ | ✅ | Eclipse, Tycho ※ |
+| Swift | ✅ | ✅ | ✅ | swift package-registry ※ |
+| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN) ※ |
+| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers ※ |
+
+※ marks formats checked only by protocol tests that replay client requests; they have not been run against the real client yet. The others passed end-to-end tests with the real clients.
 
 Unsupported formats are listed under [limitations](docs/guide.md#제한-사항).
 
@@ -173,7 +179,7 @@ The default container limit is 128 MiB (`GOMEMLIMIT=80MiB`).
 ## Status and limits
 
 - Designed for a single instance; no high availability or horizontal scaling (the same as Nexus OSS).
-- p2, CocoaPods, Swift, Terraform and HuggingFace are not available yet (in progress).
+- Terraform is not available yet (in progress).
 - The Nexus REST API covers repositories, components, assets, search and status. User and role writes and the script API are not available.
 - Known limitations are listed in the guide ([제한 사항](docs/guide.md#제한-사항)); every release's fixes and changes are in the [CHANGELOG](CHANGELOG.md).
 - Report bugs as issues and security problems privately per the [security policy](SECURITY.md).

@@ -142,6 +142,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with `/-/api/ssl/retrieve`) trusted by remote fetches, webhooks, OIDC, LDAP and SMTP in addition to
   the system roots, with the Nexus REST compat endpoints `/service/rest/v1/security/ssl` and
   `/security/ssl/truststore`.
+- The `p2` format: Eclipse update sites at `/repository/<repo>/` for Eclipse's Install New Software and
+  Tycho (`<layout>p2</layout>`). Proxy and group only, as in Nexus (a hosted p2 repository is refused by
+  validation). A proxy passes the site through and caches it (`p2.index`, `content.*`, `artifacts.*`,
+  `site.xml` and the composite documents re-checked every `metadataMaxAge`; `features/`, `plugins/`,
+  `binary/` for `contentMaxAge`) and rewrites the children of a composite repository
+  (`compositeContent.*`, `compositeArtifacts.*`, `.jar` included) so they resolve through the proxy:
+  children under the remote become relative paths, children elsewhere are mirrored under
+  `.remote/<sha1 of the child URL>/` (table in `.remote/index.json`). A group is a composite of its
+  online members (generated `p2.index`, `compositeContent.xml`, `compositeArtifacts.xml` under
+  `baseURL`); other paths come from the first member that has them. Features, plugins and binaries are
+  components (`plugins/<id>@<version>`) for cleanup policies (format `p2`); roles take `format:p2`; the
+  metadata tab reads a cached plugin's MANIFEST.MF (Bundle-Name, Bundle-Vendor, Bundle-License,
+  Require-Bundle).
+- The `swift` format: Swift package registries (SE-0292) at `/repository/<repo>/` for SwiftPM 5.7+
+  (`swift package-registry set/login/publish`): release lists, release metadata with the source-archive
+  checksum and latest/successor/predecessor `Link`s, `Package.swift` with its `Package@swift-X.Y.swift`
+  variants as alternate links, source archives with `Digest`, the `identifiers?url=` lookup and
+  `POST login`, all with `Content-Version: 1` and problem+json errors. Hosted repositories take the
+  multipart publish (archive, metadata, signature), validate scope, name and SemVer and the
+  `archive-source` layout, and record metadata and the manifest's `.package(...)` dependencies; proxies
+  rewrite release URLs and verify archives against the upstream checksum; groups answer from the first
+  member that has the package. Components are `scope.name@version`; `format:swift` privileges and cleanup
+  policies apply.
+- The `cocoapods` format (proxy only, as in Nexus): a proxy of the CocoaPods trunk CDN
+  (`https://cdn.cocoapods.org/`) for a Podfile `source '<url>/repository/<repo>/'`. The index files
+  (`CocoaPods-version.yml`, `all_pods.txt`, `all_pods_versions_<a>_<b>_<c>.txt`,
+  `deprecated_podspecs.txt`) are cached as metadata and
+  `Specs/<a>/<b>/<c>/<Pod>/<version>/<Pod>.podspec.json` as content. A podspec's `source.http` is
+  rewritten to `/repository/<repo>/pods/<Pod>/<version>/<sha1 of the URL>.<ext>`, which fetches the
+  original archive on first request, checks it against the podspec's `sha256` and caches it beside the
+  podspec; `source.git` passes through untouched (git is not proxied). Hosted and group repositories are
+  refused. Components are `Pod@version`; cleanup policies take `format: cocoapods`, roles
+  `format:cocoapods`, and the metadata tab shows summary/description, license, homepage, the source URL
+  and dependencies.
+- The `huggingface` format (proxy only, as in Nexus): a Hugging Face Hub proxy
+  (`https://huggingface.co/`) for `HF_ENDPOINT=<url>/repository/<repo>` (huggingface_hub, transformers,
+  datasets, `hf download`). `api/models|datasets|spaces/<repo id>/...` documents pass through, cached per
+  query for `metadataMaxAge`; the rest of the API, such as `whoami-v2`, is 404.
+  `[datasets/|spaces/]<repo id>/resolve/<revision>/<path>` follows the hub's redirect to its CDN and
+  caches the file under its commit sha as immutable content; a branch or tag resolves to its commit
+  through the revision document. Answers replay `X-Repo-Commit`, `ETag`/`X-Linked-Etag` (the content
+  sha256, the hub's LFS etag), `X-Linked-Size` and `Content-Length`, with byte ranges, and a HEAD of an
+  uncached LFS file is answered from the hub's headers without downloading. `remoteAuth.bearerToken`
+  (gated and private models) is sent to the configured remote host only, never to the CDN, and a client's
+  Authorization is not forwarded. Hosted and group are refused. Components are `<repo id>@<commit sha>`
+  (group `datasets`/`spaces`); cleanup takes `format: huggingface`, roles `format:huggingface`, and the
+  metadata tab shows pipeline_tag, library_name and license.
 
 ### Upgrade notes
 - The database schema version is now 3 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`

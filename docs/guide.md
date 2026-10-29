@@ -772,11 +772,11 @@ repositories:
 | 키 | 대상 | 기본값 | 설명 |
 |---|---|---|---|
 | `name` | 모두 | 필수 | 저장소 이름. URL의 `/repository/<name>/`. `/`, 공백, `\` 불가, 중복 불가. UI/API로 만들 때는 영문자·숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만, 최대 64자, `create`는 예약어. |
-| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs` 중 하나. |
-| `type` | 모두 | 필수 | `hosted`, `proxy`, `group` 중 하나. `gitlfs`는 `hosted`만 됩니다(proxy·group은 400). |
-| `remote` | proxy | 필수 | 원격 저장소의 `http(s)` URL. Cargo는 `sparse+` 없는 sparse index URL, Conan은 Conan 서버 루트(`https://center.conan.io/`), R은 CRAN 미러나 Posit Package Manager의 루트. 원격 인증 정보는 URL에 넣지 말고 `remoteAuth`에 넣으세요(URL은 암호화하지 않습니다. "저장된 비밀값 암호화" 참고). |
+| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs`, `p2`, `swift`, `cocoapods`, `huggingface` 중 하나. |
+| `type` | 모두 | 필수 | `hosted`, `proxy`, `group` 중 하나. `gitlfs`는 `hosted`만 됩니다(proxy·group은 400). `p2`는 `proxy`·`group`만, `cocoapods`·`huggingface`는 `proxy`만 됩니다(그 밖은 400). |
+| `remote` | proxy | 필수 | 원격 저장소의 `http(s)` URL. Cargo는 `sparse+` 없는 sparse index URL, Conan은 Conan 서버 루트(`https://center.conan.io/`), R은 CRAN 미러나 Posit Package Manager의 루트, p2는 p2 사이트 URL, Swift는 다른 Swift 레지스트리의 루트, CocoaPods는 트렁크 CDN `https://cdn.cocoapods.org/`(Specs git 저장소는 안 됨), HuggingFace는 `https://huggingface.co/`. 원격 인증 정보는 URL에 넣지 말고 `remoteAuth`에 넣으세요(URL은 암호화하지 않습니다. "저장된 비밀값 암호화" 참고). |
 | `remoteAuth` | proxy | 없음 | 원격 인증: `username`/`password` 또는 `bearerToken`(둘 다 있으면 토큰 우선). 설정한 `remote`와 스킴·호스트·포트가 같은 곳에만 보내며, 리다이렉트를 따라갈 때도 같습니다. 예외는 같은 호스트의 `http`(80)에서 `https`(443)로 옮기는 리다이렉트로, 첫 요청이 이미 그 호스트에 보냈으므로 자격 증명을 유지합니다. 그 밖에 포트나 스킴이 다른 곳(`https`에서 `http`로 내려가는 경우 포함)과 하위 도메인으로 가는 리다이렉트는 자격 증명 없이 따라갑니다. |
-| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`, NuGet 서비스 인덱스·registration·검색 결과, APT `dists/`, Yum `repodata/`, RubyGems compact index·specs, Composer `packages.json`·`p2`, Conda `repodata.json`·`channeldata.json`, Conan `latest`·`revisions`·파일 목록·검색, R `PACKAGES*`·`Meta/`)를 다시 확인하기까지의 시간. |
+| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`, NuGet 서비스 인덱스·registration·검색 결과, APT `dists/`, Yum `repodata/`, RubyGems compact index·specs, Composer `packages.json`·`p2`, Conda `repodata.json`·`channeldata.json`, Conan `latest`·`revisions`·파일 목록·검색, R `PACKAGES*`·`Meta/`, p2 `p2.index`·`content.*`·`artifacts.*`·`composite*`·`site.xml`, Swift 릴리스 목록·메타데이터·identifiers, CocoaPods 인덱스 파일, HuggingFace `api/…` 문서와 브랜치·태그→커밋 revision 문서)를 다시 확인하기까지의 시간. |
 | `contentMaxAge` | proxy | `"-1"` | 아티팩트 본문(jar, tgz, 휠, zip, crate, nupkg, deb, rpm)의 재확인 주기. 기본은 영구 캐시. |
 | `negativeCacheTTL` | proxy | `"10m"` | 원격이 404/410을 준 경로, 그리고 체크섬이 맞지 않은 다운로드를 다시 묻지 않는 시간. 만료된 기록은 서버가 시작할 때와 그 뒤 하루에 한 번 DB에서 지웁니다. |
 | `routingRule` | proxy | 없음 | 이 proxy에 적용할 라우팅 규칙 이름 하나. 없는 이름은 400이고 hosted·group에는 쓸 수 없습니다("라우팅 규칙" 참고). |
@@ -808,7 +808,7 @@ repositories:
 - 거절되면 클라이언트는 502(만료된 캐시가 있으면 그 캐시)를 받습니다. 로그의 `remote fetch failed` 줄에는 `address refused by the remote egress policy`가 남습니다.
 - `HTTPS_PROXY`/`HTTP_PROXY`의 사내 프록시를 거치는 요청은 프록시가 대신 접속하므로 IP 주소로 적힌 목적지만 검사합니다(위의 다른 IPv4 표기와 ASCII가 아닌 호스트의 거절 포함). 호스트 이름으로 적힌 목적지는 내부 주소로 해석되더라도 프록시가 그대로 접속하므로, 프록시에서 내부 대역으로 가는 요청을 막거나 사내 도메인과 대역을 `NO_PROXY`에 넣으세요. 프록시 자체의 주소는 막지 않습니다. `NO_PROXY`에 넣은 호스트에는 직접 접속하므로 위 검사를 모두 받습니다.
 
-**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum, RubyGems, Composer, Conda, Conan, R도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정", "RubyGems 설정", "Composer 설정", "Conda 설정", "Conan 설정", "R 설정" 참고). Git LFS는 같은 oid의 재업로드를 `allow_once`에서도 받고(멱등) `deny`만 업로드·삭제를 막습니다("Git LFS 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
+**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum, RubyGems, Composer, Conda, Conan, R, Swift도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정", "RubyGems 설정", "Composer 설정", "Conda 설정", "Conan 설정", "R 설정", "Swift 설정" 참고). Git LFS는 같은 oid의 재업로드를 `allow_once`에서도 받고(멱등) `deny`만 업로드·삭제를 막습니다("Git LFS 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
 
 ## 인증과 권한
 
@@ -1695,6 +1695,109 @@ git lfs pull                      # 다운로드(read 권한)
 - 잠금(File Locking)은 지원하지 않습니다. `locks` API는 501로 답하고 git-lfs는 그 뒤로 잠금 확인을 건너뜁니다(`lfs.<url>.locksverify=false`). `git lfs lock`은 쓸 수 없습니다.
 - 웹 UI: 컴포넌트는 오브젝트 하나하나이며 이름이 oid이고 버전은 없습니다. 컴포넌트 삭제(API `DELETE /-/api/repositories/<저장소>/components?name=<oid>`)는 version 없이 호출합니다. 메타데이터 탭은 크기와 sha256만 보여 줍니다. Cleanup 정책(포맷 `all` 또는 `gitlfs`)은 `componentAgeDays`·`lastDownloadedDays`로 오브젝트 단위로 정리합니다. 활동 이벤트는 `upload`/`delete`에 oid가 기록됩니다.
 
+### p2 설정
+
+Eclipse p2 업데이트 사이트(Nexus의 p2 포맷)입니다. Eclipse의 Install New Software, Tycho/Maven의 p2 리졸버가 요청하는 파일(`p2.index`, `content.xml`/`content.jar`/`content.xml.xz`, `artifacts.xml`/`artifacts.jar`/`artifacts.xml.xz`, `compositeContent.*`, `compositeArtifacts.*`, `site.xml`, `features/`, `plugins/`, `binary/`)을 `/repository/<저장소>/` 아래에서 제공합니다. Nexus와 같이 **proxy와 group만** 지원하며 hosted는 설정 검증에서 거부합니다(`p2 supports proxy and group repositories only`).
+
+```
+Eclipse: Help > Install New Software… > Add… > Location: http://localhost:8081/repository/p2-all/
+```
+
+```xml
+<!-- Tycho (pom.xml): layout p2 -->
+<repository>
+  <id>cc-p2</id>
+  <url>http://localhost:8081/repository/p2-all/</url>
+  <layout>p2</layout>
+</repository>
+```
+
+- proxy의 `remote`는 p2 사이트 URL입니다(예: `https://download.eclipse.org/releases/2024-09/`, `https://download.eclipse.org/eclipse/updates/4.33/`). 요청 경로를 그대로 원격에 붙여 캐시하며 `p2.index`·`content.*`·`artifacts.*`·`composite*`·`site.xml`은 `metadataMaxAge`마다 다시 확인하고, `features/`·`plugins/`·`binary/`(와 구형 `.pack200.gz`)는 `contentMaxAge`(기본 영구)로 캐시합니다. 원격이 보낸 Content-Type을 그대로 저장합니다. 원격이 응답하지 않으면 만료된 메타데이터를 `Warning: 110`과 함께 제공합니다. `artifacts.xml`의 매핑은 `${repoUrl}` 기준이라 바꾸지 않습니다.
+- 복합(composite) 사이트: `compositeContent.xml`/`compositeArtifacts.xml`(과 `.jar`)의 `<child location>`을 proxy를 통해 풀리도록 바꿔서 내보냅니다. 상대 경로 자식은 그대로 두고, 원격 `remote` 아래의 절대 URL 자식은 proxy 안의 상대 경로로, 다른 호스트·다른 경로의 자식은 `.remote/<자식 URL의 sha1>/`로 바꾸며 그 아래 요청은 해당 자식 URL에서 받아 캐시합니다(sha1→URL 표는 `.remote/index.json` 자산에 보관). `.jar`는 풀어서 바꾼 뒤 다시 압축합니다. 캐시된 자산은 원격 원본 그대로이고 응답할 때만 바꿉니다. `.xml.xz`는 xz를 풀지 않으므로 그대로 전달합니다(복합 문서를 xz로 내는 사이트는 없습니다). 원격 인증 정보는 `remote` 호스트에만 보냅니다.
+- group은 멤버를 자식으로 하는 복합 저장소입니다: `p2.index`와 `compositeContent.xml`·`compositeArtifacts.xml`을 서버가 만들어(`<child location='<baseURL>/repository/<멤버>/'/>`, offline 멤버 제외, `p2.atomic.composite.loading=false`) 답하고, 그 밖의 파일(`plugins/…` 등)은 멤버 순서상 처음 가진 멤버가 답합니다. group 루트의 `content.*`·`artifacts.*`·`site.xml`·`composite*.jar`는 404입니다(클라이언트는 `p2.index`를 따라 xml을 읽습니다). `baseURL` 설정이 필요합니다.
+- 컴포넌트는 디렉터리를 그룹으로 하여 `plugins/<id>@<버전>`, `features/<id>@<버전>`, `binary/<id>@<버전>`으로 나타나며(`.remote/<sha1>/` 아래 캐시도 같은 컴포넌트), `.pack200.gz`와 문서 파일은 컴포넌트가 아닙니다. 삭제는 Cleanup 정책(`format: p2`, proxy)으로 하며 `namePattern`은 `plugins:org.example.a`처럼 `디렉터리:id`에 맞춥니다. OSGi 버전은 모두 release로 봅니다. 역할 권한 대상으로 `format:p2`를 쓸 수 있고, 컴포넌트 메타데이터 탭은 캐시된 plugin의 MANIFEST.MF에서 Bundle-Name·Bundle-Vendor·Bundle-License·Require-Bundle을 보여 줍니다(feature·binary는 없음).
+
+### Swift 설정
+
+Swift 패키지 레지스트리(SE-0292, SwiftPM 5.7 이상의 `swift package-registry`)입니다. 릴리스 목록(`<scope>/<name>`), 릴리스 메타데이터(`<scope>/<name>/<버전>`), 매니페스트(`<scope>/<name>/<버전>/Package.swift`, `?swift-version=`), 소스 아카이브(`<scope>/<name>/<버전>.zip`), 저장소 URL 조회(`identifiers?url=`), 게시(`PUT <scope>/<name>/<버전>`), 로그인 확인(`POST login`)을 `/repository/<저장소>/` 아래에서 제공합니다. 릴리스 URL은 `baseURL`로 만든 절대 URL이므로 `baseURL`이 클라이언트가 여는 주소와 같아야 합니다.
+
+```bash
+swift package-registry set https://cc.example.com/repository/swift-all            # 기본 레지스트리(--global 이면 사용자 설정)
+swift package-registry set --scope mona https://cc.example.com/repository/swift-all   # 특정 scope만 이 레지스트리로
+
+# 로그인: 레지스트리 URL 뒤에 /login 을 붙여 줍니다. 인증 정보는 호스트 단위로 저장됩니다.
+swift package-registry login https://cc.example.com/repository/swift-all/login --username ci --password <비밀번호>
+swift package-registry login https://cc.example.com/repository/swift-all/login --token <API 토큰>
+
+# 올리기: add 권한이 필요합니다. 패키지 루트의 package-metadata.json 이 있으면 metadata로 함께 보냅니다.
+swift package-registry publish mona.LinkedList 1.1.1 --url https://cc.example.com/repository/swift-hosted
+curl -u ci:<비밀번호> -H 'Content-Type: application/zip' -T LinkedList-1.1.1.zip https://cc.example.com/repository/swift-hosted/mona/LinkedList/1.1.1   # swift package archive-source 로 만든 zip
+```
+
+```swift
+dependencies: [
+    .package(id: "mona.LinkedList", from: "1.1.1"),
+],
+targets: [
+    .target(name: "App", dependencies: [.product(name: "LinkedList", package: "mona.LinkedList")]),
+]
+```
+
+- 위 `swift package-registry` 명령은 레지스트리 명세를 따라 적었습니다. 실제 SwiftPM 클라이언트로는 아직 검증하지 않았습니다.
+- 패키지는 identifier `scope.name`으로 가리킵니다. scope는 영숫자와 하이픈(처음·끝·연속 금지, 39자 이하), name은 영숫자와 하이픈·밑줄(처음·끝·연속 금지, 100자 이하)이며 대소문자를 구분하지 않습니다. 버전은 SemVer 2.0.0(`v` 접두사 없음)이어야 하고 어긋나면 404입니다.
+- SwiftPM은 레지스트리를 HTTPS로 엽니다. 운영에서는 `baseURL`을 `https://`로 두고 TLS를 끝내는 리버스 프록시 뒤에서 운영하세요. 시험용 http 저장소는 `swift package-registry set --allow-insecure-http`(SwiftPM 5.9 이상)로만 쓸 수 있습니다.
+- hosted는 올린 zip에서 `Package.swift`와 `Package@swift-X.Y.swift`를 찾아 `.package(url:/id:/path: …)` 의존성(`from:`, `exact:`, `.upToNextMajor(…)` 등 요구 조건은 쓴 그대로)과 metadata(description, licenseURL, readmeURL, repositoryURLs)를 저장하고, 파일은 `<scope>/<name>/<버전>/source-archive.zip`에 둡니다. SwiftPM은 받은 아카이브의 최상위 디렉터리 한 단계를 벗겨 내므로 zip은 `swift package archive-source`처럼 하나의 최상위 디렉터리 아래(`<이름>/Package.swift`)에 패키지를 담아야 하며, 그렇지 않거나 zip이 아니면 400입니다. 업로드 본문은 `maxUploadMiB`를 따릅니다.
+- 아카이브 응답에는 `Digest: sha-256=…`, 릴리스 메타데이터에는 checksum과 latest/successor/predecessor `Link`가 붙고, 서명(`source-archive-signature`)을 함께 올리면 `signing`으로 제공합니다. 다른 API 버전(`application/vnd.swift.registry.v2…`)을 요구하면 406, 오류는 모두 `application/problem+json`입니다.
+- `writePolicy`: `allow_once`(기본)는 같은 버전 재게시를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.
+- `identifiers?url=`은 metadata의 `repositoryURLs`로 패키지를 찾습니다(대소문자·`.git`·끝의 `/` 무시). 게시할 때 `repositoryURLs`를 넣어 두면 `swift package resolve --replace-scm-with-registry`가 URL 의존성을 이 레지스트리의 패키지로 바꿔 받습니다.
+- proxy의 `remote`는 다른 Swift 레지스트리의 루트 URL입니다. 릴리스 목록·메타데이터·identifiers는 `metadataMaxAge`마다 다시 확인하고 목록의 릴리스 URL을 proxy 주소로 바꿔 제공합니다. 아카이브는 처음 받을 때 원격 릴리스 메타데이터의 checksum과 비교해 맞을 때만 캐시하고(다르면 502), 매니페스트는 캐시한 아카이브에서 읽습니다.
+- group은 멤버 순서상 그 패키지를 처음 가진 멤버만으로 답합니다(hosted를 proxy보다 앞에 두세요). identifiers는 멤버 결과를 합칩니다. `writeMember`가 있으면 group에 게시한 패키지는 그 hosted로 갑니다.
+- 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: swift`, hosted·proxy)으로 합니다. 컴포넌트는 `scope.name@버전`(소문자)으로 나타나고, 역할 권한 대상으로 `format:swift`를 쓸 수 있습니다. 컴포넌트 메타데이터 탭은 description, licenseURL, readmeURL, 첫 repositoryURL과 `.package(...)` 의존성을 보여 줍니다.
+
+### CocoaPods 설정
+
+CocoaPods 트렁크 CDN(`https://cdn.cocoapods.org/`)의 proxy입니다(Nexus와 같이 proxy만 있고, hosted·group은 저장소 설정 검사에서 400으로 거부합니다). `pod install`이 CDN 소스에서 읽는 루트의 인덱스 파일(`CocoaPods-version.yml`, `all_pods.txt`, `all_pods_versions_<a>_<b>_<c>.txt`, `deprecated_podspecs.txt`)과 `Specs/<a>/<b>/<c>/<Pod>/<버전>/<Pod>.podspec.json`을 `/repository/<저장소>/` 아래에서 제공합니다.
+
+```ruby
+# Podfile
+source 'http://localhost:8081/repository/pods-proxy/'
+target 'App' do
+  pod 'Alamofire', '~> 5.0'
+end
+```
+
+```bash
+pod install --repo-update
+# 읽기에 인증이 필요하면 ~/.netrc 에: machine localhost login ci password <비밀번호 또는 API 토큰>
+```
+
+- proxy의 `remote`는 트렁크 CDN `https://cdn.cocoapods.org/`입니다. **CDN 소스만 지원하며** 옛 Specs git 저장소(`https://github.com/CocoaPods/Specs.git`)는 remote로 쓸 수 없습니다. 인덱스 파일은 `metadataMaxAge`마다 다시 확인하고, podspec은 버전마다 바뀌지 않으므로 처음 받을 때 캐시합니다(`contentMaxAge`, 기본 영구). 샤드 디렉터리(Pod 이름 md5의 앞 세 글자)가 맞지 않는 경로는 404입니다. 원격이 응답하지 않으면 캐시된 인덱스를 `Warning: 110`과 함께 제공합니다.
+- podspec의 `source.http`는 `<baseURL>/repository/<저장소>/pods/<Pod>/<버전>/<원본 URL의 sha1>.<확장자>`로 바꿔 내보냅니다. 그 주소를 처음 요청하면 원본 URL(GitHub 릴리스 등)에서 받아 podspec 옆에 영구 캐시하고, podspec에 `sha256`이 있으면 검증합니다(불일치는 502이며 캐시하지 않습니다). 확장자는 원본 URL의 것(`.zip`, `.tar.gz`, `.tgz` …)을 유지하므로 CocoaPods가 압축 형식을 그대로 알아봅니다. 바꾼 URL은 절대 주소이므로 `baseURL`이 클라이언트가 여는 주소와 같아야 합니다.
+- **git 소스는 proxy하지 않습니다.** `source.git`(과 svn·hg)은 손대지 않고 그대로 두므로, 그런 Pod는 클라이언트가 원본 git 서버(GitHub 등)에 직접 접속할 수 있어야 합니다. 폐쇄망에서는 http 소스 Pod만 받을 수 있으니 git 소스 Pod는 내부 git 미러를 따로 두세요.
+- 컴포넌트는 Pod 이름과 버전(`Alamofire@5.0.0`)이며 podspec과 그 아카이브가 한 컴포넌트입니다. 삭제는 Cleanup 정책(`format: cocoapods`)으로 하고, 인덱스 파일은 컴포넌트가 아니라 지우지 않습니다. 지운 Pod는 다시 요청하면 새로 받습니다. 역할 권한 대상으로 `format:cocoapods`를 쓸 수 있고, 컴포넌트 메타데이터 탭은 summary(없으면 description), license, homepage, 원본 소스 URL, dependencies를 보여 줍니다.
+
+### HuggingFace 설정
+
+Hugging Face Hub(`https://huggingface.co/`)의 proxy입니다(Nexus와 같이 proxy만 있고, hosted·group은 400으로 거부합니다). `huggingface_hub`, `transformers`, `datasets`, `hf download`가 `HF_ENDPOINT`로 이 저장소를 Hub처럼 씁니다.
+
+```bash
+export HF_ENDPOINT=http://localhost:8081/repository/hf-proxy   # 끝에 / 없이
+export HF_HUB_DOWNLOAD_TIMEOUT=600   # 큰 파일: proxy가 원본에서 다 받을 때까지 기다립니다(아래 참고)
+export HF_HUB_ETAG_TIMEOUT=60
+hf download bert-base-uncased        # 또는 huggingface-cli download
+python -c "from transformers import AutoModel; AutoModel.from_pretrained('bert-base-uncased')"
+# 읽기에 인증이 필요하면 HF_TOKEN에 Command Center API 토큰을 넣습니다(Hub 토큰이 아닙니다)
+export HF_TOKEN=<Command Center API 토큰>
+```
+
+- `hf auth login`으로 저장해 둔 Hub 토큰이 있으면 클라이언트가 그 토큰을 proxy로 보내고 proxy는 401로 답합니다. `HF_TOKEN`을 Command Center 토큰으로 두거나 `HF_HUB_DISABLE_IMPLICIT_TOKEN=1`을 설정하세요.
+- `api/models|datasets|spaces/<repo id>`(`/revision/<리비전>`, `/tree/…` 포함) 문서는 그대로 전달하며 `metadataMaxAge` 동안 캐시합니다(짧게, 예: `10m`). 쿼리(`expand[]`, `blobs=true`, `recursive`)가 다르면 따로 캐시합니다. 그 밖의 API(`api/whoami-v2`, 목록·검색)는 404입니다.
+- 파일(`<repo id>/resolve/<리비전>/<경로>`, `datasets/<repo id>/resolve/…`, `spaces/…`)은 Hub가 주는 CDN 리다이렉트를 따라가 받아 **커밋 sha 아래 영구 캐시**합니다(`contentMaxAge`). 브랜치·태그는 revision 문서로 커밋을 찾고 그 문서는 `metadataMaxAge`마다 다시 확인하므로 브랜치가 움직이면 새 커밋의 파일을 받으며, 이전 커밋 파일은 그대로 남습니다. 응답에는 `X-Repo-Commit`, `ETag`·`X-Linked-Etag`(파일 내용의 sha256, Hub의 LFS 값과 같음), `X-Linked-Size`, `Content-Length`가 붙고 Range(이어받기)를 지원합니다. 캐시에 없는 LFS 파일의 HEAD는 Hub의 헤더로 답하고 내려받지 않습니다.
+- **토큰**: gated·비공개 모델은 저장소의 `remoteAuth.bearerToken`에 Hub 읽기 토큰을 넣습니다. gated 모델은 그 토큰 계정이 Hub에서 접근 승인을 받아 두어야 합니다. 토큰은 `remote` 호스트에만 보내고 리다이렉트된 CDN에는 보내지 않으며, 클라이언트의 Authorization은 Hub로 전달하지 않습니다. 토큰 계정이 볼 수 있는 모델은 이 저장소를 읽을 수 있는 모든 사용자에게 보이므로 읽기 권한을 제한하세요.
+- **큰 파일**: proxy는 파일을 원본에서 끝까지 받아 캐시한 뒤 보냅니다. 받는 시간이 클라이언트의 대기 시간(기본 `HF_HUB_DOWNLOAD_TIMEOUT` 10초, 재시도 5회)보다 길면 클라이언트는 실패하지만 proxy의 다운로드는 계속되므로 다시 실행하면 캐시에서 받습니다. 수 GB 모델은 `HF_HUB_DOWNLOAD_TIMEOUT`을 크게 잡거나 미리 한 번 받아 두세요. 한 파일은 30분 안에 원본에서 받아져야 하며, 디스크는 모델 크기만큼 필요합니다.
+- 지원하지 않는 것: `/`가 든 리비전(`refs/pr/1`), `POST …/paths-info`(405), Xet 전송(클라이언트가 HTTP로 받습니다), 업로드.
+- **정리**: 컴포넌트는 `<repo id>@<커밋 sha>`이고 데이터셋·스페이스는 그룹이 `datasets`·`spaces`입니다(라벨 `datasets/org/ds@<sha>`, Cleanup `namePattern`은 `datasets:org/ds`). 한 커밋의 파일(하위 디렉터리 포함)이 한 컴포넌트입니다. Cleanup 정책(`format: huggingface`, 예: `lastDownloadedDays`)으로 오래 쓰지 않은 모델을 지우며 api 문서는 남습니다. 역할 권한 대상으로 `format:huggingface`를 쓸 수 있고, 메타데이터 탭은 `pipeline_tag (library_name)`, license, Hub 페이지 주소를 보여 줍니다.
+
 ## 운영
 
 | 작업 | 명령 |
@@ -1772,7 +1875,7 @@ curl -u admin https://commandcenter.example.com/-/api/support/threads | head
 
 ### Cleanup 정책
 
-오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
+오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs`, `p2`, `swift`, `cocoapods`, `huggingface` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
 
 | 기준 | 의미 |
 |---|---|
@@ -1986,8 +2089,9 @@ docker compose start
 ## 제한 사항
 
 - 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML과 Go·Cargo 업로드 화면은 없습니다(Go·Cargo는 클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. 포맷 고유의 검색(`npm search` 포함)도 없습니다.
-- **지원하지 않는 포맷**: p2, CocoaPods, Swift, Terraform, HuggingFace는 없습니다.
+- **지원하지 않는 포맷**: Terraform은 없습니다(진행 중).
 - **Conan·R·Git LFS의 알려진 제한**: Conan v1 API에는 `remove_files`와 `packages/delete`가 없어 리비전 없는 Conan 1.x의 `conan remove -p`와 원격에만 있는 파일을 지우는 재업로드가 실패합니다(Conan 2와 리비전을 켠 Conan 1은 해당 없음). R group은 미러의 `PACKAGES.rds`를 읽지 않고 병합한 `PACKAGES`에서 `.gz`·`.rds`를 만듭니다. Git LFS는 hosted만 되고 잠금(`locks`) API는 501입니다("Conan 설정", "R 설정", "Git LFS 설정" 참고).
+- **p2·Swift·CocoaPods·HuggingFace의 알려진 제한**: p2는 Nexus와 같이 proxy·group만 되고(hosted 없음), 복합 사이트의 `.xml.xz` 문서는 풀지 않고 그대로 전달하므로 그 안의 자식 위치는 바뀌지 않습니다. Swift의 `swift package-registry` 명령은 레지스트리 명세를 따라 적은 것으로 실제 SwiftPM 클라이언트로는 아직 검증하지 않았고, SwiftPM은 레지스트리를 HTTPS로 열므로 운영에서는 `baseURL`을 `https://`로 두어야 합니다. CocoaPods는 트렁크 CDN 소스만 proxy하며 `source.git`(svn·hg 포함) Pod는 proxy하지 않으므로 클라이언트가 원본 git 서버에 직접 접속해야 합니다. HuggingFace는 한 파일을 원본에서 30분 안에 받아야 하고, 큰 파일의 첫 요청은 클라이언트가 먼저 시간 초과할 수 있으므로 `HF_HUB_DOWNLOAD_TIMEOUT`을 늘리세요. `/`가 든 리비전(`refs/pr/*`), `POST …/paths-info`, Xet 전송, 업로드는 지원하지 않습니다("p2 설정", "Swift 설정", "CocoaPods 설정", "HuggingFace 설정" 참고).
 - **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브가 gzip(`control.tar.gz`)이나 무압축 tar인 `.deb`만 받습니다(xz·zstd는 400). Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
 - **RubyGems·Composer·Conda의 알려진 제한**: RubyGems group은 `versions`·`names`만 병합하고 Marshal 인덱스(`specs.4.8.gz` 등)는 그 파일을 처음 가진 멤버 것을 그대로 냅니다. Conda hosted는 `.conda` 파일의 zstd 메타데이터를 읽지 않아 이름·버전·빌드·해시만 기록하고(의존성 없음), `repodata.json.bz2`·`.zst`·`.jlap`를 만들지 않습니다(클라이언트는 `repodata.json`으로 넘어갑니다). Composer는 v1 `providers-url`과 `notify-batch`·`security-advisories`를 제공하지 않으며(Composer 2 전용), `/`가 든 브랜치 버전은 올릴 수 없습니다("RubyGems 설정", "Composer 설정", "Conda 설정" 참고).
 - **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
@@ -2010,6 +2114,7 @@ docker compose start
   | Conan (`allow_once`) | 같은 리비전의 같은 파일을 다른 내용으로 올리면 409, 같은 내용이면 200 (`writePolicy: allow`이면 허용) |
   | R (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
   | Git LFS | 200 (같은 oid는 같은 내용이므로 멱등) |
+  | Swift (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
 
   Cargo는 `-`/`_`와 대소문자만 다른 이름, 빌드 메타데이터(`+…`)만 다른 버전도 같은 것으로 보고 409로 거부합니다.
 - **group과 의존성 혼동**: group은 멤버를 순서대로 조회합니다. Maven과 Go는 `latest`를 멤버 전체 중 가장 새로운 버전으로 고르므로, hosted 멤버를 앞에 두어도 proxy 쪽에 더 높은 버전이 있으면 그것이 `latest`가 됩니다. npm·PyPI·Cargo group은 그 패키지(프로젝트, crate)를 처음 가진 멤버 하나만으로 답하므로, hosted를 proxy보다 앞에 두면 같은 이름의 공개 버전이 섞이지 않습니다. npm과 PyPI는 앞선 멤버가 Offline이거나 오류를 내면 503·5xx로 실패하고, tarball·파일 URL을 직접 요청해도 그 멤버의 것만 줍니다. Cargo group은 Offline 멤버를 건너뛰고, crate 파일 다운로드 URL은 멤버 순서대로 찾습니다. Maven·Go·Cargo에서 사내 패키지 이름을 공개 저장소에서 선점당하지 않으려면 사내 전용 group을 따로 두거나 proxy 멤버를 넣지 마세요.

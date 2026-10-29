@@ -18,7 +18,7 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted", "gems-hosted", "composer-hosted", "conda-hosted", "conan-hosted", "r-hosted", "lfs-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted", "gems-hosted", "composer-hosted", "conda-hosted", "conan-hosted", "r-hosted", "lfs-hosted", "swift-hosted"] }
 
 # 라우팅 규칙: proxy가 원격에 물어볼 수 있는 경로. RE2 정규식, 요청 경로 앞에 "/"가 붙습니다. 첫 시작 때만 가져옵니다.
 # routingRules:
@@ -267,6 +267,43 @@ repositories:
     format: gitlfs                    # hosted만 지원(proxy/group 불가). 오브젝트 크기는 maxUploadMiB 이하
     type: hosted
     writePolicy: allow_once           # 같은 oid 재업로드는 멱등(200). deny: 읽기 전용
+  - name: p2-proxy                    # Eclipse: Install New Software > Add > http://<host>/repository/p2-proxy/
+    format: p2
+    type: proxy
+    remote: "https://download.eclipse.org/releases/2024-09/"   # 복합 사이트도 됨: 자식 위치를 proxy 경로(.remote/<sha1>/)로 바꿔 제공
+    metadataMaxAge: "24h"             # p2.index, content/artifacts/composite 문서 재확인 주기. plugins/features는 영구 캐시
+  - name: p2-eclipse                  # 또 다른 사이트(예: Eclipse 플랫폼 업데이트)
+    format: p2
+    type: proxy
+    remote: "https://download.eclipse.org/eclipse/updates/4.33/"
+  - name: p2-all                      # 멤버를 자식으로 하는 복합 저장소(compositeContent.xml 생성). hosted 없음(Nexus와 같음)
+    format: p2
+    type: group
+    members: [p2-proxy, p2-eclipse]
+  - name: swift-hosted                # swift package-registry publish mona.LinkedList 1.0.0 --url <host>/repository/swift-hosted
+    format: swift
+    type: hosted
+    writePolicy: allow_once           # allow: 같은 버전 덮어쓰기 허용(edit 권한)
+  - name: swift-proxy                 # 다른 Swift 레지스트리(SE-0292)의 루트 URL
+    format: swift
+    type: proxy
+    remote: "https://swift-registry.example.com/"
+    metadataMaxAge: "1h"              # 릴리스 목록·메타데이터·identifiers 재확인 주기. zip은 checksum 확인 후 영구 캐시
+  - name: swift-all                   # swift package-registry set <host>/repository/swift-all — 패키지는 처음 가진 멤버가 답
+    format: swift
+    type: group
+    members: [swift-hosted, swift-proxy]
+    writeMember: swift-hosted
+  - name: pods-proxy                  # Podfile: source '<host>/repository/pods-proxy/'
+    format: cocoapods
+    type: proxy                       # proxy만(hosted·group 없음)
+    remote: "https://cdn.cocoapods.org/"   # 트렁크 CDN만. source.http 아카이브는 원본에서 받아 캐시, git 소스는 그대로
+  - name: hf-proxy                    # HF_ENDPOINT=<host>/repository/hf-proxy
+    format: huggingface
+    type: proxy                       # proxy만
+    remote: "https://huggingface.co/"
+    metadataMaxAge: "10m"             # api 문서·브랜치→커밋 재확인 주기. 커밋별 파일은 영구 캐시
+    # remoteAuth: { bearerToken: "hf_..." }   # gated·비공개 모델용 Hub 읽기 토큰. Hub에만 보내고 CDN에는 보내지 않음
 
 # database:
 #   url: postgres://cc:password@db.example:5432/commandcenter?sslmode=require
