@@ -24,6 +24,10 @@ const (
 	SettingDefaultLanguage    = "defaultLanguage"
 	SettingRealms             = "realms"
 	SettingSMTP               = "smtp"
+	// SettingTerraformDefaultRepository names the terraform repository the
+	// host-root /.well-known/terraform.json points at ("" for the first
+	// terraform repository by name).
+	SettingTerraformDefaultRepository = "terraformDefaultRepository"
 )
 
 // Realm ids (Decision 3).
@@ -105,19 +109,20 @@ func ValidateSMTP(c SMTP) error {
 
 // Settings are the typed general settings.
 type Settings struct {
-	BaseURL            string
-	AnonymousRead      bool
-	AuthenticatedRead  bool
-	MaxUploadMiB       int
-	SessionIdleMinutes int
-	DefaultLanguage    string
-	Realms             []Realm
-	SMTP               SMTP
-	LDAP               LDAP
-	OIDC               OIDC
-	HTTP               HTTP
-	MetricsAnonymous   bool
-	TrustedCerts       []string // PEM, one certificate each (the SSL trust store)
+	BaseURL                    string
+	AnonymousRead              bool
+	AuthenticatedRead          bool
+	MaxUploadMiB               int
+	SessionIdleMinutes         int
+	DefaultLanguage            string
+	Realms                     []Realm
+	SMTP                       SMTP
+	LDAP                       LDAP
+	OIDC                       OIDC
+	HTTP                       HTTP
+	MetricsAnonymous           bool
+	TrustedCerts               []string // PEM, one certificate each (the SSL trust store)
+	TerraformDefaultRepository string
 }
 
 // DefaultSettings returns the values used for missing keys: today's behaviour.
@@ -247,6 +252,7 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 		{SettingHTTP, &s.HTTP},
 		{SettingMetricsAnonymous, &s.MetricsAnonymous},
 		{SettingTrustedCertificates, &s.TrustedCerts},
+		{SettingTerraformDefaultRepository, &s.TerraformDefaultRepository},
 	} {
 		if _, err := getSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return Settings{}, err
@@ -308,6 +314,7 @@ func saveSettings(ctx context.Context, q querier, s Settings) error {
 		{SettingHTTP, s.HTTP},
 		{SettingMetricsAnonymous, s.MetricsAnonymous},
 		{SettingTrustedCertificates, s.TrustedCerts},
+		{SettingTerraformDefaultRepository, s.TerraformDefaultRepository},
 	} {
 		if err := setSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return err

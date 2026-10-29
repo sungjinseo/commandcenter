@@ -39,8 +39,10 @@ type componentMetadata struct {
 	Collected     bool           `json:"collected"`
 	Dependencies  []dependencyJS `json:"dependencies"`
 	Resolved      bool           `json:"resolved"`
-	Size          *int64         `json:"size,omitempty"`   // gitlfs only: the object's size
-	SHA256        *string        `json:"sha256,omitempty"` // gitlfs only: the object's oid
+	Size          *int64         `json:"size,omitempty"`      // gitlfs only: the object's size
+	SHA256        *string        `json:"sha256,omitempty"`    // gitlfs only: the object's oid
+	Platforms     []string       `json:"platforms,omitempty"` // terraform providers only: "<os>_<arch>" of the stored zips
+	Protocols     []string       `json:"protocols,omitempty"` // terraform providers only: the plugin protocol versions
 }
 
 type dependencyJS struct {
@@ -122,6 +124,8 @@ func (u *UI) componentMetadata(w http.ResponseWriter, r *http.Request) {
 		found, err = u.cocoapodsMetadata(r.Context(), rp, name, version, &m)
 	case "huggingface":
 		found, err = u.huggingfaceMetadata(r.Context(), rp, group, name, version, &m)
+	case "terraform":
+		found, err = u.terraformMetadata(r.Context(), rp, name, version, &m)
 	default:
 		writeError(w, http.StatusBadRequest, "no metadata for format "+rp.Format)
 		return
@@ -895,6 +899,44 @@ func (u *UI) swiftMetadata(ctx context.Context, rp *repo.Repository, name, versi
 	}
 	for _, d := range a.Dependencies {
 		m.Dependencies = append(m.Dependencies, dependencyJS{Scope: "package", Name: d.Name, Requirement: d.Requirement})
+	}
+	return true, nil
+}
+
+// terraformMetadata reads a terraform hosted row: a module's (name
+// <ns>/<name>/<provider>) description, the first paragraph of its README.md;
+// a provider's (name <ns>/<type>) protocol versions and the platforms its
+// stored zips cover. Neither declares dependencies.
+func (u *UI) terraformMetadata(ctx context.Context, rp *repo.Repository, name, version string, m *componentMetadata) (bool, error) {
+	p, ok, err := u.storedPackage(ctx, rp, name, version)
+	if err != nil || !ok {
+		return ok, err
+	}
+	var a struct {
+		Description string   `json:"description"`
+		Protocols   []string `json:"protocols"`
+	}
+	json.Unmarshal([]byte(p.Attrs), &a)
+	m.Collected = true
+	if strings.Count(name, "/") == 2 {
+		m.Description = optStr(a.Description)
+		return true, nil
+	}
+	m.Protocols = a.Protocols
+	if len(m.Protocols) == 0 { // no manifest uploaded: what the registry answers
+		m.Protocols = []string{"5.0"}
+	}
+	assets, err := u.DB.ListAssets(ctx, rp.Name, "providers/"+name+"/"+version+"/")
+	if err != nil {
+		return true, err
+	}
+	m.Platforms = []string{}
+	for _, as := range assets {
+		if stem, ok := strings.CutSuffix(as.Path[strings.LastIndex(as.Path, "/")+1:], ".zip"); ok {
+			if segs := strings.Split(stem, "_"); len(segs) >= 4 {
+				m.Platforms = append(m.Platforms, segs[len(segs)-2]+"_"+segs[len(segs)-1])
+			}
+		}
 	}
 	return true, nil
 }

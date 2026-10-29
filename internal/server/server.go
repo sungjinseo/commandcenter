@@ -53,6 +53,13 @@ type Server struct {
 		http.Handler
 		repo.ErrorWriter
 	}
+
+	// TerraformDiscovery, if set, answers GET /.well-known/terraform.json,
+	// Terraform's service discovery at the host root: the document naming
+	// the one terraform repository this host serves (terraform addresses a
+	// registry by host alone), or nil for a 404. It is public: terraform
+	// reads it before sending credentials.
+	TerraformDiscovery func() []byte
 }
 
 const realm = `Basic realm="commandcenter"`
@@ -80,6 +87,18 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /-/metrics", s.metrics)
 	mux.HandleFunc("/repository/{name}/{path...}", s.repository)
+	mux.HandleFunc("GET /.well-known/terraform.json", func(w http.ResponseWriter, r *http.Request) {
+		var body []byte
+		if s.TerraformDiscovery != nil {
+			body = s.TerraformDiscovery()
+		}
+		if body == nil {
+			http.Error(w, "no terraform repository", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(body)
+	})
 	if s.Docker != nil {
 		mux.Handle("/v2/", s.Docker)
 	}

@@ -211,24 +211,9 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		u.RawPath = ""
 		target = u.String()
 	}
-	req, err := http.NewRequestWithContext(withRemote(ctx, rp.RemoteURL), http.MethodGet, target, nil)
+	req, err := f.newRequest(ctx, rp, target, t.Header)
 	if err != nil {
 		return Result{}, err
-	}
-	req.Header.Set("User-Agent", UserAgent)
-	req.Header.Set(HopHeader, hopValue(ctx))
-	for k, vs := range t.Header {
-		for _, v := range vs {
-			req.Header.Add(k, v)
-		}
-	}
-	// Credentials belong to the configured remote; never send them to other hosts.
-	if ra := rp.RemoteAuth; ra != nil && sendsCredentials(rp, req.URL) {
-		if ra.BearerToken != "" {
-			req.Header.Set("Authorization", "Bearer "+ra.BearerToken)
-		} else {
-			req.SetBasicAuth(ra.Username, ra.Password)
-		}
 	}
 	if cached {
 		if a.RemoteETag != "" {
@@ -387,3 +372,46 @@ func sendsCredentials(rp *repo.Repository, u *url.URL) bool {
 
 // Slots reports how many remote-fetch slots are in use and the maximum.
 func (f *Fetcher) Slots() (inUse, max int) { return len(f.sem), cap(f.sem) }
+
+// newRequest builds a GET of target for rp: the user agent, the hop chain,
+// header, and the remote's credentials when target is on the remote's host.
+func (f *Fetcher) newRequest(ctx context.Context, rp *repo.Repository, target string, header http.Header) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(withRemote(ctx, rp.RemoteURL), http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set(HopHeader, hopValue(ctx))
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	// Credentials belong to the configured remote; never send them to other hosts.
+	if ra := rp.RemoteAuth; ra != nil && sendsCredentials(rp, req.URL) {
+		if ra.BearerToken != "" {
+			req.Header.Set("Authorization", "Bearer "+ra.BearerToken)
+		} else {
+			req.SetBasicAuth(ra.Username, ra.Password)
+		}
+	}
+	return req, nil
+}
+
+// Request performs an uncached GET of url for rp, under the egress policy
+// of rp's remote and with its credentials when url is on the remote's
+// host: for answers that are not content to cache (a Terraform module
+// download endpoint answers 204 with the archive URL in a header). The
+// caller closes the body. A network error is ErrRemote.
+func (f *Fetcher) Request(ctx context.Context, rp *repo.Repository, url string) (*http.Response, error) {
+	req, err := f.newRequest(ctx, rp, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := f.Client.Do(req)
+	if err != nil {
+		slog.Warn("remote request failed", "repo", rp.Name, "url", logsafe.Path(url), "err", logsafe.Err(err))
+		return nil, ErrRemote
+	}
+	return resp, nil
+}

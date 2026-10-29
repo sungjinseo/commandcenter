@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"commandcenter/internal/pgp"
 )
 
 const validYAML = `
@@ -546,6 +548,38 @@ func TestValidateDefinitionTypeFields(t *testing.T) {
 	p := Repository{Name: "p", Format: "maven", Type: "proxy", Remote: "https://x.example/", VersionPolicy: "release"}
 	if notes := NormalizeStored(&p); notes != nil || p.Remote == "" || p.VersionPolicy != "release" {
 		t.Fatalf("proxy changed: %v %+v", notes, p)
+	}
+}
+
+// A terraform hosted repository may carry the GPG public key its provider
+// download documents list; it must parse as an OpenPGP public key block.
+func TestTerraformSettings(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "pgp", "testdata", "rsa2048.asc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, err := pgp.ParsePrivateKey(string(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateDefinition(Repository{Name: "tf", Format: "terraform", Type: "hosted", GPGPublicKey: k.PublicKey()}); err != nil {
+		t.Fatalf("valid: %v", err)
+	}
+	for name, c := range map[string]struct {
+		r    Repository
+		want string
+	}{
+		"on a proxy":  {Repository{Name: "p", Format: "terraform", Type: "proxy", Remote: "https://registry.terraform.io/", GPGPublicKey: k.PublicKey()}, "only valid for terraform hosted"},
+		"on helm":     {Repository{Name: "h", Format: "helm", Type: "hosted", GPGPublicKey: k.PublicKey()}, "only valid for terraform hosted"},
+		"private key": {Repository{Name: "tf", Format: "terraform", Type: "hosted", GPGPublicKey: string(b)}, "gpgPublicKey: not an ASCII-armored pgp public key block"},
+	} {
+		if err := ValidateDefinition(c.r); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: %v, want %q", name, err, c.want)
+		}
+	}
+	if err := ValidateRepositories([]Repository{{Name: "a", Format: "terraform", Type: "hosted"}, {Name: "p", Format: "terraform", Type: "proxy", Remote: "https://registry.terraform.io/"},
+		{Name: "g", Format: "terraform", Type: "group", Members: []string{"a", "p"}, WriteMember: "a"}}); err != nil {
+		t.Fatalf("terraform list: %v", err)
 	}
 }
 

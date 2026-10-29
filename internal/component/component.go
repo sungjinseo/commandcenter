@@ -313,6 +313,9 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return "", name, version, ok
 	case "huggingface": // [datasets/|spaces/]<repo id>/resolve/<commit sha>/<file>: the kind is the group
 		return SplitHF(p)
+	case "terraform": // modules/<ns>/<name>/<provider>/<version>.tgz|.zip, providers/<ns>/<type>/<version>/<file>
+		name, version, ok = SplitTerraform(p)
+		return "", name, version, ok
 	}
 	return "", "", "", false
 }
@@ -413,6 +416,33 @@ func SplitHF(p string) (kind, repoID, sha string, ok bool) {
 		return "", "", "", false
 	}
 	return kind, head, sha, true
+}
+
+// SplitTerraform maps a Terraform registry path to its component: a module
+// version's archive, modules/<ns>/<name>/<provider>/<version>.tgz (or
+// .zip), named <ns>/<name>/<provider>; or any file of a provider version's
+// directory, providers/<ns>/<type>/<version>/<file> (the platform zips,
+// SHA256SUMS and its signature, a proxy's cached download documents),
+// named <ns>/<type>. Version lists and discovery documents are not
+// components.
+func SplitTerraform(p string) (name, version string, ok bool) {
+	segs := strings.Split(p, "/")
+	for _, s := range segs {
+		if s == "" {
+			return "", "", false
+		}
+	}
+	switch {
+	case segs[0] == "modules" && len(segs) == 5:
+		for _, ext := range []string{".tgz", ".zip"} {
+			if v, cut := strings.CutSuffix(segs[4], ext); cut && v != "" {
+				return segs[1] + "/" + segs[2] + "/" + segs[3], v, true
+			}
+		}
+	case segs[0] == "providers" && len(segs) == 5:
+		return segs[1] + "/" + segs[2], segs[3], true
+	}
+	return "", "", false
 }
 
 // SplitLFS maps a Git LFS object path, objects/<aa>/<bb>/<oid> with oid a

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"commandcenter/internal/config"
 	"commandcenter/internal/repo"
@@ -71,6 +72,9 @@ type repoRequest struct {
 	Component       string `json:"component"`
 	SigningKey      string `json:"signingKey"`
 	ClearSigningKey bool   `json:"clearSigningKey"`
+	// terraform hosted: the ASCII-armored GPG public key the provider
+	// download documents list (not a secret: returned as stored).
+	GPGPublicKey string `json:"gpgPublicKey"`
 }
 
 // repoAuthResponse never carries a secret.
@@ -103,6 +107,7 @@ type repoConfigResponse struct {
 	Distribution         string            `json:"distribution,omitempty"`
 	Component            string            `json:"component,omitempty"`
 	SigningKeySet        bool              `json:"signingKeySet"`
+	GPGPublicKey         string            `json:"gpgPublicKey,omitempty"`
 }
 
 // publicRemote drops the userinfo, query and fragment of a remote, which may
@@ -141,6 +146,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		Distribution:         d.Distribution,
 		Component:            d.Component,
 		SigningKeySet:        d.SigningKey != "",
+		GPGPublicKey:         d.GPGPublicKey,
 	}
 	if d.AnonymousRead != nil {
 		v := *d.AnonymousRead
@@ -161,6 +167,7 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		AnonymousRead: b.AnonymousRead, Online: b.Online,
 		BlobStore:    b.BlobStore,
 		Distribution: b.Distribution, Component: b.Component, SigningKey: b.SigningKey,
+		GPGPublicKey: strings.TrimSpace(b.GPGPublicKey),
 	}
 	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey}
 	if b.CleanupPolicy != nil {

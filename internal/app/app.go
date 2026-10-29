@@ -41,6 +41,7 @@ import (
 	"commandcenter/internal/format/raw"
 	"commandcenter/internal/format/rubygems"
 	"commandcenter/internal/format/swift"
+	"commandcenter/internal/format/terraform"
 	"commandcenter/internal/format/yum"
 	"commandcenter/internal/logring"
 	"commandcenter/internal/logsafe"
@@ -345,13 +346,14 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	swiftH := swift.New(store, fetcher, authn, baseURL)
 	podsH := cocoapods.New(store, fetcher, baseURL)
 	hfH := huggingface.New(store, fetcher)
+	terraformH := terraform.New(store, fetcher, authn, baseURL)
 	dockerKey := make([]byte, 32)
 	rand.Read(dockerKey)
 	dockerH := docker.New(store, docker.NewFetcher(store, maxConcurrentFetches), authn, nil, baseURL, dockerKey) // Repos: the registry, below
 	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
 	conanH := conan.New(store, conan.NewFetcher(store, maxConcurrentFetches), authn, baseURL, dockerKey)
 	authn.Bearers = append(authn.Bearers, conanH.VerifyToken) // Conan login tokens
-	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH, "gitlfs": gitlfsH, "r": rH, "conan": conanH, "p2": p2H, "swift": swiftH, "cocoapods": podsH, "huggingface": hfH}
+	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH, "gitlfs": gitlfsH, "r": rH, "conan": conanH, "p2": p2H, "swift": swiftH, "cocoapods": podsH, "huggingface": hfH, "terraform": terraformH}
 	// Hosted deletes go through the format handlers, which share their locks
 	// with uploads; proxies of every format use the generic deleter.
 	deleters := cleanup.NewRegistry(store)
@@ -373,6 +375,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("r", "hosted", rH)
 	deleters.Register("conan", "hosted", conanH)
 	deleters.Register("swift", "hosted", swiftH)
+	deleters.Register("terraform", "hosted", terraformH)
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)
@@ -501,6 +504,9 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	nexus := &nexusapi.Handler{Repos: registry, Auth: authn, DB: db, BaseURL: baseURL, UI: webUI}
 	srv := &server.Server{Registry: registry, Handlers: handlers, Auth: authn, Log: log,
 		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Nexus: nexus, Requests: recorder.Request, Docker: dockerH}
+	srv.TerraformDiscovery = func() []byte {
+		return terraform.RootDiscovery(registry.Snapshot().Sorted, authn.Snapshot().Settings().TerraformDefaultRepository, baseURL())
+	}
 	a.Handler = srv.Handler()
 	return a, nil
 }

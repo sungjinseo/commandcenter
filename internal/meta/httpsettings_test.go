@@ -74,12 +74,12 @@ func TestHTTPSettingRoundTripSealed(t *testing.T) {
 	if _, err := db.GetSettingJSON(ctx, SettingHTTP, &got); err != nil || got.Proxy.Password != "px-secret" {
 		t.Fatalf("GetSettingJSON: %+v %v", got, err)
 	}
-	s.MetricsAnonymous = true
+	s.MetricsAnonymous, s.TerraformDefaultRepository = true, "tf-hosted"
 	if err := db.SaveSettings(ctx, s); err != nil {
 		t.Fatal(err)
 	}
 	s, err = db.LoadSettings(ctx)
-	if err != nil || !s.MetricsAnonymous || s.HTTP.Proxy.Password != "px-secret" {
+	if err != nil || !s.MetricsAnonymous || s.TerraformDefaultRepository != "tf-hosted" || s.HTTP.Proxy.Password != "px-secret" {
 		t.Fatalf("after save: %+v %v", s, err)
 	}
 	if raw := rawRow(t, db, `SELECT value FROM settings WHERE key = ?`, SettingHTTP); strings.Contains(raw, "px-secret") {

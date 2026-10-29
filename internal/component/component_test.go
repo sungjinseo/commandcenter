@@ -203,6 +203,15 @@ func TestDeriveAsset(t *testing.T) {
 		{"r", "src/contrib/foo_1.0.0.zip", "", "", "", false},                                          // the directory's extension
 		{"r", "src/contrib/PACKAGES.rds", "", "", "", false},                                           // the index
 		{"r", "foo_1.0.0.tar.gz", "", "", "", false},
+		{"terraform", "modules/acme/vpc/aws/1.2.0.tgz", "", "acme/vpc/aws", "1.2.0", true},
+		{"terraform", "modules/acme/vpc/aws/1.2.0-rc.1.zip", "", "acme/vpc/aws", "1.2.0-rc.1", true},
+		{"terraform", "providers/acme/demo/2.0.0/terraform-provider-demo_2.0.0_linux_amd64.zip", "", "acme/demo", "2.0.0", true},
+		{"terraform", "providers/acme/demo/2.0.0/terraform-provider-demo_2.0.0_SHA256SUMS.sig", "", "acme/demo", "2.0.0", true},
+		{"terraform", "providers/acme/demo/2.0.0/download_linux_amd64.json", "", "acme/demo", "2.0.0", true}, // a proxy's cached document goes with its version
+		{"terraform", "v1/modules/acme/vpc/aws/versions", "", "", "", false},                                 // version lists are not components
+		{"terraform", "v1/modules/acme/vpc/aws/1.2.0/download", "", "", "", false},                           // nor a proxy's kept download source
+		{"terraform", ".well-known/terraform.json", "", "", "", false},
+		{"terraform", "modules/acme/vpc/aws/1.2.0.tar", "", "", "", false},
 		{"go", "example.com/m/@v/v1.0.0.zip", "", "example.com/m", "v1.0.0", true},
 		{"maven", "org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"swift", "mona/linkedlist/1.1.1/source-archive.zip", "", "mona.linkedlist", "1.1.1", true}, // the version directory's files are the component

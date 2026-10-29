@@ -292,6 +292,13 @@ func unitPrefix(format, p string) string {
 				return p[:i+9+j+1]
 			}
 		}
+	case "terraform": // a module: one archive per version; a provider: the version directory
+		if strings.HasPrefix(p, "modules/") {
+			return p
+		}
+		if i := strings.LastIndex(p, "/"); i >= 0 {
+			return p[:i+1]
+		}
 	}
 	return homePrefix(format, p)
 }
@@ -348,6 +355,10 @@ func homePrefix(format, p string) string {
 		}
 	case "huggingface": // <repo>/resolve/
 		return cut("/resolve/")
+	case "terraform": // modules/<ns>/<name>/<provider>/ or providers/<ns>/<type>/
+		if name, _, ok := component.SplitTerraform(p); ok {
+			return strings.SplitN(p, "/", 2)[0] + "/" + name + "/"
+		}
 	}
 	return p
 }

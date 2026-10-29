@@ -29,6 +29,10 @@ type settingsDTO struct {
 	DefaultLanguage    string  `json:"defaultLanguage"`
 	MetricsAnonymous   bool    `json:"metricsAnonymous"`
 	HTTP               httpDTO `json:"http"`
+	// TerraformDefaultRepository names the terraform repository the
+	// host-root /.well-known/terraform.json points at; "" is the first
+	// terraform repository by name.
+	TerraformDefaultRepository string `json:"terraformDefaultRepository"`
 }
 
 // httpDTO is the outbound HTTP configuration without the proxy password.
@@ -99,19 +103,20 @@ func httpChanged(a, b meta.HTTP) string {
 func settingsJSON(s meta.Settings) settingsDTO {
 	return settingsDTO{BaseURL: s.BaseURL, AnonymousRead: s.AnonymousRead, AuthenticatedRead: s.AuthenticatedRead,
 		SessionIdleMinutes: s.SessionIdleMinutes, MaxUploadMiB: s.MaxUploadMiB, DefaultLanguage: s.DefaultLanguage,
-		MetricsAnonymous: s.MetricsAnonymous, HTTP: httpJSON(s.HTTP)}
+		MetricsAnonymous: s.MetricsAnonymous, HTTP: httpJSON(s.HTTP), TerraformDefaultRepository: s.TerraformDefaultRepository}
 }
 
 // settingsRequest holds only the fields the caller wants to change.
 type settingsRequest struct {
-	BaseURL            *string      `json:"baseURL"`
-	AnonymousRead      *bool        `json:"anonymousRead"`
-	AuthenticatedRead  *bool        `json:"authenticatedRead"`
-	SessionIdleMinutes *int         `json:"sessionIdleMinutes"`
-	MaxUploadMiB       *int         `json:"maxUploadMiB"`
-	DefaultLanguage    *string      `json:"defaultLanguage"`
-	MetricsAnonymous   *bool        `json:"metricsAnonymous"`
-	HTTP               *httpRequest `json:"http"`
+	BaseURL                    *string      `json:"baseURL"`
+	AnonymousRead              *bool        `json:"anonymousRead"`
+	AuthenticatedRead          *bool        `json:"authenticatedRead"`
+	SessionIdleMinutes         *int         `json:"sessionIdleMinutes"`
+	MaxUploadMiB               *int         `json:"maxUploadMiB"`
+	DefaultLanguage            *string      `json:"defaultLanguage"`
+	MetricsAnonymous           *bool        `json:"metricsAnonymous"`
+	HTTP                       *httpRequest `json:"http"`
+	TerraformDefaultRepository *string      `json:"terraformDefaultRepository"`
 }
 
 func (u *UI) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -213,6 +218,17 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		check(meta.SettingHTTP, err)
 	}
+	if body.TerraformDefaultRepository != nil {
+		name := strings.TrimSpace(*body.TerraformDefaultRepository)
+		var err error
+		if rp := u.Repos.Get(name); name != "" && (rp == nil || rp.Format != "terraform") {
+			err = fmt.Errorf("terraformDefaultRepository: %q is not a terraform repository", name)
+		}
+		if err == nil {
+			s.TerraformDefaultRepository = name
+		}
+		check(meta.SettingTerraformDefaultRepository, err)
+	}
 	if err := v.err(); err != nil {
 		u.writeAccessError(w, r, err)
 		return
@@ -229,6 +245,7 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		meta.SettingAuthenticatedRead: s.AuthenticatedRead, meta.SettingSessionIdleMinutes: s.SessionIdleMinutes,
 		meta.SettingMaxUploadMiB: s.MaxUploadMiB, meta.SettingDefaultLanguage: s.DefaultLanguage,
 		meta.SettingMetricsAnonymous: s.MetricsAnonymous, meta.SettingHTTP: s.HTTP,
+		meta.SettingTerraformDefaultRepository: s.TerraformDefaultRepository,
 	}
 	err = u.DB.Tx(r.Context(), func(tx *meta.Tx) error {
 		for _, k := range changed {

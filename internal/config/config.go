@@ -221,6 +221,11 @@ type Repository struct {
 	Component    string `yaml:"component,omitempty" json:"component,omitempty"`
 	SigningKey   string `yaml:"signingKey,omitempty" json:"signingKey,omitempty"`
 
+	// terraform hosted: the ASCII-armored OpenPGP public key whose private
+	// key signed the uploaded providers' SHA256SUMS files; the download
+	// documents list it (key id and armor) for terraform to verify with.
+	GPGPublicKey string `yaml:"gpgPublicKey,omitempty" json:"gpgPublicKey,omitempty"`
+
 	AnonymousRead *bool `yaml:"anonymousRead" json:"anonymousRead,omitempty"` // overrides Config.AnonymousRead
 
 	// CleanupPolicy names the cleanup policy applied to this repository
@@ -248,7 +253,7 @@ type Repository struct {
 func (r Repository) IsOnline() bool { return r.Online == nil || *r.Online }
 
 var (
-	knownFormats = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true, "swift": true, "cocoapods": true, "huggingface": true}
+	knownFormats = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true, "swift": true, "cocoapods": true, "huggingface": true, "terraform": true}
 	// aptNameRE is a distribution or component name: path segments, as
 	// apt's sources.list takes them ("stable", "bookworm-updates", "main").
 	aptNameRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9][A-Za-z0-9._+-]*)*$`)
@@ -534,6 +539,14 @@ func ValidateDefinition(r Repository) error {
 	for _, f := range durationFields(&r) {
 		if *f.d < 0 && *f.d != Never {
 			errs = append(errs, fmt.Errorf("repository %q: %s %q must not be negative (use \"-1\" for never)", r.Name, f.name, f.d.Text()))
+		}
+	}
+	if r.GPGPublicKey != "" && (r.Format != "terraform" || r.Type != "hosted") {
+		errs = append(errs, fmt.Errorf("repository %q: gpgPublicKey is only valid for terraform hosted repositories", r.Name))
+	}
+	if r.GPGPublicKey != "" {
+		if _, err := pgp.PublicKeyID(r.GPGPublicKey); err != nil {
+			errs = append(errs, fmt.Errorf("repository %q: gpgPublicKey: %w", r.Name, err))
 		}
 	}
 	seen := map[string]bool{}

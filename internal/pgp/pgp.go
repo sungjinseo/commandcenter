@@ -479,3 +479,29 @@ func crc24(b []byte) []byte {
 	}
 	return []byte{byte(crc >> 16), byte(crc >> 8), byte(crc)}
 }
+
+// PublicKeyID reads an ASCII-armored OpenPGP public key block (gpg
+// --export --armor) and returns the long key ID (16 hex digits) of its v4
+// primary key, as Terraform's registry protocol lists signing keys. The
+// key's algorithm does not matter: only the fingerprint is computed.
+func PublicKeyID(armored string) (string, error) {
+	raw, err := unarmor(armored, "PGP PUBLIC KEY BLOCK")
+	if err != nil {
+		return "", err
+	}
+	pkts, err := parsePackets(raw)
+	if err != nil {
+		return "", err
+	}
+	for _, p := range pkts {
+		if p.tag != tagPublicKey {
+			continue
+		}
+		if len(p.body) < 6 || p.body[0] != 4 {
+			return "", errors.New("only v4 keys are supported")
+		}
+		fp := sha1.Sum(append([]byte{0x99, byte(len(p.body) >> 8), byte(len(p.body))}, p.body...))
+		return fmt.Sprintf("%X", fp[12:]), nil
+	}
+	return "", errors.New("no public key packet in the block")
+}

@@ -386,6 +386,11 @@ func TestEvaluateScanBudgetPerFormat(t *testing.T) {
 		{"swift", []string{ // the version directory's files are one component; the release list and identifiers are not components
 			"a/b/1.0.0/Package.swift", "a/b/1.0.0/release.json", "a/b/1.0.0/source-archive.zip", "a/b/1.1.0/source-archive.zip", "a/b/releases.json", "a/c/0.1.0/source-archive.zip", "identifiers/x.json",
 		}, map[int]string{1: "", 2: "", 3: "a.b@1.0.0", 4: "a.b@1.0.0,a.b@1.1.0", 5: "a.b@1.0.0,a.b@1.1.0", 6: "a.b@1.0.0,a.b@1.1.0,a.c@0.1.0", 7: "a.b@1.0.0,a.b@1.1.0,a.c@0.1.0"}},
+		{"terraform", []string{ // a module is its archive, a provider version its directory; version lists are not components
+			"modules/a/b/aws/1.0.0.tgz", "modules/a/b/aws/1.1.0.zip", "providers/a/t/1.0.0/download_linux_amd64.json",
+			"providers/a/t/1.0.0/terraform-provider-t_1.0.0_SHA256SUMS", "providers/a/t/1.0.0/terraform-provider-t_1.0.0_linux_amd64.zip", "v1/modules/a/b/aws/versions",
+		}, map[int]string{1: "a/b/aws@1.0.0", 2: "a/b/aws@1.0.0,a/b/aws@1.1.0", 3: "a/b/aws@1.0.0,a/b/aws@1.1.0", 4: "a/b/aws@1.0.0,a/b/aws@1.1.0",
+			5: "a/b/aws@1.0.0,a/b/aws@1.1.0,a/t@1.0.0", 6: "a/b/aws@1.0.0,a/b/aws@1.1.0,a/t@1.0.0"}},
 	}
 	for _, c := range cases {
 		t.Run(c.format, func(t *testing.T) {

@@ -284,3 +284,34 @@ func equalInts(a, b []int) bool {
 	}
 	return true
 }
+
+func TestPublicKeyID(t *testing.T) {
+	k := testKey(t)
+	id, err := PublicKeyID(k.PublicKey())
+	if err != nil || id != k.KeyID() {
+		t.Fatalf("PublicKeyID = %q, %v; want %q", id, err, k.KeyID())
+	}
+	if _, err := PublicKeyID("nope"); err == nil {
+		t.Fatal("garbage accepted")
+	}
+	// gpg --armor --export of an ed25519 key with a cv25519 subkey: the
+	// primary key's id, as gpg --list-keys --keyid-format long shows it.
+	if id, err := PublicKeyID(gpgEd25519Public); err != nil || id != "07BB5F69718F7C89" {
+		t.Fatalf("gpg export: %q, %v", id, err)
+	}
+}
+
+const gpgEd25519Public = `-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+mDMEauKcjxYJKwYBBAHaRw8BAQdAWb+7JIhw9YyJK5ekNm1dw6Mt+dQs+muo4Pj8
+56VVeFy0GFRGIFRlc3QgPHRmQGV4YW1wbGUuY29tPoiUBBMWCgA8FiEEc/zGzH8+
+FR8uhfH5B7tfaXGPfIkFAmrinI8CGwMFCwkIBwIDIgIBBhUKCQgLAgQWAgMBAh4H
+AheAAAoJEAe7X2lxj3yJYMYBAMEdBi+9zGpF1Xw/ludgCobUm6zkMKx69/dmEccT
+D6fbAP986bcflKqmd5sDrM2Su4P5pzo/vYnMxPqnWW8a7xkoA7g4BGrinJUSCisG
+AQQBl1UBBQEBB0BVOG9RD8XHqqK74L/xXlM+rL/d4d3ynn+v52mgSIYFIgMBCAeI
+eAQYFgoAIBYhBHP8xsx/PhUfLoXx+Qe7X2lxj3yJBQJq4pyVAhsMAAoJEAe7X2lx
+j3yJvVgBALkp4ojqDNB70YpGo9Kp1Gs0837kuUW3zXAJbcfrUQVFAP9aBIRU4bjf
+tLBOztB4Eq/SG0lOBmVlCvnRhjboEvvUAg==
+=pU3b
+-----END PGP PUBLIC KEY BLOCK-----
+`
