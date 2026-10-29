@@ -52,7 +52,31 @@ func tarInfo(index, about string) []byte {
 	return buf.Bytes()
 }
 
-// condaFile is a .conda: a zip with metadata.json and the two zstd tarballs.
+// zstdRaw is b as a zstd frame of raw blocks: what any decoder reads.
+func zstdRaw(b []byte) []byte {
+	out := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x38} // no content size or checksum, a 128 KiB window
+	for {
+		n := min(len(b), 128<<10)
+		h := n << 3 // raw
+		if n == len(b) {
+			h |= 1 // last
+		}
+		out = append(append(out, byte(h), byte(h>>8), byte(h>>16)), b[:n]...)
+		if b = b[n:]; len(b) == 0 {
+			return out
+		}
+	}
+}
+
+// condaIndex is the info/index.json condaFile writes for stem.
+func condaIndex(stem string) string {
+	_, name, version, _ := component.SplitConda("noarch/" + stem + ".conda")
+	ver, build, _ := strings.Cut(version, "-")
+	return fmt.Sprintf(`{"name": %q, "version": %q, "build": %q, "build_number": 0, "depends": ["python >=3.8"], "license": "MIT"}`, name, ver, build)
+}
+
+// condaFile is a .conda: a zip with metadata.json and the two zstd
+// tarballs, info-<stem>.tar.zst holding condaIndex(stem) and an about.json.
 func condaFile(stem string, entries ...string) []byte {
 	if entries == nil {
 		entries = []string{"metadata.json", "info-" + stem + ".tar.zst", "pkg-" + stem + ".tar.zst"}
@@ -61,13 +85,28 @@ func condaFile(stem string, entries ...string) []byte {
 	zw := zip.NewWriter(&buf)
 	for _, name := range entries {
 		w, _ := zw.Create(name)
-		if name == "metadata.json" {
+		switch {
+		case name == "metadata.json":
 			io.WriteString(w, `{"conda_pkg_format_version": 2}`)
-		} else {
-			io.WriteString(w, "\x28\xb5\x2f\xfd"+name) // zstd magic, not a real frame
+		case strings.HasPrefix(name, "info-"):
+			w.Write(zstdRaw(tarOf("info/index.json", condaIndex(stem), "info/about.json", `{"summary": "a package"}`)))
+		default:
+			w.Write(zstdRaw(tarOf("lib/python3.12/site-packages/x.py", "print('hi')")))
 		}
 	}
 	zw.Close()
+	return buf.Bytes()
+}
+
+// tarOf is a tar of name, body pairs.
+func tarOf(files ...string) []byte {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for i := 0; i < len(files); i += 2 {
+		tw.WriteHeader(&tar.Header{Name: files[i], Mode: 0o644, Size: int64(len(files[i+1]))})
+		io.WriteString(tw, files[i+1])
+	}
+	tw.Close()
 	return buf.Bytes()
 }
 
@@ -153,8 +192,26 @@ func TestReadInfoAndFinish(t *testing.T) {
 
 func TestReadConda(t *testing.T) {
 	b := condaFile("foo-1.0-py_0")
-	if err := readConda(bytes.NewReader(b), int64(len(b)), "foo-1.0-py_0"); err != nil {
+	index, about, err := readConda(bytes.NewReader(b), int64(len(b)), "foo-1.0-py_0")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if got, _ := json.Marshal(index); string(got) != `{"build":"py_0","build_number":0,"depends":["python \u003e=3.8"],"license":"MIT","name":"foo","version":"1.0"}` || about["summary"] != "a package" {
+		t.Fatalf("index %s, about %v", got, about)
+	}
+	conda := func(info []byte) []byte { // a .conda with this info tarball
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		for _, n := range []string{"metadata.json", "info-foo-1.0-py_0.tar.zst", "pkg-foo-1.0-py_0.tar.zst"} {
+			w, _ := zw.Create(n)
+			if n == "metadata.json" {
+				io.WriteString(w, `{"conda_pkg_format_version": 2}`)
+			} else {
+				w.Write(info)
+			}
+		}
+		zw.Close()
+		return buf.Bytes()
 	}
 	for name, c := range map[string]struct {
 		b   []byte
@@ -174,8 +231,12 @@ func TestReadConda(t *testing.T) {
 			zw.Close()
 			return buf.Bytes()
 		}(), "conda_pkg_format_version"},
+		"info not zstd":  {conda([]byte("\x28\xb5\x2f\xfdnot a frame")), "info-foo-1.0-py_0.tar.zst: zstd"},
+		"info no index":  {conda(zstdRaw(tarOf("info/about.json", "{}"))), "no info/index.json"},
+		"info truncated": {conda(zstdRaw(tarOf("info/index.json", condaIndex("foo-1.0-py_0")))[:100]), "unexpected EOF"},
+		"info not tar":   {conda(zstdRaw([]byte("plain text, not a tar archive"))), "not a compressed tar archive"},
 	} {
-		if err := readConda(bytes.NewReader(c.b), int64(len(c.b)), "foo-1.0-py_0"); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), c.msg) {
+		if _, _, err := readConda(bytes.NewReader(c.b), int64(len(c.b)), "foo-1.0-py_0"); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), c.msg) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
@@ -201,7 +262,7 @@ func TestDocumentsFromRows(t *testing.T) {
 		tarRow(t, "linux-64", "foo-1.10-py_1.tar.bz2", tarInfo(`{"name":"foo","version":"1.10","build":"py_1","build_number":1,"subdir":"linux-64"}`, "")),
 	}
 	// a .conda of a build uploaded as both: listed under packages.conda
-	condaRow := row{File: "foo-1.10-py_2.conda", Subdir: "noarch", Index: map[string]any{}}
+	condaRow := row{File: "foo-1.10-py_2.conda", Subdir: "noarch", Index: map[string]any{"name": "foo", "version": "1.10", "build": "py_2"}}
 	condaRow, err := condaRow.finish(sums([]byte("conda")))
 	if err != nil {
 		t.Fatal(err)
@@ -379,10 +440,13 @@ func (e *env) get(t *testing.T, repoName, path string, want int) string {
 	return w.Body.String()
 }
 
-// condaEntry is the repodata entry of a .conda upload: what the file name and sums give.
+// condaEntry is the repodata entry of a .conda upload of condaFile: its
+// index.json, subdir and sums.
 func condaEntry(name, version, build, subdir string, b []byte) string {
 	s := sums(b)
-	return fmt.Sprintf(`{"build":%q,"build_number":0,"depends":[],"md5":%q,"name":%q,"sha256":%q,"size":%d,"subdir":%q,"version":%q}`, build, s.MD5, name, s.SHA256, s.Size, subdir, version)
+	e, _ := json.Marshal(map[string]any{"name": name, "version": version, "build": build, "build_number": 0, "depends": []string{"python >=3.8"}, "license": "MIT",
+		"subdir": subdir, "md5": s.MD5, "sha256": s.SHA256, "size": s.Size})
+	return string(e)
 }
 
 func TestHostedUploadAndDocuments(t *testing.T) {
@@ -415,7 +479,7 @@ func TestHostedUploadAndDocuments(t *testing.T) {
 			t.Fatalf("%s:\n%s\nwant:\n%s", doc, got, want)
 		}
 	}
-	if got := e.get(t, "conda-hosted", "channeldata.json", 200); got != `{"channeldata_version":1,"packages":{"foo":{"subdirs":["noarch"],"version":"1.0"}},"subdirs":["noarch"]}` {
+	if got := e.get(t, "conda-hosted", "channeldata.json", 200); got != `{"channeldata_version":1,"packages":{"foo":{"subdirs":["noarch"],"summary":"a package","version":"1.0"}},"subdirs":["noarch"]}` {
 		t.Fatalf("channeldata: %s", got)
 	}
 	if got := e.get(t, "conda-hosted", "linux-64/repodata.json", 200); got != strings.Replace(empty, "noarch", "linux-64", 1) {
@@ -467,7 +531,7 @@ func TestHostedUploadAndDocuments(t *testing.T) {
 	if err := json.Unmarshal([]byte(e.get(t, "conda-hosted", "linux-64/repodata.json", 200)), &rd64); err != nil || len(rd64.Conda) != 1 || rd64.Info.Subdir != "linux-64" {
 		t.Fatalf("linux-64: %v %+v", err, rd64)
 	}
-	if got := e.get(t, "conda-hosted", "channeldata.json", 200); got != `{"channeldata_version":1,"packages":{"alpha":{"subdirs":["noarch"],"version":"2"},"foo":{"subdirs":["linux-64","noarch"],"version":"1.1"}},"subdirs":["linux-64","noarch"]}` {
+	if got := e.get(t, "conda-hosted", "channeldata.json", 200); got != `{"channeldata_version":1,"packages":{"alpha":{"subdirs":["noarch"],"summary":"a package","version":"2"},"foo":{"subdirs":["linux-64","noarch"],"summary":"a package","version":"1.1"}},"subdirs":["linux-64","noarch"]}` {
 		t.Fatalf("channeldata: %s", got)
 	}
 	if w := e.do("DELETE", "conda-hosted", "noarch/alpha-2-0.conda", nil); w.Code != 405 || w.Header().Get("Allow") != "GET, HEAD, PUT" {
@@ -570,7 +634,7 @@ func TestProxyAndGroup(t *testing.T) {
 			}
 		}
 	}
-	if got := e.get(t, "conda-all", "channeldata.json", 200); got != `{"channeldata_version":1,"packages":{"dup":{"subdirs":["linux-64"],"version":"1.0"},"up":{"subdirs":["linux-64"],"version":"2.0"}},"subdirs":["linux-64","noarch"]}` {
+	if got := e.get(t, "conda-all", "channeldata.json", 200); got != `{"channeldata_version":1,"packages":{"dup":{"subdirs":["linux-64"],"summary":"a package","version":"1.0"},"up":{"subdirs":["linux-64"],"version":"2.0"}},"subdirs":["linux-64","noarch"]}` {
 		t.Fatalf("group channeldata: %s", got)
 	}
 	// the merges are cached: two upstream fetches (repodata, channeldata), not one per request
@@ -667,5 +731,21 @@ func TestCleanupAndDelete(t *testing.T) {
 	// gone already: no error, nothing counted
 	if res, err := e.h.DeleteComponent(ctx, e.repos["conda-hosted"], cands[0].Component, "system"); err != nil || res.Assets != 0 {
 		t.Fatalf("again: %+v %v", res, err)
+	}
+}
+
+// A .conda whose central directory has more entries than a .conda holds is
+// refused before archive/zip reads it.
+func TestCondaZipDirectoryBounded(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for i := 0; i < maxCondaEntries+1; i++ {
+		w, _ := zw.Create(fmt.Sprintf("f%d", i))
+		w.Write([]byte("x"))
+	}
+	zw.Close()
+	_, _, err := readConda(bytes.NewReader(buf.Bytes()), int64(buf.Len()), "x-1-0")
+	if err == nil || !strings.Contains(err.Error(), "entries") {
+		t.Fatalf("err %v", err)
 	}
 }

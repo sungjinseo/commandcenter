@@ -268,7 +268,8 @@ func TestComponentMetadataApt(t *testing.T) {
 
 // conda: the index.json and about.json of the hosted row (the subdir is
 // the group, the version <version>-<build>); a build stored as both
-// .tar.bz2 and .conda is read from the .tar.bz2, which has the index.
+// .tar.bz2 and .conda is read from the .tar.bz2 (these .conda rows are as
+// releases that did not read .conda indexes stored them).
 func TestComponentMetadataConda(t *testing.T) {
 	e := newEnvWith(t, "http://repo.example", func(c *config.Config) {
 		c.Repositories = append(c.Repositories, config.Repository{Name: "conda-hosted", Format: "conda", Type: "hosted"})

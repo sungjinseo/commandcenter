@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bytes"
+	"commandcenter/internal/zipdir"
 	"compress/bzip2"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"commandcenter/internal/blob"
 	"commandcenter/internal/component"
 	"commandcenter/internal/repo"
+	"commandcenter/internal/zstd"
 )
 
 const (
@@ -23,12 +25,14 @@ const (
 	ctZip   = "application/zip" // a .conda is a zip
 	// maxInfo bounds info/index.json, info/about.json and metadata.json.
 	maxInfo = 1 << 20
+	// maxInfoTar bounds what a .conda's info tarball decompresses to.
+	maxInfoTar = 64 << 20
 )
 
 // row is a hosted package's row (Attrs): the repodata entry of the file
-// and, for a .tar.bz2, its about.json, for channeldata and the metadata
-// API. Numbers are json.Number, so index.json's timestamp and build_number
-// come out as they went in.
+// and its about.json, for channeldata and the metadata API. Numbers are
+// json.Number, so index.json's timestamp and build_number come out as they
+// went in.
 type row struct {
 	File   string         `json:"file"`   // <name>-<version>-<build>.tar.bz2 or .conda
 	Subdir string         `json:"subdir"` // the directory the file is in
@@ -68,16 +72,13 @@ func uploadErr(err error) error {
 	return fmt.Errorf("reading package: %w", err)
 }
 
-// parse reads the stored package at subdir/file: a .tar.bz2's info/index.json
-// and info/about.json, or a .conda's metadata.json (its index is in a zstd
-// tarball the standard library cannot read: the entry then has what the
-// file name gives, and no depends).
+// parse reads the stored package at subdir/file: info/index.json and
+// info/about.json from a .tar.bz2, or from a .conda's info-<stem>.tar.zst.
 func parse(f blob.File, sums blob.Sums, subdir, file string) (row, error) {
 	r := row{File: file, Subdir: subdir}
 	var err error
 	if strings.HasSuffix(file, ".conda") {
-		err = readConda(f, sums.Size, strings.TrimSuffix(file, ".conda"))
-		r.Index = map[string]any{}
+		r.Index, r.About, err = readConda(f, sums.Size, strings.TrimSuffix(file, ".conda"))
 	} else {
 		r.Index, r.About, err = readInfo(bzip2.NewReader(f))
 	}
@@ -89,8 +90,8 @@ func parse(f blob.File, sums blob.Sums, subdir, file string) (row, error) {
 
 // finish completes the repodata entry of r from its file name and sums:
 // the name, version and build the file name gives must be the index's
-// (as yum requires of an RPM's name) and fill a .conda's; so must the
-// subdir; md5, sha256 and size are the file's.
+// (as yum requires of an RPM's name), and so must the subdir; md5, sha256
+// and size are the file's.
 func (r row) finish(sums blob.Sums) (row, error) {
 	_, name, version, ok := component.SplitConda(r.path())
 	if !ok {
@@ -98,12 +99,7 @@ func (r row) finish(sums blob.Sums) (row, error) {
 	}
 	ver, build, _ := strings.Cut(version, "-")
 	for k, v := range map[string]string{"name": name, "version": ver, "build": build} {
-		got, ok := r.Index[k].(string)
-		if !ok && strings.HasSuffix(r.File, ".conda") {
-			r.Index[k] = v
-			continue
-		}
-		if got != v {
+		if got, _ := r.Index[k].(string); got != v {
 			return row{}, badPackage("file name %q does not match the package: %s %q", r.File, k, got)
 		}
 	}
@@ -122,9 +118,9 @@ func (r row) finish(sums blob.Sums) (row, error) {
 }
 
 // readInfo reads info/index.json and info/about.json from a package's tar
-// stream (a .tar.bz2 decompressed). conda-build writes info/ first, so
-// reading stops at the first entry outside info/ after the index was
-// seen, before the payload.
+// stream (a .tar.bz2 or a .conda's info tarball decompressed). conda-build
+// writes info/ first, so reading stops at the first entry outside info/
+// after the index was seen, before the payload.
 func readInfo(r io.Reader) (index, about map[string]any, err error) {
 	tr := tar.NewReader(r)
 	for {
@@ -133,7 +129,7 @@ func readInfo(r io.Reader) (index, about map[string]any, err error) {
 			break
 		}
 		if err != nil {
-			return nil, nil, badPackage("not a bzip2 tar archive: %v", err)
+			return nil, nil, badPackage("not a compressed tar archive: %v", err)
 		}
 		name := strings.TrimPrefix(hdr.Name, "./")
 		if index != nil && !strings.HasPrefix(name, "info/") {
@@ -165,37 +161,58 @@ func readInfo(r io.Reader) (index, about map[string]any, err error) {
 	return index, about, nil
 }
 
-// readConda checks that a .conda is one: a zip with metadata.json
+// Limits of a .conda's central directory (it has three entries).
+const (
+	maxCondaEntries   = 64
+	maxCondaDirectory = 64 << 10
+)
+
+// readConda reads a .conda: a zip with metadata.json
 // (conda_pkg_format_version) and the info-<stem>.tar.zst and
-// pkg-<stem>.tar.zst tarballs.
-func readConda(f io.ReaderAt, size int64, stem string) error {
+// pkg-<stem>.tar.zst tarballs; the index and about are the info tarball's.
+func readConda(f io.ReaderAt, size int64, stem string) (index, about map[string]any, err error) {
+	// A .conda holds metadata.json and two tarballs: bound what
+	// zip.NewReader allocates for the central directory first.
+	if !zipdir.OK(f, size, maxCondaEntries, maxCondaDirectory) {
+		return nil, nil, badPackage("not a .conda (zip) file, or one with over %d entries", maxCondaEntries)
+	}
 	zr, err := zip.NewReader(f, size)
 	if err != nil {
-		return badPackage("not a .conda (zip) file: %v", err)
+		return nil, nil, badPackage("not a .conda (zip) file: %v", err)
 	}
 	has := map[string]bool{}
 	for _, zf := range zr.File {
 		has[zf.Name] = true
 	}
-	for _, name := range []string{"metadata.json", "info-" + stem + ".tar.zst", "pkg-" + stem + ".tar.zst"} {
+	info := "info-" + stem + ".tar.zst"
+	for _, name := range []string{"metadata.json", info, "pkg-" + stem + ".tar.zst"} {
 		if !has[name] {
-			return badPackage("no %s in the .conda file", name)
+			return nil, nil, badPackage("no %s in the .conda file", name)
 		}
 	}
 	mf, err := zr.Open("metadata.json")
 	if err != nil {
-		return badPackage("metadata.json: %v", err)
+		return nil, nil, badPackage("metadata.json: %v", err)
 	}
 	defer mf.Close()
 	b, err := io.ReadAll(io.LimitReader(mf, maxInfo))
 	if err != nil {
-		return badPackage("metadata.json: %v", err)
+		return nil, nil, badPackage("metadata.json: %v", err)
 	}
 	var m struct {
 		Version json.Number `json:"conda_pkg_format_version"`
 	}
 	if err := json.Unmarshal(b, &m); err != nil || m.Version == "" {
-		return badPackage("metadata.json has no conda_pkg_format_version")
+		return nil, nil, badPackage("metadata.json has no conda_pkg_format_version")
 	}
-	return nil
+	tf, err := zr.Open(info)
+	if err != nil {
+		return nil, nil, badPackage("%s: %v", info, err)
+	}
+	defer tf.Close()
+	zs, err := zstd.NewReader(tf, zstd.Options{})
+	if err != nil {
+		return nil, nil, badPackage("%s: %v", info, err)
+	}
+	return readInfo(io.LimitReader(zs, maxInfoTar))
 }

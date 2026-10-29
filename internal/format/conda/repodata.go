@@ -76,8 +76,8 @@ func newChanneldata() *channeldata {
 }
 
 // add records r: its subdir, and its about if it is the latest version
-// (then build number; a .tar.bz2 before a .conda of the same build, as
-// only it has an about.json) of its name.
+// (then build number; of one build, the .tar.bz2 before the .conda) of its
+// name.
 func (cd *channeldata) add(r row) {
 	name := r.str("name")
 	p, ok := cd.Packages[name]

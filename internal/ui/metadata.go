@@ -705,7 +705,8 @@ func (u *UI) rubygemsMetadata(ctx context.Context, rp *repo.Repository, name, ve
 // holds (the group is the subdir, the version <version>-<build>): summary
 // and description, license, home, dev_url, and depends ("depends") and
 // constrains ("constrains") as dependencies. A build uploaded as both
-// .tar.bz2 and .conda is read from the .tar.bz2, which has the index.
+// .tar.bz2 and .conda is read from the .tar.bz2 (the row of a .conda
+// stored before .conda indexes were read has what the file name gives).
 func (u *UI) condaMetadata(ctx context.Context, rp *repo.Repository, subdir, name, version string, m *componentMetadata) (bool, error) {
 	if subdir == "" {
 		return false, nil

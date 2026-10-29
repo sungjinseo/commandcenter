@@ -10,6 +10,7 @@ package apt
 import (
 	"archive/tar"
 	"bytes"
+	"compress/bzip2"
 	"compress/gzip"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,8 @@ import (
 
 	"commandcenter/internal/blob"
 	"commandcenter/internal/repo"
+	"commandcenter/internal/xz"
+	"commandcenter/internal/zstd"
 )
 
 const (
@@ -100,9 +103,9 @@ func poolPath(component, pkg, version, arch string) string {
 
 // readDeb reads the control file out of a .deb: an ar archive whose first
 // member is debian-binary ("2.0") and whose second is the control archive,
-// a tar, gzip-compressed or not, holding "control". xz and zstd control
-// archives are refused (the standard library has no decoder): build with
-// `dpkg-deb -Zgzip`, which nfpm and fpm do by default.
+// a tar holding "control", uncompressed or compressed with gzip, xz (what
+// Debian's dpkg-deb writes), zstd (Ubuntu's, since 21.10), bzip2 or lzma.
+// What it decompresses to is bounded by maxControlTar.
 func readDeb(r io.Reader) (fields, error) {
 	var magic [8]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil || string(magic[:]) != "!<arch>\n" {
@@ -131,13 +134,20 @@ func readDeb(r io.Reader) (fields, error) {
 		switch ext {
 		case "":
 		case ".gz":
-			gz, err := gzip.NewReader(body)
-			if err != nil {
-				return nil, badDeb("control.tar.gz: %v", err)
-			}
-			body = gz
+			body, err = gzip.NewReader(body)
+		case ".xz":
+			body, err = xz.NewReader(body, xz.Options{})
+		case ".zst":
+			body, err = zstd.NewReader(body, zstd.Options{})
+		case ".bz2":
+			body = bzip2.NewReader(body)
+		case ".lzma":
+			body, err = xz.NewLZMAReader(body, xz.Options{})
 		default:
-			return nil, badDeb("control archive compression %q is not supported: build the package with gzip (dpkg-deb -Zgzip)", ext)
+			return nil, badDeb("control archive compression %q is not supported (gzip, xz, zstd, bzip2 and lzma are)", ext)
+		}
+		if err != nil {
+			return nil, badDeb("control.tar%s: %v", ext, err)
 		}
 		return readControlTar(body)
 	}

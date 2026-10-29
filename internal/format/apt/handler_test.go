@@ -8,8 +8,10 @@ import (
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -75,16 +77,68 @@ func tarOf(t *testing.T, files map[string]string, compress bool) []byte {
 	return buf.Bytes()
 }
 
-// deb builds a package as dpkg-deb does: debian-binary, control.tar.gz
-// (or control.tar / control.tar.xz by name) with ./control, data.tar.gz.
+// deb builds a package as dpkg-deb does: debian-binary, the control
+// archive with ./control, compressed as controlName says (gzip, xz,
+// zstd; xz and zstd store the tar uncompressed), data.tar.gz.
 func deb(t *testing.T, control string, controlName string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	buf.WriteString("!<arch>\n")
 	arMember(&buf, "debian-binary", []byte("2.0\n"))
-	arMember(&buf, controlName, tarOf(t, map[string]string{"./": "", "./control": control, "./md5sums": "x  usr/bin/hello\n"}, strings.HasSuffix(controlName, ".gz")))
+	ctl := tarOf(t, map[string]string{"./": "", "./control": control, "./md5sums": "x  usr/bin/hello\n"}, strings.HasSuffix(controlName, ".gz"))
+	switch {
+	case strings.HasSuffix(controlName, ".xz"):
+		ctl = xzStored(ctl)
+	case strings.HasSuffix(controlName, ".zst"):
+		ctl = zstdRaw(ctl)
+	}
+	arMember(&buf, controlName, ctl)
 	arMember(&buf, "data.tar.gz", tarOf(t, map[string]string{"./usr/bin/hello": "#!/bin/sh\necho hello\n"}, true))
 	return buf.Bytes()
+}
+
+// xzStored is b as an .xz stream of one block of LZMA2 uncompressed
+// chunks, with a CRC32 check.
+func xzStored(b []byte) []byte {
+	le := binary.LittleEndian
+	out := []byte{0xfd, '7', 'z', 'X', 'Z', 0, 0, 1}
+	out = le.AppendUint32(out, crc32.ChecksumIEEE(out[6:8]))
+	hdr := []byte{2, 0, 0x21, 1, 0, 0, 0, 0} // 12 bytes: one filter, LZMA2 with a 4 KiB dictionary
+	hdr = le.AppendUint32(hdr, crc32.ChecksumIEEE(hdr))
+	var data []byte
+	for i := 0; i < len(b); i += 1 << 16 {
+		c := b[i:min(i+1<<16, len(b))]
+		ctl := byte(2)
+		if i == 0 {
+			ctl = 1 // and a dictionary reset
+		}
+		data = append(append(data, ctl, byte((len(c)-1)>>8), byte(len(c)-1)), c...)
+	}
+	data = append(data, 0)
+	out = append(append(append(out, hdr...), data...), make([]byte, (4-len(data)%4)%4)...)
+	out = le.AppendUint32(out, crc32.ChecksumIEEE(b))
+	index := binary.AppendUvarint(binary.AppendUvarint([]byte{0, 1}, uint64(len(hdr)+len(data)+4)), uint64(len(b)))
+	index = append(index, make([]byte, (4-len(index)%4)%4)...)
+	index = le.AppendUint32(index, crc32.ChecksumIEEE(index))
+	footer := append(le.AppendUint32(nil, uint32(len(index)/4-1)), 0, 1)
+	out = le.AppendUint32(append(out, index...), crc32.ChecksumIEEE(footer))
+	return append(append(out, footer...), 'Y', 'Z')
+}
+
+// zstdRaw is b as a zstd frame of raw blocks.
+func zstdRaw(b []byte) []byte {
+	out := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x38} // no content size or checksum, a 128 KiB window
+	for {
+		n := min(len(b), 128<<10)
+		h := n << 3 // raw
+		if n == len(b) {
+			h |= 1 // last
+		}
+		out = append(append(out, byte(h), byte(h>>8), byte(h>>16)), b[:n]...)
+		if b = b[n:]; len(b) == 0 {
+			return out
+		}
+	}
 }
 
 const helloControl = "Package: hello\nVersion: 1.0\nArchitecture: amd64\nMaintainer: QA <qa@example.test>\nInstalled-Size: 12\n" +
@@ -326,8 +380,13 @@ func TestHostedRejections(t *testing.T) {
 		msg  string
 	}{
 		{"not an archive", []byte("plain text"), "not a Debian package"},
-		{"xz control", deb(t, helloControl, "control.tar.xz"), `compression ".xz" is not supported`},
-		{"zstd control", deb(t, helloControl, "control.tar.zst"), `compression ".zst" is not supported`},
+		{"lz4 control", deb(t, helloControl, "control.tar.lz4"), `compression ".lz4" is not supported`},
+		{"not xz", debWith("control.tar.xz", []byte("not xz data")), "control.tar.xz: xz: not an .xz stream"},
+		{"not zstd", debWith("control.tar.zst", []byte("not zstd data")), "control.tar.zst: zstd: not a zstd frame"},
+		{"cut xz", debWith("control.tar.xz", xzStored(tarOf(t, map[string]string{"./md5sums": strings.Repeat("x", 3000)}, false))[:1000]), "control archive is not a tar"},
+		{"cut zstd", debWith("control.tar.zst", zstdRaw(tarOf(t, map[string]string{"./md5sums": strings.Repeat("x", 3000)}, false))[:1000]), "control archive is not a tar"},
+		{"not lzma", debWith("control.tar.lzma", []byte{0xff}), "control.tar.lzma: xz: not an .lzma stream"},
+		{"not bzip2", debWith("control.tar.bz2", []byte("not bzip2 data")), "control archive is not a tar: bzip2"},
 		{"no Package", deb(t, "Version: 1.0\nArchitecture: amd64\n", "control.tar.gz"), `field Package "" is missing`},
 		{"bad name", deb(t, "Package: Hello_World\nVersion: 1.0\nArchitecture: amd64\n", "control.tar.gz"), `field Package "Hello_World"`},
 		{"bad version", deb(t, "Package: hello\nVersion: v1\nArchitecture: amd64\n", "control.tar.gz"), `field Version "v1"`},
@@ -646,6 +705,42 @@ func TestDeleteComponent(t *testing.T) {
 	// the asset path derives the same component the delete takes
 	if g, n, v, ok := component.DeriveAsset("apt", "pool/main/h/hello/hello_1.0_amd64.deb"); !ok || g != "amd64" || n != "hello" || v != "1.0" {
 		t.Fatalf("DeriveAsset: %q %q %q %v", g, n, v, ok)
+	}
+}
+
+// debWith is a package whose control archive member is name, body.
+func debWith(name string, body []byte) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("!<arch>\n")
+	arMember(&buf, "debian-binary", []byte("2.0\n"))
+	arMember(&buf, name, body)
+	return buf.Bytes()
+}
+
+// TestControlCompressions: the control archive as dpkg-deb compresses it,
+// or not at all, gives the same fields. testdata has helloControl's
+// archive (GNU tar) compressed by bzip2 1.0.8 and xz --format=lzma 5.2.5.
+func TestControlCompressions(t *testing.T) {
+	want, err := readDeb(bytes.NewReader(deb(t, helloControl, "control.tar.gz")))
+	if err != nil || want.get("Homepage") != "https://example.test/hello" {
+		t.Fatalf("gzip: %v %v", want, err)
+	}
+	for _, name := range []string{"control.tar", "control.tar.xz", "control.tar.zst", "control.tar.bz2", "control.tar.lzma"} {
+		b := deb(t, helloControl, name)
+		if fixture, err := os.ReadFile(filepath.Join("testdata", name)); err == nil {
+			b = debWith(name, fixture)
+		}
+		got, err := readDeb(bytes.NewReader(b))
+		if err != nil || fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s: %v %v", name, got, err)
+		}
+	}
+	// a control archive larger than one xz chunk or zstd block
+	big := helloControl + "X-Pad: " + strings.Repeat("p", 200<<10) + "\n"
+	for _, name := range []string{"control.tar.xz", "control.tar.zst"} {
+		if got, err := readDeb(bytes.NewReader(deb(t, big, name))); err != nil || len(got.get("X-Pad")) != 200<<10 {
+			t.Errorf("big %s: %v", name, err)
+		}
 	}
 }
 

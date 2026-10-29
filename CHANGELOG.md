@@ -334,6 +334,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   list, top components per repository, advisories on the component view.
 
 ### Fixed
+- APT hosted: `.deb` packages whose control archive is `control.tar.xz` (Debian's `dpkg-deb` default),
+  `control.tar.zst` (Ubuntu 21.10 and later), `control.tar.bz2` or `control.tar.lzma` are accepted.
+  Before, only `control.tar.gz` and an uncompressed `control.tar` were read, so nearly every
+  distribution package was refused with 400. Built-in xz and Zstandard decoders (standard library only)
+  do the work; the decompressed archive is still bounded at 64 MiB and `control` at 1 MiB, and an
+  archive that declares an xz dictionary or zstd window above 8 MiB, uses an xz BCJ filter or needs a
+  zstd dictionary is refused with 400.
+- Conda hosted: a `.conda` upload's `info-<name>-<version>-<build>.tar.zst` is read, so its
+  `packages.conda` entry carries the package's `info/index.json` (`depends`, `constrains`, `license`,
+  `timestamp`, `build_number`, ...) and conda resolves the dependencies of `.conda` packages. As for a
+  `.tar.bz2`, the file name must match the index (400 otherwise); `.conda` files uploaded before keep
+  their old entries until uploaded again, and a `.conda` zip with more than 64 entries is refused.
 - Yum hosted repositories accept RPM files built by rpmbuild: 0.2.0 looked for the wrong header magic
   (`8d ad e8 01` instead of `8e ad e8 01`) and refused every real RPM.
 - Webhooks no longer send a delivery twice when a poll read it while a worker was sending it.
