@@ -439,6 +439,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		cur := registry.Get(rp.Name)
 		return cur != nil && cur.Gen == rp.Gen
 	}
+	store.Lookup = registry.Get // contentDisposition on downloads
 	authn.AnonymousRead = registry.AnonymousRead
 	authn.RepoFormat = func(name string) string {
 		if rp := registry.Get(name); rp != nil {
@@ -499,6 +500,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Config:     cfg,
 		DataDir:    cfg.DataDir,
 		FetchSlots: fetcher.Slots,
+		Remote:     fetcher.Remote,
 		Deleters:   deleters,
 		Webhooks:   hooks,
 	}

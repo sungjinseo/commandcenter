@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -88,6 +89,9 @@ type Fetcher struct {
 	RouteAllowed func(rp *repo.Repository, path string) bool
 	sf           singleflight.Group
 	sem          chan struct{}
+
+	blockMu sync.Mutex
+	remotes map[string]*remoteState // auto-block state by repository incarnation (autoblock.go)
 }
 
 // New creates a Fetcher that runs at most maxConcurrent remote requests at once.
@@ -134,6 +138,9 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 		}
 	}
 	f.count(rp.Name, false)
+	if err := f.blocked(rp, now); err != nil {
+		return f.stale(rp, t.Key, a, cached, err)
+	}
 	// The flight is detached from the caller so one cancelled client does not abort
 	// a download that other waiters share. This caller may still stop waiting early.
 	ch := f.sf.DoChan(fmt.Sprintf("%s\x00%d\x00%s", rp.Name, rp.Gen, t.Key), func() (any, error) {
@@ -230,9 +237,15 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		f.Stats.Upstream(rp.Name, err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests, time.Since(t0))
 	}
 	if err != nil {
+		f.noteFailure(rp, err)
 		return f.stale(rp, t.Key, a, cached, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 500 {
+		f.noteFailure(rp, fmt.Errorf("remote status %d", resp.StatusCode))
+	} else {
+		f.noteSuccess(rp)
+	}
 	now := f.Now()
 	status := resp.StatusCode
 	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); status == http.StatusOK && t.NotHTML && mt == "text/html" {

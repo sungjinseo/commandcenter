@@ -39,10 +39,17 @@ func addPolicy(out *repoJSON, rp *repo.Repository) {
 		out.WritePolicy = rp.WritePolicy
 		out.Depth = rp.Depth
 		out.Distribution, out.Component, out.SigningKeySet = rp.Distribution, rp.Component, rp.SigningKey != ""
+		out.StrictContentTypeValidation = rp.StrictContentTypeValidation
 	case "proxy":
 		out.MetadataMaxAge = formatDuration(rp.MetadataMaxAge)
 		out.ContentMaxAge = formatDuration(rp.ContentMaxAge)
 		out.NegativeCacheTTL = formatDuration(rp.NegativeCacheTTL)
+	}
+	if rp.Format == "raw" || rp.Format == "gitlfs" {
+		out.ContentDisposition = rp.ContentDisposition
+		if out.ContentDisposition == "" {
+			out.ContentDisposition = "inline"
+		}
 	}
 }
 
@@ -108,6 +115,8 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 			realm = "OIDC"
 		case meta.SourceCrowd:
 			realm = "Crowd"
+		case meta.SourceRUT:
+			realm = "RUT"
 		}
 		st := stored[su.ID]
 		users = append(users, map[string]any{
@@ -312,6 +321,7 @@ func (u *UI) healthChecks(rctx context.Context) []check {
 	if u.Auth.Snapshot().RealmEnabled(meta.RealmCrowd) {
 		checks = append(checks, runCheck("Crowd reachable", u.crowdCheck(rctx)))
 	}
+	checks = append(checks, u.quotaChecks(rctx)...)
 	return checks
 }
 

@@ -364,15 +364,32 @@ func TestUnpublishWhereNotSupported(t *testing.T) {
 	}
 }
 
-// TestAuditNotSupported: audit must not claim "0 vulnerabilities" (QA M-3,
-// Decision 2).
-func TestAuditNotSupported(t *testing.T) {
+// TestAudit: a proxy, or a group through its first proxy member, forwards
+// npm audit to the remote and passes its answer through; a hosted
+// repository answers an empty report so `npm install` does not fail.
+func TestAudit(t *testing.T) {
 	e := newEnv(t)
-	for _, path := range []string{"-/npm/v1/security/advisories/bulk", "-/npm/v1/security/audits/quick"} {
-		w := e.do("POST", "npm-all", path, `{"express":["4.0.0"]}`, anon)
-		if w.Code != http.StatusNotImplemented || jsonBody(t, w)["error"] != "npm audit is not supported by this registry" {
-			t.Fatalf("%s: %d %q", path, w.Code, w.Body.String())
+	for _, name := range []string{"npm-proxy", "npm-all"} {
+		w := e.do("POST", name, "-/npm/v1/security/advisories/bulk", `{"express":["4.0.0"]}`, anon)
+		m := jsonBody(t, w)
+		if w.Code != http.StatusTeapot || m["method"] != "POST" || get(m, "body", "express") == nil {
+			t.Fatalf("%s: %d %q", name, w.Code, w.Body.String())
 		}
+	}
+	if w := e.do("GET", "npm-proxy", "-/npm/v1/security/audits/quick", "", anon); w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET audit: %d", w.Code)
+	}
+	w := e.do("POST", "npm-hosted", "-/npm/v1/security/audits/quick", `{"name":"x"}`, anon)
+	if m := jsonBody(t, w); w.Code != 200 || get(m, "metadata", "vulnerabilities", "critical") != 0.0 || m["actions"] == nil {
+		t.Fatalf("hosted audit: %d %s", w.Code, w.Body.String())
+	}
+	if w := e.do("POST", "npm-hosted", "-/npm/v1/security/advisories/bulk", `{}`, anon); w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{}" {
+		t.Fatalf("hosted bulk: %d %s", w.Code, w.Body.String())
+	}
+	// the request body is bounded: a larger one is 413, not forwarded whole
+	big := `{"x":"` + strings.Repeat("a", auditBodyMax) + `"}`
+	if w := e.do("POST", "npm-proxy", "-/npm/v1/security/audits/quick", big, anon); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("big audit: %d %.200s", w.Code, w.Body.String())
 	}
 }
 

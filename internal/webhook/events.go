@@ -79,6 +79,7 @@ var renamed = map[string]string{
 	"task.create": "task.created", "task.update": "task.updated", "task.delete": "task.deleted",
 	"task.run": "task.finished", "cleanup": "cleanup.finished",
 	"webhook.create": "webhook.created", "webhook.update": "webhook.updated", "webhook.delete": "webhook.deleted",
+	"settings.defaultRoles": "settings.updated", "realms.rutauth.update": "realm.updated",
 }
 
 // event is one activity event as the dispatcher received it, with the

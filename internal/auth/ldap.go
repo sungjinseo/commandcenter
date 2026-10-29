@@ -86,6 +86,8 @@ func (p Principal) Owner() string {
 		return oidcOwnerPrefix + p.User
 	case p.IsCrowd():
 		return crowdOwnerPrefix + p.User
+	case p.IsRUT():
+		return rutOwnerPrefix + p.User
 	}
 	return p.User
 }
@@ -235,6 +237,7 @@ func (a *Authenticator) ldapPrincipal(s *Snapshot, u ldap.User) (Principal, bool
 			}
 		}
 	}
+	roles = s.grant(roles)
 	return Principal{User: u.ID, Admin: hasRole(roles, meta.AdminRole), roles: roles, source: sourceLDAP}, true
 }
 
@@ -370,6 +373,12 @@ func (a *Authenticator) CreateTokenFor(ctx context.Context, p Principal) (id, to
 	}
 	if p.IsCrowd() {
 		if _, ok := a.crowdLookup(ctx, p.User); !ok {
+			return "", "", fmt.Errorf("%w: %q", ErrUserDisabled, p.User)
+		}
+		return a.storeToken(ctx, p.Owner())
+	}
+	if p.IsRUT() {
+		if _, ok := a.rutLookup(ctx, p.User); !ok {
 			return "", "", fmt.Errorf("%w: %q", ErrUserDisabled, p.User)
 		}
 		return a.storeToken(ctx, p.Owner())

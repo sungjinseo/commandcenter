@@ -42,7 +42,7 @@ func requireInteractive(w http.ResponseWriter, r *http.Request) (auth.Principal,
 	if !ok {
 		return p, false
 	}
-	if p.Via != auth.ViaPassword && p.Via != auth.ViaSession {
+	if p.Via != auth.ViaPassword && p.Via != auth.ViaSession && p.Via != auth.ViaRUT {
 		writeError(w, http.StatusForbidden, "this action requires a password or session login")
 		return p, false
 	}

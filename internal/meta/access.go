@@ -21,6 +21,7 @@ const (
 	SourceLDAP  = "ldap"
 	SourceOIDC  = "oidc"
 	SourceCrowd = "crowd"
+	SourceRUT   = "rutauth" // an override row for a user the trusted proxy names (RUT realm)
 
 	StatusActive   = "active"
 	StatusDisabled = "disabled"

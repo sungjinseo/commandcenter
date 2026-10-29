@@ -40,6 +40,12 @@ func fakeRegistry(accept *string) http.HandlerFunc {
 			io.WriteString(w, leftPad)
 		case "/left-pad/-/left-pad-1.1.0.tgz":
 			io.WriteString(w, "remote-tgz")
+		case "/-/npm/v1/security/audits/quick", "/-/npm/v1/security/advisories/bulk":
+			// the audit endpoints echo what they were sent (TestAudit)
+			b, _ := io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTeapot)
+			io.WriteString(w, `{"method":"`+r.Method+`","encoding":"`+r.Header.Get("Content-Encoding")+`","body":`+string(b)+`}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -187,9 +193,6 @@ func TestAccountEndpoints(t *testing.T) {
 	e := newEnv(t)
 	if w := e.do("GET", "npm-all", "-/ping", "", anon); w.Code != 200 {
 		t.Fatalf("ping: %d", w.Code)
-	}
-	if w := e.do("POST", "npm-all", "-/npm/v1/security/advisories/bulk", `{"x":["1"]}`, anon); w.Code != http.StatusNotImplemented {
-		t.Fatalf("audit: %d %q", w.Code, w.Body.String())
 	}
 	if w := e.do("POST", "npm-all", "-/v1/login", "{}", anon); w.Code != 404 {
 		t.Fatalf("web login must 404 so npm falls back: %d", w.Code)

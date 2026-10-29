@@ -193,6 +193,8 @@ type Authenticator struct {
 	crowdHTTP    *http.Client
 	crowdHTTPURL string
 	crowdFlight  singleflight.Group
+	rutMu        sync.Mutex
+	rutUsers     map[string][]string // RUT id -> groups of its last trusted request (rutauth.go)
 }
 
 const (
@@ -277,6 +279,9 @@ func (a *Authenticator) setSnapshot(s *Snapshot) {
 	if old != nil && crowdChanged(old, s) {
 		a.clearCrowd()
 	}
+	if old != nil && rutChanged(old, s) {
+		a.clearRUT()
+	}
 }
 
 // Snapshot returns the live snapshot. It is immutable.
@@ -295,10 +300,12 @@ func (a *Authenticator) OnUserChanged(id string) {
 		a.Sessions.DeleteUser(ldapOwnerPrefix + id)
 		a.Sessions.DeleteUser(oidcOwnerPrefix + id)
 		a.Sessions.DeleteUser(crowdOwnerPrefix + id)
+		a.Sessions.DeleteUser(rutOwnerPrefix + id)
 	}
 	a.dropLDAP(id)
 	a.dropOIDC(id)
 	a.dropCrowd(id)
+	a.dropRUT(id)
 	prefix := id + "\x00"
 	a.mu.Lock()
 	for k := range a.cache {
@@ -320,6 +327,11 @@ func (a *Authenticator) Authenticate(r *http.Request) (Principal, error) {
 		// dotnet nuget push sends the API key (an API token here) in its own header.
 		if key := strings.TrimSpace(r.Header.Get("X-NuGet-ApiKey")); key != "" {
 			return a.checkToken(r.Context(), key, "")
+		}
+		// A trusted reverse proxy's user header (rutauth.go) comes before
+		// the session cookie: the gateway authenticates every request.
+		if p, ok := a.rutPrincipal(r); ok {
+			return p, nil
 		}
 		return a.cookiePrincipal(r), nil
 	}
@@ -445,11 +457,15 @@ func (a *Authenticator) lookup(ctx context.Context, name string) (Principal, boo
 	if id, ok := strings.CutPrefix(name, crowdOwnerPrefix); ok {
 		return a.crowdLookup(ctx, id)
 	}
-	u, ok := a.snap.Load().users[name]
-	if !ok || u.Status != meta.StatusActive || u.Source != meta.SourceLocal {
-		return Principal{}, false // an ldap- or oidc-source row is an override, not a principal
+	if id, ok := splitRUTOwner(name); ok {
+		return a.rutLookup(ctx, id)
 	}
-	return principal(u), true
+	s := a.snap.Load()
+	u, ok := s.users[name]
+	if !ok || u.Status != meta.StatusActive || u.Source != meta.SourceLocal {
+		return Principal{}, false // an ldap-, oidc- or rutauth-source row is an override, not a principal
+	}
+	return s.principal(u), true
 }
 
 // CheckPassword verifies a user's password through the enabled password
@@ -532,7 +548,7 @@ func (a *Authenticator) localPassword(ctx context.Context, s *Snapshot, user, pa
 	exp, hit := a.cache[key]
 	a.mu.Unlock()
 	if hit && now.Before(exp) {
-		return passwordPrincipal(u), true
+		return passwordPrincipal(s, u), true
 	}
 	if cachedOnly || compareHash(ctx, []byte(u.PasswordHash), pass) != nil {
 		return Principal{}, false
@@ -543,11 +559,11 @@ func (a *Authenticator) localPassword(ctx context.Context, s *Snapshot, user, pa
 	}
 	a.cache[key] = now.Add(cacheTTL)
 	a.mu.Unlock()
-	return passwordPrincipal(u), true
+	return passwordPrincipal(s, u), true
 }
 
-func passwordPrincipal(u meta.User) Principal {
-	p := principal(u)
+func passwordPrincipal(s *Snapshot, u meta.User) Principal {
+	p := s.principal(u)
 	p.Via = ViaPassword
 	return p
 }
@@ -605,6 +621,17 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 			return Principal{}, ErrBadCredentials
 		}
 		p = cp
+	} else if id, isRUT := splitRUTOwner(user); isRUT {
+		// A RUT user's token: the realm on and the user seen through the
+		// gateway since the last restart.
+		if owner != "" && id != owner {
+			return Principal{}, ErrBadCredentials
+		}
+		rp, ok := a.rutLookup(ctx, id)
+		if !ok {
+			return Principal{}, ErrBadCredentials
+		}
+		p = rp
 	} else {
 		u, ok := s.users[user]
 		if !ok || u.Status != meta.StatusActive || u.Source != meta.SourceLocal {
@@ -613,7 +640,7 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 		if owner != "" && u.ID != owner {
 			return Principal{}, ErrBadCredentials
 		}
-		p = principal(u)
+		p = s.principal(u)
 	}
 	if time.Since(lastUsed) >= meta.TokenTouchInterval {
 		a.tokens.TouchToken(ctx, hash)
@@ -622,9 +649,27 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 	return p, nil
 }
 
-// principal builds the principal of u; u.Roles belongs to an immutable snapshot.
-func principal(u meta.User) Principal {
-	return Principal{User: u.ID, Admin: hasRole(u.Roles, meta.AdminRole), roles: u.Roles}
+// principal builds the principal of u with the default roles added; u.Roles
+// belongs to the immutable snapshot and is never modified.
+func (s *Snapshot) principal(u meta.User) Principal {
+	roles := s.grant(u.Roles)
+	return Principal{User: u.ID, Admin: hasRole(roles, meta.AdminRole), roles: roles}
+}
+
+// grant returns roles plus the default roles setting (Nexus
+// DefaultRoleRealm): every signed-in principal holds them. Without default
+// roles it returns roles itself.
+func (s *Snapshot) grant(roles []string) []string {
+	if len(s.settings.DefaultRoles) == 0 {
+		return roles
+	}
+	out := append(make([]string, 0, len(roles)+len(s.settings.DefaultRoles)), roles...)
+	for _, r := range s.settings.DefaultRoles {
+		if !hasRole(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Can reports whether p may perform acc on the named repository.
@@ -724,7 +769,7 @@ func (a *Authenticator) RevokeUserTokens(ctx context.Context, id string) (int64,
 	if !ok {
 		return 0, errors.New("auth: the token store cannot revoke tokens")
 	}
-	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id, crowdOwnerPrefix+id)
+	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id, crowdOwnerPrefix+id, rutOwnerPrefix+id)
 }
 
 // RevokeToken deletes token when p owns it (npm logout). A token that does not

@@ -34,6 +34,8 @@ type settingsDTO struct {
 	// terraform repository by name.
 	TerraformDefaultRepository string          `json:"terraformDefaultRepository"`
 	UserTokens                 meta.UserTokens `json:"userTokens"`
+	// DefaultRoles are granted to every signed-in user (Nexus DefaultRoleRealm).
+	DefaultRoles []string `json:"defaultRoles"`
 }
 
 // httpDTO is the outbound HTTP configuration without the proxy password.
@@ -105,7 +107,7 @@ func settingsJSON(s meta.Settings) settingsDTO {
 	return settingsDTO{BaseURL: s.BaseURL, AnonymousRead: s.AnonymousRead, AuthenticatedRead: s.AuthenticatedRead,
 		SessionIdleMinutes: s.SessionIdleMinutes, MaxUploadMiB: s.MaxUploadMiB, DefaultLanguage: s.DefaultLanguage,
 		MetricsAnonymous: s.MetricsAnonymous, HTTP: httpJSON(s.HTTP), TerraformDefaultRepository: s.TerraformDefaultRepository,
-		UserTokens: s.UserTokens}
+		UserTokens: s.UserTokens, DefaultRoles: nonNil(s.DefaultRoles)}
 }
 
 // settingsRequest holds only the fields the caller wants to change.
@@ -120,6 +122,7 @@ type settingsRequest struct {
 	HTTP                       *httpRequest     `json:"http"`
 	TerraformDefaultRepository *string          `json:"terraformDefaultRepository"`
 	UserTokens                 *meta.UserTokens `json:"userTokens"`
+	DefaultRoles               *[]string        `json:"defaultRoles"`
 }
 
 func (u *UI) getSettings(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +139,10 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 	var body settingsRequest
 	if !decodeBody(w, r, &body) {
 		return
+	}
+	if body.DefaultRoles != nil { // a role reference: serialised with role deletes
+		u.accessMu.Lock()
+		defer u.accessMu.Unlock()
 	}
 	// Start from the stored settings, not the snapshot, so a concurrent
 	// change to other keys (realms) is not written back stale.
@@ -241,6 +248,24 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		check(meta.SettingUserTokens, err)
 	}
+	if body.DefaultRoles != nil {
+		roles := append([]string{}, *body.DefaultRoles...)
+		var rv validation
+		if err := u.checkRoleRefs(r.Context(), &rv, roles); err != nil {
+			u.fail(w, r, err)
+			return
+		}
+		if contains(roles, meta.AdminRole) {
+			rv.add("the admin role cannot be a default role")
+		}
+		for _, msg := range rv {
+			v.add("defaultRoles: %s", msg)
+		}
+		if len(rv) == 0 {
+			s.DefaultRoles = roles
+			changed = append(changed, meta.SettingDefaultRoles)
+		}
+	}
 	if err := v.err(); err != nil {
 		u.writeAccessError(w, r, err)
 		return
@@ -259,6 +284,7 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		meta.SettingMetricsAnonymous: s.MetricsAnonymous, meta.SettingHTTP: s.HTTP,
 		meta.SettingTerraformDefaultRepository: s.TerraformDefaultRepository,
 		meta.SettingUserTokens:                 s.UserTokens,
+		meta.SettingDefaultRoles:               s.DefaultRoles,
 	}
 	err = u.DB.Tx(r.Context(), func(tx *meta.Tx) error {
 		for _, k := range changed {
@@ -289,7 +315,12 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 	if body.UserTokens != nil {
 		u.emit(r, "settings.userTokens", "", "", tokensDetail)
 	}
-	if rest := slices.DeleteFunc(slices.Clone(changed), func(k string) bool { return k == meta.SettingHTTP || k == meta.SettingUserTokens }); len(rest) > 0 {
+	if body.DefaultRoles != nil {
+		u.emit(r, "settings.defaultRoles", "", "", strings.Join(s.DefaultRoles, ", "))
+	}
+	if rest := slices.DeleteFunc(slices.Clone(changed), func(k string) bool {
+		return k == meta.SettingHTTP || k == meta.SettingUserTokens || k == meta.SettingDefaultRoles
+	}); len(rest) > 0 {
 		u.emit(r, "settings.update", "", "", strings.Join(rest, ", "))
 	}
 	writeJSON(w, http.StatusOK, settingsJSON(u.Auth.Snapshot().Settings()))

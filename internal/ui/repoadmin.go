@@ -75,6 +75,14 @@ type repoRequest struct {
 	// terraform hosted: the ASCII-armored GPG public key the provider
 	// download documents list (not a secret: returned as stored).
 	GPGPublicKey string `json:"gpgPublicKey"`
+	// Content handling: hosted strictContentTypeValidation; raw and gitlfs
+	// contentDisposition ("" or "inline", "attachment").
+	StrictContentTypeValidation bool   `json:"strictContentTypeValidation"`
+	ContentDisposition          string `json:"contentDisposition"`
+	// Proxy remote: blocked never asks the remote; autoBlock null or absent
+	// means true.
+	Blocked   bool  `json:"blocked"`
+	AutoBlock *bool `json:"autoBlock"`
 }
 
 // repoAuthResponse never carries a secret.
@@ -108,6 +116,11 @@ type repoConfigResponse struct {
 	Component            string            `json:"component,omitempty"`
 	SigningKeySet        bool              `json:"signingKeySet"`
 	GPGPublicKey         string            `json:"gpgPublicKey,omitempty"`
+
+	StrictContentTypeValidation bool   `json:"strictContentTypeValidation"`
+	ContentDisposition          string `json:"contentDisposition"`
+	Blocked                     bool   `json:"blocked"`
+	AutoBlock                   bool   `json:"autoBlock"`
 }
 
 // publicRemote drops the userinfo, query and fragment of a remote, which may
@@ -147,6 +160,11 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		Component:            d.Component,
 		SigningKeySet:        d.SigningKey != "",
 		GPGPublicKey:         d.GPGPublicKey,
+
+		StrictContentTypeValidation: d.StrictContentTypeValidation,
+		ContentDisposition:          d.ContentDisposition,
+		Blocked:                     d.Blocked,
+		AutoBlock:                   d.Type == "proxy" && d.AutoBlocks(),
 	}
 	if d.AnonymousRead != nil {
 		v := *d.AnonymousRead
@@ -167,7 +185,9 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		AnonymousRead: b.AnonymousRead, Online: b.Online,
 		BlobStore:    b.BlobStore,
 		Distribution: b.Distribution, Component: b.Component, SigningKey: b.SigningKey,
-		GPGPublicKey: strings.TrimSpace(b.GPGPublicKey),
+		GPGPublicKey:                strings.TrimSpace(b.GPGPublicKey),
+		StrictContentTypeValidation: b.StrictContentTypeValidation, ContentDisposition: b.ContentDisposition,
+		Blocked: b.Blocked, AutoBlock: b.AutoBlock,
 	}
 	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey}
 	if b.CleanupPolicy != nil {

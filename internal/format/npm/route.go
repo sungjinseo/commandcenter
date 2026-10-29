@@ -39,6 +39,7 @@ type Route struct {
 	User    string // KindLogin
 	Token   string // KindToken
 	Rev     string // KindRev: the _rev npm read ("undefined" when the document had none)
+	Path    string // KindAudit: the request path, forwarded as is
 }
 
 // npm (validate-npm-package-name) refuses a leading "." or "_" on the whole
@@ -71,7 +72,7 @@ func ParseRoute(path string) (Route, error) {
 	case "-/v1/login":
 		return Route{Kind: KindWebLogin}, nil
 	case "-/npm/v1/security/advisories/bulk", "-/npm/v1/security/audits", "-/npm/v1/security/audits/quick":
-		return Route{Kind: KindAudit}, nil
+		return Route{Kind: KindAudit, Path: path}, nil
 	}
 	if user, ok := strings.CutPrefix(path, "-/user/org.couchdb.user:"); ok {
 		if user == "" || strings.Contains(user, "/") {

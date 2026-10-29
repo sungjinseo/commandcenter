@@ -158,8 +158,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		writeJSON(w, http.StatusOK, struct{}{})
 		return nil
 	case KindAudit:
-		// An empty answer read as "found 0 vulnerabilities" (QA M-3).
-		return repo.Errorf(http.StatusNotImplemented, "npm audit is not supported by this registry")
+		return h.audit(w, r, rp, rt.Path)
 	case KindRev:
 		// npm reads a 404 here as "already deleted" and reports success
 		// (QA H-2): unpublish deletes for real or fails visibly (QA N-10).
@@ -421,4 +420,46 @@ func allowed(rp *repo.Repository, kind Kind) string {
 		}
 	}
 	return ""
+}
+
+// auditBodyMax bounds the audit request body forwarded to the remote.
+const auditBodyMax = 16 << 20
+
+// emptyAudit is the report of a registry that scans nothing, so `npm
+// install` against a hosted repository does not fail on its audit step.
+const emptyAudit = `{"actions":[],"advisories":{},"muted":[],"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0},"dependencies":0,"devDependencies":0,"optionalDependencies":0,"totalDependencies":0}}`
+
+// audit forwards an npm audit request (POST /-/npm/v1/security/audits,
+// /audits/quick, /advisories/bulk) to the remote of a proxy, or of a group's
+// first proxy member, without caching; a hosted repository (or a group
+// without a proxy) answers an empty report.
+func (h *Handler) audit(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) error {
+	if r.Method != http.MethodPost {
+		return repo.MethodNotAllowed(http.MethodPost, "method %s not allowed", r.Method)
+	}
+	if target := auditTarget(rp); target != nil {
+		return h.Resolver.Fetcher.Forward(r.Context(), target, w, r, path, auditBodyMax)
+	}
+	body := emptyAudit
+	if strings.HasSuffix(path, "/advisories/bulk") {
+		body = "{}"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, body+"\n")
+	return nil
+}
+
+// auditTarget is the proxy that answers audits for rp: rp itself, or the
+// first proxy among a group's members (depth first); nil for hosted.
+func auditTarget(rp *repo.Repository) *repo.Repository {
+	if rp.Type == "proxy" {
+		return rp
+	}
+	for _, m := range rp.MemberRepos {
+		if t := auditTarget(m); t != nil {
+			return t
+		}
+	}
+	return nil
 }

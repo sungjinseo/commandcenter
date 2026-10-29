@@ -60,6 +60,10 @@ type UI struct {
 	Deleters   *cleanup.Registry       // component deletes in hosted repositories; nil serves 501
 	Webhooks   *webhook.Dispatcher     // webhook delivery and reload after a change; nil serves 501
 
+	// Remote reports a proxy's live remote state (proxy.Fetcher.Remote);
+	// nil shows none.
+	Remote func(rp *repo.Repository) repo.RemoteStatus
+
 	smtpTest       smtpTestState              // rate limit of the SMTP test send
 	settingsLoaded func()                     // test hook: runs between putSettings' read and its write
 	accessMu       sync.Mutex                 // serialises access changes: load, lockout check, write, reload (final review I3)
@@ -90,6 +94,11 @@ type UI struct {
 	storeCache   ttlCache[map[string]blobTotals]
 	internalOnce sync.Once
 	internal     http.Handler
+
+	// quotaMu guards quotaViolated: which blob stores the last check found
+	// over their soft quota, so the blobstore.quota event fires once per flip.
+	quotaMu       sync.Mutex
+	quotaViolated map[string]bool
 }
 
 // Routes registers "/", "GET /ui/", "/-/api/" and the "/-/sso/" login

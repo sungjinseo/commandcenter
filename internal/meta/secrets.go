@@ -399,7 +399,11 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 			if !changed {
 				continue
 			}
-			b, err := json.Marshal(c)
+			var q struct { // the soft quota next to the S3 fields stays
+				Quota *Quota `json:"quota"`
+			}
+			json.Unmarshal([]byte(js), &q)
+			b, err := json.Marshal(storedConfig{S3Config: &c, Quota: q.Quota})
 			if err != nil {
 				return err
 			}

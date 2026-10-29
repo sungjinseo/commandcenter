@@ -57,6 +57,8 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.smtpRoutes(mux)
 	u.realmRoutes(mux)
 	u.oidcRealmRoutes(mux)
+	u.rutRealmRoutes(mux)
+	mux.HandleFunc("GET /-/api/openapi.json", u.openAPI)
 	u.taskRoutes(mux)
 	u.webhookRoutes(mux)
 	u.securityRoutes(mux)
@@ -88,6 +90,8 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 			out["realm"] = "OIDC"
 		case p.IsCrowd():
 			out["realm"] = "Crowd"
+		case p.IsRUT():
+			out["realm"] = "RUT"
 		}
 		// Signed-in users see the version in the sidebar footer (plan 10);
 		// anonymous callers do not learn it.
@@ -269,6 +273,23 @@ type repoJSON struct {
 	MetadataMaxAge   string `json:"metadataMaxAge,omitempty"`
 	ContentMaxAge    string `json:"contentMaxAge,omitempty"`
 	NegativeCacheTTL string `json:"negativeCacheTTL,omitempty"`
+
+	// Content handling (admin-only): hosted strictContentTypeValidation;
+	// raw and gitlfs contentDisposition ("inline" or "attachment").
+	StrictContentTypeValidation bool   `json:"strictContentTypeValidation,omitempty"`
+	ContentDisposition          string `json:"contentDisposition,omitempty"`
+	// Proxy remote state (signed-in callers): the blocked and autoBlock
+	// settings and the live remoteStatus (proxy.Fetcher.Remote).
+	Blocked      *bool             `json:"blocked,omitempty"`
+	AutoBlock    *bool             `json:"autoBlock,omitempty"`
+	RemoteStatus *remoteStatusJSON `json:"remoteStatus,omitempty"`
+}
+
+type remoteStatusJSON struct {
+	Blocked   bool   `json:"blocked"`
+	Auto      bool   `json:"auto"`
+	Until     string `json:"until"`
+	LastError string `json:"lastError"`
 }
 
 func (u *UI) repoURL(name string) string { return u.baseURL() + "/repository/" + name + "/" }
@@ -307,6 +328,14 @@ func (u *UI) describe(p auth.Principal, rp *repo.Repository, st meta.RepoStat) r
 	if p.Admin {
 		out.BlobStore = repo.StoreOf(rp.Repository)
 		addPolicy(&out, rp)
+	}
+	if rp.Type == "proxy" && !p.Anonymous() { // the remote's state helps every user, but anonymous callers do not learn it
+		blocked, autoBlock := rp.Blocked, rp.AutoBlocks()
+		out.Blocked, out.AutoBlock = &blocked, &autoBlock
+		if u.Remote != nil {
+			st := u.Remote(rp)
+			out.RemoteStatus = &remoteStatusJSON{Blocked: st.Blocked, Auto: st.Auto, Until: rfc3339(st.Until), LastError: st.LastError}
+		}
 	}
 	// The UI upload adds; an offline target refuses writes (503).
 	out.CanWrite = targetOnline && u.Auth.Can(p, target, auth.Add)

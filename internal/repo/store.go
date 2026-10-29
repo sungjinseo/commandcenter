@@ -49,6 +49,19 @@ type Store struct {
 
 	// Events, if set, receives upload and delete events from the format handlers.
 	Events EventSink
+
+	// Lookup, if set, resolves a repository name to its live definition
+	// (the registry); nil is unknown. ServeAsset reads the contentDisposition
+	// of the asset's repository through it unless the handler set one.
+	Lookup func(name string) *Repository
+}
+
+// Definition returns the live definition of the named repository, or nil.
+func (s *Store) Definition(name string) *Repository {
+	if s.Lookup == nil {
+		return nil
+	}
+	return s.Lookup(name)
 }
 
 // StoreOf is the one rule for which blob store a repository uses, shared by
@@ -301,6 +314,9 @@ func ServeAsset(w http.ResponseWriter, r *http.Request, s *Store, a meta.Asset) 
 		ct = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", ct)
+	if rp := s.Definition(a.Repo); rp != nil && w.Header().Get("Content-Disposition") == "" {
+		SetContentDisposition(w, rp.ContentDisposition, a.Path)
+	}
 	if a.SHA1 != "" {
 		w.Header().Set("ETag", `"{SHA1{`+a.SHA1+`}}"`)
 	}

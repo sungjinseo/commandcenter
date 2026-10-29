@@ -249,6 +249,9 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	if def.Online == nil { // absent keeps the stored state
 		def.Online = cur.Online
 	}
+	if def.AutoBlock == nil {
+		def.AutoBlock = cur.AutoBlock
+	}
 	if clear.KeepCleanupPolicy {
 		def.CleanupPolicy = cur.CleanupPolicy
 	}
@@ -455,6 +458,10 @@ func cloneDef(def config.Repository) config.Repository {
 	if def.AnonymousRead != nil {
 		v := *def.AnonymousRead
 		def.AnonymousRead = &v
+	}
+	if def.AutoBlock != nil {
+		v := *def.AutoBlock
+		def.AutoBlock = &v
 	}
 	return def
 }

@@ -141,6 +141,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 	if a.ContentType == "" {
 		a.ContentType = ContentType(p)
 	}
+	repo.SetContentDisposition(w, rp.ContentDisposition, p) // a group's own setting, else the member's (ServeAsset)
 	repo.ServeAsset(w, r, h.Store, a)
 }
 
@@ -224,7 +225,11 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p string) error {
 	if _, _, err := mime.ParseMediaType(ct); err != nil {
 		ct = ContentType(p)
 	}
-	if _, err := h.Store.Put(ctx, rp.Name, p, ct, r.Body); err != nil {
+	body, err := repo.StrictBody(rp, p, ct, r.Body)
+	if err != nil {
+		return err
+	}
+	if _, err := h.Store.Put(ctx, rp.Name, p, ct, body); err != nil {
 		return err
 	}
 	h.Store.Emit(r, "upload", rp.Name, p, "")

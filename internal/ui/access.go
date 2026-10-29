@@ -389,8 +389,8 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	if body.Status == "" {
 		body.Status = meta.StatusActive
 	}
-	if body.Source != meta.SourceLocal && body.Source != meta.SourceLDAP && body.Source != meta.SourceOIDC && body.Source != meta.SourceCrowd {
-		v.add("source must be %q, %q, %q or %q", meta.SourceLocal, meta.SourceLDAP, meta.SourceOIDC, meta.SourceCrowd)
+	if body.Source != meta.SourceLocal && body.Source != meta.SourceLDAP && body.Source != meta.SourceOIDC && body.Source != meta.SourceCrowd && body.Source != meta.SourceRUT {
+		v.add("source must be %q, %q, %q, %q or %q", meta.SourceLocal, meta.SourceLDAP, meta.SourceOIDC, meta.SourceCrowd, meta.SourceRUT)
 	}
 	if body.Status != meta.StatusActive && body.Status != meta.StatusDisabled {
 		v.add("status must be %q or %q", meta.StatusActive, meta.StatusDisabled)
@@ -401,7 +401,7 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	hash := ""
 	switch {
 	case body.Source != meta.SourceLocal && body.Password != "":
-		v.add("an LDAP, OIDC or Crowd user has no local password")
+		v.add("an LDAP, OIDC, Crowd or RUT user has no local password")
 	case body.Source == meta.SourceLocal:
 		if err := checkPassword(body.Password); err != nil {
 			v = append(v, err.(*repo.ValidationError).Errors...)
@@ -859,6 +859,14 @@ func (u *UI) deleteRole(w http.ResponseWriter, r *http.Request) {
 	}
 	if ref := ldapRoleRef(set.OIDC.Mapping(), id); ref != "" {
 		writeError(w, http.StatusConflict, roleInUseMessage+" by the "+strings.Replace(ref, "LDAP", "OIDC", 1))
+		return
+	}
+	if ref := ldapRoleRef(set.RUT.Mapping(), id); ref != "" {
+		writeError(w, http.StatusConflict, roleInUseMessage+" by the "+strings.Replace(ref, "LDAP", "RUT", 1))
+		return
+	}
+	if contains(set.DefaultRoles, id) {
+		writeError(w, http.StatusConflict, roleInUseMessage+" by the defaultRoles setting")
 		return
 	}
 	// A role held by a user is refused by the store (ErrInUse), so deleting

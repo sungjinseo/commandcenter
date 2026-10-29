@@ -140,6 +140,8 @@ func NewSnapshotWith(users []meta.User, roles []meta.Role, settings meta.Setting
 	settings.LDAP = settings.LDAP.Copy()
 	settings.OIDC = settings.OIDC.Copy()
 	settings.Crowd = settings.Crowd.Copy()
+	settings.RUT = settings.RUT.Copy()
+	settings.DefaultRoles = append([]string{}, settings.DefaultRoles...)
 	s.settings = settings
 	for _, r := range settings.Realms {
 		if r.Enabled {
@@ -208,9 +210,11 @@ func (s *Snapshot) Settings() meta.Settings {
 	out.Realms = append([]meta.Realm{}, s.settings.Realms...)
 	out.LDAP = s.settings.LDAP.Copy()
 	out.OIDC = s.settings.OIDC.Copy()
+	out.RUT = s.settings.RUT.Copy()
 	out.HTTP = s.settings.HTTP.Copy()
 	out.TrustedCerts = append([]string{}, s.settings.TrustedCerts...)
 	out.Crowd = s.settings.Crowd.Copy()
+	out.DefaultRoles = append([]string{}, s.settings.DefaultRoles...)
 	return out
 }
 

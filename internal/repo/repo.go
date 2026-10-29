@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"commandcenter/internal/auth"
 	"commandcenter/internal/blob"
@@ -26,6 +27,17 @@ type Repository struct {
 	// Gen identifies the incarnation: the registry changes it when the
 	// repository is created again or its remote changes. Zero outside a registry.
 	Gen uint64
+}
+
+// RemoteStatus is the live state of a proxy's remote (proxy.Fetcher.Remote):
+// Blocked while no remote request is made, by the manual blocked setting or
+// (Auto) after consecutive failures until Until; LastError is the failure
+// that caused it (client-safe: no URL).
+type RemoteStatus struct {
+	Blocked   bool      `json:"blocked"`
+	Auto      bool      `json:"auto"`
+	Until     time.Time `json:"-"`
+	LastError string    `json:"lastError"`
 }
 
 // Build resolves repository references. cfg must already be validated.

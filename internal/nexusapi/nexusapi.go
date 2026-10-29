@@ -80,6 +80,10 @@ func (h *Handler) init() {
 	m.HandleFunc("GET "+p+"/security/users", h.users)
 	m.HandleFunc("GET "+p+"/security/roles", h.roles)
 	m.HandleFunc("GET "+p+"/blobstores", h.blobStores)
+	m.HandleFunc("GET "+p+"/blobstores/{name}/quota-status", h.quotaStatus)
+	m.HandleFunc("POST "+p+"/blobstores/file", h.createFileBlobStore)
+	m.HandleFunc("PUT "+p+"/blobstores/file/{name}", h.updateFileBlobStore)
+	m.HandleFunc("GET /service/rest/swagger.json", h.swagger) // outside the prefix; the server routes it here
 	m.HandleFunc("GET "+p+"/tasks", h.tasks)
 	h.securityRoutes(m, p)
 	m.HandleFunc("GET "+p+"/security/ssl", h.sslList)
@@ -298,7 +302,7 @@ func minutes(d config.Duration) int {
 
 func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 	d := rp.Repository
-	storage := map[string]any{"blobStoreName": repo.StoreOf(d), "strictContentTypeValidation": false}
+	storage := map[string]any{"blobStoreName": repo.StoreOf(d), "strictContentTypeValidation": d.StrictContentTypeValidation}
 	if d.Type == "hosted" {
 		storage["writePolicy"] = strings.ToUpper(d.WritePolicy)
 	}
@@ -312,7 +316,7 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 	case "proxy":
 		out["proxy"] = map[string]any{"remoteUrl": publicRemote(rp), "contentMaxAge": minutes(d.ContentMaxAge), "metadataMaxAge": minutes(d.MetadataMaxAge)}
 		out["negativeCache"] = map[string]any{"enabled": true, "timeToLive": minutes(d.NegativeCacheTTL)}
-		hc := map[string]any{"blocked": false, "autoBlock": false, "authentication": nil}
+		hc := map[string]any{"blocked": d.Blocked, "autoBlock": d.AutoBlocks(), "authentication": nil}
 		if a := d.RemoteAuth; a != nil && a.Username != "" {
 			hc["authentication"] = map[string]any{"type": "username", "username": a.Username}
 		} else if a != nil && a.BearerToken != "" {
@@ -333,6 +337,13 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 			vp = "MIXED"
 		}
 		out["maven"] = map[string]any{"versionPolicy": vp, "layoutPolicy": "PERMISSIVE", "contentDisposition": "INLINE"}
+	}
+	if d.Format == "raw" {
+		cd := strings.ToUpper(d.ContentDisposition)
+		if cd == "" {
+			cd = "INLINE"
+		}
+		out["raw"] = map[string]any{"contentDisposition": cd}
 	}
 	return out
 }
@@ -388,6 +399,8 @@ type repoBody struct {
 	Storage struct {
 		BlobStoreName string `json:"blobStoreName"`
 		WritePolicy   string `json:"writePolicy"`
+
+		StrictContentTypeValidation bool `json:"strictContentTypeValidation"`
 	} `json:"storage"`
 	Cleanup *struct {
 		PolicyNames []string `json:"policyNames"`
@@ -405,6 +418,8 @@ type repoBody struct {
 		WritableMember string   `json:"writableMember"`
 	} `json:"group"`
 	HTTPClient struct {
+		Blocked        bool  `json:"blocked"`
+		AutoBlock      *bool `json:"autoBlock"`
 		Authentication *struct {
 			Username string `json:"username"`
 			Password string `json:"password"`
@@ -413,6 +428,9 @@ type repoBody struct {
 	Maven struct {
 		VersionPolicy string `json:"versionPolicy"`
 	} `json:"maven"`
+	Raw struct {
+		ContentDisposition string `json:"contentDisposition"` // INLINE | ATTACHMENT
+	} `json:"raw"`
 	// RoutingRule is the request field, RoutingRuleName the one Nexus
 	// returns; either is accepted.
 	RoutingRule     *string `json:"routingRule"`
@@ -445,6 +463,15 @@ func uiRepo(format, typ string, b repoBody) map[string]any {
 		"writePolicy":      strings.ToLower(b.Storage.WritePolicy),
 		"online":           b.Online,
 		"blobStore":        b.Storage.BlobStoreName,
+	}
+	if typ == "hosted" {
+		out["strictContentTypeValidation"] = b.Storage.StrictContentTypeValidation
+	}
+	if typ == "proxy" {
+		out["blocked"], out["autoBlock"] = b.HTTPClient.Blocked, b.HTTPClient.AutoBlock
+	}
+	if cd := strings.ToLower(b.Raw.ContentDisposition); cd != "" {
+		out["contentDisposition"] = cd
 	}
 	if typ == "group" { // Nexus group bodies name a blob store; Command Center groups have none
 		out["blobStore"] = ""
@@ -1260,13 +1287,7 @@ func (h *Handler) blobStores(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var res struct {
-		Stores []struct {
-			Name      string `json:"name"`
-			Type      string `json:"type"`
-			BlobCount int64  `json:"blobCount"`
-			UsedBytes int64  `json:"usedBytes"`
-			FsFree    *int64 `json:"fsFree"`
-		} `json:"blobstores"`
+		Stores []blobStoreRow `json:"blobstores"`
 	}
 	json.Unmarshal(body, &res)
 	out := []map[string]any{}
@@ -1280,9 +1301,117 @@ func (h *Handler) blobStores(w http.ResponseWriter, r *http.Request) {
 			free = *s.FsFree
 		}
 		out = append(out, map[string]any{"name": s.Name, "type": typ, "unavailable": false, "blobCount": s.BlobCount,
-			"totalSizeInBytes": s.UsedBytes, "availableSpaceInBytes": free, "softQuota": nil})
+			"totalSizeInBytes": s.UsedBytes, "availableSpaceInBytes": free, "softQuota": softQuota(s.Quota)})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ---- blob store soft quota (Nexus: type spaceUsedQuota | spaceRemainingQuota, limit in MB) ----
+
+type uiQuota struct {
+	Type       string `json:"type"`
+	LimitBytes int64  `json:"limitBytes"`
+}
+
+type nexusQuota struct {
+	Type  string `json:"type"`
+	Limit int64  `json:"limit"` // MB, as Nexus's API
+}
+
+var quotaTypes = map[string]string{"spaceUsedQuota": "spaceUsedBytes", "spaceRemainingQuota": "spaceRemainingBytes"}
+
+func softQuota(q *uiQuota) *nexusQuota {
+	if q == nil {
+		return nil
+	}
+	for nx, cc := range quotaTypes {
+		if cc == q.Type {
+			return &nexusQuota{Type: nx, Limit: q.LimitBytes >> 20}
+		}
+	}
+	return nil
+}
+
+func (q *nexusQuota) ui() any {
+	if q == nil {
+		return nil
+	}
+	typ, ok := quotaTypes[q.Type]
+	if !ok {
+		typ = q.Type // the UI's own names are accepted too, and refused there otherwise
+	}
+	return uiQuota{Type: typ, LimitBytes: q.Limit << 20}
+}
+
+type blobStoreRow struct {
+	Name      string   `json:"name"`
+	Type      string   `json:"type"`
+	BlobCount int64    `json:"blobCount"`
+	UsedBytes int64    `json:"usedBytes"`
+	FsFree    *int64   `json:"fsFree"`
+	Quota     *uiQuota `json:"quota"`
+	Violated  bool     `json:"quotaViolated"`
+}
+
+// quotaStatus: GET /blobstores/{name}/quota-status.
+func (h *Handler) quotaStatus(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.admin(w, r); !ok {
+		return
+	}
+	name := r.PathValue("name")
+	status, body := h.call(r, http.MethodGet, "/-/api/blobstores/"+url.PathEscape(name), nil)
+	if status != http.StatusOK {
+		writeUIError(w, status, body)
+		return
+	}
+	var s blobStoreRow
+	json.Unmarshal(body, &s)
+	msg := ""
+	if s.Violated {
+		msg = "Blob store " + name + " is over its soft quota"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"isViolation": s.Violated, "message": msg, "blobStoreName": name})
+}
+
+type fileBlobStoreBody struct {
+	Name      string      `json:"name"`
+	Path      string      `json:"path"`
+	SoftQuota *nexusQuota `json:"softQuota"`
+}
+
+func (h *Handler) createFileBlobStore(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.admin(w, r); !ok {
+		return
+	}
+	var b fileBlobStoreBody
+	if !decodeSmall(w, r, &b) {
+		return
+	}
+	if b.Path == b.Name { // Nexus's default, relative to its work directory: the default location here
+		b.Path = ""
+	}
+	status, body := h.call(r, http.MethodPost, "/-/api/blobstores", map[string]any{"name": b.Name, "path": b.Path, "type": "file", "quota": b.SoftQuota.ui()})
+	if status != http.StatusCreated {
+		writeUIError(w, status, body)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) updateFileBlobStore(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.admin(w, r); !ok {
+		return
+	}
+	var b fileBlobStoreBody
+	if !decodeSmall(w, r, &b) {
+		return
+	}
+	status, body := h.call(r, http.MethodPut, "/-/api/blobstores/"+url.PathEscape(r.PathValue("name")), map[string]any{"quota": b.SoftQuota.ui()})
+	if status != http.StatusOK {
+		writeUIError(w, status, body)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) tasks(w http.ResponseWriter, r *http.Request) {

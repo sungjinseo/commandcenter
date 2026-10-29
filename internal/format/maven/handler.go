@@ -180,7 +180,11 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 	if c == nil {
 		return repo.Errorf(http.StatusBadRequest, "%q is not a valid maven artifact path", p.Main)
 	}
-	if err := h.storeArtifact(ctx, rp, p, c, r.Body); err != nil {
+	body, err := repo.StrictBody(rp, p.Main, r.Header.Get("Content-Type"), r.Body)
+	if err != nil {
+		return err
+	}
+	if err := h.storeArtifact(ctx, rp, p, c, body); err != nil {
 		return err
 	}
 	if !strings.HasSuffix(p.Main, ".asc") { // signatures are sidecars, not components

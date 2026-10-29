@@ -28,6 +28,7 @@ const (
 	// host-root /.well-known/terraform.json points at ("" for the first
 	// terraform repository by name).
 	SettingTerraformDefaultRepository = "terraformDefaultRepository"
+	SettingDefaultRoles               = "defaultRoles" // roles every signed-in user holds (Nexus DefaultRoleRealm)
 )
 
 // Realm ids (Decision 3).
@@ -39,7 +40,7 @@ const (
 	RealmCrowd = "crowd" // password login against Atlassian Crowd
 )
 
-var knownRealms = map[string]bool{RealmLocal: true, RealmToken: true, RealmLDAP: true, RealmOIDC: true, RealmCrowd: true}
+var knownRealms = map[string]bool{RealmLocal: true, RealmToken: true, RealmLDAP: true, RealmOIDC: true, RealmCrowd: true, RealmRUT: true}
 
 // Realm is one entry of the ordered realm list.
 type Realm struct {
@@ -126,6 +127,8 @@ type Settings struct {
 	TerraformDefaultRepository string
 	UserTokens                 UserTokens
 	Crowd                      Crowd
+	RUT                        RUT
+	DefaultRoles               []string // granted to every signed-in principal in addition to its own roles
 }
 
 // DefaultSettings returns the values used for missing keys: today's behaviour.
@@ -139,9 +142,11 @@ func DefaultSettings() Settings {
 		Realms:             []Realm{{ID: RealmLocal, Enabled: true}, {ID: RealmToken, Enabled: true}},
 		LDAP:               DefaultLDAP(),
 		OIDC:               DefaultOIDC(),
+		RUT:                DefaultRUT(),
 		HTTP:               DefaultHTTP(),
 		TrustedCerts:       []string{},
 		Crowd:              DefaultCrowd(),
+		DefaultRoles:       []string{},
 	}
 }
 
@@ -253,12 +258,14 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 		{SettingSMTP, &s.SMTP},
 		{SettingLDAP, &s.LDAP},
 		{SettingOIDC, &s.OIDC},
+		{SettingRUT, &s.RUT},
 		{SettingHTTP, &s.HTTP},
 		{SettingMetricsAnonymous, &s.MetricsAnonymous},
 		{SettingTrustedCertificates, &s.TrustedCerts},
 		{SettingTerraformDefaultRepository, &s.TerraformDefaultRepository},
 		{SettingUserTokens, &s.UserTokens},
 		{SettingCrowd, &s.Crowd},
+		{SettingDefaultRoles, &s.DefaultRoles},
 	} {
 		if _, err := getSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return Settings{}, err
@@ -266,6 +273,9 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 	}
 	if s.Realms == nil {
 		s.Realms = []Realm{}
+	}
+	if s.DefaultRoles == nil {
+		s.DefaultRoles = []string{}
 	}
 	if s.TrustedCerts == nil {
 		s.TrustedCerts = []string{}
@@ -320,12 +330,14 @@ func saveSettings(ctx context.Context, q querier, s Settings) error {
 		{SettingSMTP, s.SMTP},
 		{SettingLDAP, s.LDAP},
 		{SettingOIDC, s.OIDC},
+		{SettingRUT, s.RUT},
 		{SettingHTTP, s.HTTP},
 		{SettingMetricsAnonymous, s.MetricsAnonymous},
 		{SettingTrustedCertificates, s.TrustedCerts},
 		{SettingTerraformDefaultRepository, s.TerraformDefaultRepository},
 		{SettingUserTokens, s.UserTokens},
 		{SettingCrowd, s.Crowd},
+		{SettingDefaultRoles, s.DefaultRoles},
 	} {
 		if err := setSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return err
@@ -451,6 +463,12 @@ func validateSettingValue(key string, b []byte) error {
 			return fmt.Errorf("%s: %w", key, err)
 		}
 		return ValidateOIDC(v)
+	case SettingRUT:
+		v := DefaultRUT()
+		if err := json.Unmarshal(b, &v); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
+		return ValidateRUT(v)
 	case SettingHTTP:
 		v := DefaultHTTP()
 		if err := json.Unmarshal(b, &v); err != nil {

@@ -1,6 +1,8 @@
 package meta
 
 import (
+	"bytes"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -49,5 +51,48 @@ func TestBlobStoreUpgradeFromSchema1(t *testing.T) {
 	}
 	if err := db.CreateBlobStore(ctx, BlobStore{Name: "bad", Type: BlobStoreS3}); err == nil {
 		t.Fatal("an s3 store without configuration was stored")
+	}
+}
+
+// The soft quota lives in the config column next to an S3 store's sealed
+// secret: setting it keeps the secret, rekeying keeps the quota.
+func TestBlobStoreQuotaStored(t *testing.T) {
+	db, err := Open(metatest.Target(t, filepath.Join(t.TempDir(), "meta.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.SetSecretKey(bytes.Repeat([]byte{1}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	q := &Quota{Type: QuotaSpaceUsed, LimitBytes: 10}
+	if err := db.CreateBlobStore(ctx, BlobStore{Name: "f", Path: "/f", Quota: q}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateBlobStore(ctx, BlobStore{Name: "s", Path: "/s", Type: BlobStoreS3, S3: &blob.S3Config{Bucket: "b", SecretKey: "s3-secret"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateBlobStore(ctx, BlobStore{Name: "bad", Path: "/b", Quota: &Quota{Type: "x", LimitBytes: 1}}); err == nil {
+		t.Fatal("invalid quota stored")
+	}
+	if err := db.SetBlobStoreQuota(ctx, "s", &Quota{Type: QuotaSpaceRemaining, LimitBytes: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetBlobStoreQuota(ctx, "nope", nil); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing store: %v", err)
+	}
+	if _, _, err := db.RotateSecretKey(ctx, bytes.Repeat([]byte{2}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	f, _ := db.GetBlobStore(ctx, "f")
+	s, err := db.GetBlobStore(ctx, "s")
+	if err != nil || f.Quota == nil || *f.Quota != *q || s.Quota == nil || s.Quota.Type != QuotaSpaceRemaining || s.S3.SecretKey != "s3-secret" {
+		t.Fatalf("f %+v s %+v %v", f.Quota, s, err)
+	}
+	if err := db.SetBlobStoreQuota(ctx, "f", nil); err != nil {
+		t.Fatal(err)
+	}
+	if f, _ := db.GetBlobStore(ctx, "f"); f.Quota != nil {
+		t.Fatalf("not removed: %+v", f.Quota)
 	}
 }

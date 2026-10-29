@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"commandcenter/internal/blob"
+	"commandcenter/internal/events"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/sysinfo"
@@ -30,6 +31,7 @@ func (u *UI) blobStoreRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/blobstores", u.listBlobStores)
 	mux.HandleFunc("POST /-/api/blobstores", u.createBlobStore)
 	mux.HandleFunc("GET /-/api/blobstores/{name}", u.getBlobStore)
+	mux.HandleFunc("PUT /-/api/blobstores/{name}", u.updateBlobStore)
 	mux.HandleFunc("DELETE /-/api/blobstores/{name}", u.deleteBlobStore)
 }
 
@@ -47,6 +49,8 @@ type blobStoreRequest struct {
 	Path string         `json:"path"`
 	Type string         `json:"type"`
 	S3   *blob.S3Config `json:"s3"`
+
+	Quota *meta.Quota `json:"quota"` // soft quota; null or absent is none
 }
 
 // blobStoreJSON is one store's wire shape. Path is the directory the store
@@ -64,6 +68,10 @@ type blobStoreJSON struct {
 	FsFree    *uint64 `json:"fsFree"`
 	RepoCount int     `json:"repoCount"`
 	Warning   string  `json:"warning,omitempty"`
+	// Quota is the soft quota (null when none); QuotaViolated whether the
+	// store is over it right now (writes are still accepted).
+	Quota         *meta.Quota `json:"quota"`
+	QuotaViolated bool        `json:"quotaViolated"`
 }
 
 // s3JSON is blob.S3Config without its secret: what GET shows.
@@ -95,15 +103,18 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 	if out.Type == "" {
 		out.Type = meta.BlobStoreFile
 	}
+	out.Quota = bs.Quota
 	if bs.Type == meta.BlobStoreS3 && bs.S3 != nil {
 		c := bs.S3
 		out.S3 = &s3JSON{Bucket: c.Bucket, Prefix: c.Prefix, Region: c.Region, Endpoint: c.Endpoint,
 			PathStyle: c.PathStyle, AccessKey: c.AccessKey, SecretSet: c.SecretKey != "", SSE: c.SSE}
+		out.QuotaViolated, _ = quotaState(out)
 		return out, nil
 	}
 	if total, free, ok := sysinfo.DiskUsage(filepath.Join(root, "blobs")); ok {
 		out.FsTotal, out.FsFree = &total, &free
 	}
+	out.QuotaViolated, _ = quotaState(out)
 	dd, err1 := realPath(u.DataDir)
 	rt, err2 := realPath(root)
 	if err1 == nil && err2 == nil && !isSubpath(dd, rt) {
@@ -166,7 +177,11 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.writeBlobStoreError(w, r, err)
 		return
 	}
-	row := meta.BlobStore{Name: body.Name, Path: filepath.Join("blobstores", body.Name), Type: body.Type}
+	row := meta.BlobStore{Name: body.Name, Path: filepath.Join("blobstores", body.Name), Type: body.Type, Quota: body.Quota}
+	if err := meta.ValidateQuota(body.Quota); err != nil {
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{err.Error()}})
+		return
+	}
 	switch {
 	case filepath.IsAbs(body.Path):
 		row.Path = filepath.Clean(body.Path)
@@ -252,6 +267,104 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, v)
+}
+
+// updateBlobStore changes the soft quota, the one mutable field: {"quota":
+// {type, limitBytes}} sets it, {"quota": null} removes it.
+func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+		return
+	}
+	var body struct {
+		Quota *meta.Quota `json:"quota"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	name := r.PathValue("name")
+	if err := meta.ValidateQuota(body.Quota); err != nil {
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{err.Error()}})
+		return
+	}
+	if err := u.DB.SetBlobStoreQuota(r.Context(), name, body.Quota); err != nil {
+		u.writeBlobStoreError(w, r, err)
+		return
+	}
+	stored, err := u.DB.GetBlobStore(r.Context(), name)
+	if err != nil {
+		u.writeBlobStoreError(w, r, err)
+		return
+	}
+	detail := "quota removed"
+	if q := stored.Quota; q != nil {
+		detail = fmt.Sprintf("quota %s %d", q.Type, q.LimitBytes)
+	}
+	u.emit(r, "blobstore.update", "", name, detail)
+	v, err := u.blobStoreView(r.Context(), stored)
+	if err != nil {
+		u.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// quotaState evaluates v's soft quota: spaceUsedBytes against the bytes its
+// repositories use, spaceRemainingBytes against the free space of its
+// filesystem (unknown for an S3 store: never violated). The message says
+// which.
+func quotaState(v blobStoreJSON) (violated bool, msg string) {
+	q := v.Quota
+	switch {
+	case q == nil:
+		return false, "no quota"
+	case q.Type == meta.QuotaSpaceUsed:
+		return v.UsedBytes > q.LimitBytes, fmt.Sprintf("%d of %d bytes used", v.UsedBytes, q.LimitBytes)
+	case v.FsFree == nil:
+		return false, "free space unknown"
+	}
+	return int64(*v.FsFree) < q.LimitBytes, fmt.Sprintf("%d bytes free, %d required", *v.FsFree, q.LimitBytes)
+}
+
+// quotaChecks is one "Blob store quota: <name>" health check per store with a
+// quota. A store found over its quota, or back within it, records a
+// blobstore.quota event once per flip (the System actor).
+func (u *UI) quotaChecks(ctx context.Context) []check {
+	rows, err := u.DB.ListBlobStores(ctx)
+	if err != nil {
+		return []check{runCheck("Blob store quota", func() (bool, string) { return false, "cannot list blob stores: " + err.Error() })}
+	}
+	var out []check
+	for _, bs := range rows {
+		if bs.Quota == nil {
+			continue
+		}
+		out = append(out, runCheck("Blob store quota: "+bs.Name, func() (bool, string) {
+			v, err := u.blobStoreView(ctx, bs)
+			if err != nil {
+				return false, "cannot read usage: " + err.Error()
+			}
+			violated, msg := quotaState(v)
+			u.quotaMu.Lock()
+			flipped := violated != u.quotaViolated[bs.Name]
+			if u.quotaViolated == nil {
+				u.quotaViolated = map[string]bool{}
+			}
+			u.quotaViolated[bs.Name] = violated
+			u.quotaMu.Unlock()
+			if flipped && u.Events != nil {
+				state := "violated: "
+				if !violated {
+					state = "within limit: "
+				}
+				u.Events.Emit("blobstore.quota", events.System, "", bs.Name, state+msg)
+			}
+			if violated {
+				return false, "soft quota exceeded: " + msg
+			}
+			return true, msg
+		}))
+	}
+	return out
 }
 
 // errStoreInUse refuses deleting a store a repository uses.
