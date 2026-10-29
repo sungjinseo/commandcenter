@@ -7,9 +7,11 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -68,8 +70,8 @@ func sha1hex(b []byte) string {
 func manifest(files map[string][]byte) []byte {
 	var b strings.Builder
 	b.WriteString("1700000000\n")
-	for name, body := range files {
-		b.WriteString(name + ": " + md5hex(body) + "\n")
+	for _, name := range slices.Sorted(maps.Keys(files)) { // sorted, as conan writes it: map order would vary the md5
+		b.WriteString(name + ": " + md5hex(files[name]) + "\n")
 	}
 	return []byte(b.String())
 }
