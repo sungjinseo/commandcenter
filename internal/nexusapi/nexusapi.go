@@ -80,7 +80,15 @@ func (h *Handler) init() {
 	m.HandleFunc("GET "+p+"/security/users", h.users)
 	m.HandleFunc("GET "+p+"/security/roles", h.roles)
 	m.HandleFunc("GET "+p+"/blobstores", h.blobStores)
-	m.HandleFunc("GET "+p+"/blobstores/{name}/quota-status", h.quotaStatus)
+	// {name}/{sub}, not {name}/quota-status: the literal form would conflict
+	// with GET /blobstores/group/{name} in the mux (neither is more specific).
+	m.HandleFunc("GET "+p+"/blobstores/{name}/{sub}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("sub") != "quota-status" {
+			writeMessage(w, http.StatusNotFound, "not found")
+			return
+		}
+		h.quotaStatus(w, r)
+	})
 	m.HandleFunc("POST "+p+"/blobstores/file", h.createFileBlobStore)
 	m.HandleFunc("PUT "+p+"/blobstores/file/{name}", h.updateFileBlobStore)
 	m.HandleFunc("GET /service/rest/swagger.json", h.swagger) // outside the prefix; the server routes it here
@@ -90,6 +98,7 @@ func (h *Handler) init() {
 	m.HandleFunc("POST "+p+"/security/ssl/truststore", h.sslAdd)
 	m.HandleFunc("DELETE "+p+"/security/ssl/truststore/{id}", h.sslRemove)
 	h.userTokenRoutes(m, p)
+	h.blobGroupRoutes(m, p)
 	m.HandleFunc(p+"/", func(w http.ResponseWriter, r *http.Request) { writeMessage(w, http.StatusNotFound, "not found") })
 	h.mux = m
 }
@@ -1295,6 +1304,9 @@ func (h *Handler) blobStores(w http.ResponseWriter, r *http.Request) {
 		typ := "File"
 		if s.Type == meta.BlobStoreS3 {
 			typ = "S3"
+		}
+		if s.Type == meta.BlobStoreGroup {
+			typ = "Group"
 		}
 		var free int64
 		if s.FsFree != nil {

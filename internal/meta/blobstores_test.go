@@ -2,6 +2,7 @@ package meta
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -94,5 +95,33 @@ func TestBlobStoreQuotaStored(t *testing.T) {
 	}
 	if f, _ := db.GetBlobStore(ctx, "f"); f.Quota != nil {
 		t.Fatalf("not removed: %+v", f.Quota)
+	}
+}
+
+// A group keeps its soft quota when its members change, and a quota set on
+// a group survives the round trip.
+func TestBlobStoreGroupKeepsQuota(t *testing.T) {
+	db := openTest(t)
+	ctx := context.Background()
+	for _, n := range []string{"a", "b"} {
+		if err := db.CreateBlobStore(ctx, BlobStore{Name: n, Path: "/tmp/" + n}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q := &Quota{Type: "spaceUsedBytes", LimitBytes: 1 << 30}
+	g := BlobStore{Name: "g", Path: "/tmp/g", Type: BlobStoreGroup, Quota: q,
+		Group: &blob.GroupConfig{Members: []blob.GroupMember{{Name: "a"}}, FillPolicy: "roundRobin"}}
+	if err := db.CreateBlobStore(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateBlobStoreGroup(ctx, "g", blob.GroupConfig{Members: []blob.GroupMember{{Name: "a"}, {Name: "b"}}, FillPolicy: "writeToFirst"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetBlobStore(ctx, "g")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Quota == nil || *got.Quota != *q || got.Group == nil || len(got.Group.Members) != 2 || got.Group.FillPolicy != "writeToFirst" {
+		t.Fatalf("group after update: quota %+v group %+v", got.Quota, got.Group)
 	}
 }

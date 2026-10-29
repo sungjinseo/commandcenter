@@ -41,13 +41,17 @@ type object struct {
 	data []byte
 	mod  time.Time
 	sse  string
+	kms  string // x-amz-server-side-encryption-aws-kms-key-id
 }
 
 type upload struct {
 	key   string
 	sse   string
+	kms   string
 	parts map[int][]byte
 }
+
+const kmsHeader = "x-amz-server-side-encryption-aws-kms-key-id"
 
 // New starts a fake bucket "test" that t stops.
 func New(t testing.TB) *Server {
@@ -88,6 +92,17 @@ func (s *Server) SSE(key string) string {
 	defer s.mu.Unlock()
 	if o := s.objects[key]; o != nil {
 		return o.sse
+	}
+	return ""
+}
+
+// KMSKey returns the x-amz-server-side-encryption-aws-kms-key-id an object
+// was stored with.
+func (s *Server) KMSKey(key string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if o := s.objects[key]; o != nil {
+		return o.kms
 	}
 	return ""
 }
@@ -150,7 +165,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		id := hex.EncodeToString([]byte(fmt.Sprintf("up%d", len(s.uploads)+1)))
-		s.uploads[id] = &upload{key: key, sse: r.Header.Get("x-amz-server-side-encryption"), parts: map[int][]byte{}}
+		s.uploads[id] = &upload{key: key, sse: r.Header.Get("x-amz-server-side-encryption"), kms: r.Header.Get(kmsHeader), parts: map[int][]byte{}}
 		w.Header().Set("Content-Type", "application/xml")
 		fmt.Fprintf(w, `<InitiateMultipartUploadResult><Bucket>%s</Bucket><Key>%s</Key><UploadId>%s</UploadId></InitiateMultipartUploadResult>`, bucket, key, id)
 	case r.Method == http.MethodPut && q.Has("uploadId"):
@@ -189,7 +204,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			data = append(data, part...)
 		}
 		delete(s.uploads, q.Get("uploadId"))
-		s.objects[key] = &object{data: data, mod: time.Now(), sse: up.sse}
+		s.objects[key] = &object{data: data, mod: time.Now(), sse: up.sse, kms: up.kms}
 		w.Header().Set("Content-Type", "application/xml")
 		fmt.Fprintf(w, `<CompleteMultipartUploadResult><Key>%s</Key><ETag>%s</ETag></CompleteMultipartUploadResult>`, key, etag(data))
 	case r.Method == http.MethodDelete && q.Has("uploadId"):
@@ -204,7 +219,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusBadRequest, "MissingContentLength", "Content-Length required")
 			return
 		}
-		s.objects[key] = &object{data: body, mod: time.Now(), sse: r.Header.Get("x-amz-server-side-encryption")}
+		s.objects[key] = &object{data: body, mod: time.Now(), sse: r.Header.Get("x-amz-server-side-encryption"), kms: r.Header.Get(kmsHeader)}
 		w.Header().Set("ETag", etag(body))
 		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodDelete:

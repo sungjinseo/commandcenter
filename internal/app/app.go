@@ -288,10 +288,22 @@ func openBlobStores(cfg *config.Config, db *meta.DB) (map[string]*blob.Store, er
 		return nil, fmt.Errorf("list blob stores: %w", err)
 	}
 	stores := make(map[string]*blob.Store, len(rows))
+	var groups []meta.BlobStore // opened once their members are
 	for _, bs := range rows {
+		if bs.Type == meta.BlobStoreGroup {
+			groups = append(groups, bs)
+			continue
+		}
 		s, err := repo.OpenStore(cfg.DataDir, bs)
 		if err != nil {
 			return nil, fmt.Errorf("open blob store %q at %s: %w", bs.Name, repo.StoreRoot(cfg.DataDir, bs), err)
+		}
+		stores[bs.Name] = s
+	}
+	for _, bs := range groups {
+		s, err := repo.OpenGroup(cfg.DataDir, bs, func(name string) *blob.Store { return stores[name] })
+		if err != nil {
+			return nil, fmt.Errorf("open blob store group %q: %w", bs.Name, err)
 		}
 		stores[bs.Name] = s
 	}
@@ -427,7 +439,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		}
 		return ""
 	}
-	registry.HasStore = store.HasStore
+	registry.HasStore = store.Routable // a group member's blobs are routed by its group
 	// A repository naming a missing store cannot read or write blobs; GC
 	// keeps its blobs everywhere. Say so once per repository; do not refuse
 	// to start.
@@ -788,6 +800,9 @@ func (a *App) GC(ctx context.Context, minAge time.Duration) (int, int64, error) 
 			errs = append(errs, err)
 			break
 		}
+		if a.Store.GroupOf(name) != "" {
+			continue // collected with its group
+		}
 		n, b, err := a.GCStore(ctx, name, minAge)
 		total, freed = total+n, freed+b
 		if err != nil {
@@ -801,9 +816,19 @@ func (a *App) GC(ctx context.Context, minAge time.Duration) (int, int64, error) 
 // (not the default one, see GCStore) alive: those repo.StoreOf assigns to it,
 // plus every repository whose store cannot be resolved (defense in depth: GC
 // never deletes for such a repository, whichever store its blobs ended up in).
+// For a group, the repositories that name one of its members count too
+// (none should: only a config file or a race could make one).
 func (a *App) gcScope(storeName string) []string {
 	snap := a.Registry.Snapshot()
-	return append(repo.ReposForStore(snap, storeName), repo.OrphanRepos(snap, a.Store.HasStore)...)
+	out := append(repo.ReposForStore(snap, storeName), repo.OrphanRepos(snap, a.Store.HasStore)...)
+	if bs := a.Store.StoreByName(storeName); bs != nil {
+		if cfg, ok := bs.Group(); ok {
+			for _, m := range cfg.Members {
+				out = append(out, repo.ReposForStore(snap, m.Name)...)
+			}
+		}
+	}
+	return out
 }
 
 // GCStore removes blobs that no asset in the store's own repositories
@@ -816,7 +841,8 @@ func (a *App) gcScope(storeName string) []string {
 // there, and those may be the only copies (QA N-30).
 // The age guard protects uploads written but not yet recorded; the ModTime and
 // in-use re-check immediately before removal protects uploads that raced the
-// walk.
+// walk. A group is collected member by member, each copy of a blob on its
+// own age, with the group's scope; a member is not collected on its own.
 func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duration) (int, int64, error) {
 	if storeName == "" {
 		storeName = repo.DefaultStore
@@ -824,6 +850,9 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 	bs := a.Store.StoreByName(storeName)
 	if bs == nil {
 		return 0, 0, fmt.Errorf("unknown blob store %q", storeName)
+	}
+	if g := a.Store.GroupOf(storeName); g != "" {
+		return 0, 0, fmt.Errorf("blob store %q is a member of the group %q: compact the group", storeName, g)
 	}
 	// The walk below sees only blobs; temp files a killed process left are swept here.
 	if n, err := bs.SweepTmp(); err != nil {
@@ -837,6 +866,30 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 		inUse = func(sha string) (bool, error) { return a.DB.BlobInUseInRepos(ctx, sha, repos) }
 	}
 	cutoff := time.Now().Add(-minAge)
+	cfg, isGroup := bs.Group()
+	if !isGroup {
+		return gcWalk(bs, inUse, cutoff)
+	}
+	removed, freed := 0, int64(0)
+	var errs []error
+	for _, m := range cfg.Members {
+		ms := a.Store.StoreByName(m.Name)
+		if ms == nil {
+			errs = append(errs, fmt.Errorf("member %q is not open", m.Name))
+			continue
+		}
+		ms.SweepTmp() // best effort, as above: a member's commits across filesystems spool there
+		n, b, err := gcWalk(ms, inUse, cutoff)
+		removed, freed = removed+n, freed+b
+		if err != nil {
+			errs = append(errs, fmt.Errorf("member %q: %w", m.Name, err))
+		}
+	}
+	return removed, freed, errors.Join(errs...)
+}
+
+// gcWalk removes the blobs of bs that are older than cutoff and not inUse.
+func gcWalk(bs *blob.Store, inUse func(string) (bool, error), cutoff time.Time) (int, int64, error) {
 	removed, freed := 0, int64(0)
 	err := bs.Walk(func(sha string, mod time.Time) error {
 		if mod.After(cutoff) {

@@ -139,6 +139,9 @@ CREATE TABLE IF NOT EXISTS user_tokens(
 //	   proxy's blocked paths to the remote and drop "selector:" privileges.
 //	4: user_tokens: an older build would not create the table, and would
 //	   keep a deleted user's user token row.
+//	4: blob_stores rows of type "group" (blob store groups): an older build
+//	   would open a group as an empty directory and compact its members as
+//	   stores no repository uses, deleting every blob they hold.
 const schemaVersion = 4
 
 // Open opens the metadata database and creates or upgrades its tables:

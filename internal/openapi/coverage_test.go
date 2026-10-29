@@ -125,7 +125,7 @@ func TestDocument(t *testing.T) {
 	if op == nil || len(op["parameters"].([]any)) != 2 {
 		t.Fatalf("packages route: %v", op)
 	}
-	if doc.Paths[nexusapi.Prefix+"/blobstores/{name}/quota-status"]["get"] == nil || doc.Paths["/-/api/realms/rutauth"]["put"] == nil {
+	if doc.Paths[nexusapi.Prefix+"/blobstores/{name}/{sub}"]["get"] == nil || doc.Paths["/-/api/realms/rutauth"]["put"] == nil {
 		t.Fatal("new routes missing")
 	}
 	for p, ops := range doc.Paths {

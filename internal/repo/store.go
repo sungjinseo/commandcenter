@@ -115,9 +115,12 @@ func StoreRoot(dataDir string, bs meta.BlobStore) string {
 }
 
 // OpenStore opens a stored blob store at its StoreRoot: a directory store,
-// or for an S3 row the bucket it names.
+// or for an S3 row the bucket it names. A group opens with OpenGroup.
 func OpenStore(dataDir string, bs meta.BlobStore) (*blob.Store, error) {
 	root := StoreRoot(dataDir, bs)
+	if bs.Type == meta.BlobStoreGroup {
+		return nil, fmt.Errorf("blob store %q is a group: open it with OpenGroup", bs.Name)
+	}
 	if bs.Type == meta.BlobStoreS3 {
 		if bs.S3 == nil {
 			return nil, fmt.Errorf("blob store %q has no s3 configuration", bs.Name)
@@ -126,6 +129,36 @@ func OpenStore(dataDir string, bs meta.BlobStore) (*blob.Store, error) {
 	}
 	return blob.Open(root)
 }
+
+// OpenGroup opens a group row at its StoreRoot over the live member stores
+// lookup returns by name.
+func OpenGroup(dataDir string, bs meta.BlobStore, lookup func(string) *blob.Store) (*blob.Store, error) {
+	if bs.Group == nil {
+		return nil, fmt.Errorf("blob store %q has no group configuration", bs.Name)
+	}
+	return blob.OpenGroup(StoreRoot(dataDir, bs), *bs.Group, lookup)
+}
+
+// GroupOf returns the name of the group that has the named store as a
+// member, "" when none has.
+func (s *Store) GroupOf(name string) string {
+	s.blobMu.RLock()
+	defer s.blobMu.RUnlock()
+	for g, bs := range s.Blobs {
+		if cfg, ok := bs.Group(); ok {
+			for _, m := range cfg.Members {
+				if m.Name == name {
+					return g
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// Routable reports whether a repository may name the store: it exists and
+// is not a group member (whose blobs the group routes).
+func (s *Store) Routable(name string) bool { return s.HasStore(name) && s.GroupOf(name) == "" }
 
 // blobsFor resolves a blob-store name ("" is the default) to its *blob.Store.
 // An unknown name is an error: the caller must not fall back to another store,

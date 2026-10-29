@@ -3,6 +3,7 @@
 package blob
 
 import (
+	"context"
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
@@ -49,7 +50,7 @@ type backend interface {
 	open(sha string) (File, error)
 	stat(sha string) (Info, error)
 	remove(sha string) error
-	walk(fn func(sha string, modTime time.Time) error) error
+	walk(fn func(sha string, size int64, modTime time.Time) error) error
 	check() error
 }
 
@@ -241,7 +242,41 @@ func (d dir) put(tmp string, sums Sums) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
-	return os.Rename(tmp, dst)
+	err := rename(tmp, dst)
+	if errors.Is(err, syscall.EXDEV) { // a group's temp file, on another filesystem than this member
+		return d.copyIn(tmp, dst)
+	}
+	return err
+}
+
+// rename is os.Rename; a test makes it fail across filesystems.
+var rename = os.Rename
+
+// copyIn copies src to dst through a temp file in d's own tmp directory, for
+// a src that cannot be renamed into d because it is on another filesystem.
+func (d dir) copyIn(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	f, err := os.CreateTemp(filepath.Join(d.root, "tmp"), tmpPrefix+"*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name()) // a no-op after the rename
+	if _, err := io.Copy(f, in); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), dst)
 }
 
 // Open opens the blob with the given SHA-256 for reading.
@@ -276,12 +311,22 @@ func (d dir) remove(sha string) error {
 	return err
 }
 
-// Walk calls fn for every stored blob.
+// Walk calls fn for every stored blob (for a group: every member's copy).
 func (s *Store) Walk(fn func(sha string, modTime time.Time) error) error {
-	return s.be.walk(fn)
+	return s.be.walk(func(sha string, _ int64, mod time.Time) error { return fn(sha, mod) })
 }
 
-func (d dir) walk(fn func(sha string, modTime time.Time) error) error {
+// Usage walks the store and returns how many blobs it holds and their bytes
+// (for a group: every member's copies); it stops when ctx is done.
+func (s *Store) Usage(ctx context.Context) (blobs, bytes int64, err error) {
+	err = s.be.walk(func(_ string, size int64, _ time.Time) error {
+		blobs, bytes = blobs+1, bytes+size
+		return ctx.Err()
+	})
+	return blobs, bytes, err
+}
+
+func (d dir) walk(fn func(sha string, size int64, modTime time.Time) error) error {
 	return filepath.WalkDir(filepath.Join(d.root, "blobs", "sha256"), func(p string, e fs.DirEntry, err error) error {
 		if err != nil || e.IsDir() || !validSHA(e.Name()) {
 			return err
@@ -290,7 +335,7 @@ func (d dir) walk(fn func(sha string, modTime time.Time) error) error {
 		if err != nil {
 			return err
 		}
-		return fn(e.Name(), info.ModTime())
+		return fn(e.Name(), info.Size(), info.ModTime())
 	})
 }
 

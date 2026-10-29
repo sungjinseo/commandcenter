@@ -37,12 +37,43 @@ type S3Config struct {
 	LegacyAccessKey string `json:"accessKey,omitempty"`
 	LegacySecretKey string `json:"secretKey,omitempty"`
 	SSE             string `json:"sse,omitempty"` // x-amz-server-side-encryption on every upload: "AES256" or "aws:kms"; empty: none
+	// Encryption is server-side encryption in Nexus's shape; Validate sets
+	// SSE from it, and its kmsKeyId goes with SSE-KMS uploads.
+	Encryption *S3Encryption `json:"encryption,omitempty"`
+	// Failover lists buckets in other regions that hold a replica of this
+	// one (the provider's cross-region replication). Reads try them in order
+	// while this bucket's endpoint does not answer or answers 5xx; writes,
+	// deletes and listings stay on this bucket. They share the prefix,
+	// credentials and path style.
+	Failover []S3Failover `json:"failover,omitempty"`
 }
+
+// S3Encryption is an S3 store's server-side encryption.
+type S3Encryption struct {
+	Type     string `json:"type"`               // "s3ManagedEncryption" (SSE-S3, AES256) or "kmsManagedEncryption" (SSE-KMS)
+	KMSKeyID string `json:"kmsKeyId,omitempty"` // SSE-KMS key id, ARN or alias; empty: the bucket's AWS managed key
+}
+
+// S3Failover is one replica bucket a store reads from while its primary is
+// down.
+type S3Failover struct {
+	Region   string `json:"region"`             // empty: the primary's region
+	Bucket   string `json:"bucket"`             //
+	Endpoint string `json:"endpoint,omitempty"` // empty: the region's AWS endpoint
+}
+
+// sseTypes maps S3Encryption.Type to the x-amz-server-side-encryption value.
+var sseTypes = map[string]string{"s3ManagedEncryption": "AES256", "kmsManagedEncryption": "aws:kms"}
 
 var (
 	s3BucketRE = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 	s3PrefixRE = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
+	s3KMSKeyRE = regexp.MustCompile(`^[A-Za-z0-9:/_+=.,@-]+$`)
+	s3RegionRE = regexp.MustCompile(`^[a-z0-9-]{1,64}$`)
 )
+
+// maxS3Failover is how many failover buckets a store may list.
+const maxS3Failover = 5
 
 // Validate reports the first thing wrong with c, after trimming the slashes
 // of its prefix. It does not touch the bucket.
@@ -57,12 +88,48 @@ func (c *S3Config) Validate() error {
 		return errors.New(`sse must be "AES256", "aws:kms" or empty`)
 	case (c.AccessKey == "") != (c.SecretKey == ""):
 		return errors.New("accessKey and secretKey go together (leave both empty for the AWS_* environment)")
+	case len(c.Failover) > maxS3Failover:
+		return fmt.Errorf("failover lists at most %d buckets", maxS3Failover)
 	}
-	if c.Endpoint != "" {
-		u, err := url.Parse(c.Endpoint)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.User != nil {
-			return errors.New("endpoint must be an http(s) URL with a host and nothing after the path")
+	if err := validEndpoint(c.Endpoint); err != nil {
+		return errors.New("endpoint " + err.Error())
+	}
+	if e := c.Encryption; e != nil {
+		sse := sseTypes[e.Type]
+		switch {
+		case sse == "":
+			return errors.New(`encryption.type must be "s3ManagedEncryption" or "kmsManagedEncryption"`)
+		case c.SSE != "" && c.SSE != sse:
+			return fmt.Errorf("sse %q and encryption.type %q disagree", c.SSE, e.Type)
+		case e.KMSKeyID != "" && sse != "aws:kms":
+			return errors.New("encryption.kmsKeyId goes with kmsManagedEncryption")
+		case e.KMSKeyID != "" && (len(e.KMSKeyID) > 2048 || !s3KMSKeyRE.MatchString(e.KMSKeyID)):
+			return errors.New("encryption.kmsKeyId must be a KMS key id, ARN or alias")
 		}
+		c.SSE = sse
+	}
+	for i, f := range c.Failover {
+		switch {
+		case !s3BucketRE.MatchString(f.Bucket):
+			return fmt.Errorf("failover[%d].bucket must be 3 to 63 lower-case letters, digits, dots or hyphens", i)
+		case f.Region != "" && !s3RegionRE.MatchString(f.Region):
+			return fmt.Errorf("failover[%d].region must be a region name such as eu-west-1", i)
+		}
+		if err := validEndpoint(f.Endpoint); err != nil {
+			return fmt.Errorf("failover[%d].endpoint %v", i, err)
+		}
+	}
+	return nil
+}
+
+// validEndpoint checks an S3 endpoint; empty is the region's AWS endpoint.
+func validEndpoint(ep string) error {
+	if ep == "" {
+		return nil
+	}
+	u, err := url.Parse(ep)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.User != nil {
+		return errors.New("must be an http(s) URL with a host and nothing after the path")
 	}
 	return nil
 }
@@ -80,6 +147,7 @@ type s3 struct {
 	base                          *url.URL // scheme://host, with /<bucket> for path style
 	client                        *http.Client
 	now                           func() time.Time
+	failover                      []*s3 // replicas open and stat read from while this one is unavailable
 }
 
 // OpenS3 opens a store whose blobs live in the bucket cfg describes;
@@ -88,6 +156,27 @@ func OpenS3(root string, cfg S3Config) (*Store, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	be, err := newS3(cfg)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range cfg.Failover {
+		fc := cfg
+		fc.Bucket, fc.Endpoint, fc.Failover = f.Bucket, f.Endpoint, nil
+		if f.Region != "" {
+			fc.Region = f.Region
+		}
+		fb, err := newS3(fc)
+		if err != nil {
+			return nil, err
+		}
+		be.failover = append(be.failover, fb)
+	}
+	return open(root, be)
+}
+
+// newS3 is the backend for the bucket of cfg, which passed Validate.
+func newS3(cfg S3Config) (*s3, error) {
 	if cfg.Region == "" {
 		cfg.Region = "us-east-1"
 	}
@@ -112,7 +201,7 @@ func OpenS3(root string, cfg S3Config) (*Store, error) {
 	// endpoint, which do reports, and following one off the host would
 	// relay another server's reply as the object.
 	be.client = &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return open(root, be)
+	return be, nil
 }
 
 // endpointURL is the endpoint c targets in one spelling: the region's AWS
@@ -171,21 +260,51 @@ func (s *s3) request(method, key string, q url.Values, hdr map[string]string, bo
 	return r, nil
 }
 
-// sse is the server-side encryption header for uploads, if configured.
+// sse is the server-side encryption headers for uploads, if configured.
 func (s *s3) sse() map[string]string {
 	if s.cfg.SSE == "" {
 		return nil
 	}
-	return map[string]string{"x-amz-server-side-encryption": s.cfg.SSE}
+	h := map[string]string{"x-amz-server-side-encryption": s.cfg.SSE}
+	if e := s.cfg.Encryption; e != nil && e.KMSKeyID != "" && s.cfg.SSE == "aws:kms" {
+		h["x-amz-server-side-encryption-aws-kms-key-id"] = e.KMSKeyID
+	}
+	return h
+}
+
+// unavailable marks an error a failover bucket may answer instead: the
+// endpoint did not answer, or answered 5xx.
+type unavailable struct{ error }
+
+func (e unavailable) Unwrap() error { return e.error }
+
+func isUnavailable(err error) bool {
+	var u unavailable
+	return errors.As(err, &u)
+}
+
+// withFailover runs fn on s and, while that fails as unavailable, on each
+// failover bucket in turn; with none answering it returns s's error.
+func withFailover[T any](s *s3, fn func(*s3) (T, error)) (T, error) {
+	v, err := fn(s)
+	if !isUnavailable(err) {
+		return v, err
+	}
+	for _, f := range s.failover {
+		if fv, ferr := fn(f); ferr == nil {
+			return fv, nil
+		}
+	}
+	return v, err
 }
 
 // do sends r and returns the response when its status is one of ok, else
 // an error naming the status and S3's message. A 404 is ErrNotFound; a full
-// store (507, MinIO) is ErrDiskFull.
+// store (507, MinIO) is ErrDiskFull; no answer or another 5xx is unavailable.
 func (s *s3) do(r *http.Request, ok ...int) (*http.Response, error) {
 	resp, err := s.client.Do(r)
 	if err != nil {
-		return nil, fmt.Errorf("s3 %s %s: %w", r.Method, r.URL.Path, err)
+		return nil, unavailable{fmt.Errorf("s3 %s %s: %w", r.Method, r.URL.Path, err)}
 	}
 	for _, c := range ok {
 		if resp.StatusCode == c {
@@ -200,6 +319,9 @@ func (s *s3) do(r *http.Request, ok ...int) (*http.Response, error) {
 		return nil, fmt.Errorf("%w: %v", ErrNotFound, err)
 	case http.StatusInsufficientStorage:
 		return nil, fmt.Errorf("%w: %v", ErrDiskFull, err)
+	}
+	if resp.StatusCode >= 500 {
+		return nil, unavailable{err}
 	}
 	return nil, err
 }
@@ -353,6 +475,12 @@ func (s *s3) get(key string, from, to int64) (io.ReadCloser, int64, error) {
 }
 
 func (s *s3) open(sha string) (File, error) {
+	return withFailover(s, func(b *s3) (File, error) { return b.openOne(sha) })
+}
+
+// openOne opens the object in this bucket; the file's later Range GETs go
+// to the same bucket.
+func (s *s3) openOne(sha string) (File, error) {
 	body, size, err := s.get(s.key(sha), 0, -1)
 	if err != nil {
 		return nil, err
@@ -361,6 +489,10 @@ func (s *s3) open(sha string) (File, error) {
 }
 
 func (s *s3) stat(sha string) (Info, error) {
+	return withFailover(s, func(b *s3) (Info, error) { return b.statOne(sha) })
+}
+
+func (s *s3) statOne(sha string) (Info, error) {
 	r, err := s.request(http.MethodHead, s.key(sha), nil, nil, nil, 0, emptySHA256)
 	if err != nil {
 		return Info{}, err
@@ -415,10 +547,11 @@ type s3Listing struct {
 	Contents              []struct {
 		Key          string    `xml:"Key"`
 		LastModified time.Time `xml:"LastModified"`
+		Size         int64     `xml:"Size"`
 	} `xml:"Contents"`
 }
 
-func (s *s3) walk(fn func(sha string, modTime time.Time) error) error {
+func (s *s3) walk(fn func(sha string, size int64, modTime time.Time) error) error {
 	token := ""
 	for {
 		page, err := s.list(1000, token)
@@ -430,7 +563,7 @@ func (s *s3) walk(fn func(sha string, modTime time.Time) error) error {
 			if !validSHA(sha) {
 				continue
 			}
-			if err := fn(sha, o.LastModified); err != nil {
+			if err := fn(sha, o.Size, o.LastModified); err != nil {
 				return err
 			}
 		}

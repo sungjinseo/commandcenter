@@ -111,7 +111,7 @@ func TestBlobStoreS3Rejected(t *testing.T) {
 		mutate func(m map[string]any)
 		want   string
 	}{
-		"unknown type":    {func(m map[string]any) { m["type"] = "gcs" }, `must be "file" or "s3"`},
+		"unknown type":    {func(m map[string]any) { m["type"] = "gcs" }, `must be "file", "s3" or "group"`},
 		"no s3":           {func(m map[string]any) { delete(m, "s3") }, "needs"},
 		"no bucket":       {func(m map[string]any) { m["s3"].(map[string]any)["bucket"] = "" }, "bucket"},
 		"bad endpoint":    {func(m map[string]any) { m["s3"].(map[string]any)["endpoint"] = "minio:9000" }, "endpoint"},

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"commandcenter/internal/blob"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 )
@@ -49,8 +50,20 @@ func runRecalc(ctx context.Context, s *Service, t meta.Task, _ string, log *RunL
 			return summary{}, err
 		}
 		bs := s.Store.StoreByName(name)
-		var stored int64
-		if err := bs.Walk(func(string, time.Time) error { stored++; return ctx.Err() }); err != nil {
+		if g := s.Store.GroupOf(name); g != "" {
+			if len(names) > 1 {
+				continue // counted with its group
+			}
+			n, b, err := bs.Usage(ctx)
+			if err != nil {
+				return summary{}, fmt.Errorf("blob store %q: %w", name, err)
+			}
+			total += n
+			log.Infof("%s: %d blobs (%d bytes) in the store, a member of the group %q, whose repositories it serves", name, n, b, g)
+			continue
+		}
+		stored, err := groupUsage(ctx, s, name, bs, log)
+		if err != nil {
 			return summary{}, fmt.Errorf("blob store %q: %w", name, err)
 		}
 		var used, bytes int64
@@ -68,6 +81,32 @@ func runRecalc(ctx context.Context, s *Service, t meta.Task, _ string, log *RunL
 	sum := summary{msg: fmt.Sprintf("%d blobs in %d blob stores; the sizes shown are computed live from the asset rows, nothing to recalculate", total, len(names))}
 	log.Infof("%s", sum.msg)
 	return sum, nil
+}
+
+// groupUsage counts the blobs bs holds; for a group it logs each member's
+// blobs and bytes, whose sums are the group's.
+func groupUsage(ctx context.Context, s *Service, name string, bs *blob.Store, log *RunLog) (int64, error) {
+	cfg, ok := bs.Group()
+	if !ok {
+		var stored int64
+		err := bs.Walk(func(string, time.Time) error { stored++; return ctx.Err() })
+		return stored, err
+	}
+	var blobs, bytes int64
+	for _, m := range cfg.Members {
+		ms := s.Store.StoreByName(m.Name)
+		if ms == nil {
+			return 0, fmt.Errorf("member %q is not open", m.Name)
+		}
+		n, b, err := ms.Usage(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("member %q: %w", m.Name, err)
+		}
+		blobs, bytes = blobs+n, bytes+b
+		log.Infof("%s: member %s holds %d blobs (%d bytes)", name, m.Name, n, b)
+	}
+	log.Infof("%s: the group holds %d blobs (%d bytes) in %d members; a blob copied to two members counts twice", name, blobs, bytes, len(cfg.Members))
+	return blobs, nil
 }
 
 // runTemp removes the stale temp files and abandoned upload sessions of

@@ -51,6 +51,7 @@ var Kinds = []Kind{
 	{"webhook.updated", "A webhook changed"},
 	{"webhook.deleted", "A webhook was deleted"},
 	{"ping", "The test event sent from the webhook page"},
+	{"blobstore.updated", "A blob store group's members or fill policy changed, or a store was converted to a group"},
 }
 
 var known = func() map[string]bool {
@@ -80,6 +81,7 @@ var renamed = map[string]string{
 	"task.run": "task.finished", "cleanup": "cleanup.finished",
 	"webhook.create": "webhook.created", "webhook.update": "webhook.updated", "webhook.delete": "webhook.deleted",
 	"settings.defaultRoles": "settings.updated", "realms.rutauth.update": "realm.updated",
+	"blobstore.update": "blobstore.updated", "blobstore.convert": "blobstore.updated",
 }
 
 // event is one activity event as the dispatcher received it, with the

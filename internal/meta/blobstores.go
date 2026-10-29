@@ -16,14 +16,16 @@ import (
 // repository routes its blob I/O to the store it names. The "default" row
 // is seeded on startup with the data directory as its path.
 
-// BlobStore is one named store: its blobs are under Path (Type "file") or
-// in the bucket S3 describes (Type "s3"), with Path holding its temp files.
+// BlobStore is one named store: its blobs are under Path (Type "file"), in
+// the bucket S3 describes (Type "s3") or in the member stores Group names
+// (Type "group"); an S3 store and a group keep only their temp files in Path.
 type BlobStore struct {
 	Name      string
 	Path      string
-	Type      string         // BlobStoreFile or BlobStoreS3; "" reads as file
-	S3        *blob.S3Config // for BlobStoreS3; its SecretKey is sealed in the row
-	Quota     *Quota         // soft quota; nil is none
+	Type      string            // BlobStoreFile or BlobStoreS3; "" reads as file
+	S3        *blob.S3Config    // for BlobStoreS3; its SecretKey is sealed in the row
+	Quota     *Quota            // soft quota; nil is none
+	Group     *blob.GroupConfig // for BlobStoreGroup
 	CreatedAt time.Time
 }
 
@@ -58,12 +60,14 @@ func ValidateQuota(q *Quota) error {
 // and the quota under one key.
 type storedConfig struct {
 	*blob.S3Config
+	*blob.GroupConfig
 	Quota *Quota `json:"quota,omitempty"`
 }
 
 const (
-	BlobStoreFile = "file"
-	BlobStoreS3   = "s3"
+	BlobStoreFile  = "file"
+	BlobStoreS3    = "s3"
+	BlobStoreGroup = "group"
 )
 
 const blobStoreCols = `name, path, type, config, created_at`
@@ -78,6 +82,12 @@ func (s sealer) blobStoreRow(bs BlobStore) (typ, config string, err error) {
 		return "", "", fmt.Errorf("blob store %q: %w", bs.Name, err)
 	}
 	sc := storedConfig{Quota: bs.Quota}
+	if bs.Type == BlobStoreGroup {
+		if bs.Group == nil {
+			return "", "", fmt.Errorf("blob store %q: a group needs its members", bs.Name)
+		}
+		sc.GroupConfig = bs.Group
+	}
 	if bs.Type == BlobStoreS3 {
 		if bs.S3 == nil {
 			return "", "", fmt.Errorf("blob store %q: an s3 store needs its s3 configuration", bs.Name)
@@ -187,6 +197,85 @@ ON CONFLICT(name) DO UPDATE SET path = excluded.path`, name, path, BlobStoreFile
 	return err
 }
 
+// UpdateBlobStoreGroup replaces a group's members and fill policy, keeping
+// the rest of its stored configuration (the soft quota), or returns
+// ErrNotFound when there is no group of that name.
+func (d *DB) UpdateBlobStoreGroup(ctx context.Context, name string, cfg blob.GroupConfig) error {
+	g, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	var gm map[string]json.RawMessage
+	if err := json.Unmarshal(g, &gm); err != nil {
+		return err
+	}
+	return d.Tx(ctx, func(tx *Tx) error {
+		var config string
+		err := tx.q.QueryRowContext(ctx, `SELECT config FROM blob_stores WHERE name = ? AND type = ?`, name, BlobStoreGroup).Scan(&config)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		m := map[string]json.RawMessage{}
+		if err := json.Unmarshal([]byte(config), &m); err != nil {
+			return fmt.Errorf("blob store %q: decode stored configuration: %w", name, err)
+		}
+		if m == nil {
+			m = map[string]json.RawMessage{}
+		}
+		for k, v := range gm {
+			m[k] = v
+		}
+		b, err := json.Marshal(m)
+		if err != nil {
+			return err
+		}
+		_, err = tx.q.ExecContext(ctx, `UPDATE blob_stores SET config = ? WHERE name = ?`, string(b), name)
+		return err
+	})
+}
+
+// ConvertBlobStoreToGroup turns the file or S3 store name into a group of
+// that name in one transaction: the store's row is renamed member, with its
+// path set to memberPath and the rest kept, and a group row named name, at the
+// store's former path, is created with cfg. ErrNotFound if there is no such
+// store, ErrExists if member is taken.
+func (d *DB) ConvertBlobStoreToGroup(ctx context.Context, name, member, memberPath string, cfg blob.GroupConfig) error {
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return d.Tx(ctx, func(tx *Tx) error {
+		var path, typ string
+		err := tx.q.QueryRowContext(ctx, `SELECT path, type FROM blob_stores WHERE name = ?`, name).Scan(&path, &typ)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if typ == BlobStoreGroup {
+			return fmt.Errorf("blob store %q is a group already", name)
+		}
+		var one int
+		err = tx.q.QueryRowContext(ctx, `SELECT 1 FROM blob_stores WHERE name = ?`, member).Scan(&one)
+		if err == nil {
+			return ErrExists
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `UPDATE blob_stores SET name = ?, path = ? WHERE name = ?`, member, memberPath, name); err != nil {
+			return err
+		}
+		_, err = tx.q.ExecContext(ctx, `INSERT INTO blob_stores(`+blobStoreCols+`) VALUES(?,?,?,?,?)`,
+			name, path, BlobStoreGroup, string(b), toMs(time.Now()))
+		return err
+	})
+}
+
 // DeleteBlobStore removes a blob store, or returns ErrNotFound.
 func (d *DB) DeleteBlobStore(ctx context.Context, name string) error {
 	res, err := d.sql.ExecContext(ctx, `DELETE FROM blob_stores WHERE name = ?`, name)
@@ -216,6 +305,12 @@ func (d *DB) scanBlobStore(row scanner) (BlobStore, error) {
 	}
 	if json.Unmarshal([]byte(config), &sc) == nil && ValidateQuota(sc.Quota) == nil {
 		bs.Quota = sc.Quota
+	}
+	if bs.Type == BlobStoreGroup {
+		bs.Group = &blob.GroupConfig{}
+		if err := json.Unmarshal([]byte(config), bs.Group); err != nil {
+			return BlobStore{}, fmt.Errorf("blob store %q: decode stored group: %w", bs.Name, err)
+		}
 	}
 	if bs.Type == BlobStoreS3 {
 		bs.S3 = &blob.S3Config{}

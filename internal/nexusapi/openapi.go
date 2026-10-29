@@ -46,7 +46,7 @@ var apiDocs = []openapi.Route{
 	{Pattern: "GET " + Prefix + "/security/users", Summary: "Stored users", Tag: nx, Auth: nxAdmin, Query: []string{"userId"}, Reply: "NexusUserList"},
 	{Pattern: "GET " + Prefix + "/security/roles", Summary: "Roles", Tag: nx, Auth: nxAdmin, Reply: "NexusRoleList"},
 	{Pattern: "GET " + Prefix + "/blobstores", Summary: "Blob stores with softQuota", Tag: nx, Auth: nxAdmin, Reply: "NexusBlobStoreList"},
-	{Pattern: "GET " + Prefix + "/blobstores/{name}/quota-status", Summary: "Soft quota state: isViolation, message, blobStoreName", Tag: nx, Auth: nxAdmin, Reply: "NexusQuotaStatus"},
+	{Pattern: "GET " + Prefix + "/blobstores/{name}/{sub}", Summary: "{sub} = quota-status: the soft quota state (isViolation, message, blobStoreName); other {sub} 404", Tag: nx, Auth: nxAdmin, Reply: "NexusQuotaStatus"},
 	{Pattern: "POST " + Prefix + "/blobstores/file", Summary: "Creates a file blob store: name, path, softQuota {type, limit (MB)}", Tag: nx, Auth: nxAdmin, Request: "NexusFileBlobStore", Replies: map[int]string{204: "created", 400: "NexusValidation"}},
 	{Pattern: "PUT " + Prefix + "/blobstores/file/{name}", Summary: "Updates a file blob store's softQuota (path is immutable)", Tag: nx, Auth: nxAdmin, Request: "NexusFileBlobStore", Replies: map[int]string{204: "updated", 400: "NexusValidation"}},
 	{Pattern: "GET " + Prefix + "/tasks", Summary: "Scheduled tasks", Tag: nx, Auth: nxAdmin, Reply: "NexusTaskPage"},
@@ -74,5 +74,9 @@ var apiDocs = []openapi.Route{
 	{Pattern: "POST " + Prefix + "/security/users/{userId}/{realm}/user-token", Summary: "Creates or resets one user's token (returns the pass code)", Tag: nx, Auth: nxAdmin, Reply: "NexusUserToken"},
 	{Pattern: "DELETE " + Prefix + "/security/users/{userId}/{realm}/user-token", Summary: "Deletes one user's token", Tag: nx, Auth: nxAdmin, Replies: map[int]string{204: "deleted", 404: "Error"}},
 	{Pattern: "DELETE " + Prefix + "/security/users/{userId}/{realm}/user-token-reset", Summary: "Alias of the user-token DELETE", Tag: nx, Auth: nxAdmin, Replies: map[int]string{204: "deleted", 404: "Error"}},
+	{Pattern: "GET " + Prefix + "/blobstores/group", Summary: "Blob store groups: name, members, fillPolicy, softQuota", Tag: nx, Auth: nxAdmin, Reply: "NexusBlobStoreGroupList"},
+	{Pattern: "POST " + Prefix + "/blobstores/group", Summary: "Creates a blob store group", Tag: nx, Auth: nxAdmin, Request: "NexusBlobStoreGroup", Replies: map[int]string{204: "created", 400: "NexusValidation"}},
+	{Pattern: "GET " + Prefix + "/blobstores/group/{name}", Summary: "One blob store group", Tag: nx, Auth: nxAdmin, Reply: "NexusBlobStoreGroup", Replies: map[int]string{404: "Error"}},
+	{Pattern: "PUT " + Prefix + "/blobstores/group/{name}", Summary: "Replaces a group's members and fill policy (keeps read-only flags of kept members)", Tag: nx, Auth: nxAdmin, Request: "NexusBlobStoreGroup", Replies: map[int]string{204: "updated", 400: "NexusValidation"}},
 	{Pattern: Prefix + "/", Summary: "Anything else under the prefix: 404 {\"message\"}", Tag: nx, Replies: map[int]string{404: "Error"}},
 }

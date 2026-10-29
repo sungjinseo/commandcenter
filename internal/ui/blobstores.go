@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +35,7 @@ func (u *UI) blobStoreRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/blobstores/{name}", u.getBlobStore)
 	mux.HandleFunc("PUT /-/api/blobstores/{name}", u.updateBlobStore)
 	mux.HandleFunc("DELETE /-/api/blobstores/{name}", u.deleteBlobStore)
+	u.blobGroupRoutes(mux)
 }
 
 // blobStoreDeleteHook, if set, runs inside a delete after its in-use check,
@@ -51,6 +54,9 @@ type blobStoreRequest struct {
 	S3   *blob.S3Config `json:"s3"`
 
 	Quota *meta.Quota `json:"quota"` // soft quota; null or absent is none
+	// A group's (Type "group"), see blobgroups.go.
+	Members    []blob.GroupMember `json:"members"`
+	FillPolicy string             `json:"fillPolicy"`
 }
 
 // blobStoreJSON is one store's wire shape. Path is the directory the store
@@ -72,6 +78,11 @@ type blobStoreJSON struct {
 	// store is over it right now (writes are still accepted).
 	Quota         *meta.Quota `json:"quota"`
 	QuotaViolated bool        `json:"quotaViolated"`
+	// A group's members in read order and its fill policy; MemberOf names
+	// the group a file or S3 store belongs to.
+	Members    []blob.GroupMember `json:"members,omitempty"`
+	FillPolicy string             `json:"fillPolicy,omitempty"`
+	MemberOf   string             `json:"memberOf,omitempty"`
 }
 
 // s3JSON is blob.S3Config without its secret: what GET shows.
@@ -84,6 +95,9 @@ type s3JSON struct {
 	AccessKey string `json:"accessKeyId"`
 	SecretSet bool   `json:"secretSet"` // the secret itself is never shown
 	SSE       string `json:"sse"`
+	// Encryption is null unless set; Failover is [] without replicas.
+	Encryption *blob.S3Encryption `json:"encryption"`
+	Failover   []blob.S3Failover  `json:"failover"`
 }
 
 // blobStoreView builds the DTO for one stored row: usage scoped to the store's
@@ -104,10 +118,19 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 		out.Type = meta.BlobStoreFile
 	}
 	out.Quota = bs.Quota
+	if u.Store != nil {
+		out.MemberOf = u.Store.GroupOf(bs.Name)
+	}
+	if bs.Type == meta.BlobStoreGroup && bs.Group != nil {
+		out.Members, out.FillPolicy = bs.Group.Members, bs.Group.FillPolicy
+		out.QuotaViolated, _ = quotaState(out)
+		return out, nil
+	}
 	if bs.Type == meta.BlobStoreS3 && bs.S3 != nil {
 		c := bs.S3
 		out.S3 = &s3JSON{Bucket: c.Bucket, Prefix: c.Prefix, Region: c.Region, Endpoint: c.Endpoint,
-			PathStyle: c.PathStyle, AccessKey: c.AccessKey, SecretSet: c.SecretKey != "", SSE: c.SSE}
+			PathStyle: c.PathStyle, AccessKey: c.AccessKey, SecretSet: c.SecretKey != "", SSE: c.SSE,
+			Encryption: c.Encryption, Failover: append([]blob.S3Failover{}, c.Failover...)}
 		out.QuotaViolated, _ = quotaState(out)
 		return out, nil
 	}
@@ -194,6 +217,17 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 	case "":
 		row.Type = meta.BlobStoreFile
 	case meta.BlobStoreFile:
+	case meta.BlobStoreGroup:
+		cfg := blob.GroupConfig{Members: body.Members, FillPolicy: body.FillPolicy}
+		if err := cfg.Validate(); err != nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{err.Error()}})
+			return
+		}
+		if body.S3 != nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`"s3" is an s3 store's ("type": "s3")`}})
+			return
+		}
+		row.Group = &cfg
 	case meta.BlobStoreS3:
 		if body.S3 == nil {
 			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"an s3 blob store needs \"s3\" with at least its bucket"}})
@@ -205,10 +239,14 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		}
 		row.S3 = body.S3
 	default:
-		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`blob store type must be "file" or "s3"`}})
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`blob store type must be "file", "s3" or "group"`}})
 		return
 	}
-	err := u.Repos.WithWriteLock(func(*repo.Snapshot) error {
+	if row.Type != meta.BlobStoreGroup && (body.Members != nil || body.FillPolicy != "") {
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`members and fillPolicy are a group's ("type": "group")`}})
+		return
+	}
+	err := u.Repos.WithWriteLock(func(snap *repo.Snapshot) error {
 		ctx := r.Context()
 		// A duplicate name is a conflict, not an isolation problem.
 		if _, err := u.DB.GetBlobStore(ctx, body.Name); err == nil {
@@ -217,6 +255,11 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		root := repo.StoreRoot(u.DataDir, row)
+		if row.Type == meta.BlobStoreGroup {
+			if err := u.checkGroupMembers(ctx, snap, body.Name, *row.Group, nil); err != nil {
+				return err
+			}
+		}
 		if row.Type == meta.BlobStoreS3 {
 			if err := u.checkS3Isolation(ctx, *row.S3); err != nil {
 				return err
@@ -229,7 +272,13 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 				return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: %v", body.Name, err)}}
 			}
 		}
-		bs, err := repo.OpenStore(u.DataDir, row)
+		var bs *blob.Store
+		var err error
+		if row.Type == meta.BlobStoreGroup {
+			bs, err = repo.OpenGroup(u.DataDir, row, u.Store.StoreByName)
+		} else {
+			bs, err = repo.OpenStore(u.DataDir, row)
+		}
 		if err != nil {
 			return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: directory %s is not usable: %v", body.Name, root, err)}}
 		}
@@ -260,6 +309,9 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 	if stored.Type == meta.BlobStoreS3 && stored.S3 != nil {
 		detail = "s3://" + stored.S3.Bucket + "/" + stored.S3.Prefix
 	}
+	if stored.Group != nil {
+		detail = groupDetail(*stored.Group)
+	}
 	u.emit(r, "blobstore.create", "", body.Name, detail)
 	v, err := u.blobStoreView(r.Context(), stored)
 	if err != nil {
@@ -275,31 +327,61 @@ func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
 		return
 	}
-	var body struct {
-		Quota *meta.Quota `json:"quota"`
-	}
-	if !decodeBody(w, r, &body) {
+	var raw map[string]json.RawMessage
+	if !decodeBody(w, r, &raw) {
 		return
 	}
+	var body blobStoreRequest
+	b, _ := json.Marshal(raw)
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	_, setQuota := raw["quota"]
+	_, members := raw["members"]
+	_, fill := raw["fillPolicy"]
+	setGroup := members || fill
 	name := r.PathValue("name")
-	if err := meta.ValidateQuota(body.Quota); err != nil {
-		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{err.Error()}})
+	if !setQuota && !setGroup {
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"nothing to change: send quota, or a group's members and fillPolicy"}})
 		return
 	}
-	if err := u.DB.SetBlobStoreQuota(r.Context(), name, body.Quota); err != nil {
-		u.writeBlobStoreError(w, r, err)
-		return
+	if setQuota {
+		if err := meta.ValidateQuota(body.Quota); err != nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{err.Error()}})
+			return
+		}
+	}
+	if setGroup {
+		if u.Store == nil {
+			writeError(w, http.StatusNotImplemented, "blob stores are not available")
+			return
+		}
+		cfg, err := u.setGroupMembers(r.Context(), name, body)
+		if err != nil {
+			u.writeBlobStoreError(w, r, err)
+			return
+		}
+		u.emit(r, "blobstore.update", "", name, groupDetail(cfg))
+	}
+	if setQuota {
+		if err := u.DB.SetBlobStoreQuota(r.Context(), name, body.Quota); err != nil {
+			u.writeBlobStoreError(w, r, err)
+			return
+		}
+		detail := "quota removed"
+		if q := body.Quota; q != nil {
+			detail = fmt.Sprintf("quota %s %d", q.Type, q.LimitBytes)
+		}
+		u.emit(r, "blobstore.update", "", name, detail)
 	}
 	stored, err := u.DB.GetBlobStore(r.Context(), name)
 	if err != nil {
 		u.writeBlobStoreError(w, r, err)
 		return
 	}
-	detail := "quota removed"
-	if q := stored.Quota; q != nil {
-		detail = fmt.Sprintf("quota %s %d", q.Type, q.LimitBytes)
-	}
-	u.emit(r, "blobstore.update", "", name, detail)
 	v, err := u.blobStoreView(r.Context(), stored)
 	if err != nil {
 		u.fail(w, r, err)
@@ -389,6 +471,9 @@ func (u *UI) deleteBlobStore(w http.ResponseWriter, r *http.Request) {
 	err := u.Repos.WithWriteLock(func(s *repo.Snapshot) error {
 		if users := repo.ReposForStore(s, name); len(users) > 0 {
 			return &errStoreInUse{name: name, repos: users}
+		}
+		if err := u.refuseGroupMember(r.Context(), name); err != nil {
+			return err
 		}
 		if blobStoreDeleteHook != nil {
 			blobStoreDeleteHook()
