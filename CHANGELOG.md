@@ -72,6 +72,76 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from `contentSelectors:`, and served at `/service/rest/v1/security/content-selectors` plus
   `security/privileges/repository-content-selector`, which maps a Nexus privilege onto the role
   `priv:<name>`.
+- The `conan` format: Conan remotes at `/repository/<repo>/` for Conan 2 (`conan remote add`, `conan remote login`,
+  `install`, `upload`, `list`, `remove` through the v2 revisions API; `v1/ping` advertises
+  `complex_search,checksum_deploy,revisions,matrix_params`) and the v1 API Conan 1.x uses without revisions
+  (snapshots, `digest`, `download_urls`, `upload_urls`, package search; `remove_files` and `packages/delete` are
+  not implemented). `conan remote login` sends the password or an API token as Basic to
+  `v1/users/authenticate` and gets a one-hour signed token the server accepts as Bearer. Hosted repositories
+  store files at their v2 paths (`v2/conans/<name>/<version>/<user>/<channel>/revisions/<rrev>/files/…` and the
+  package paths under it), keep one row per recipe revision for search, and apply `writePolicy` per file of a
+  revision (409 on different content under `allow_once`, overwriting under `allow` needs edit, `deny` is
+  read-only); `checksum_deploy` answers 404 unless the file is already there. Proxies cache a Conan server
+  (Conan Center, Artifactory): metadata revalidated after `metadataMaxAge`, files kept, `remoteAuth` exchanged
+  for the remote's token; groups answer from the first member that has the recipe, merge search results and
+  upload to their `writeMember`. Components are recipe revisions (`<version>#<rrev>`, group `user/channel`)
+  with their binaries as assets; cleanup policies (format `conan`), the web UI's component delete and
+  metadata (`conanfile.py` description, license, homepage, url and requires/tool_requires/build_requires/
+  test_requires), and `format:conan` role privileges cover conan repositories.
+- The `r` format: R (CRAN-style) repositories for `install.packages()`, remotes, pak and renv.
+  A hosted repository takes packages with `PUT /repository/<repo>/<contrib dir>/<pkg>_<version>.tar.gz`
+  (`.zip` under `bin/windows/contrib/<R.x>`, `.tgz` under `bin/macosx[/<build>]/contrib/<R.x>`), reads the
+  package's `DESCRIPTION` (its `Package` and `Version` must be the file name's) and regenerates the
+  directory's `PACKAGES`, `PACKAGES.gz` and `PACKAGES.rds` (an R serialization, format 2, that every R
+  reads) in the same transaction as every upload and component delete; `writePolicy` applies as for Yum.
+  A proxy passes a CRAN mirror or Posit Package Manager through unchanged (`PACKAGES*` and `Meta/`
+  revalidated after `metadataMaxAge`, packages and `src/contrib/Archive/` kept); a group serves a file
+  from the first member that has it and merges the members' `PACKAGES` of a contrib directory (hosted
+  first, the first member's entry per package and version), deriving `PACKAGES.gz` and `PACKAGES.rds`
+  from the merge. Components are one per contrib directory (the directory is the group), so cleanup
+  policies (format `r`), the web UI's component delete and metadata (Title/Description, License, URL,
+  BugReports, Depends/Imports/LinkingTo/Suggests) and `format:r` role privileges cover r repositories.
+- The `gitlfs` format: a Git LFS server (Batch API with the basic transfer) as a hosted repository,
+  for `lfs.url = <baseURL>/repository/<repo>/info/lfs` (or `…/repository/<repo>/`). `POST
+  objects/batch` answers download hrefs for stored objects (per-object 404 otherwise) and upload +
+  verify hrefs for missing ones; `PUT objects/<oid>` stores the object after checking its sha256
+  (422 on mismatch) and is idempotent under every writePolicy but `deny`; `GET/HEAD objects/<oid>`
+  serve it with ETag and Range; `POST objects/verify` checks the stored size. Download needs read,
+  upload add; an unauthenticated batch is challenged with `LFS-Authenticate` (Basic password, API
+  token as password, or Bearer token). Objects are components named by their oid (no version) for
+  the web UI, component delete and cleanup policies (`gitlfs` or `all`). Object size is bounded by
+  `maxUploadMiB`. The lock API answers 501 (git-lfs then skips locks); proxy and group gitlfs
+  repositories are refused.
+- Maintenance tasks in the style of Nexus Repository: `repository.verify-blobs` (checks that every
+  asset's blob exists, with `checksum` re-reading it and comparing the SHA-256, bounded by `maxBytes`
+  per run and resumed by the next; Failed when anything is missing or differs, nothing deleted),
+  `maven.purge-snapshots` (removes old SNAPSHOT versions per GA by `minimumRetained`,
+  `snapshotRetentionDays`, `lastDownloadedDays` and `removeIfReleased`/`gracePeriodDays`, with
+  `preview`; metadata is regenerated and `delete` events recorded), `blobstore.recalculate-size`
+  (reports blobs in each store against the asset rows) and `blobstore.delete-temp-files` (sweeps stale
+  temp files and abandoned Docker upload sessions). `repository.rebuild-metadata` now rebuilds apt,
+  yum, helm and conda hosted repositories too, and takes an empty `repo` (every repository) with an
+  optional `format`. `GET /-/api/tasks` lists each type's parameters; the Nexus REST compat layer
+  reports Nexus task type names.
+- Prometheus metrics at `GET /-/metrics/prometheus` (text exposition): Go runtime and process gauges,
+  per-repository request/error/bytes/latency/upstream/cache counters (process lifetime), repository and
+  blob store sizes, task results and health checks. Admins only unless the new `metricsAnonymous`
+  general setting is on.
+- Thread dump at `GET /-/api/support/threads` (admin): every goroutine's stack as text, for a bug report.
+- Support bundle at `GET /-/api/support/zip` (admin): a zip of version/runtime info, the effective
+  settings (secrets redacted), repositories, blob stores, status checks, system information, tasks,
+  webhooks, the last 500 activity events, the in-memory log, a thread dump, the Prometheus text and the
+  24-hour request statistics; activity event `support.zip`.
+- Runtime log level: `GET/PUT /-/api/logging` (admin) changes the root logger's level (debug, info,
+  warn, error) at once, until the next start; activity event `logging.level`.
+- Outbound HTTP settings in the general settings (`http`): a forward proxy with credentials and a
+  non-proxy host list for all remote fetches, webhooks and OIDC, connect and response-header timeouts,
+  retries of idempotent requests after network errors and a User-Agent suffix; applied without a
+  restart, the `HTTP_PROXY`/`NO_PROXY` environment remains the fallback.
+- SSL trust store: admin-added CA certificates (`/-/api/ssl/certificates`, retrieve a server's chain
+  with `/-/api/ssl/retrieve`) trusted by remote fetches, webhooks, OIDC, LDAP and SMTP in addition to
+  the system roots, with the Nexus REST compat endpoints `/service/rest/v1/security/ssl` and
+  `/security/ssl/truststore`.
 
 ### Upgrade notes
 - The database schema version is now 3 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`

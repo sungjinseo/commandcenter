@@ -18,7 +18,7 @@ users:
     roles: [deployer]
 
 roles:
-  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted", "gems-hosted", "composer-hosted", "conda-hosted"] }
+  deployer: { write: ["maven-releases", "maven-snapshots", "npm-hosted", "pypi-hosted", "go-hosted", "cargo-hosted", "docker-hosted", "raw-hosted", "helm-hosted", "nuget-hosted", "yum-hosted", "apt-hosted", "gems-hosted", "composer-hosted", "conda-hosted", "conan-hosted", "r-hosted", "lfs-hosted"] }
 
 # 라우팅 규칙: proxy가 원격에 물어볼 수 있는 경로. RE2 정규식, 요청 경로 앞에 "/"가 붙습니다. 첫 시작 때만 가져옵니다.
 # routingRules:
@@ -235,6 +235,38 @@ repositories:
     type: group
     members: [conda-hosted, conda-proxy]
     writeMember: conda-hosted
+  - name: conan-hosted                # conan upload "pkg/*" -r cc --confirm  (conan remote add cc <host>/repository/conan-hosted)
+    format: conan
+    type: hosted
+    writePolicy: allow_once           # 새 리비전은 언제나 허용. allow: 같은 리비전 파일 덮어쓰기 허용(edit 권한)
+  - name: conan-proxy                 # conan remote add cc <host>/repository/conan-proxy
+    format: conan
+    type: proxy
+    remote: "https://center.conan.io/"   # Conan 서버 루트(v2 API). remoteAuth가 있으면 원격에 로그인해 토큰 사용
+    metadataMaxAge: "1h"              # latest/revisions/files 목록·검색 재확인 주기. 파일은 영구 캐시
+  - name: conan-all                   # conan remote add cc <host>/repository/conan-all — hosted가 가진 레시피는 hosted 리비전만
+    format: conan
+    type: group
+    members: [conan-hosted, conan-proxy]
+    writeMember: conan-hosted
+  - name: r-hosted                    # curl -u ci:pw --upload-file foo_1.0.0.tar.gz <host>/repository/r-hosted/src/contrib/
+    format: r
+    type: hosted
+    writePolicy: allow_once           # allow: 같은 디렉터리의 같은 패키지_버전 덮어쓰기 허용(edit 권한)
+  - name: r-proxy                     # options(repos = c(CRAN = "<host>/repository/r-proxy"))
+    format: r
+    type: proxy
+    remote: "https://cloud.r-project.org/"   # CRAN 미러 또는 Posit Package Manager(https://packagemanager.posit.co/cran/latest/). 경로를 그대로 캐시
+    metadataMaxAge: "1h"              # PACKAGES*·Meta/ 재확인 주기. 패키지 파일은 영구 캐시
+  - name: r-all                       # options(repos = c(CC = "<host>/repository/r-all")) — 파일은 먼저 가진 멤버, PACKAGES는 병합
+    format: r
+    type: group
+    members: [r-hosted, r-proxy]
+    writeMember: r-hosted
+  - name: lfs-hosted                  # git config -f .lfsconfig lfs.url http://<host>/repository/lfs-hosted/info/lfs
+    format: gitlfs                    # hosted만 지원(proxy/group 불가). 오브젝트 크기는 maxUploadMiB 이하
+    type: hosted
+    writePolicy: allow_once           # 같은 oid 재업로드는 멱등(200). deny: 읽기 전용
 
 # database:
 #   url: postgres://cc:password@db.example:5432/commandcenter?sslmode=require

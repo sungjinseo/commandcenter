@@ -772,11 +772,11 @@ repositories:
 | 키 | 대상 | 기본값 | 설명 |
 |---|---|---|---|
 | `name` | 모두 | 필수 | 저장소 이름. URL의 `/repository/<name>/`. `/`, 공백, `\` 불가, 중복 불가. UI/API로 만들 때는 영문자·숫자로 시작하고 영문자, 숫자, `.`, `_`, `-`만, 최대 64자, `create`는 예약어. |
-| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum`, `rubygems`, `composer`, `conda` 중 하나. |
-| `type` | 모두 | 필수 | `hosted`, `proxy`, `group` 중 하나. |
-| `remote` | proxy | 필수 | 원격 저장소의 `http(s)` URL. Cargo는 `sparse+` 없는 sparse index URL. 원격 인증 정보는 URL에 넣지 말고 `remoteAuth`에 넣으세요(URL은 암호화하지 않습니다. "저장된 비밀값 암호화" 참고). |
+| `format` | 모두 | 필수 | `maven`, `npm`, `pypi`, `go`, `cargo`, `docker`, `raw`, `helm`, `nuget`, `apt`, `yum`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs` 중 하나. |
+| `type` | 모두 | 필수 | `hosted`, `proxy`, `group` 중 하나. `gitlfs`는 `hosted`만 됩니다(proxy·group은 400). |
+| `remote` | proxy | 필수 | 원격 저장소의 `http(s)` URL. Cargo는 `sparse+` 없는 sparse index URL, Conan은 Conan 서버 루트(`https://center.conan.io/`), R은 CRAN 미러나 Posit Package Manager의 루트. 원격 인증 정보는 URL에 넣지 말고 `remoteAuth`에 넣으세요(URL은 암호화하지 않습니다. "저장된 비밀값 암호화" 참고). |
 | `remoteAuth` | proxy | 없음 | 원격 인증: `username`/`password` 또는 `bearerToken`(둘 다 있으면 토큰 우선). 설정한 `remote`와 스킴·호스트·포트가 같은 곳에만 보내며, 리다이렉트를 따라갈 때도 같습니다. 예외는 같은 호스트의 `http`(80)에서 `https`(443)로 옮기는 리다이렉트로, 첫 요청이 이미 그 호스트에 보냈으므로 자격 증명을 유지합니다. 그 밖에 포트나 스킴이 다른 곳(`https`에서 `http`로 내려가는 경우 포함)과 하위 도메인으로 가는 리다이렉트는 자격 증명 없이 따라갑니다. |
-| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`, NuGet 서비스 인덱스·registration·검색 결과, APT `dists/`, Yum `repodata/`, RubyGems compact index·specs, Composer `packages.json`·`p2`, Conda `repodata.json`·`channeldata.json`)를 다시 확인하기까지의 시간. |
+| `metadataMaxAge` | proxy | `"24h"` | 메타데이터(maven-metadata.xml, packument, simple 인덱스, Go `list`/`@latest`, Cargo 인덱스, Docker 태그, Helm `index.yaml`, NuGet 서비스 인덱스·registration·검색 결과, APT `dists/`, Yum `repodata/`, RubyGems compact index·specs, Composer `packages.json`·`p2`, Conda `repodata.json`·`channeldata.json`, Conan `latest`·`revisions`·파일 목록·검색, R `PACKAGES*`·`Meta/`)를 다시 확인하기까지의 시간. |
 | `contentMaxAge` | proxy | `"-1"` | 아티팩트 본문(jar, tgz, 휠, zip, crate, nupkg, deb, rpm)의 재확인 주기. 기본은 영구 캐시. |
 | `negativeCacheTTL` | proxy | `"10m"` | 원격이 404/410을 준 경로, 그리고 체크섬이 맞지 않은 다운로드를 다시 묻지 않는 시간. 만료된 기록은 서버가 시작할 때와 그 뒤 하루에 한 번 DB에서 지웁니다. |
 | `routingRule` | proxy | 없음 | 이 proxy에 적용할 라우팅 규칙 이름 하나. 없는 이름은 400이고 hosted·group에는 쓸 수 없습니다("라우팅 규칙" 참고). |
@@ -808,7 +808,7 @@ repositories:
 - 거절되면 클라이언트는 502(만료된 캐시가 있으면 그 캐시)를 받습니다. 로그의 `remote fetch failed` 줄에는 `address refused by the remote egress policy`가 남습니다.
 - `HTTPS_PROXY`/`HTTP_PROXY`의 사내 프록시를 거치는 요청은 프록시가 대신 접속하므로 IP 주소로 적힌 목적지만 검사합니다(위의 다른 IPv4 표기와 ASCII가 아닌 호스트의 거절 포함). 호스트 이름으로 적힌 목적지는 내부 주소로 해석되더라도 프록시가 그대로 접속하므로, 프록시에서 내부 대역으로 가는 요청을 막거나 사내 도메인과 대역을 `NO_PROXY`에 넣으세요. 프록시 자체의 주소는 막지 않습니다. `NO_PROXY`에 넣은 호스트에는 직접 접속하므로 위 검사를 모두 받습니다.
 
-**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum, RubyGems, Composer, Conda도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정", "RubyGems 설정", "Composer 설정", "Conda 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
+**writePolicy의 적용 범위**: Maven은 세 값을 모두 따릅니다. raw는 Maven처럼 세 값을 모두 따릅니다(`allow`에서 같은 경로를 덮어쓰려면 edit 권한이 필요). Helm, Docker, NuGet, APT, Yum, RubyGems, Composer, Conda, Conan, R도 세 값을 모두 따릅니다("Helm 설정", "Docker 설정", "NuGet 설정", "APT 설정", "Yum 설정", "RubyGems 설정", "Composer 설정", "Conda 설정", "Conan 설정", "R 설정" 참고). Git LFS는 같은 oid의 재업로드를 `allow_once`에서도 받고(멱등) `deny`만 업로드·삭제를 막습니다("Git LFS 설정" 참고). Go는 `allow`가 아니면 같은 파일을 거부하고 `deny`는 업로드를 막습니다. PyPI와 Cargo는 `deny`만 효과가 있으며 같은 파일·버전 재업로드는 항상 거부합니다. npm은 `writePolicy`를 쓰지 않으며 이미 게시된 버전은 항상 거부합니다. 단, `deny`인 저장소에서는 모든 포맷의 삭제(Maven `DELETE`, `npm unpublish`, Go `DELETE`, 웹 UI·API의 컴포넌트 삭제)가 400입니다. Cleanup 정책은 `writePolicy`를 무시합니다.
 
 ## 인증과 권한
 
@@ -976,6 +976,25 @@ SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비�
 - 키를 켠 뒤 이 기능이 없는 이전 버전으로 내리면, 이전 버전은 암호화된 값을 그대로 비밀번호로 보내 원격·SMTP·LDAP 인증이 실패합니다("업그레이드" 참고).
 - 키가 없을 때는 `enc:v1:`로 시작하는 비밀번호를 저장하지 않습니다(암호화된 값과 구별할 수 없기 때문입니다).
 
+### SSL 인증서(신뢰 저장소)
+
+사내 CA가 서명한 인증서를 쓰는 원격 저장소(proxy의 `remote`), 웹훅 대상, OIDC 제공자, LDAP 서버, SMTP 서버에 연결하려면 그 CA 인증서를 신뢰 저장소에 넣습니다. 시스템 루트 인증서(와 `SSL_CERT_DIR`로 마운트한 CA)에 더해 신뢰되며, 서버를 다시 시작하지 않아도 바로 적용됩니다. OIDC의 `caCert`가 있으면 그쪽이 우선하고, LDAP·OIDC의 `insecureSkipVerify`는 여전히 검증을 건너뜁니다.
+
+관리자 화면의 SSL 인증서 페이지나 API로 관리합니다(관리자; 추가·삭제·가져오기는 비밀번호·세션 로그인과 `X-Command-Center-UI: 1` 헤더).
+
+- `GET /-/api/ssl/certificates`: 저장된 인증서 목록. 항목마다 `id`(SHA-256 지문), `subject`, `issuer`, `notBefore`, `notAfter`, `expired`, `isCA`, `pem`이 있습니다.
+- `POST /-/api/ssl/retrieve` `{"host":"ldap.corp.local","port":636}`: 서버에 TLS로 접속해 서버가 내민 인증서 체인(리프부터 루트까지)을 검증 없이 가져옵니다. 포트를 생략하면 443이고, HTTPS가 아닌 LDAPS·SMTPS 포트도 됩니다. 각 인증서의 `trusted`로 이미 저장됐는지 알 수 있습니다. 화면에서는 "서버에서 가져오기"로 체인을 본 뒤 CA 인증서를 골라 "신뢰 저장소에 추가"합니다. 가져온 인증서를 추가하기 전에 지문을 다른 경로로 확인하는 것이 안전합니다(처음 접속한 서버의 인증서를 그대로 믿으면 중간자 공격을 막지 못합니다). 접속은 proxy와 같은 송신 정책과 `http.proxy` 설정을 따르고, 닿지 않으면 502입니다.
+- `POST /-/api/ssl/certificates` `{"pem":"-----BEGIN CERTIFICATE-----..."}`: PEM을 직접 붙여 넣어 추가합니다(여러 장이 들어 있으면 새 것만 추가; 이미 있으면 409). 보통은 서버 인증서가 아니라 서명한 CA(루트 또는 중간) 인증서를 넣습니다.
+- `DELETE /-/api/ssl/certificates/<id>`: 삭제합니다.
+
+활동 이벤트 `ssl.add`·`ssl.remove`가 남습니다. 인증서는 일반 설정의 `trustedCertificates`에 PEM으로 저장되므로 메타데이터 데이터베이스 백업에 포함됩니다. Nexus REST 호환 계층에서는 `GET /service/rest/v1/security/ssl`(목록), `GET /service/rest/v1/security/ssl?host=&port=`(가져오기), `POST /service/rest/v1/security/ssl/truststore`(본문이 PEM), `DELETE /service/rest/v1/security/ssl/truststore/<id>`가 같은 저장소를 다룹니다.
+
+```bash
+# 사내 CA 추가
+curl -u admin -H 'X-Command-Center-UI: 1' -H 'Content-Type: application/json' \
+  -d "$(jq -Rs '{pem: .}' < corp-root-ca.pem)" https://commandcenter.example.com/-/api/ssl/certificates
+```
+
 ## Realm, LDAP, OIDC
 
 **Realm**은 인증 방식입니다. Realm 화면에서 순서와 켜기/끄기를 정합니다(`GET/PUT /-/api/realms`).
@@ -997,7 +1016,7 @@ SMTP 비밀번호, LDAP bind 비밀번호, proxy 저장소의 `remoteAuth` 비�
 |---|---|---|
 | `url` | 없음 | `ldap://호스트[:포트]` 또는 `ldaps://호스트[:포트]` |
 | `startTLS` | `false` | `ldap://`에서 StartTLS로 암호화(`ldaps://`와는 같이 쓸 수 없음) |
-| `insecureSkipVerify` | `false` | 서버 인증서 검증 생략. 시험용으로만 쓰세요. 사내 CA가 발급한 인증서라면 검증을 끄지 말고, 그 CA 인증서(PEM 파일)를 컨테이너의 한 디렉터리에 마운트한 뒤 환경변수 `SSL_CERT_DIR`로 그 디렉터리를 알려 주세요(예: `SSL_CERT_DIR=/etc/ssl/internal-ca`). 이 설정은 SMTP와 proxy의 원격 연결에도 적용되며, 기본 인증서 묶음도 계속 읽으므로 공개 CA를 쓰는 연결에는 영향이 없습니다. |
+| `insecureSkipVerify` | `false` | 서버 인증서 검증 생략. 시험용으로만 쓰세요. 사내 CA가 발급한 인증서라면 검증을 끄지 말고, 그 CA 인증서(PEM 파일)를 컨테이너의 한 디렉터리에 마운트한 뒤 환경변수 `SSL_CERT_DIR`로 그 디렉터리를 알려 주거나, 재시작 없이 화면에서 추가하려면 "SSL 인증서(신뢰 저장소)"에 넣으세요(예: `SSL_CERT_DIR=/etc/ssl/internal-ca`). 이 설정은 SMTP와 proxy의 원격 연결에도 적용되며, 기본 인증서 묶음도 계속 읽으므로 공개 CA를 쓰는 연결에는 영향이 없습니다. |
 | `bindDN`, `bindPassword` | 없음 | 검색에 쓰는 서비스 계정. `bindDN`이 없으면 익명 검색. 비밀번호는 저장만 되고(비밀값 키를 정하면 암호화해서, "저장된 비밀값 암호화" 참고) API 응답·로그·이벤트에 나오지 않습니다(`bindPasswordSet`만 표시). 비워서 보내면 기존 값을 유지하고 `clearBindPassword: true`로 지웁니다. 단 **서버의 호스트:포트를 바꾸거나, `ldaps`에서 `ldap`으로 바꾸거나, `startTLS`를 끄거나, `insecureSkipVerify`를 켤 때는 비밀번호를 다시 입력해야 합니다**(400). 저장된 비밀번호가 다른 서버나 더 약한 연결로 새어 나가지 않게 하는 규칙입니다. |
 | `timeoutSeconds` | `5` | 연결·응답 제한(1..60) |
 | `userBaseDN` | 필수 | 사용자를 검색할 기준 DN |
@@ -1122,6 +1141,16 @@ blob(파일 내용)은 **blob store** 디렉터리에 sha256 이름으로 저장
 | `sessionIdleMinutes` | `720` | 세션 유휴 만료(5..10080분). 이미 로그인한 세션에도 적용됩니다. |
 | `maxUploadMiB` | `1024` | 업로드 본문 최대 크기(1..1048576). 요청마다 읽으므로 바로 적용됩니다. |
 | `defaultLanguage` | `ko` | `ko` 또는 `en`. 브라우저에 저장된 언어 선택이 없을 때 웹 UI가 쓰는 언어이고(언어 버튼으로 고르면 그 선택이 저장되어 우선합니다), 작업 실패 알림 메일의 언어입니다. `GET /-/api/me`가 로그인하지 않은 사용자에게도 알려 줍니다. |
+| `metricsAnonymous` | `false` | `GET /-/metrics/prometheus`를 인증 없이 허용("메트릭" 참고) |
+| `http.userAgentSuffix` | 빈 값 | 원격 저장소·웹훅·OIDC 요청의 `User-Agent`(`commandcenter/1`) 뒤에 붙이는 문자열(100자 이하의 ASCII). 상위 저장소 운영자가 요청 출처를 구분할 때 씁니다. |
+| `http.connectTimeoutSeconds` | `10` | 원격에 연결을 맺을 때까지 기다리는 시간(1..600초) |
+| `http.timeoutSeconds` | `30` | 요청을 보낸 뒤 응답 헤더가 올 때까지 기다리는 시간(1..600초). 본문 전송 시간은 포함하지 않습니다. |
+| `http.retries` | `0` | 네트워크 오류(연결 끊김·시간 초과)가 났을 때 GET/HEAD 요청을 1초 간격으로 다시 보내는 횟수(0..10). 4xx·5xx 응답은 다시 보내지 않습니다. |
+| `http.proxy.host`, `http.proxy.port` | 빈 값 | 모든 외부 HTTP·HTTPS 요청이 거치는 forward proxy. 호스트가 비어 있으면 환경 변수 `HTTP_PROXY`·`HTTPS_PROXY`·`NO_PROXY`를 그대로 씁니다. |
+| `http.proxy.username`, `http.proxy.password` | 빈 값 | 프록시 인증(Basic). 비밀번호는 저장만 되고 API가 돌려주지 않으며(`passwordSet`), 바꾸지 않을 때는 비워 보내고 지우려면 `clearPassword: true`를 보냅니다. 비밀값 키가 있으면 암호화해 저장합니다. |
+| `http.proxy.nonProxyHosts` | `[]` | 프록시를 거치지 않고 직접 연결할 호스트 패턴: `mirror.corp.local`, `*.corp.local`(하위 도메인 전체), `10.*`(주소 앞부분) |
+
+`http` 값은 한 묶음으로 보냅니다(`PUT /-/api/settings`에 `"http": {...}` 전체). 저장 즉시 원격 저장소 가져오기·웹훅·OIDC 연결에 적용되고, 열려 있던 유휴 연결은 끊고 새 설정으로 다시 맺습니다. 활동 이벤트 `settings.http`에는 바뀐 키 이름만 남습니다. 프록시를 거치는 요청도 원격 egress 정책("설정 레퍼런스"의 원격 접속 제한 참고)을 따르되, 주소를 해석하는 쪽이 프록시이므로 IP 리터럴만 검사할 수 있습니다.
 
 ## 이메일 알림
 
@@ -1589,6 +1618,83 @@ channels:
 - group은 패키지 파일은 멤버 순서상 그 파일을 처음 가진 멤버가 답하고, `<subdir>/repodata.json`·`current_repodata.json`·`channeldata.json`은 **멤버들의 문서를 합쳐서** 답합니다(hosted를 앞에 두면 hosted 패키지 우선, 같은 파일 이름은 앞 멤버 것). 합친 문서는 group 저장소에 저장해 두고 멤버 문서가 바뀔 때(hosted 업로드·삭제, proxy의 원격 갱신)만 다시 만듭니다. group은 `repodata.json.zst`·`.bz2`·`.jlap`를 404로 답해 클라이언트가 합친 `repodata.json`을 쓰게 합니다. `writeMember`가 있으면 group에 올린 패키지는 그 hosted로 갑니다.
 - 컴포넌트는 subdir을 그룹으로, 이름과 `<버전>-<빌드>`(`1.0-py_0`)를 버전으로 나타나며(라벨 `noarch/foo@1.0-py_0`, Cleanup `namePattern`은 `noarch:foo`처럼 `subdir:이름`에 맞춥니다), 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: conda`, hosted·proxy 모두)으로 하고 지우면 `repodata.json`·`channeldata.json`이 바로 갱신됩니다. 역할 권한 대상으로 `format:conda`를 쓸 수 있고, 컴포넌트 메타데이터 탭은 summary·description, license, home, dev_url과 depends(`depends`)·constrains(`constrains`)를 보여 줍니다.
 
+### Conan 설정
+
+Conan 원격 저장소(Nexus의 conan 포맷)입니다. Conan 2.x가 쓰는 v2 API(리비전)와, Conan 1.x가 리비전 없이 쓰는 v1 API의 읽기·업로드 부분을 `/repository/<저장소>/` 아래에서 제공합니다. v1 문서는 `baseURL`로 만든 절대 URL을 담으므로 `baseURL`이 클라이언트가 여는 주소와 같아야 합니다.
+
+```bash
+conan remote add cc http://localhost:8081/repository/conan-all
+conan remote login cc ci -p <비밀번호 또는 API 토큰>     # 읽기에 인증이 필요하거나 올릴 때
+conan install --requires=zlib/1.3 -r cc --build=missing
+conan create . -r cc                                    # 의존성은 cc에서 받습니다
+conan upload "mypkg/*" -r cc --confirm                   # add 권한. hosted 또는 writeMember가 있는 group
+conan list "zlib/*" -r cc                                # 검색
+conan remove "mypkg/1.0#*" -r cc --confirm               # delete 권한
+```
+
+- 로그인은 `v1/users/authenticate`에 Basic으로 비밀번호나 API 토큰을 보내 1시간짜리 토큰을 받고, 이후 요청은 `Authorization: Bearer <토큰>`으로 옵니다. 토큰이 만료되면 Conan이 저장된 자격으로 다시 로그인합니다(`conan remote login`, `CONAN_LOGIN_USERNAME_*`/`CONAN_PASSWORD_*`, `credentials.json`). `v1/ping`과 `v1/users/*`는 권한 없이 열리고, 그 외 읽기는 read, 업로드는 add, 삭제는 delete 권한입니다. 익명 읽기가 꺼진 저장소는 `conan remote login`을 먼저 하세요.
+- hosted는 파일을 v2 URL 경로 그대로 저장합니다: 레시피 `v2/conans/<name>/<version>/<user>/<channel>/revisions/<rrev>/files/<파일>`(user/channel이 없으면 `_`), 바이너리 `.../revisions/<rrev>/packages/<package_id>/revisions/<prev>/files/<파일>`. 레시피 리비전마다 패키지 행을 하나 두어 검색과 `latest`/`revisions`(최신 먼저)에 씁니다. 웹 UI의 컴포넌트는 레시피 리비전입니다: 이름은 레시피 이름, 그룹은 `user/channel`, 버전은 `<version>#<rrev>`이고 그 리비전의 바이너리 파일이 모두 애셋으로 보입니다.
+- `writePolicy`: 새 리비전은 언제나 새 컴포넌트입니다. `allow_once`(기본)는 같은 리비전의 같은 파일을 다른 내용으로 다시 올리면 409(같은 내용은 200), `allow`는 덮어쓰기 허용(edit 권한), `deny`는 읽기 전용(400)입니다. `checksum_deploy`(`X-Checksum-Deploy`)는 같은 경로에 같은 sha1 파일이 있을 때만 201이고 아니면 404라 클라이언트가 내용을 올립니다. 업로드 본문은 `maxUploadMiB`를 따릅니다.
+- proxy의 `remote`는 Conan 서버 루트(예: `https://center.conan.io/`, Artifactory는 `https://<host>/artifactory/api/conan/<repo>/`)이고 v2 API만 씁니다. `latest`·`revisions`·`files` 목록·패키지 검색은 `metadataMaxAge`마다 다시 확인하고, 파일은 처음 받을 때 캐시합니다(`contentMaxAge`). 원격이 응답하지 않으면 캐시된 문서를 `Warning: 110`과 함께 주고, 없는 레시피는 `negativeCacheTTL` 동안 404입니다. `remoteAuth`에 사용자/비밀번호를 주면 원격의 `v1/users/authenticate`에서 토큰을 받아 Bearer로 보내고, 거부되면 한 번 다시 로그인합니다(Conan Center는 익명).
+- group은 멤버 순서상 그 레시피를 처음 가진 멤버(`latest`가 200인 멤버)만으로 답하므로 hosted를 proxy보다 앞에 두세요. 검색은 멤버 결과를 합칩니다. `writeMember`가 있으면 group에 올린 것은 그 hosted로 갑니다.
+- Conan 1.x(리비전 없음)는 v1 API로 최신 리비전을 읽습니다: 스냅샷(`{파일: md5}`, 저장된 `conanmanifest.txt`에서), `digest`, `download_urls`, 패키지 목록(`search`), `upload_urls`(새 레시피는 리비전 `0`, 패키지는 패키지 리비전 `0`에 올라갑니다). v1의 `remove_files`와 `packages/delete`는 없으므로 Conan 1의 `conan remove -p`와, 원격에만 있는 파일을 지우는 재업로드는 실패합니다. 리비전을 켠 Conan 1(`CONAN_REVISIONS_ENABLED=1`)은 Conan 2처럼 v2 API를 씁니다.
+- 삭제는 `conan remove -r`(레시피, 리비전, 패키지, 패키지 리비전 모두 delete 권한), 웹 UI·API의 컴포넌트 삭제(레시피 리비전과 그 바이너리 전부), Cleanup 정책(conan hosted·proxy, 레시피 리비전 단위; `releaseType`은 `#rrev`를 뗀 버전으로 판단)으로 합니다. 역할 권한 대상으로 `format:conan`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 `conanfile.py`를 훑어 `description`·`license`·`homepage`·`url`과 `requires`/`tool_requires`/`build_requires`/`test_requires`(클래스 속성과 `self.requires("…")` 호출)를 보여 줍니다. 조건문은 평가하지 않습니다.
+
+### R 설정
+
+R(CRAN 형식) 저장소입니다. `install.packages()`, remotes, pak, renv가 읽는 구조 그대로 `/repository/<저장소>/` 아래에 소스 패키지는 `src/contrib/<패키지>_<버전>.tar.gz`, 바이너리는 `bin/windows/contrib/<R.x>/<패키지>_<버전>.zip`, `bin/macosx/contrib/<R.x>/…tgz`(`bin/macosx/big-sur-arm64/contrib/<R.x>/` 등 빌드 하위 디렉터리 포함)로 두고, 각 contrib 디렉터리에 `PACKAGES`, `PACKAGES.gz`, `PACKAGES.rds`를 제공합니다. hosted는 서버가 세 파일을 직접 만들어 유지합니다(패키지를 올리거나 지울 때마다 같은 트랜잭션에서 `tools::write_PACKAGES`와 같은 필드 순서로 다시 생성).
+
+```r
+# ~/.Rprofile 또는 세션에서
+options(repos = c(CC = "http://localhost:8081/repository/r-all"))   # CRAN 대신 그룹(또는 hosted/proxy) 하나만
+install.packages("foo")                                              # 소스와 바이너리를 OS·R 버전에 맞게 찾습니다
+# 인증이 필요한 저장소: options(repos = c(CC = "http://user:password@localhost:8081/repository/r-all"))
+# renv: renv.lock의 Repositories 항목이나 options(repos=) 를 같은 URL로 바꿉니다
+```
+
+```bash
+# 올리기: R CMD build 로 만든 tar.gz 를 contrib 디렉터리에 PUT(curl). add 권한이 필요합니다.
+curl -u ci:<비밀번호> --upload-file foo_1.0.0.tar.gz http://localhost:8081/repository/r-hosted/src/contrib/
+# Windows 바이너리(R CMD INSTALL --build 로 만든 zip)와 macOS 바이너리(tgz)는 R 버전 디렉터리에 올립니다
+curl -u ci:<비밀번호> --upload-file foo_1.0.0.zip http://localhost:8081/repository/r-hosted/bin/windows/contrib/4.4/
+curl -u ci:<비밀번호> --upload-file foo_1.0.0.tgz http://localhost:8081/repository/r-hosted/bin/macosx/big-sur-arm64/contrib/4.4/
+```
+
+- hosted는 올린 파일 안의 `<패키지>/DESCRIPTION`을 읽어(tar.gz·tgz는 tar+gzip, zip은 zip) 필드 전체와 md5/sha256/크기를 저장하고, `Package`·`Version`이 파일 이름과 다르거나 DESCRIPTION이 없거나 디렉터리와 확장자가 맞지 않으면(`src/contrib`에 zip 등) 400입니다. 파일 이름은 `<패키지>_<버전>.<확장자>`이며 패키지 이름은 R 규칙(영문자로 시작, 2자 이상, 영숫자와 `.`)을 따릅니다. 업로드 본문은 `maxUploadMiB`를 따릅니다. 첫 업로드 전에도 contrib 디렉터리의 `PACKAGES`(빈 파일)·`PACKAGES.rds`(0행 행렬)를 200으로 답하므로 다른 저장소의 패키지를 설치할 때 경고가 나지 않습니다.
+- `PACKAGES`에는 Package, Version, Priority, Depends, Imports, LinkingTo, Suggests, Enhances, License, License_is_FOSS, License_restricts_use, OS_type, Archs, MD5sum(파일의 md5), NeedsCompilation, 바이너리면 Built가 들어가며 디렉터리마다 패키지·버전 순으로 정렬됩니다. 같은 패키지의 여러 버전을 함께 두면 R이 최신 버전을 고릅니다.
+- `PACKAGES.rds`: R 직렬화 형식(XDR, 버전 2, gzip)으로 쓴 문자 행렬이며 R 2.3 이상 어느 버전이든 읽습니다. R은 `.rds`를 먼저 읽고 실패하면 `PACKAGES.gz`, `PACKAGES` 순으로 내려가므로 세 파일의 내용은 항상 같습니다. 컴포넌트는 contrib 디렉터리를 그룹으로 하여 `src/contrib/foo@1.0.0`, `bin/windows/contrib/4.4/foo@1.0.0`처럼 나타나며, 같은 패키지·버전이라도 디렉터리가 다르면 별개 컴포넌트입니다.
+- `writePolicy`: `allow_once`(기본)는 같은 디렉터리의 같은 패키지·버전 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요, 인덱스도 갱신), `deny`는 읽기 전용(400)입니다.
+- proxy의 `remote`는 CRAN 미러 또는 Posit Package Manager의 루트이며(예: `remote: https://cloud.r-project.org/`, `remote: https://packagemanager.posit.co/cran/latest/`) 요청 경로를 그대로 원격에 붙여 캐시합니다. 내용은 바꾸지 않습니다. `PACKAGES*`와 `Meta/` 아래 파일은 `metadataMaxAge`마다 다시 확인하고, 패키지 파일(`src/contrib/Archive/<패키지>/`의 옛 버전 포함)은 `contentMaxAge`(기본 영구)로 캐시합니다. 원격의 디렉터리 목록(HTML)은 404로 답합니다. `options(repos = c(CRAN = "http://localhost:8081/repository/r-proxy"))`로 씁니다.
+- group은 패키지 파일을 멤버 순서상 처음 가진 멤버에서 답하고, contrib 디렉터리의 `PACKAGES`는 멤버들의 것을 병합합니다(hosted를 앞에 두면 사내 패키지가 먼저 나오고, 같은 Package·Version은 앞선 멤버 것만 남습니다). 병합 결과는 멤버의 문서가 바뀔 때까지 저장해 두고, 그룹의 `PACKAGES.gz`·`PACKAGES.rds`는 병합한 `PACKAGES`에서 만들어(미러의 .rds를 읽지 않음) 같은 방식으로 캐시합니다. 어느 멤버에도 없는 디렉터리는 빈 인덱스로 답합니다. `writeMember`가 있으면 group에 올린 파일은 그 hosted로 갑니다.
+- 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: r`, hosted·proxy 모두)으로 하고, 지우면 그 디렉터리의 인덱스 세 파일이 바로 갱신됩니다. 역할 권한 대상으로 `format:r`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 Title·Description, License, URL, BugReports와 Depends/Imports/LinkingTo/Suggests(Suggests는 선택)를 보여 줍니다.
+
+### Git LFS 설정
+
+`gitlfs` 포맷은 Git LFS 서버(Batch API, basic 전송)입니다. Git 저장소 자체는 다른 곳(Gitea, GitHub 등)에 두고 큰 파일(LFS 오브젝트)만 Command Center에 저장합니다. Nexus의 Git LFS와 같이 hosted만 지원하며 proxy·group은 만들 수 없습니다(설정 검증에서 400).
+
+```bash
+# 저장소마다 LFS 서버를 지정합니다(.lfsconfig를 커밋하면 모든 클론에 적용됩니다).
+git config -f .lfsconfig lfs.url http://localhost:8081/repository/lfs-hosted/info/lfs
+# 또는 로컬 설정만: git config lfs.url http://localhost:8081/repository/lfs-hosted/info/lfs
+# (…/repository/lfs-hosted/ 까지만 써도 됩니다.)
+
+# 인증: git credential helper에 API 토큰을 저장합니다(비밀번호도 되지만 토큰을 권장합니다).
+git config credential.helper store      # 또는 osxkeychain, manager 등
+printf 'protocol=http\nhost=localhost:8081\nusername=ci\npassword=<API 토큰>\n' | git credential approve
+
+git lfs track '*.bin'
+git add .gitattributes file.bin && git commit -m 'lfs'
+git lfs push origin main          # 오브젝트는 lfs.url로, 커밋은 origin으로
+git push origin main
+git lfs pull                      # 다운로드(read 권한)
+```
+
+- 권한: 다운로드(batch `download`, GET)는 read, 업로드(batch `upload`, PUT)는 add, 오브젝트 DELETE는 delete 권한입니다. 인증이 없으면 batch 응답이 401과 `LFS-Authenticate: Basic realm="commandcenter"`로 자격 증명을 요구하며, git-lfs는 credential helper의 값을 Basic으로 보냅니다. `Authorization: Bearer <API 토큰>`도 됩니다. 역할 대상으로 `format:gitlfs`를 쓸 수 있습니다.
+- 저장: 오브젝트는 sha256(oid)으로 이름 붙은 파일 하나이며 `objects/<aa>/<bb>/<oid>` 경로에 저장됩니다. 업로드 내용의 sha256이 oid와 다르면 422로 거부합니다. 같은 oid는 같은 내용이므로 재업로드는 `allow_once`에서도 200으로 받습니다(멱등). `writePolicy: deny`는 업로드·삭제를 400으로 막습니다. `POST …/objects/verify`는 저장된 크기가 맞으면 200, 아니면 422입니다.
+- 크기 제한: 오브젝트 하나는 `maxUploadMiB`(기본 1024)를 넘을 수 없습니다(413). LFS 오브젝트는 크므로 LFS를 쓰는 인스턴스는 이 값을 넉넉히 올리고 리버스 프록시의 본문 제한("Ingress와 큰 업로드" 참고)도 맞추세요.
+- 잠금(File Locking)은 지원하지 않습니다. `locks` API는 501로 답하고 git-lfs는 그 뒤로 잠금 확인을 건너뜁니다(`lfs.<url>.locksverify=false`). `git lfs lock`은 쓸 수 없습니다.
+- 웹 UI: 컴포넌트는 오브젝트 하나하나이며 이름이 oid이고 버전은 없습니다. 컴포넌트 삭제(API `DELETE /-/api/repositories/<저장소>/components?name=<oid>`)는 version 없이 호출합니다. 메타데이터 탭은 크기와 sha256만 보여 줍니다. Cleanup 정책(포맷 `all` 또는 `gitlfs`)은 `componentAgeDays`·`lastDownloadedDays`로 오브젝트 단위로 정리합니다. 활동 이벤트는 `upload`/`delete`에 oid가 기록됩니다.
+
 ## 운영
 
 | 작업 | 명령 |
@@ -1609,6 +1715,10 @@ Kubernetes에서는 `docker compose exec commandcenter` 대신 `kubectl -n <네�
 표준 출력에 JSON 한 줄씩 기록합니다. 요청마다 `id`, `method`, `path`, `status`, `bytes`, `ms`, `user`, `remote` 필드가 있습니다.
 클라이언트가 보낸 `X-Request-Id`는 1–64자의 `[A-Za-z0-9._-]`일 때만 쓰고, 아니면 서버가 새로 만듭니다. 500 오류 메시지에 나오는 request id로 로그를 검색할 수 있습니다.
 
+### 로그 레벨
+
+로그 레벨은 실행 중에 바꿀 수 있습니다. `GET /-/api/logging`(관리자)은 현재 레벨을 `{"level":"info","persistent":false}`로 알려 주고, `PUT /-/api/logging`에 `{"level":"debug"}`(`debug`, `info`, `warn`, `error`)를 보내면(관리자, 비밀번호·세션 로그인, `X-Command-Center-UI: 1` 헤더) 바로 적용됩니다. 관리자 화면의 로그 페이지에서도 고를 수 있습니다. 바뀐 레벨은 저장되지 않아 서버를 다시 시작하면 `info`로 돌아오고, 활동 이벤트 `logging.level`이 남습니다. `debug`는 로그 양이 크게 늘어나므로 원인을 찾은 뒤 되돌리는 것이 좋습니다.
+
 ### 메트릭
 
 `GET /-/metrics`는 `admin` 사용자만 호출할 수 있습니다(JSON).
@@ -1619,9 +1729,50 @@ curl -u admin http://localhost:8081/-/metrics
 
 필드: `heapAllocBytes`, `heapSysBytes`, `sysBytes`, `numGC`, `goroutines`, `rssBytes`(Linux에서만 값이 있음).
 
+`GET /-/metrics/prometheus`는 같은 정보를 Prometheus 텍스트 형식(0.0.4)으로 내보냅니다. 기본으로 `admin`만 호출할 수 있고, 일반 설정의 `metricsAnonymous`를 `true`로 두면 인증 없이도 읽을 수 있습니다(수집기가 자격 증명을 보낼 수 없을 때만 켜고, 리버스 프록시에서 경로를 막아 두는 편이 안전합니다).
+
+| 메트릭 | 설명 |
+|---|---|
+| `commandcenter_build_info{version,goversion}` | 항상 1 |
+| `commandcenter_uptime_seconds`, `go_goroutines`, `go_memstats_heap_alloc_bytes`, `go_memstats_sys_bytes`, `process_resident_memory_bytes`, `go_gc_cycles_total` | 프로세스·Go 런타임 |
+| `commandcenter_requests_total{repository}`, `commandcenter_request_errors_total`(5xx·429), `commandcenter_request_bytes_total{repository,direction="in\|out"}`, `commandcenter_request_duration_ms_sum/_count` | 저장소별 요청 카운터. 프로세스가 시작한 뒤의 누적값이며(재시작하면 0부터) `rate()`로 쓰면 됩니다 |
+| `commandcenter_upstream_requests_total`, `commandcenter_upstream_failures_total`, `commandcenter_cache_hits_total`, `commandcenter_cache_misses_total` | proxy 저장소의 원격 가져오기와 캐시 조회 |
+| `commandcenter_repository_assets{repository}`, `commandcenter_repository_bytes` | 저장소의 asset 수와 크기(30초 캐시) |
+| `commandcenter_blobstore_blobs{store}`, `commandcenter_blobstore_bytes` | blob store별 blob 수와 크기(30초 캐시) |
+| `commandcenter_tasks_last_result{task,type}` | 마지막 실행이 성공이면 1, 실패면 0(한 번도 안 돌았으면 없음) |
+| `commandcenter_health_check{name}` | 상태 점검(Database, Blob store, Memory, Remote fetch slots, Repositories) 통과 1, 실패 0 |
+
+Prometheus 수집 설정 예:
+
+```yaml
+scrape_configs:
+  - job_name: commandcenter
+    metrics_path: /-/metrics/prometheus
+    scheme: https
+    basic_auth:
+      username: metrics-admin     # admin 역할의 계정(API 토큰도 비밀번호 자리에 넣을 수 있음)
+      password_file: /etc/prometheus/commandcenter.pw
+    static_configs:
+      - targets: ["commandcenter.example.com:443"]
+```
+
+### 지원 번들과 스레드 덤프
+
+문제를 보고할 때 필요한 정보를 한 번에 모읍니다. 관리자 화면의 지원(Support) 페이지에서 내려받거나 API로 호출합니다.
+
+- `GET /-/api/support/zip`(관리자, 비밀번호·세션 로그인): `commandcenter-support-<호스트>-<시각>.zip`을 내려줍니다. 안에는 `info.json`(버전·Go 버전·OS·가동 시간·PID), `config.json`(적용 중인 일반·SMTP·Realm·LDAP·OIDC·SSL 설정), `repositories.json`, `blobstores.json`, `status.json`(상태 점검), `sysinfo.json`, `tasks.json`, `webhooks.json`, `request-stats.json`(최근 24시간 저장소별 통계), `events.json`(최근 활동 500건), `logs.txt`(메모리에 남아 있는 로그), `threads.txt`(스레드 덤프), `metrics.txt`(Prometheus 텍스트)가 들어 있습니다.
+- 비밀값은 들어가지 않습니다. 비밀번호·클라이언트 시크릿·S3 secret key·웹훅 시크릿은 API 화면과 같이 "설정됨" 여부(`passwordSet` 등)로만 나타나고, 원격 URL의 자격 증명도 지워집니다. 그래도 외부에 보내기 전에 `config.json`의 호스트 이름 등 공개하고 싶지 않은 값이 있는지 한 번 확인하는 것이 좋습니다.
+- 크기는 제한되어 있습니다(활동 500건, 로그 링 1 MiB, 스레드 덤프 8 MiB). 내려받으면 활동 이벤트 `support.zip`이 남습니다.
+- `GET /-/api/support/threads`(관리자): 모든 goroutine의 스택을 텍스트로 돌려줍니다(최대 8 MiB). 요청이 멈춘 것 같을 때 어디서 기다리는지 보는 용도입니다.
+
+```bash
+curl -u admin -o support.zip https://commandcenter.example.com/-/api/support/zip
+curl -u admin https://commandcenter.example.com/-/api/support/threads | head
+```
+
 ### Cleanup 정책
 
-오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
+오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
 
 | 기준 | 의미 |
 |---|---|
@@ -1650,7 +1801,13 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 |---|---|---|
 | `blobstore.compact` | 쓰이지 않는 blob과 1시간 넘은 임시 파일 정리(`commandcenter gc`와 같음) | `blobStore`(선택, 한 store만. 비우면 모든 store. 없는 이름은 만들 때 400) |
 | `repository.cleanup` | 정책이 연결된 저장소를 정리 | `repos`(비우면 정책이 있는 모든 저장소) |
-| `repository.rebuild-metadata` | hosted: 모든 GA와 SNAPSHOT 버전의 `maven-metadata.xml`을 에셋에서 다시 만들고, 아티팩트가 없는 GA의 문서에서 버전을 지움(`<plugins>`는 남김). proxy: 이전 버전이 캐시한, Maven 파일이 아닌 경로의 캐시(디렉터리 목록, `.index/`)를 지움 | `repo`(Maven hosted 또는 proxy) |
+| `repository.rebuild-metadata` | Maven hosted: 모든 GA와 SNAPSHOT 버전의 `maven-metadata.xml`을 에셋에서 다시 만들고 아티팩트가 없는 GA의 문서에서 버전을 지움(`<plugins>`는 남김). Maven proxy: 이전 버전이 캐시한, Maven 파일이 아닌 경로의 캐시(디렉터리 목록, `.index/`)를 지움. apt·yum·helm·conda hosted: 패키지 행에서 `dists/`, `repodata/`(depth 1은 디렉터리마다), `index.yaml`, `repodata.json`·`channeldata.json`을 업로드 때와 같은 방식으로 다시 씀 | `repo`(비우면 다시 만들 수 있는 모든 저장소), `format`(비운 `repo`와 함께 한 형식만, 예: `helm`) |
+| `repository.verify-blobs` | 저장소의 모든 에셋에 대해 blob이 blob store에 있는지(크기 포함) 확인하고, `checksum`이면 blob을 다시 읽어 SHA-256을 비교. 빠지거나 다른 blob이 하나라도 있으면 결과가 **Failed**이며 로그에 경로를 100개까지 남김. 아무것도 지우지 않음 | `repository`(비우면 모든 저장소), `checksum`(기본 꺼짐), `maxBytes`(checksum 때 한 번에 읽는 바이트, 기본 10 GiB. 넘치면 멈추고 다음 실행이 저장소별 커서에서 이어 감) |
+| `maven.purge-snapshots` | Maven hosted 저장소의 SNAPSHOT 버전을 GA마다 최신 `minimumRetained`개만 남기고, 나머지 중 `snapshotRetentionDays`보다 오래된(0이면 나이 무관) 버전을 디렉터리째 지움. `lastDownloadedDays`를 주면 그 기간 동안 내려받지 않은(한 번도 없으면 저장된 지 그만큼 지난) 버전만 지움. `removeIfReleased`면 같은 GA에 정식 `X`가 있는 `X-SNAPSHOT`은 남길 개수와 무관하게, 정식 버전이 `gracePeriodDays`보다 오래됐을 때 지움. 삭제는 컴포넌트 삭제 경로를 지나므로 `maven-metadata.xml`이 다시 만들어지고 `delete` 활동이 남으며, 평가 뒤 바뀐 버전은 건너뜀. `writePolicy: deny` 저장소는 만들 때 400, 실행 때 Failed | `repository`(Maven hosted, 필수), `minimumRetained`(기본 1), `snapshotRetentionDays`(기본 30), `lastDownloadedDays`(기본 0), `removeIfReleased`, `gracePeriodDays`, `preview`(지울 것을 로그에만 남김) |
+| `blobstore.recalculate-size` | blob store의 blob 수를 세어 에셋이 참조하는 수·바이트와 비교해 로그에 남김. 화면의 용량은 에셋 행에서 실시간으로 계산하므로 저장할 값은 없고, 다음 compaction이 지울 blob 수를 미리 봄 | `blobStore`(선택) |
+| `blobstore.delete-temp-files` | 각 store `tmp/`의 1시간 넘은 임시 파일(`up-*`)과 24시간 넘게 쓰지 않은 Docker 업로드 세션(`ses-*`)을 지움(compact가 시작할 때 하는 정리와 같음). S3 store의 multipart 잔여물은 다루지 않음 | `blobStore`(선택) |
+
+작업 목록 API(`GET /-/api/tasks`)의 `types[]`에는 종류마다 `params`(이름·형식·기본값)가 함께 옵니다. Nexus 호환 API(`GET /service/rest/v1/tasks`)는 `type`을 Nexus 이름으로 바꿔 줍니다(`repository.maven.rebuild-metadata`, `repository.maven.remove-snapshots`, `blobstore.delete-temp-files`).
 
 첫 시작 때 작업이 하나도 없으면 `compact-blobstore`(`blobstore.compact`, `daily:03:00`, 사용)를 만듭니다. 이 기본 작업은 지울 수 없습니다(`DELETE`는 409). 지우면 재시작해도 다시 생기지 않아 compaction이 조용히 멈추기 때문이며, 끄고 싶으면 "사용"을 끄세요.
 
@@ -1690,6 +1847,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
   | `cleanup` | 정리 결과(개수, 용량) |
   | `policy.create` / `policy.update` / `policy.delete` | 정책 변경 |
   | `routingrule.*` / `selector.*` / `webhook.*` | 라우팅 규칙, 컨텐츠 셀렉터, webhook 변경 |
+  | `settings.http` / `logging.level` / `support.zip` / `ssl.add` / `ssl.remove` | 외부 HTTP 설정 변경, 로그 레벨 변경, 지원 번들 내려받기, 신뢰 저장소 변경 |
 
 ### 다운로드 수·요청 추이
 
@@ -1752,6 +1910,8 @@ docker compose up -d
 ```
 
 Git Bash에서는 복원의 `docker run` 앞에 `MSYS_NO_PATHCONV=1`을 붙이고 `-v "$(pwd -W)":/backup`을 씁니다.
+
+**저장소 점검(verify-blobs)**: `repository.verify-blobs` 작업은 `meta.db`의 에셋이 가리키는 blob이 blob store에 실제로 있는지 점검합니다("예약 작업" 참고). 백업을 복원한 뒤나 blob 디렉터리를 옮긴 뒤 한 번 돌려 두 쪽이 같은 시점의 것인지 확인하세요. 기본은 존재와 크기만 보므로 빠르고, `checksum`을 켜면 blob을 다시 읽어 SHA-256까지 비교합니다. 큰 store는 `maxBytes`(기본 10 GiB)만큼 읽고 멈춘 뒤 다음 실행이 저장소별 커서에서 이어 가므로 매일 밤 일정으로 두면 전체를 돌아가며 점검합니다. 결과가 Failed면 로그에 빠진 blob(`missing:`)과 내용이 다른 blob(`mismatch:`)의 경로가 100개까지 남습니다. 작업은 아무것도 지우지 않습니다. 빠진 blob은 백업에서 해당 파일(`blobs/sha256/xx/yy/<sha>`)을 되돌리거나 에셋을 지우고 다시 올리고, 내용이 다른 blob은 디스크 손상을 의심하고 백업에서 되돌리세요.
 
 ### 릴리스 이미지와 바이너리
 
@@ -1826,7 +1986,8 @@ docker compose start
 ## 제한 사항
 
 - 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. SAML과 Go·Cargo 업로드 화면은 없습니다(Go·Cargo는 클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. 포맷 고유의 검색(`npm search` 포함)도 없습니다.
-- **지원하지 않는 포맷**: Conan, R, Git LFS, p2, CocoaPods, Swift, Terraform, HuggingFace는 없습니다.
+- **지원하지 않는 포맷**: p2, CocoaPods, Swift, Terraform, HuggingFace는 없습니다.
+- **Conan·R·Git LFS의 알려진 제한**: Conan v1 API에는 `remove_files`와 `packages/delete`가 없어 리비전 없는 Conan 1.x의 `conan remove -p`와 원격에만 있는 파일을 지우는 재업로드가 실패합니다(Conan 2와 리비전을 켠 Conan 1은 해당 없음). R group은 미러의 `PACKAGES.rds`를 읽지 않고 병합한 `PACKAGES`에서 `.gz`·`.rds`를 만듭니다. Git LFS는 hosted만 되고 잠금(`locks`) API는 501입니다("Conan 설정", "R 설정", "Git LFS 설정" 참고).
 - **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브가 gzip(`control.tar.gz`)이나 무압축 tar인 `.deb`만 받습니다(xz·zstd는 400). Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
 - **RubyGems·Composer·Conda의 알려진 제한**: RubyGems group은 `versions`·`names`만 병합하고 Marshal 인덱스(`specs.4.8.gz` 등)는 그 파일을 처음 가진 멤버 것을 그대로 냅니다. Conda hosted는 `.conda` 파일의 zstd 메타데이터를 읽지 않아 이름·버전·빌드·해시만 기록하고(의존성 없음), `repodata.json.bz2`·`.zst`·`.jlap`를 만들지 않습니다(클라이언트는 `repodata.json`으로 넘어갑니다). Composer는 v1 `providers-url`과 `notify-batch`·`security-advisories`를 제공하지 않으며(Composer 2 전용), `/`가 든 브랜치 버전은 올릴 수 없습니다("RubyGems 설정", "Composer 설정", "Conda 설정" 참고).
 - **인스턴스는 하나만**: 잠금이 모두 프로세스 안에 있어 같은 데이터로 여러 대를 띄울 수 없습니다. 이중화와 수평 확장은 없습니다("저장 공간과 인스턴스" 참고).
@@ -1846,6 +2007,9 @@ docker compose start
   | Cargo | 409 |
   | NuGet, APT, Yum (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
   | RubyGems, Composer, Conda (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
+  | Conan (`allow_once`) | 같은 리비전의 같은 파일을 다른 내용으로 올리면 409, 같은 내용이면 200 (`writePolicy: allow`이면 허용) |
+  | R (`allow_once`) | 409 (`writePolicy: allow`이면 허용) |
+  | Git LFS | 200 (같은 oid는 같은 내용이므로 멱등) |
 
   Cargo는 `-`/`_`와 대소문자만 다른 이름, 빌드 메타데이터(`+…`)만 다른 버전도 같은 것으로 보고 409로 거부합니다.
 - **group과 의존성 혼동**: group은 멤버를 순서대로 조회합니다. Maven과 Go는 `latest`를 멤버 전체 중 가장 새로운 버전으로 고르므로, hosted 멤버를 앞에 두어도 proxy 쪽에 더 높은 버전이 있으면 그것이 `latest`가 됩니다. npm·PyPI·Cargo group은 그 패키지(프로젝트, crate)를 처음 가진 멤버 하나만으로 답하므로, hosted를 proxy보다 앞에 두면 같은 이름의 공개 버전이 섞이지 않습니다. npm과 PyPI는 앞선 멤버가 Offline이거나 오류를 내면 503·5xx로 실패하고, tarball·파일 URL을 직접 요청해도 그 멤버의 것만 줍니다. Cargo group은 Offline 멤버를 건너뛰고, crate 파일 다운로드 URL은 멤버 순서대로 찾습니다. Maven·Go·Cargo에서 사내 패키지 이름을 공개 저장소에서 선점당하지 않으려면 사내 전용 group을 따로 두거나 proxy 멤버를 넣지 마세요.

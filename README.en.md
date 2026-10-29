@@ -4,7 +4,7 @@
 
 <p align="center">
   A small, solid open-source artifact registry that takes the place of Nexus Repository.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda in one binary, running as a single Kubernetes pod.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS in one binary, running as a single Kubernetes pod.
 </p>
 
 <p align="center">
@@ -54,6 +54,9 @@ Most in-house package repositories start as Nexus Repository OSS, and then meet 
 | RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
 | Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
 | Conda | ✅ | ✅ | ✅ | conda, mamba |
+| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) |
+| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL |
+| Git LFS | ✅ | ❌ | ❌ | git lfs |
 
 Unsupported formats are listed under [limitations](docs/guide.md#제한-사항).
 
@@ -63,7 +66,8 @@ Unsupported formats are listed under [limitations](docs/guide.md#제한-사항).
 - **Authentication and authorization**: local users, roles with per-repository privileges (browse, read, add, edit, delete), API tokens, **LDAP** (standard-library client), **OIDC** (Keycloak, Gitea, GitHub and others, with group-to-role mapping), Docker token auth.
 - **Operational visibility**: per-repository requests, error rate, latency, upstream failures and cache hit rate; request trends, activity log, health checks, log viewer, failure e-mails.
 - **Storage**: file or **S3-compatible** blob stores (several at once), content-addressed deduplication, blob GC. Metadata in **SQLite** or **PostgreSQL**, with a migration command between them.
-- **Housekeeping**: cleanup policies (age, last download, name pattern), scheduled tasks, per-repository online/offline.
+- **Housekeeping**: cleanup policies (age, last download, name pattern), scheduled and maintenance tasks (blob verification, Maven snapshot purge, metadata rebuild, temp file sweep), per-repository online/offline.
+- **Operations tooling**: Prometheus metrics endpoint, support bundle (support zip), thread dump, runtime log level, outbound HTTP proxy settings, SSL trust store for internal CAs.
 - **Webhooks**: global or per-repository HTTP POST of every activity event (HMAC signatures, retries, delivery history).
 - **Routing rules**: BLOCK/ALLOW regex rules on the paths a proxy may ask its remote for (keeps internal artifacts from leaking).
 - **Content selectors**: CSEL expressions (`format`, `path`, `coordinate.groupId`) that scope role privileges to paths.
@@ -169,7 +173,7 @@ The default container limit is 128 MiB (`GOMEMLIMIT=80MiB`).
 ## Status and limits
 
 - Designed for a single instance; no high availability or horizontal scaling (the same as Nexus OSS).
-- Conan, R, Git LFS, p2, CocoaPods, Swift, Terraform and HuggingFace are not available yet (in progress).
+- p2, CocoaPods, Swift, Terraform and HuggingFace are not available yet (in progress).
 - The Nexus REST API covers repositories, components, assets, search and status. User and role writes and the script API are not available.
 - Known limitations are listed in the guide ([제한 사항](docs/guide.md#제한-사항)); every release's fixes and changes are in the [CHANGELOG](CHANGELOG.md).
 - Report bugs as issues and security problems privately per the [security policy](SECURITY.md).
