@@ -333,6 +333,8 @@ function pageTitle(key) {
     case "admin/repository/routingrules": return t("nav.routingrules");
     case "admin/security/contentselectors": return t("nav.selectors");
     case "admin/system/webhooks": return t("nav.webhooks");
+    case "admin/system/support": return t("nav.support");
+    case "admin/security/certificates": return t("nav.certificates");
     case "admin/security/users": return t("nav.users");
     case "admin/security/roles": return t("nav.roles");
     case "admin/security/realms": return t("nav.realms");
@@ -419,6 +421,7 @@ function navSections() {
       me.admin ? ["#admin/security/roles", t("nav.roles"), "roles", is("admin/security/roles")] : null,
       me.admin ? ["#admin/security/realms", t("nav.realms"), "realms", is("admin/security/realms")] : null,
       me.admin ? ["#admin/security/contentselectors", t("nav.selectors"), "browse", is("admin/security/contentselectors")] : null,
+      me.admin ? ["#admin/security/certificates", t("nav.certificates"), "cert", is("admin/security/certificates")] : null,
       [me.admin ? "#admin/security/usertoken" : "#user/usertoken", t("nav.tokens"), "token", is("admin/security/usertoken", "user/usertoken")],
     ]]);
   }
@@ -427,6 +430,7 @@ function navSections() {
       ["#admin/system/general", t("nav.general"), "settings", is("admin/system/general")],
       ["#admin/system/webhooks", t("nav.webhooks"), "upload", is("admin/system/webhooks")],
       ["#admin/support/status", t("nav.status"), "health", is("admin/support/status", "admin/support/systeminformation")],
+      ["#admin/system/support", t("nav.support"), "lifebuoy", is("admin/system/support")],
     ]]);
   }
   return out;

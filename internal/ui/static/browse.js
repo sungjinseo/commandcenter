@@ -238,6 +238,8 @@ function usageTools(format, c) {
     case "pypi": return [["pip", "pip install " + c.name + "==" + c.version]];
     case "go": return [["Go", "go get " + c.name + "@" + c.version]];
     case "cargo": return [["Cargo", "cargo add " + c.name + "@" + c.version + " --registry commandcenter"]];
+    case "conan": return [["Conan", "conan install --requires=" + c.name + "/" + String(c.version).split("#")[0] + (c.group ? "@" + c.group : "") + " -r commandcenter"]];
+    case "r": return [["R", 'install.packages("' + c.name + '")']];
   }
   return [];
 }
@@ -377,6 +379,7 @@ async function versionList(r, c) {
     case "rubygems":
     case "composer":
     case "yum": return pkgVersions(c.name);
+    case "r": return pkgVersions((c.group ? c.group + "/" : "") + c.name); // the package name is directory-qualified
     case "maven": {
       const dir = (c.group ? c.group.split(".").join("/") + "/" : "") + c.name + "/";
       const d = await listDir(dir);
@@ -634,6 +637,24 @@ function setupSnippets(r) {
       const out = [["conda config", "conda config --add channels " + url], [".condarc", "channels:\n  - " + url], ["conda install", "conda install -c " + url + " <package>"]];
       if (hosted || r.writeMember) out.push(["upload", "curl -u ci --upload-file <file> " + url + "<subdir>/"]);
       return out;
+    }
+    case "conan": {
+      const out = [["conan remote add", "conan remote add commandcenter " + url + (local ? "" : "\nconan remote login commandcenter ci -p <" + t("setup.password") + ">")],
+        ["conan install", "conan install --requires=<package>/<version> -r commandcenter"]];
+      if (hosted || r.writeMember) out.push(["conan upload", "conan upload \"<package>/*\" -r commandcenter --confirm"]);
+      return out;
+    }
+    case "r": {
+      const out = [[".Rprofile", "options(repos = c(" + r.name.replace(/[^A-Za-z0-9_.]/g, "_") + " = \"" + url + "\"))"], ["install.packages", 'install.packages("<package>")']];
+      if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <package>_<version>.tar.gz " + url + "src/contrib/\ncurl -u ci -T <package>_<version>.zip " + url + "bin/windows/contrib/<R.x>/"]);
+      return out;
+    }
+    case "gitlfs": {
+      let authority = host; // host:port, as git credential keys it
+      try { authority = new URL(url).host; } catch (e) { /* keep the host name */ }
+      return [[".lfsconfig", "git config -f .lfsconfig lfs.url " + url + "info/lfs"], ["git config", "git config lfs.url " + url + "info/lfs"],
+        ["git credential", "printf 'protocol=" + (url.startsWith("https:") ? "https" : "http") + "\\nhost=" + authority + "\\nusername=ci\\npassword=<" + t("setup.token") + ">\\n' | git credential approve"],
+        ["git lfs push", "git lfs push origin <branch>\n# " + t("setup.lfsNote")]];
     }
     case "composer": {
       const out = [["composer config", "composer config repositories.commandcenter composer " + url + (local ? "" : "\ncomposer config -g http-basic." + host + " ci <" + t("setup.password") + ">")]];

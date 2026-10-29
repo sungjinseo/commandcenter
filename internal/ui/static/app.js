@@ -30,6 +30,8 @@ const ADMIN_SCREENS = {
   "admin/repository/routingrules": true,
   "admin/security/contentselectors": true,
   "admin/system/webhooks": true,
+  "admin/system/support": false,
+  "admin/security/certificates": false,
 }; // value: whether the screen takes a ":<id>" parameter
 
 function dec(x) {
@@ -170,7 +172,8 @@ async function show(view, r) {
     const titles = { "admin/repository/repositories": t("nav.repositories"), "admin/security/users": t("nav.users"), "admin/security/roles": t("nav.roles"), "admin/security/realms": t("nav.realms"), "admin/security/usertoken": t("nav.tokens"),
       "admin/support/status": t("nav.status"), "admin/support/systeminformation": t("nav.sysinfo"), "admin/system/tasks": t("nav.tasks"),
       "admin/repository/cleanuppolicies": t("nav.cleanup"), "admin/repository/blobstores": t("nav.blobstores"), "admin/system/general": t("nav.general"),
-      "admin/repository/routingrules": t("nav.routingrules"), "admin/security/contentselectors": t("nav.selectors"), "admin/system/webhooks": t("nav.webhooks") };
+      "admin/repository/routingrules": t("nav.routingrules"), "admin/security/contentselectors": t("nav.selectors"), "admin/system/webhooks": t("nav.webhooks"),
+      "admin/system/support": t("nav.support"), "admin/security/certificates": t("nav.certificates") };
     return needAdmin(view, titles[r.key] || t("need.admin"));
   }
   const out = showSettings(view, r.key, p0, p1, r.criteria);

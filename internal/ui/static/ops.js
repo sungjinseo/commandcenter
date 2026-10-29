@@ -525,13 +525,32 @@ const cargoNote = () => h("div", { class: "notice" }, icon("info", "hint-ico"), 
 
 const taskLink = (id) => "#admin/system/tasks" + (id ? ":" + enc(id) : "");
 const CLEANUP = "repository.cleanup", REBUILD = "repository.rebuild-metadata", COMPACT = "blobstore.compact";
+const VERIFY = "repository.verify-blobs", PURGE = "maven.purge-snapshots", RECALC = "blobstore.recalculate-size", TEMP = "blobstore.delete-temp-files";
 const TASK_STATUS = { Running: ["task.running", "blue"], Waiting: ["task.waiting"], Disabled: ["task.disabled"] };
 const taskStatus = (x) => (TASK_STATUS[x.status] ? badge(t(TASK_STATUS[x.status][0]), TASK_STATUS[x.status][1]) : badge(x.status));
 const RESULTS = { OK: ["task.ok", "green"], Failed: ["task.failed", "red"], Stopped: ["task.stopped", "amber"] };
 const resultText = (x) => (RESULTS[x.lastResult] ? t(RESULTS[x.lastResult][0]) : x.lastResult || dash);
 const resultBadge = (x) => (x.lastResult ? badge(resultText(x), (RESULTS[x.lastResult] || [])[1]) : badge(t("task.never")));
 const taskEyebrow = () => ({ eyebrow: t("task.eyebrow") });
-const typeLabel = (type, fallback) => ({ [COMPACT]: t("task.tCompact"), [CLEANUP]: t("task.tCleanup"), [REBUILD]: t("task.tRebuild") }[type] || fallback || type);
+const typeLabel = (type, fallback) => ({ [COMPACT]: t("task.tCompact"), [CLEANUP]: t("task.tCleanup"), [REBUILD]: t("task.tRebuild"),
+  [VERIFY]: t("task.tVerify"), [PURGE]: t("task.tPurge"), [RECALC]: t("task.tRecalc"), [TEMP]: t("task.tTemp") }[type] || fallback || type);
+// Parameter names the dictionaries label; any other name is shown as is.
+const PARAM_KEY = "task.p.", PARAM_HELP = "task.ph."; // + the parameter name
+const PARAM_KEYS = ["repos", "repo", "repository", "format", "blobStore", "checksum", "maxBytes", "minimumRetained", "snapshotRetentionDays", "lastDownloadedDays", "removeIfReleased", "gracePeriodDays", "preview"];
+const paramLabel = (name) => (PARAM_KEYS.includes(name) ? t(PARAM_KEY + name) : name);
+// paramParts lists a task's stored parameters as "name: value", by their API
+// names (short and the same in both languages); empty and false values are left out.
+function paramParts(params) {
+  const parts = [];
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v === "" || v === null || v === undefined || v === false || (Array.isArray(v) && !v.length)) continue;
+    parts.push(k + ": " + (v === true ? t("task.pOn") : Array.isArray(v) ? v.join(", ") : k === "maxBytes" ? fmtBytes(v) : String(v)));
+  }
+  return parts;
+}
+// Repositories a "repository" parameter may name, per task type (the server checks too).
+const REBUILDABLE = (r) => (r.format === "maven" && r.type !== "group") || (["apt", "yum", "helm", "conda"].includes(r.format) && r.type === "hosted");
+const repoChoices = (type, repos) => (type === REBUILD ? repos.filter(REBUILDABLE) : type === PURGE ? repos.filter((r) => r.format === "maven" && r.type === "hosted") : repos);
 
 // Schedules (plan 11 Decision 7), in server time.
 const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -615,7 +634,8 @@ export async function viewTasks(view, id) {
     h("section", { class: "card" }, tbl(
       [t("task.task"), t("col.status"), t("task.schedule"), t("task.next"), t("task.lastResult"), actHead()],
       tasks.map((x) => h("tr", null,
-        h("td", { class: "name" }, h("a", { href: taskLink(x.id) }, h("strong", null, taskName(x))), h("div", { class: "tiny muted" }, typeLabel(x.type, x.typeName))),
+        h("td", { class: "name" }, h("a", { href: taskLink(x.id) }, h("strong", null, taskName(x))), h("div", { class: "tiny muted" }, typeLabel(x.type, x.typeName)),
+          paramParts(x.params).length ? h("div", { class: "tiny muted mono params" }, paramParts(x.params).join(" · ")) : null),
         h("td", null, taskStatus(x)),
         h("td", null, scheduleText(x.schedule)),
         h("td", { class: "nowrap" }, x.nextRun ? fmtDate(x.nextRun) : dash),
@@ -625,28 +645,95 @@ export async function viewTasks(view, id) {
     h("div", { class: "notice" }, t("task.tzNote")));
 }
 
-// paramsEditor gives the type's parameter controls and how to read them.
-function paramsEditor(type, params, repos, policyOf) {
+// paramsEditor renders one control per parameter of the type's spec
+// (GET /-/api/tasks types[].params: name, type, required, default, help) and
+// reads them back; get() returns {params, errs}. The cleanup task keeps its
+// policy-aware multi-select.
+function paramsEditor(type, spec, params, repos, stores, policyOf) {
   params = params || {};
-  if (type === CLEANUP) {
-    const list = repos.filter(cleanable);
-    const picked = new Set(params.repos || []);
-    const m = h("select", { multiple: true, size: Math.min(8, Math.max(3, list.length)), class: "rf-list" },
-      list.map((r) => {
-        const o = h("option", { value: r.name }, r.name + " · " + (policyOf[r.name] || t("task.noPolicy")));
-        o.selected = picked.has(r.name);
-        return o;
-      }));
-    return { el: field(t("task.repos"), m, t("task.reposHelp"), { full: true }), get: () => ({ repos: [...m.selectedOptions].map((o) => o.value) }) };
+  const controls = [];
+  const els = [];
+  for (const p of spec || []) {
+    const cur = Object.prototype.hasOwnProperty.call(params, p.name) ? params[p.name] : p.default; // the server applies the default to an absent one
+    const help = p.help ? (PARAM_KEYS.includes(p.name) ? t(PARAM_HELP + (type === PURGE && p.name === "repository" ? "purgeRepository" : p.name)) : p.help) : null;
+    let el, get;
+    switch (p.type) {
+      case "repositories": {
+        const list = type === CLEANUP ? repos.filter(cleanable) : repos;
+        const picked = new Set(Array.isArray(cur) ? cur : []);
+        const m = h("select", { multiple: true, size: Math.min(8, Math.max(3, list.length)), class: "rf-list" },
+          list.map((r) => {
+            const o = h("option", { value: r.name }, r.name + (type === CLEANUP ? " · " + (policyOf[r.name] || t("task.noPolicy")) : " · " + r.format + " · " + r.type));
+            o.selected = picked.has(r.name);
+            return o;
+          }));
+        el = field(paramLabel(p.name), m, type === CLEANUP ? t("task.reposHelp") : help, { full: true, req: !!p.required });
+        get = () => [...m.selectedOptions].map((o) => o.value);
+        break;
+      }
+      case "repository": {
+        const list = repoChoices(type, repos).map((r) => [r.name, r.name + " · " + r.format + " · " + r.type]);
+        const v = typeof cur === "string" ? cur : "";
+        if (v && !list.some(([n]) => n === v)) list.unshift([v, v]);
+        const one = sel([["", p.required ? t("task.pickRepo") : t("task.allRepos")]].concat(list), v);
+        el = field(paramLabel(p.name), one, help, { req: !!p.required, full: true });
+        get = () => one.value;
+        break;
+      }
+      case "blobStore": {
+        const list = stores.map((n) => [n, n]);
+        const v = typeof cur === "string" ? cur : "";
+        if (v && !list.some(([n]) => n === v)) list.unshift([v, v]);
+        const one = sel([["", p.required ? t("task.pickStore") : t("task.allStores")]].concat(list), v);
+        el = field(paramLabel(p.name), one, help, { req: !!p.required });
+        get = () => one.value;
+        break;
+      }
+      case "format": {
+        const one = sel([["", t("task.anyFormat")]].concat(FORMATS.map((f) => [f, FORMAT_NAMES[f]])), typeof cur === "string" && FORMATS.includes(cur) ? cur : "");
+        el = field(paramLabel(p.name), one, help, { req: !!p.required });
+        get = () => one.value;
+        break;
+      }
+      case "bool": {
+        const box = h("input", { type: "checkbox", checked: cur === true });
+        el = h("div", { class: "field" }, h("label", { class: "check" }, box, paramLabel(p.name)), help ? h("small", null, help) : null);
+        get = () => box.checked;
+        break;
+      }
+      case "int":
+      case "bytes": {
+        const num = numIn(cur === undefined || cur === null ? "" : cur, 0, undefined);
+        const size = p.type === "bytes" ? h("span", { class: "rf-set muted" }) : null;
+        const sync = () => { if (size) size.textContent = intOf(num) >= 0 ? fmtBytes(intOf(num)) : ""; };
+        num.addEventListener("input", sync);
+        sync();
+        el = field(paramLabel(p.name), num, size ? [size, " ", help] : help, { req: !!p.required });
+        get = () => (num.value.trim() === "" ? undefined : intOf(num));
+        break;
+      }
+      default: {
+        const inp = textIn(cur === undefined || cur === null ? "" : String(cur), { maxlength: 500 });
+        el = field(paramLabel(p.name), inp, help, { req: !!p.required, full: true });
+        get = () => inp.value.trim();
+      }
+    }
+    els.push(el);
+    controls.push({ p, get });
   }
-  if (type === REBUILD) {
-    const list = repos.filter((r) => r.format === "maven" && (r.type === "hosted" || r.type === "proxy")).map((r) => [r.name, r.name + " · " + r.type]);
-    const cur = params.repo || "";
-    if (cur && !list.some(([n]) => n === cur)) list.unshift([cur, cur]);
-    const one = sel([["", t("task.pickRepo")]].concat(list), cur);
-    return { el: field(t("col.repo"), one, t("task.rebuildHelp"), { req: true, full: true }), get: () => ({ repo: one.value }) };
-  }
-  return { el: h("div", { class: "notice" }, type === COMPACT ? t("task.compactAbout") : t("task.noParams")), get: () => ({}) };
+  const get = () => {
+    const out = {}, errs = [];
+    for (const { p, get: g } of controls) {
+      const v = g();
+      const empty = v === undefined || v === "" || (Array.isArray(v) && !v.length);
+      if (p.required && empty) errs.push(t("task.e.param", { name: paramLabel(p.name) }));
+      if ((p.type === "int" || p.type === "bytes") && v !== undefined && !(v >= 0)) errs.push(t("task.e.int", { name: paramLabel(p.name) }));
+      if (!empty) out[p.name] = v;
+    }
+    return { params: out, errs };
+  };
+  if (!els.length) return { el: h("div", { class: "notice" }, type === COMPACT ? t("task.compactAbout") : t("task.noParams")), get };
+  return { el: fields(...els), get };
 }
 
 // logLines shows a run log ("<RFC3339> LEVEL message" lines) in the concept's .log block.
@@ -663,11 +750,12 @@ async function taskForm(view, id) {
   const isLive = alive();
   const creating = id === null;
   const none = () => null;
-  const [list, got, repos, pols] = await Promise.all([
+  const [list, got, repos, pols, bs] = await Promise.all([
     api("tasks"),
     creating ? null : api("tasks/" + encSeg(id)).catch((e) => { if (e.status === 404) return none(); throw e; }),
     loadRepos(true),
     api("cleanup/policies").catch(none),
+    api("blobstores").catch(none),
   ]);
   if (!isLive()) return;
   const back = h("a", { class: "btn", href: taskLink() }, t("task.back"));
@@ -679,16 +767,19 @@ async function taskForm(view, id) {
   const policyOf = {};
   for (const p of (pols && pols.policies) || []) for (const r of p.repositories || []) policyOf[r] = p.name;
   const types = (list.types || []).map((x) => [x.type, typeLabel(x.type, x.name)]);
+  const specOf = (ty) => ((list.types || []).find((x) => x.type === ty) || {}).params || [];
+  const stores = ((bs && bs.blobstores) || []).map((x) => x.name);
 
   const nameIn = textIn(task ? task.name : "", { required: true, maxlength: 100 });
   const typeSel = creating ? sel(types, CLEANUP) : textIn(typeLabel(task.type, task.typeName), { readonly: true });
   const sched = scheduleEditor(task ? task.schedule : "daily:02:00");
   const enabled = h("input", { type: "checkbox", checked: task ? !!task.enabled : true });
   const notify = h("textarea", { rows: 3, spellcheck: "false", autocomplete: "off", placeholder: "ops@example.com", maxlength: 2000 }, task && task.notifyEmail ? task.notifyEmail.join("\n") : "");
-  const paramsBox = h("div", null);
+  const paramsBox = h("div", { class: "task-params" });
   let params = null;
   const setParams = () => {
-    params = paramsEditor(creating ? typeSel.value : task.type, task ? task.params : null, repos, policyOf);
+    const ty = creating ? typeSel.value : task.type;
+    params = paramsEditor(ty, specOf(ty), task ? task.params : null, repos, stores, policyOf);
     put(paramsBox, params.el);
   };
   setParams();
@@ -707,12 +798,12 @@ async function taskForm(view, id) {
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     fs.clear();
-    const b = { name: nameIn.value.trim(), schedule: sched.value(), params: params.get(), enabled: enabled.checked,
+    const pv = params.get();
+    const b = { name: nameIn.value.trim(), schedule: sched.value(), params: pv.params, enabled: enabled.checked,
       notifyEmail: notify.value.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean) };
     if (creating) b.type = typeSel.value;
-    const errs = [];
-    if (!b.name) errs.push(t("task.e.name"));
-    if ((creating ? b.type : task.type) === REBUILD && !b.params.repo) errs.push(t("task.e.repo"));
+    const errs = pv.errs.slice();
+    if (!b.name) errs.unshift(t("task.e.name"));
     if (/^once:$/.test(b.schedule)) errs.push(t("task.e.when"));
     if (errs.length) { fs.show(errs); return; }
     save.disabled = true;
@@ -750,6 +841,7 @@ async function taskForm(view, id) {
       kv(t("task.lastResult"), resultBadge(task)),
       kv(t("task.next"), task.nextRun ? fmtDate(task.nextRun) : dash),
       kv(t("task.schedule"), scheduleText(task.schedule)),
+      kv(t("task.params"), paramParts(task.params).length ? h("span", { class: "params mono" }, paramParts(task.params).map((x) => h("span", null, x))) : dash),
       kv(t("task.notify"), (task.notifyEmail || []).length ? task.notifyEmail.join(", ") : dash),
       kv(t("task.lastRun"), task.lastRun ? fmtDate(task.lastRun) : dash),
       task.lastRun ? kv(t("task.duration"), fmtNum(task.lastDurationMs) + " ms") : null,

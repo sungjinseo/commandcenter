@@ -118,6 +118,8 @@ const ICONS = {
   sun: ["M8 12a4 4 0 1 0 8 0a4 4 0 1 0-8 0z", "M12 2v2", "M12 20v2", "M2 12h2", "M20 12h2", "M4.9 4.9l1.4 1.4", "M17.7 17.7l1.4 1.4", "M4.9 19.1l1.4-1.4", "M17.7 6.3l1.4-1.4"],
   moon: ["M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"],
   monitor: ["M3 5h18v11H3z", "M8 20h8", "M12 16v4"],
+  cert: ["M4 4h16v12H4z", "M8 8h8", "M8 11h5", "M15 16v5l2-1.5l2 1.5v-5"],
+  lifebuoy: ["M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8z", "M5.6 5.6l3.6 3.6", "M14.8 14.8l3.6 3.6", "M18.4 5.6l-3.6 3.6", "M9.2 14.8l-3.6 3.6"],
 };
 
 // icon returns an SVG element for one of the names above; unknown names
@@ -152,12 +154,12 @@ export function fmtUptime(sec) {
   return t("time.ms", { m: mm, s: sec % 60 });
 }
 
-export const FORMATS = ["maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm", "nuget", "apt", "yum", "rubygems", "conda", "composer"];
+export const FORMATS = ["maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm", "nuget", "apt", "yum", "rubygems", "conda", "composer", "conan", "r", "gitlfs"];
 const TYPES = { hosted: "hosted", proxy: "proxy", group: "group" };
 export const fmtBadge = (f) => h("span", { class: "badge" + (FORMATS.includes(f) ? " f-" + f : "") }, f);
 export const typeBadge = (ty) => h("span", { class: "badge" + (TYPES[ty] ? " t-" + ty : "") }, ty);
-export const FORMAT_NAMES = { maven: "Maven", npm: "npm", pypi: "PyPI", go: "Go", cargo: "Cargo", docker: "Docker", raw: "Raw", helm: "Helm", nuget: "NuGet", apt: "APT", yum: "Yum", rubygems: "RubyGems", conda: "Conda", composer: "Composer" };
-const TILES = { maven: "M", npm: "npm", pypi: "py", go: "go", cargo: "rs", docker: "dk", raw: "raw", helm: "hm", nuget: "nu", apt: "deb", yum: "rpm", rubygems: "gem", conda: "cn", composer: "php" };
+export const FORMAT_NAMES = { maven: "Maven", npm: "npm", pypi: "PyPI", go: "Go", cargo: "Cargo", docker: "Docker", raw: "Raw", helm: "Helm", nuget: "NuGet", apt: "APT", yum: "Yum", rubygems: "RubyGems", conda: "Conda", composer: "Composer", conan: "Conan", r: "R", gitlfs: "Git LFS" };
+const TILES = { maven: "M", npm: "npm", pypi: "py", go: "go", cargo: "rs", docker: "dk", raw: "raw", helm: "hm", nuget: "nu", apt: "deb", yum: "rpm", rubygems: "gem", conda: "cn", composer: "php", conan: "co", r: "R", gitlfs: "lfs" };
 // fmtTile is the concept's coloured format tile.
 export const fmtTile = (f) => h("span", { class: "format" + (FORMATS.includes(f) ? " " + f : ""), "aria-hidden": "true" },
   FORMATS.includes(f) ? TILES[f] : String(f || "?").slice(0, 1));

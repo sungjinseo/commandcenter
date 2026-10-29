@@ -196,6 +196,7 @@ export async function viewGeneral(view) {
   const [g0, sm0] = await Promise.all([api("settings"), api("settings/smtp")]);
   if (!isLive()) return;
   let g = Object.assign({}, g0), sm = Object.assign({}, sm0); // what the server holds now
+  const hp = () => Object.assign({ host: "", port: 0, username: "", passwordSet: false, nonProxyHosts: [] }, (g.http || {}).proxy || {});
 
   const form = h("form", { novalidate: true });
   const fs = formState(form);
@@ -255,6 +256,42 @@ export async function viewGeneral(view) {
     }
   });
 
+  // outbound HTTP (plan: proxy, timeouts, retries, user agent); the whole object is sent when any of it changed
+  const hc = g.http || {};
+  const ua = textIn(hc.userAgentSuffix, { maxlength: 100, placeholder: "(acme-ci)" });
+  const connT = numIn(hc.connectTimeoutSeconds ?? 10, 1, 600);
+  const respT = numIn(hc.timeoutSeconds ?? 30, 1, 600);
+  const retries = numIn(hc.retries ?? 0, 0, 10);
+  const pxHost = textIn(hp().host, { maxlength: 253, placeholder: "proxy.corp.local" });
+  const pxPort = h("input", { type: "number", inputmode: "numeric", min: 1, max: 65535, step: 1, value: hp().port ? String(hp().port) : "" });
+  const pxUser = textIn(hp().username, { maxlength: 255, autocomplete: "off" });
+  const pxPw = h("input", { type: "password", autocomplete: "new-password", placeholder: hp().passwordSet ? t("rf.unchanged") : "" });
+  const pxClear = h("input", { type: "checkbox" });
+  const pxClearRow = h("div", { class: "field" }, h("label", { class: "check" }, pxClear, t("http.clearPw")));
+  pxClearRow.hidden = !hp().passwordSet;
+  pxClear.addEventListener("change", () => { pxPw.disabled = pxClear.checked; if (pxClear.checked) pxPw.value = ""; });
+  const pxPwSet = h("span", null);
+  const syncPxSet = () => put(pxPwSet, hp().passwordSet ? [h("span", { class: "rf-set" }, t("rf.passSet")), " — ", t("rf.keepEmpty")] : t("http.pwHelp"));
+  syncPxSet();
+  const noProxy = h("textarea", { rows: 3, spellcheck: "false", autocomplete: "off", class: "mono", placeholder: "mirror.corp.local\n*.corp.local\n10.*" }, hp().nonProxyHosts.join("\n"));
+  const hostsOf = () => noProxy.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+  const httpBody = () => ({ userAgentSuffix: ua.value.trim(), connectTimeoutSeconds: intOf(connT), timeoutSeconds: intOf(respT), retries: intOf(retries),
+    proxy: { host: pxHost.value.trim(), port: Number(pxPort.value) || 0, username: pxUser.value.trim(), password: pxPw.value, clearPassword: pxClear.checked, nonProxyHosts: hostsOf() } });
+  const httpDirty = () => {
+    const b = httpBody(), p = hp();
+    return b.userAgentSuffix !== (hc.userAgentSuffix || "") || b.connectTimeoutSeconds !== hc.connectTimeoutSeconds || b.timeoutSeconds !== hc.timeoutSeconds ||
+      b.retries !== hc.retries || b.proxy.host !== (p.host || "") || b.proxy.port !== (p.port || 0) || b.proxy.username !== (p.username || "") ||
+      b.proxy.password !== "" || b.proxy.clearPassword || b.proxy.nonProxyHosts.join("\n") !== p.nonProxyHosts.join("\n");
+  };
+  const httpBox = fields(
+    field(t("http.ua"), ua, t("http.uaHelp"), { full: true }),
+    field(t("http.connT"), connT, t("http.connTHelp")), field(t("http.respT"), respT, t("http.respTHelp")),
+    field(t("http.retries"), retries, t("http.retriesHelp")),
+    h("div", { class: "field full" }, h("h3", { class: "sub-title" }, t("http.proxy")), h("small", null, t("http.proxyHelp"))),
+    field(t("http.pxHost"), pxHost, t("http.pxHostHelp")), field(t("http.pxPort"), pxPort),
+    field(t("http.pxUser"), pxUser), field(t("http.pxPw"), pxPw, pxPwSet), pxClearRow,
+    field(t("http.noProxy"), noProxy, t("http.noProxyHelp"), { full: true }));
+
   const save = h("button", { type: "button", class: "btn primary" }, t("gen.save"));
   const mailBox = h("div", null, fields(
     checkRow(enabled, t("smtp.enabled"), t("smtp.enabledHelp")),
@@ -279,6 +316,13 @@ export async function viewGeneral(view) {
     if (isNaN(idleN) || idleN < 5 || idleN > 10080) errs.push(t("gen.e.idle"));
     if (isNaN(upN) || upN < 1 || upN > 1048576) errs.push(t("gen.e.upload"));
     if (!baseURL.value.trim()) errs.push(t("gen.e.base"));
+    const hb = httpBody(), httpChanged = httpDirty();
+    if (httpChanged) {
+      if (!(hb.connectTimeoutSeconds >= 1 && hb.connectTimeoutSeconds <= 600) || !(hb.timeoutSeconds >= 1 && hb.timeoutSeconds <= 600)) errs.push(t("http.e.timeout"));
+      if (!(hb.retries >= 0 && hb.retries <= 10)) errs.push(t("http.e.retries"));
+      if (hb.proxy.host && !(hb.proxy.port >= 1 && hb.proxy.port <= 65535)) errs.push(t("http.e.port"));
+    }
+    pxPw.value = ""; // the secret never stays in the page
     const body = {};
     if (!errs.length) {
       if (baseURL.value.trim().replace(/\/+$/, "") !== g.baseURL) body.baseURL = baseURL.value.trim();
@@ -287,6 +331,7 @@ export async function viewGeneral(view) {
       if (lang.value !== g.defaultLanguage) body.defaultLanguage = lang.value;
       if (idleN !== g.sessionIdleMinutes) body.sessionIdleMinutes = idleN;
       if (upN !== g.maxUploadMiB) body.maxUploadMiB = upN;
+      if (httpChanged) body.http = hb;
     }
     const mailChanged = smtpDirty();
     const mail = { host: host.value.trim(), port: Number(port.value) || 0, security: secure.value, username: user.value, from: sender.value.trim(),
@@ -300,7 +345,16 @@ export async function viewGeneral(view) {
     if (Object.keys(body).length) {
       try {
         const out = await api("settings", { method: "PUT", body });
+        delete body.http; // never keep the proxy password around
         g = Object.assign(g, body, out && typeof out === "object" && !Array.isArray(out) ? out : {});
+        if (out && out.http) {
+          Object.assign(hc, out.http);
+          pxClear.checked = false;
+          pxPw.disabled = false;
+          pxPw.placeholder = hp().passwordSet ? t("rf.unchanged") : "";
+          pxClearRow.hidden = !hp().passwordSet;
+          syncPxSet();
+        }
         saved.push(t("gen.savedGeneral"));
       } catch (e) {
         if (e.status === 401 || e.status === 403) { save.disabled = false; handleError(e); return; }
@@ -346,9 +400,10 @@ export async function viewGeneral(view) {
       field(t("gen.lang"), lang, t("gen.langHelp")))),
     card(t("gen.session"), t("gen.sessionSub"), fields(field(t("gen.idle"), idle, t("gen.idleHelp")))),
     card(t("gen.upload"), t("gen.uploadSub"), fields(field(t("gen.maxUpload"), maxUp, t("gen.maxUploadHelp")))),
+    card(t("http.title"), t("http.sub"), httpBox),
     card(t("smtp.title"), t("smtp.sub"), mailBox)), h("div", { class: "savebar" }, save));
 
-  const help = h("aside", { class: "form-help" }, h("h3", null, t("gen.helpTitle")), h("p", null, t("gen.helpLive")), h("p", null, t("gen.helpMail")));
+  const help = h("aside", { class: "form-help" }, h("h3", null, t("gen.helpTitle")), h("p", null, t("gen.helpLive")), h("p", null, t("gen.helpHttp")), h("p", null, t("gen.helpMail")));
   put(view,
     pageHead(t("nav.general"), sub(t("gen.sub")), null, { eyebrow: t("gen.eyebrow") }),
     fs.ok,

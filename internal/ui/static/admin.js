@@ -3,8 +3,8 @@
 // access.js): API tokens, status and system information. Admin screens use the routes: the list at "#admin/<screen>",
 // a detail at "#admin/<screen>:<id>".
 import {
-  state, h, put, api, enc, alive, filterBar, row, fmtBytes, fmtNum, fmtDate, fmtUptime,
-  copyLine, pageHead, loading, truncNote, card, kv, stat, tbl, handleError, needLogin, icon, s, markBusy,
+  state, h, put, api, enc, encSeg, alive, filterBar, row, fmtBytes, fmtNum, fmtDate, fmtUptime,
+  copyLine, copyButton, pageHead, loading, truncNote, card, kv, stat, tbl, handleError, needLogin, icon, s, markBusy,
 } from "./util.js";
 import { t } from "./i18n.js";
 import { confirmDelete, viewRepos } from "./browse.js";
@@ -12,6 +12,7 @@ import { viewRepoForm, DEFAULT_RECIPE } from "./repoform.js";
 import { viewTasks, viewPolicies, trendCard, logsCard, viewRoutingRules, viewSelectors, viewWebhooks } from "./ops.js";
 import { viewUsers, viewRoles, viewRealms } from "./access.js";
 import { viewBlobStores, viewGeneral } from "./settings.js";
+import { field, fields, sel, textIn, button, formState, errList } from "./ops.js";
 
 const dash = "—";
 const badge = (text, cls) => h("span", { class: "badge" + (cls ? " " + cls : "") }, text);
@@ -326,6 +327,237 @@ async function viewSysInfo(view) {
     panel);
 }
 
+// ---- support: bundle, thread dump, log level, metrics ---------------------------------
+//   #admin/system/support
+
+const ZIP_ENTRIES = ["info.json", "config.json", "repositories.json", "blobstores.json", "status.json", "sysinfo.json", "tasks.json", "webhooks.json", "request-stats.json", "events.json", "logs.txt", "threads.txt", "metrics.txt"];
+const LOG_LEVELS = ["debug", "info", "warn", "error"]; // what PUT /-/api/logging accepts
+
+// fetchText gets a text/plain API answer (api() expects JSON).
+async function fetchText(path) {
+  const res = await fetch("/-/api/" + path, { credentials: "same-origin", headers: { "X-Command-Center-UI": "1" } });
+  if (!res.ok) {
+    let msg = res.status + " " + res.statusText;
+    try { const d = await res.json(); if (d && d.error) msg = d.error; } catch (e) { /* not JSON */ }
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
+  }
+  return res.text();
+}
+
+async function viewSupport(view) {
+  const isLive = alive();
+  const eb = { eyebrow: t("sys.eyebrow") };
+  const [lg, st] = await Promise.all([api("logging").catch((e) => ({ error: e })), api("settings").catch(() => null)]);
+  if (!isLive()) return;
+
+  // support bundle: a plain link, so the browser saves the zip
+  const zip = card(t("sup.zipTitle"), t("sup.zipSub"), [
+    h("p", { class: "tiny" }, t("sup.zipContains")),
+    h("p", { class: "tiny mono zip-entries" }, ZIP_ENTRIES.join(" · ")),
+    h("div", { class: "notice" }, t("sup.zipRedacted")),
+    h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/-/api/support/zip", download: "" }, t("sup.zipDownload")))]);
+
+  // thread dump
+  const pre = h("pre", { class: "code threads", tabindex: "0", hidden: true });
+  const tools = h("div", { class: "actions", hidden: true });
+  const load = button(t("sup.threadsLoad"), "primary");
+  let dumpURL = null;
+  state.leaving.push(() => { if (dumpURL) URL.revokeObjectURL(dumpURL); });
+  load.addEventListener("click", async () => {
+    load.disabled = true;
+    try {
+      const text = await fetchText("support/threads");
+      if (!isLive()) return;
+      pre.textContent = text;
+      pre.hidden = false;
+      if (dumpURL) URL.revokeObjectURL(dumpURL);
+      dumpURL = URL.createObjectURL(new Blob([text], { type: "text/plain;charset=utf-8" }));
+      const dl = h("a", { class: "btn small", download: "threads.txt" }, t("sup.threadsSave"));
+      dl.setAttribute("href", dumpURL); // trusted URL created above
+      put(tools, copyButton(text, pre, t("sup.threadsCopy")), dl, h("span", { class: "tiny muted" }, t("sup.threadsSize", { n: fmtNum(text.split("\n").length) })));
+      tools.hidden = false;
+    } catch (e) {
+      if (isLive()) handleError(e);
+    } finally { load.disabled = false; }
+  });
+  const threads = card(t("sup.threadsTitle"), t("sup.threadsSub"), [h("div", { class: "actions" }, load, tools), pre]);
+
+  // runtime log level
+  const level = sel(LOG_LEVELS.map((l) => [l, l.toUpperCase()]), lg && LOG_LEVELS.includes(lg.level) ? lg.level : "info", { "aria-label": t("sup.level") });
+  const levelMsg = h("p", { class: "tiny muted", role: "status" });
+  const unavailable = lg && lg.error;
+  if (unavailable) {
+    level.disabled = true;
+    levelMsg.textContent = lg.error.status === 501 ? t("sup.levelFixed") : lg.error.message;
+  }
+  level.addEventListener("change", async () => {
+    level.disabled = true;
+    try {
+      const out = await api("logging", { method: "PUT", body: { level: level.value } });
+      if (!isLive()) return;
+      if (out && LOG_LEVELS.includes(out.level)) level.value = out.level;
+      levelMsg.textContent = t("sup.levelSet", { level: level.value.toUpperCase() });
+    } catch (e) {
+      if (!isLive()) return;
+      levelMsg.textContent = "";
+      handleError(e);
+    } finally { level.disabled = !!unavailable; }
+  });
+  const logging = card(t("sup.levelTitle"), t("sup.levelSub"), [
+    fields(field(t("sup.level"), level, t("sup.levelHelp"), { full: true })), levelMsg,
+    h("div", { class: "notice amber" }, t("sup.levelNote"))]);
+
+  // Prometheus endpoint and the anonymous-scrape setting
+  const anon = h("input", { type: "checkbox", checked: !!(st && st.metricsAnonymous), disabled: !st });
+  const anonMsg = h("p", { class: "tiny muted", role: "status" });
+  anon.addEventListener("change", async () => {
+    anon.disabled = true;
+    try {
+      await api("settings", { method: "PUT", body: { metricsAnonymous: anon.checked } });
+      if (isLive()) anonMsg.textContent = t("gen.saved");
+    } catch (e) {
+      if (!isLive()) return;
+      anon.checked = !anon.checked;
+      handleError(e);
+    } finally { anon.disabled = false; }
+  });
+  const metrics = card(t("sup.metricsTitle"), t("sup.metricsSub"), [
+    copyLine(location.origin + "/-/metrics/prometheus", t("sup.metricsCopy")),
+    h("p", { class: "tiny muted metrics-auth" }, t("sup.metricsAuth")),
+    h("div", { class: "field" }, h("label", { class: "check" }, anon, t("sup.metricsAnon")), h("small", null, t("sup.metricsAnonHelp"))), anonMsg]);
+
+  put(view, pageHead(t("nav.support"), sub(t("sup.sub")), null, eb),
+    h("div", { class: "two" }, h("div", { class: "stack" }, zip, threads), h("div", { class: "stack" }, logging, metrics)));
+}
+
+// ---- SSL certificates (the trust store) ------------------------------------------------
+//   #admin/security/certificates
+
+const certName = (c) => c.subjectCommonName || c.subject || c.id;
+const fp = (id) => h("code", { class: "fp", title: id }, String(id || "").replace(/(.{2})(?=.)/g, "$1:"));
+const dotBadge = (text, cls) => badge([h("span", { class: "dot", "aria-hidden": "true" }), text], cls);
+const expiry = (c) => (c.expired ? dotBadge(t("ssl.expired"), "red") : h("span", null, fmtDate(c.notAfter)));
+const certMeta = (c) => h("div", { class: "tiny muted" }, [c.isCA ? t("ssl.ca") : t("ssl.leaf"), c.issuerCommonName || c.issuer].filter(Boolean).join(" · "));
+
+async function viewCertificates(view) {
+  const isLive = alive();
+  const eb = { eyebrow: t("users.eyebrow") };
+  const listBox = h("div", { class: "stack" }, loading()); // a stack, so the card in it has no bottom margin
+  const fs = formState(h("form"));
+  let known = new Set();
+
+  // addPEM stores the certificate(s) of a PEM text; 409 means every one was there.
+  const addPEM = async (pem) => {
+    try {
+      const out = await api("ssl/certificates", { method: "POST", body: { pem } });
+      if (!isLive()) return false;
+      put(fs.ok, t("ssl.added", { n: fmtNum((out.certificates || []).length) }));
+      fs.ok.hidden = false;
+      await load();
+      return true;
+    } catch (e) {
+      if (!isLive()) return false;
+      if (e.status === 401 || e.status === 403) { handleError(e); return false; }
+      fs.show(e.status === 409 ? [t("ssl.exists")] : errList(e));
+      return false;
+    }
+  };
+  const load = async () => {
+    const d = await api("ssl/certificates");
+    if (!isLive()) return;
+    const certs = d.certificates || [];
+    known = new Set(certs.map((c) => c.id));
+    const rows = certs.map((c) => {
+      const del = button(t("common.delete"), "small danger");
+      del.addEventListener("click", async () => {
+        if (!(await confirmDelete(t("ssl.delText", { name: certName(c) }), t("ssl.delTitle")))) return;
+        del.disabled = true;
+        try {
+          await api("ssl/certificates/" + encSeg(c.id), { method: "DELETE" });
+        } catch (e) {
+          del.disabled = false;
+          handleError(e);
+          return;
+        }
+        if (isLive()) { put(fs.ok, t("ssl.deleted", { name: certName(c) })); fs.ok.hidden = false; load().catch(handleError); }
+      });
+      return row([
+        [[h("strong", null, certName(c)), certMeta(c)], "name"],
+        [c.subjectOrganization || c.issuerOrganization || dash],
+        [expiry(c), "nowrap"],
+        [fp(c.id)],
+        [del, "act"],
+      ], certName(c) + " " + c.subject + " " + c.issuer + " " + c.id);
+    });
+    const f = filterBar(rows, t("ssl.filter"), "ssl.count");
+    const c = card(t("ssl.listTitle"), t("ssl.listSub"), null);
+    c.append(f.bar, tbl([t("ssl.subject"), t("ssl.org"), t("ssl.expires"), t("ssl.fingerprint"), { t: h("span", { class: "sr-only" }, t("col.actions")), cls: "act" }], rows, t("ssl.none")), f.none);
+    put(listBox, c);
+    chainRows.querySelectorAll("button[data-id]").forEach((b) => { if (known.has(b.dataset.id)) b.replaceWith(dotBadge(t("ssl.trusted"), "green")); });
+  };
+
+  // retrieve a server's chain
+  const hostIn = textIn("", { placeholder: "ldap.corp.local", maxlength: 253, class: "mono", autocomplete: "off" });
+  const portIn = h("input", { type: "number", inputmode: "numeric", min: 1, max: 65535, step: 1, value: "443" });
+  const run = h("button", { type: "submit", class: "btn primary" }, t("ssl.fetch"));
+  const chainRows = h("div", { class: "chain" });
+  const fetchForm = h("form", { novalidate: true });
+  const ffs = formState(fetchForm);
+  put(fetchForm, ffs.err, fields(field(t("ssl.host"), hostIn, t("ssl.hostHelp"), { req: true }), field(t("ssl.port"), portIn, t("ssl.portHelp"))),
+    h("div", { class: "actions end" }, run), chainRows);
+  fetchForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    ffs.clear();
+    fs.clear();
+    const host = hostIn.value.trim(), port = Number(portIn.value) || 443;
+    if (!host) { ffs.show([t("ssl.e.host")]); return; }
+    run.disabled = true;
+    put(chainRows, loading());
+    try {
+      const d = await api("ssl/retrieve", { method: "POST", body: { host, port } });
+      if (!isLive()) return;
+      const certs = d.certificates || [];
+      put(chainRows, h("p", { class: "tiny muted" }, t("ssl.chainOf", { host: d.host + ":" + d.port, n: fmtNum(certs.length) })),
+        certs.map((c) => {
+          let act;
+          if (c.trusted || known.has(c.id)) act = dotBadge(t("ssl.trusted"), "green");
+          else {
+            act = button(t("ssl.add"), "small primary");
+            act.dataset.id = c.id;
+            act.addEventListener("click", async () => { act.disabled = true; if (!(await addPEM(c.pem))) act.disabled = false; });
+          }
+          return h("div", { class: "listrow" }, h("div", null, h("strong", null, certName(c)), certMeta(c), h("div", { class: "tiny" }, t("ssl.expires"), ": ", expiry(c)), fp(c.id)), act);
+        }),
+        h("div", { class: "notice amber" }, t("ssl.verifyNote")));
+    } catch (e) {
+      if (!isLive()) return;
+      put(chainRows);
+      if (e.status === 401 || e.status === 403) { handleError(e); return; }
+      ffs.show(errList(e));
+    } finally { run.disabled = false; }
+  });
+
+  // paste a PEM
+  const pem = h("textarea", { class: "mono", rows: 7, spellcheck: "false", autocomplete: "off", placeholder: "-----BEGIN CERTIFICATE-----\n…\n-----END CERTIFICATE-----" });
+  const addBtn = h("button", { type: "submit", class: "btn primary" }, t("ssl.add"));
+  const pemForm = h("form", { novalidate: true }, fields(field(t("ssl.pem"), pem, t("ssl.pemHelp"), { full: true })), h("div", { class: "actions end" }, addBtn));
+  pemForm.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    fs.clear();
+    if (!/-----BEGIN CERTIFICATE-----/.test(pem.value)) { fs.show([t("ssl.e.pem")]); return; }
+    addBtn.disabled = true;
+    if (await addPEM(pem.value)) pem.value = "";
+    addBtn.disabled = false;
+  });
+
+  put(view, pageHead(t("nav.certificates"), sub(t("ssl.sub")), null, eb), fs.err, fs.ok,
+    h("div", { class: "two" }, h("div", { class: "stack" }, listBox, h("div", { class: "notice" }, t("ssl.about"))),
+      h("div", { class: "stack" }, card(t("ssl.fetchTitle"), t("ssl.fetchSub"), fetchForm), card(t("ssl.pemTitle"), t("ssl.pemSub"), pemForm))));
+  await load();
+}
+
 // ---- settings router ------------------------------------------------------------------
 
 // showSettings renders an admin screen; the caller has checked admin.
@@ -348,6 +580,8 @@ export function showSettings(view, key, p0, p1, criteria) {
     case "admin/repository/routingrules": return viewRoutingRules(view, p0);
     case "admin/security/contentselectors": return viewSelectors(view, p0);
     case "admin/system/webhooks": return viewWebhooks(view, p0);
+    case "admin/system/support": return viewSupport(view);
+    case "admin/security/certificates": return viewCertificates(view);
   }
   return null;
 }

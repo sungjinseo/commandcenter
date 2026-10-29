@@ -18,9 +18,12 @@ const tk = (base, k) => t(base + "." + k);
 const createLink = (recipe) => adminRepoLink("create") + (recipe ? ":" + encodeURIComponent(recipe) : "");
 
 // Recipe names: "maven2" is our "maven" format.
-const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"], ["rubygems", "rubygems"], ["conda", "conda"], ["composer", "composer"]];
+const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"], ["rubygems", "rubygems"], ["conda", "conda"], ["composer", "composer"], ["conan", "conan"], ["r", "r"], ["gitlfs", "gitlfs"]];
 const TYPES = ["hosted", "proxy", "group"];
-const RECIPES = RECIPE_FORMATS.flatMap(([label, format]) => TYPES.map((type) => ({ id: label + "-" + type, format, type })));
+// Formats the server stores only as hosted (a proxy or group is refused with 400).
+const HOSTED_ONLY = ["gitlfs"];
+const typesOf = (format) => (HOSTED_ONLY.includes(format) ? ["hosted"] : TYPES);
+const RECIPES = RECIPE_FORMATS.flatMap(([label, format]) => typesOf(format).map((type) => ({ id: label + "-" + type, format, type })));
 const recipeOf = (format, type) => RECIPES.find((r) => r.format === format && r.type === type);
 export const DEFAULT_RECIPE = "maven2-hosted";
 
@@ -35,6 +38,7 @@ const REMOTE_EXAMPLE = {
   go: "https://proxy.golang.org/", cargo: "https://index.crates.io/", docker: "https://registry-1.docker.io", helm: "https://charts.helm.sh/stable/",
   nuget: "https://api.nuget.org/v3/index.json", apt: "https://deb.debian.org/debian/", yum: "https://dl.rockylinux.org/pub/",
   rubygems: "https://rubygems.org/", conda: "https://conda.anaconda.org/conda-forge/", composer: "https://repo.packagist.org/",
+  conan: "https://center.conan.io/", r: "https://cloud.r-project.org/",
 };
 const ANON = [["", "rf.anonInherit"], ["true", "rf.anonAllow"], ["false", "rf.anonDeny"]];
 
@@ -284,7 +288,7 @@ export async function viewRepoForm(view, o) {
   const format = editing ? textInput(FORMAT_NAMES[cfg.format] || cfg.format, { readonly: true }) : select(fmtNames, cfg.format);
   // switchTo re-runs the create route for another recipe, keeping the name.
   const switchTo = (fmt, type, focus) => {
-    const r = recipeOf(fmt, type);
+    const r = recipeOf(fmt, type) || recipeOf(fmt, "hosted");
     if (!r) return;
     carry = { name: name.value, focus, blobStore: bstore ? bstore.value : "" };
     location.replace(createLink(r.id));
@@ -387,7 +391,7 @@ export async function viewRepoForm(view, o) {
 
   const help = h("aside", { class: "form-help" },
     h("h3", null, t("rf.helpTitle")),
-    TYPES.map((ty) => h("p", { class: ty === cfg.type ? "on" : null }, h("b", null, tk("rf.type", ty)), h("br"), tk("rf.typeHelp", ty))),
+    typesOf(cfg.format).map((ty) => h("p", { class: ty === cfg.type ? "on" : null }, h("b", null, tk("rf.type", ty)), h("br"), tk("rf.typeHelp", ty))),
     h("p", null, t("rf.helpLive")));
 
   const form = h("form", { class: "rf", novalidate: true },
@@ -545,7 +549,7 @@ export async function viewRepoForm(view, o) {
 
   let typecards = null;
   if (!editing) {
-    typecards = h("div", { class: "typecards", role: "group", "aria-label": t("col.type") }, TYPES.map((ty) => {
+    typecards = h("div", { class: "typecards", role: "group", "aria-label": t("col.type") }, typesOf(cfg.format).map((ty) => {
       const b = h("button", { type: "button", class: "typecard" + (ty === cfg.type ? " selected" : ""), "aria-pressed": String(ty === cfg.type), "data-type": ty },
         h("strong", null, tk("rf.type", ty)), h("small", null, tk("rf.typeCard", ty)));
       b.addEventListener("click", () => { if (ty !== cfg.type) switchTo(cfg.format, ty, "type"); });
@@ -563,7 +567,7 @@ export async function viewRepoForm(view, o) {
     pageHead(editing ? t("rf.editTitle", { name: cfg.name }) : t("rf.createTitle"),
       h("p", null, editing ? [typeBadge(cfg.type), " ", t("rf.editSub")] : t("rf.createSub")),
       h("div", { class: "actions" }, acts), eyebrow),
-    okBox, typecards, form);
+    okBox, typecards, !editing && HOSTED_ONLY.includes(cfg.format) ? h("div", { class: "notice" }, t("rf.hostedOnly", { format: FORMAT_NAMES[cfg.format] || cfg.format })) : null, form);
   if (kept && kept.focus === "type") typecards.querySelector(".selected").focus();
   else if (kept && kept.focus === "format") format.focus();
   else if (!editing) name.focus();

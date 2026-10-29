@@ -175,7 +175,7 @@ select[multiple] { height: auto; }
 .card-head p { font-size: 13px; color: var(--text-3); margin-top: 3px; }
 .card-body { padding: 16px; }
 .card-title { font-size: 12px; margin: 0 0 8px; font-weight: 600; }
-.stack { display: grid; gap: 15px; }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 15px; } /* minmax: a wide table scrolls in its .tablewrap instead of widening the column */
 .two { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(290px, .8fr); gap: 16px; align-items: start; margin-bottom: 16px; }
 .two:last-child { margin-bottom: 0; }
 .two + .quicklinks { margin-top: 0; }
@@ -813,3 +813,16 @@ dialog.modal { border-radius: var(--radius); }
 .spark .area { fill: var(--text-2); }
 th.sparkcell { text-transform: none; }
 .card-head.toolbar .hint, .toolbar-note { font-size: 12.5px; color: var(--text-3); }
+
+/* wave-2 screens: support page and the trust store */
+.threads { max-height: 420px; overflow: auto; margin-top: 12px; white-space: pre; overflow-wrap: normal; }
+.metrics-auth { margin: 6px 0 14px; }
+.zip-entries { overflow-wrap: anywhere; color: var(--text-3); }
+code.fp { font-size: 12px; overflow-wrap: anywhere; color: var(--text-2); }
+td .params { overflow-wrap: anywhere; }
+@media (max-width: 600px) { td .params { display: none; } } /* the detail page lists them */
+.kv .params { font-size: 12px; overflow-wrap: anywhere; }
+.kv .params > span { display: block; }
+.task-params { margin-bottom: 16px; }
+.listrow > div > .fp { display: block; margin-top: 4px; }
+.chain:not(:empty) { margin-top: 14px; }
