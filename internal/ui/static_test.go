@@ -69,7 +69,7 @@ func TestStaticJSListed(t *testing.T) {
 }
 
 func TestStaticSizeBudget(t *testing.T) {
-	const budget = 640 << 10 // 655360 bytes (190 KiB, raised to 320 KiB in plan 10, 400 KiB in plan 11, 512 KiB in plan 12 and 640 KiB for the wave-1 screens, by ruling)
+	const budget = 768 << 10 // 786432 bytes (190 KiB, raised to 320 KiB in plan 10, 400 KiB in plan 11, 512 KiB in plan 12, 640 KiB for the wave-1 screens and 768 KiB for the wave-4 screens, by ruling)
 	// The IBM Plex web fonts (static/fonts, OFL) have their own budget: three
 	// Korean weights subset to KS X 1001 plus two mono weights, cached by ETag.
 	const fontBudget = 768 << 10

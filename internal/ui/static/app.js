@@ -6,7 +6,7 @@ import {
 import { initShell, renderChrome, openLogin, refreshMe } from "./shell.js";
 import { t } from "./i18n.js";
 import { viewTokens, showSettings } from "./admin.js";
-import { viewAccount } from "./access.js";
+import { viewAccount, viewUserTokens } from "./access.js";
 import { viewWelcome } from "./dash.js";
 import { viewRepos, viewTree } from "./browse.js";
 import { viewSearch, viewComponent } from "./search.js";
@@ -32,6 +32,11 @@ const ADMIN_SCREENS = {
   "admin/system/webhooks": true,
   "admin/system/support": false,
   "admin/security/certificates": false,
+  "admin/repository/tags": true,
+  "admin/repository/staging": false,
+  "admin/repository/quarantine": false,
+  "admin/security/user-tokens": false,
+  "admin/system/vulnerability": false,
 }; // value: whether the screen takes a ":<id>" parameter
 
 function dec(x) {
@@ -138,7 +143,7 @@ export function parse(hash) {
     if (params.length > max) return { notFound: true };
     return { key: head, params };
   }
-  if ((head === "user/account" || head === "user/usertoken") && !params.length) return { key: head, params };
+  if ((head === "user/account" || head === "user/usertoken" || head === "user/user-token") && !params.length) return { key: head, params };
   return { notFound: true };
 }
 
@@ -166,6 +171,7 @@ async function show(view, r) {
     case "browse/upload": return p0 === undefined ? viewUploadList(view) : viewUpload(view, p0);
     case "user/account": return viewAccount(view);
     case "user/usertoken": return viewTokens(view, false);
+    case "user/user-token": return viewUserTokens(view, false);
   }
   if (r.key.startsWith("browse/search/")) return viewSearch(view, r.key.slice("browse/search/".length), r.criteria);
   if (!state.me.admin) {
@@ -173,7 +179,9 @@ async function show(view, r) {
       "admin/support/status": t("nav.status"), "admin/support/systeminformation": t("nav.sysinfo"), "admin/system/tasks": t("nav.tasks"),
       "admin/repository/cleanuppolicies": t("nav.cleanup"), "admin/repository/blobstores": t("nav.blobstores"), "admin/system/general": t("nav.general"),
       "admin/repository/routingrules": t("nav.routingrules"), "admin/security/contentselectors": t("nav.selectors"), "admin/system/webhooks": t("nav.webhooks"),
-      "admin/system/support": t("nav.support"), "admin/security/certificates": t("nav.certificates") };
+      "admin/system/support": t("nav.support"), "admin/security/certificates": t("nav.certificates"),
+      "admin/repository/tags": t("nav.tags"), "admin/repository/staging": t("nav.staging"), "admin/repository/quarantine": t("nav.quarantine"),
+      "admin/security/user-tokens": t("nav.userTokens"), "admin/system/vulnerability": t("nav.vulnerability") };
     return needAdmin(view, titles[r.key] || t("need.admin"));
   }
   const out = showSettings(view, r.key, p0, p1, r.criteria);

@@ -9,9 +9,9 @@ import {
 import { t } from "./i18n.js";
 import { confirmDelete, viewRepos } from "./browse.js";
 import { viewRepoForm, DEFAULT_RECIPE } from "./repoform.js";
-import { viewTasks, viewPolicies, trendCard, logsCard, viewRoutingRules, viewSelectors, viewWebhooks } from "./ops.js";
-import { viewUsers, viewRoles, viewRealms } from "./access.js";
-import { viewBlobStores, viewGeneral } from "./settings.js";
+import { viewTasks, viewPolicies, trendCard, logsCard, viewRoutingRules, viewSelectors, viewWebhooks, viewTags, viewStaging } from "./ops.js";
+import { viewUsers, viewRoles, viewRealms, viewUserTokens } from "./access.js";
+import { viewBlobStores, viewGeneral, viewVulnerability, viewQuarantine } from "./settings.js";
 import { field, fields, sel, textIn, button, formState, errList } from "./ops.js";
 
 const dash = "—";
@@ -582,6 +582,11 @@ export function showSettings(view, key, p0, p1, criteria) {
     case "admin/system/webhooks": return viewWebhooks(view, p0);
     case "admin/system/support": return viewSupport(view);
     case "admin/security/certificates": return viewCertificates(view);
+    case "admin/repository/tags": return viewTags(view, p0);
+    case "admin/repository/staging": return viewStaging(view);
+    case "admin/repository/quarantine": return viewQuarantine(view);
+    case "admin/security/user-tokens": return viewUserTokens(view, true);
+    case "admin/system/vulnerability": return viewVulnerability(view);
   }
   return null;
 }

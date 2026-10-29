@@ -5,8 +5,8 @@
 //   #admin/repository/cleanuppolicies[:create|:<name>]
 //   #admin/system/tasks[:create|:<id>]
 import {
-  state, h, put, api, enc, encSeg, alive, adminRepoLink, safeURL, fmtBytes, fmtNum, fmtDate, FORMATS, FORMAT_NAMES,
-  fmtBadge, nameCell, pageHead, loading, card, kv, tbl, handleError, showError, icon, s, markBusy, taskName, loadRepos, debounce,
+  state, h, put, api, enc, encSeg, alive, adminRepoLink, componentLink, safeURL, fmtBytes, fmtNum, fmtDate, FORMATS, FORMAT_NAMES,
+  fmtBadge, nameCell, pageHead, loading, card, kv, tbl, handleError, showError, icon, s, markBusy, taskName, loadRepos, debounce, saveBlob, OSV_FORMATS,
 } from "./util.js";
 import { t, locale } from "./i18n.js";
 import { confirmDelete } from "./browse.js";
@@ -358,7 +358,8 @@ export async function viewPolicies(view, name) {
       [t("pol.policy"), t("col.format"), t("pol.age"), t("pol.lastDl"), t("pol.repos"), actHead()],
       list.map((p) => h("tr", null,
         h("td", { class: "name" }, h("a", { href: polLink(p.name) }, h("strong", null, p.name)),
-          p.namePattern || p.releaseType !== "any" ? h("div", { class: "tiny muted" }, [relText(p.releaseType), p.namePattern].filter(Boolean).join(" · ")) : null),
+          p.namePattern || p.releaseType !== "any" || p.retain ? h("div", { class: "tiny muted" }, [relText(p.releaseType), p.namePattern, p.retain ? t("pol.retainN", { n: p.retain }) : ""].filter(Boolean).join(" · ")) : null,
+          p.notes ? h("div", { class: "tiny muted" }, p.notes) : null),
         h("td", null, polFormat(p.format)),
         h("td", { class: "nowrap" }, days(p.componentAgeDays)),
         h("td", { class: "nowrap" }, days(p.lastDownloadedDays)),
@@ -392,7 +393,8 @@ async function policyForm(view, name) {
   const creating = name === null;
   const [p, repos] = await Promise.all([creating ? null : api("cleanup/policies/" + encSeg(name)), loadRepos(true)]);
   if (!isLive()) return;
-  const cur = p || { name: "", format: "all", componentAgeDays: 30, lastDownloadedDays: 0, releaseType: "any", namePattern: "", repositories: [] };
+  const cur = p || { name: "", format: "all", componentAgeDays: 30, lastDownloadedDays: 0, releaseType: "any", namePattern: "", repositories: [],
+    pathPattern: "", retain: 0, retainSortBy: "version", exclude: { namePattern: "", versionPattern: "" }, notes: "" };
   const back = h("a", { class: "btn", href: polLink() }, t("pol.back"));
 
   const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 64 });
@@ -401,6 +403,17 @@ async function policyForm(view, name) {
   const lastDl = numIn(cur.lastDownloadedDays, 0, 36500);
   const rel = sel(RELEASE(), cur.releaseType || "any");
   const pat = textIn(cur.namePattern, { maxlength: 200, placeholder: "^com\\.example:.*$", class: "mono" });
+  const pathPat = textIn(cur.pathPattern, { maxlength: 200, placeholder: "^com/example/.*\\.jar$", class: "mono" });
+  const retain = numIn(cur.retain || 0, 0, 1000);
+  const sortBy = sel([["version", t("pol.sortVersion")], ["date", t("pol.sortDate")]], cur.retainSortBy || "version");
+  const ex = cur.exclude || {};
+  const exName = textIn(ex.namePattern, { maxlength: 200, class: "mono", placeholder: "^com\\.example:keep-.*$" });
+  const exVer = textIn(ex.versionPattern, { maxlength: 200, class: "mono", placeholder: "^1\\.0\\..*$" });
+  const notes = h("textarea", { rows: 3, maxlength: 1000 }, cur.notes || "");
+  const sortField = field(t("pol.sortBy"), sortBy, t("pol.sortByHelp"));
+  const syncSort = () => { sortField.hidden = !(intOf(retain) > 0); };
+  retain.addEventListener("input", syncSort);
+  syncSort();
   const save = h("button", { type: "submit", class: "btn primary" }, creating ? t("pol.createBtn") : t("pol.save"));
   const form = h("form", { novalidate: true });
   const fs = formState(form);
@@ -411,21 +424,36 @@ async function policyForm(view, name) {
       field(t("pol.ageField"), age, t("pol.ageHelp")),
       field(t("pol.lastDlField"), lastDl, t("pol.lastDlHelp")),
       field(t("pol.release"), rel, t("pol.releaseHelp")),
-      field(t("pol.pattern"), pat, t("pol.patternHelp"))),
+      field(t("pol.pattern"), pat, t("pol.patternHelp")),
+      field(t("pol.pathPattern"), pathPat, t("pol.pathPatternHelp")),
+      field(t("pol.retain"), retain, t("pol.retainHelp")), sortField,
+      field(t("pol.exName"), exName, t("pol.exNameHelp")),
+      field(t("pol.exVer"), exVer, t("pol.exVerHelp")),
+      field(t("pol.notes"), notes, t("pol.notesHelp"), { full: true })),
     h("div", { class: "notice" }, t("pol.andNote")),
     h("div", { class: "actions end" }, save));
+
+  // bodyOf reads the whole policy: a PUT replaces every field (an absent one is cleared).
+  const bodyOf = () => {
+    const keep = intOf(retain);
+    const b = {
+      name: creating ? nameIn.value.trim() : cur.name, format: format.value,
+      componentAgeDays: intOf(age), lastDownloadedDays: intOf(lastDl), releaseType: rel.value, namePattern: pat.value.trim(),
+      pathPattern: pathPat.value.trim(), retain: keep, retainSortBy: keep > 0 ? sortBy.value : "",
+      exclude: { namePattern: exName.value.trim(), versionPattern: exVer.value.trim() }, notes: notes.value.trim(),
+    };
+    const errs = [];
+    if (isNaN(b.componentAgeDays) || isNaN(b.lastDownloadedDays)) errs.push(t("pol.e.days"));
+    else if (isNaN(keep) || keep > 1000) errs.push(t("pol.e.retain"));
+    else if (!b.componentAgeDays && !b.lastDownloadedDays && !keep) errs.push(t("pol.e.ageNone"));
+    return { b, errs };
+  };
 
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     fs.clear();
-    const b = {
-      name: creating ? nameIn.value.trim() : cur.name, format: format.value,
-      componentAgeDays: intOf(age), lastDownloadedDays: intOf(lastDl), releaseType: rel.value, namePattern: pat.value.trim(),
-    };
-    const errs = [];
-    if (!b.name) errs.push(t("pol.e.name"));
-    if (isNaN(b.componentAgeDays) || isNaN(b.lastDownloadedDays)) errs.push(t("pol.e.days"));
-    else if (!b.componentAgeDays && !b.lastDownloadedDays) errs.push(t("pol.e.ageNone"));
+    const { b, errs } = bodyOf();
+    if (!b.name) errs.unshift(t("pol.e.name"));
     if (errs.length) { fs.show(errs); return; }
     save.disabled = true;
     try {
@@ -443,9 +471,10 @@ async function policyForm(view, name) {
   });
 
   const criteria = card(t("pol.criteria"), t("pol.criteriaSub"), form);
+  const draft = draftCard(isLive, repos, format, bodyOf);
   if (creating) {
     put(view, pageHead(t("pol.createTitle"), sub(t("pol.createSub")), acts(back), polEyebrow()), fs.ok,
-      h("div", { class: "two" }, criteria, h("div", { class: "stack" }, cargoNote())));
+      h("div", { class: "two" }, criteria, h("div", { class: "stack" }, cargoNote())), draft);
     nameIn.focus();
     return;
   }
@@ -515,8 +544,88 @@ async function policyForm(view, name) {
   put(view,
     pageHead(cur.name, h("p", null, polFormat(cur.format), " ", t("pol.detailSub")), acts(back, del), polEyebrow()),
     fs.ok,
-    h("div", { class: "two" }, h("div", { class: "stack" }, criteria, conn), h("div", { class: "stack" }, preview, cargoNote())));
+    h("div", { class: "two" }, h("div", { class: "stack" }, criteria, conn), h("div", { class: "stack" }, preview, cargoNote())), draft);
   if (connected.length) runPreview();
+}
+
+// draftCard previews the form's current values, saved or not, on one
+// repository (POST /-/api/cleanup/preview): totals, at most 1000 rows, and
+// every candidate as CSV. Nothing is deleted.
+function draftCard(isLive, repos, format, bodyOf) {
+  const repoSel = h("select");
+  const run = button(t("pol.draftRun"), "primary"), csv = button(t("pol.draftCsv"));
+  const out = h("div", { class: "pv-result", "aria-live": "polite" }, h("p", { class: "hint" }, t("pol.draftIdle")));
+  const fill = () => {
+    const keep = repoSel.value;
+    const list = repos.filter((r) => cleanable(r) && matches(format.value, r.format));
+    put(repoSel, list.map((r) => h("option", { value: r.name }, r.name + " · " + r.format + " · " + r.type)));
+    if (list.some((r) => r.name === keep)) repoSel.value = keep;
+    run.disabled = csv.disabled = !list.length;
+  };
+  format.addEventListener("change", fill);
+  fill();
+  // body is the policy of the form plus the repository; null shows the form's problems.
+  const body = () => {
+    const x = bodyOf();
+    if (x.errs.length) { put(out, amber(x.errs.join(" "))); return null; }
+    delete x.b.name; // optional, and an unsaved name may not be valid yet
+    return Object.assign(x.b, { repository: repoSel.value });
+  };
+  const failed = (e) => {
+    if (!isLive()) return;
+    put(out, amber(errList(e).join(" ")));
+    if (e.status === 401 || e.status === 403) handleError(e);
+  };
+  let seq = 0;
+  run.addEventListener("click", async () => {
+    const b = body();
+    if (!b) return;
+    const n = ++seq;
+    run.disabled = true;
+    put(out, loading());
+    try {
+      const d = await api("cleanup/preview", { method: "POST", body: b });
+      if (!isLive() || n !== seq) return;
+      const list = d.components || [];
+      put(out,
+        h("div", { class: "pv-count" }, fmtNum(d.total), h("small", null, t("pol.prevUnit", { n: d.total, size: fmtBytes(d.bytes) }))),
+        h("p", { class: "tiny muted" }, t("pol.prevOf", { repo: b.repository })),
+        d.truncated ? amber(t("pol.draftTrunc", { n: fmtNum(list.length) })) : null,
+        h("div", { class: "scroll-y" }, tbl([t("comp.group"), t("col.name"), t("col.version"), t("col.updated"), t("pol.lastDl"), t("pol.reason")],
+          list.map((c) => h("tr", null,
+            h("td", null, c.group || dash), h("td", { class: "name" }, h("strong", null, c.name)), h("td", null, c.version || dash),
+            h("td", { class: "nowrap" }, fmtDate(c.lastUpdated)),
+            h("td", { class: "nowrap" }, c.lastDownloaded ? fmtDate(c.lastDownloaded) : t("pol.never")),
+            h("td", { class: "tiny" }, c.reason || dash))), t("pol.noCandidates"))),
+        h("div", { class: "notice" }, t("pol.noDelete")));
+    } catch (e) {
+      if (n === seq) failed(e);
+    } finally {
+      if (n === seq) run.disabled = false;
+    }
+  });
+  // The CSV is a POST, so it is fetched and saved through a Blob, not a link.
+  csv.addEventListener("click", async () => {
+    const b = body();
+    if (!b) return;
+    csv.disabled = true;
+    try {
+      const res = await fetch("/-/api/cleanup/preview?format=csv", { method: "POST", credentials: "same-origin",
+        headers: { "X-Command-Center-UI": "1", "Content-Type": "application/json" }, body: JSON.stringify(b) });
+      if (!res.ok) {
+        let msg = res.status + " " + res.statusText;
+        try { const d = await res.json(); if (d && d.error) msg = d.error; } catch (e) { /* not JSON */ }
+        throw Object.assign(new Error(msg), { status: res.status });
+      }
+      const blob = await res.blob();
+      if (isLive()) saveBlob(blob, "cleanup-preview-" + b.repository + ".csv");
+    } catch (e) {
+      failed(e);
+    } finally {
+      csv.disabled = false;
+    }
+  });
+  return card(t("pol.draftTitle"), t("pol.draftSub"), [field(t("col.repo"), repoSel), acts(run, csv), out]);
 }
 
 const cargoNote = () => h("div", { class: "notice" }, icon("info", "hint-ico"), t("pol.cargoNote"));
@@ -526,6 +635,8 @@ const cargoNote = () => h("div", { class: "notice" }, icon("info", "hint-ico"), 
 const taskLink = (id) => "#admin/system/tasks" + (id ? ":" + enc(id) : "");
 const CLEANUP = "repository.cleanup", REBUILD = "repository.rebuild-metadata", COMPACT = "blobstore.compact";
 const VERIFY = "repository.verify-blobs", PURGE = "maven.purge-snapshots", RECALC = "blobstore.recalculate-size", TEMP = "blobstore.delete-temp-files";
+const EXPORT = "repository.export", IMPORT = "repository.import", MOVE = "repository.change-blobstore", RMMEMBER = "blobstore.group-remove-member";
+const VSYNC = "vulnerability.sync", VSCAN = "vulnerability.scan";
 const TASK_STATUS = { Running: ["task.running", "blue"], Waiting: ["task.waiting"], Disabled: ["task.disabled"] };
 const taskStatus = (x) => (TASK_STATUS[x.status] ? badge(t(TASK_STATUS[x.status][0]), TASK_STATUS[x.status][1]) : badge(x.status));
 const RESULTS = { OK: ["task.ok", "green"], Failed: ["task.failed", "red"], Stopped: ["task.stopped", "amber"] };
@@ -533,10 +644,15 @@ const resultText = (x) => (RESULTS[x.lastResult] ? t(RESULTS[x.lastResult][0]) :
 const resultBadge = (x) => (x.lastResult ? badge(resultText(x), (RESULTS[x.lastResult] || [])[1]) : badge(t("task.never")));
 const taskEyebrow = () => ({ eyebrow: t("task.eyebrow") });
 const typeLabel = (type, fallback) => ({ [COMPACT]: t("task.tCompact"), [CLEANUP]: t("task.tCleanup"), [REBUILD]: t("task.tRebuild"),
-  [VERIFY]: t("task.tVerify"), [PURGE]: t("task.tPurge"), [RECALC]: t("task.tRecalc"), [TEMP]: t("task.tTemp") }[type] || fallback || type);
+  [VERIFY]: t("task.tVerify"), [PURGE]: t("task.tPurge"), [RECALC]: t("task.tRecalc"), [TEMP]: t("task.tTemp"),
+  [EXPORT]: t("task.tExport"), [IMPORT]: t("task.tImport"), [MOVE]: t("task.tMove"), [RMMEMBER]: t("task.tRmMember"),
+  [VSYNC]: t("task.tVulnSync"), [VSCAN]: t("task.tVulnScan") }[type] || fallback || type);
 // Parameter names the dictionaries label; any other name is shown as is.
 const PARAM_KEY = "task.p.", PARAM_HELP = "task.ph."; // + the parameter name
-const PARAM_KEYS = ["repos", "repo", "repository", "format", "blobStore", "checksum", "maxBytes", "minimumRetained", "snapshotRetentionDays", "lastDownloadedDays", "removeIfReleased", "gracePeriodDays", "preview"];
+const PARAM_KEYS = ["repos", "repo", "repository", "format", "blobStore", "checksum", "maxBytes", "minimumRetained", "snapshotRetentionDays", "lastDownloadedDays", "removeIfReleased", "gracePeriodDays", "preview",
+  "repositories", "destination", "includeProxies", "since", "hardLinks", "source", "createMissing", "overwrite", "target", "group", "member"];
+// A parameter whose help depends on its task type: "<type>:<name>" → the help key suffix.
+const HELP_ALIAS = { [PURGE + ":repository"]: "purgeRepository", [IMPORT + ":repositories"]: "importRepositories", [VSCAN + ":repository"]: "vulnRepository", [MOVE + ":repo"]: "moveRepo" };
 const paramLabel = (name) => (PARAM_KEYS.includes(name) ? t(PARAM_KEY + name) : name);
 // paramParts lists a task's stored parameters as "name: value", by their API
 // names (short and the same in both languages); empty and false values are left out.
@@ -544,13 +660,19 @@ function paramParts(params) {
   const parts = [];
   for (const [k, v] of Object.entries(params || {})) {
     if (v === "" || v === null || v === undefined || v === false || (Array.isArray(v) && !v.length)) continue;
+    if (typeof v === "object" && !Array.isArray(v)) { // a mapping
+      const m = Object.entries(v);
+      if (m.length) parts.push(k + ": " + m.map(([a, b]) => a + "→" + (b || a)).join(", "));
+      continue;
+    }
     parts.push(k + ": " + (v === true ? t("task.pOn") : Array.isArray(v) ? v.join(", ") : k === "maxBytes" ? fmtBytes(v) : String(v)));
   }
   return parts;
 }
 // Repositories a "repository" parameter may name, per task type (the server checks too).
 const REBUILDABLE = (r) => (r.format === "maven" && r.type !== "group") || (["apt", "yum", "helm", "conda"].includes(r.format) && r.type === "hosted");
-const repoChoices = (type, repos) => (type === REBUILD ? repos.filter(REBUILDABLE) : type === PURGE ? repos.filter((r) => r.format === "maven" && r.type === "hosted") : repos);
+const repoChoices = (type, repos) => (type === REBUILD ? repos.filter(REBUILDABLE) : type === PURGE ? repos.filter((r) => r.format === "maven" && r.type === "hosted")
+  : type === MOVE ? repos.filter((r) => r.type !== "group") : type === VSCAN ? repos.filter((r) => r.type !== "group" && OSV_FORMATS.includes(r.format)) : repos);
 
 // Schedules (plan 11 Decision 7), in server time.
 const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
@@ -627,10 +749,16 @@ function scheduleEditor(sch) {
 export async function viewTasks(view, id) {
   if (id !== undefined) return taskForm(view, id === "create" ? null : id);
   const isLive = alive();
-  const tasks = (await api("tasks")).tasks || [];
+  const all = await api("tasks");
+  const tasks = all.tasks || [];
   if (!isLive()) return;
+  const xfer = (kind) => {
+    const b = button(kind === "export" ? t("task.exportBtn") : t("task.importBtn"));
+    b.addEventListener("click", () => transferDialog(kind, all.types));
+    return all.types && all.types.some((x) => x.type === (kind === "export" ? EXPORT : IMPORT)) ? b : null;
+  };
   put(view,
-    pageHead(t("nav.tasks"), sub(t("task.sub")), acts(h("a", { class: "btn primary", href: taskLink("create") }, t("task.create"))), taskEyebrow()),
+    pageHead(t("nav.tasks"), sub(t("task.sub")), acts(xfer("export"), xfer("import"), h("a", { class: "btn primary", href: taskLink("create") }, t("task.create"))), taskEyebrow()),
     h("section", { class: "card" }, tbl(
       [t("task.task"), t("col.status"), t("task.schedule"), t("task.next"), t("task.lastResult"), actHead()],
       tasks.map((x) => h("tr", null,
@@ -655,11 +783,11 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
   const els = [];
   for (const p of spec || []) {
     const cur = Object.prototype.hasOwnProperty.call(params, p.name) ? params[p.name] : p.default; // the server applies the default to an absent one
-    const help = p.help ? (PARAM_KEYS.includes(p.name) ? t(PARAM_HELP + (type === PURGE && p.name === "repository" ? "purgeRepository" : p.name)) : p.help) : null;
+    const help = p.help ? (PARAM_KEYS.includes(p.name) ? t(PARAM_HELP + (HELP_ALIAS[type + ":" + p.name] || p.name)) : p.help) : null;
     let el, get;
     switch (p.type) {
       case "repositories": {
-        const list = type === CLEANUP ? repos.filter(cleanable) : repos;
+        const list = type === CLEANUP ? repos.filter(cleanable) : type === EXPORT ? repos.filter((r) => r.type !== "group") : repos;
         const picked = new Set(Array.isArray(cur) ? cur : []);
         const m = h("select", { multiple: true, size: Math.min(8, Math.max(3, list.length)), class: "rf-list" },
           list.map((r) => {
@@ -701,6 +829,29 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
         get = () => box.checked;
         break;
       }
+      case "mapping": { // an object of key → value rows (an import's exported name → repository)
+        const rows = [], box = h("div", { class: "map-rows" });
+        const add = (k, v) => {
+          const from = textIn(k, { class: "mono", placeholder: t("task.mapFrom"), "aria-label": t("task.mapFrom") });
+          const to = textIn(v, { class: "mono", placeholder: t("task.mapTo"), "aria-label": t("task.mapTo") });
+          const rm = button(t("ldap.mapRemove"), "small danger");
+          const line = h("div", { class: "row map-row" }, h("div", { class: "grow" }, from), h("span", { "aria-hidden": "true" }, "→"), h("div", { class: "grow" }, to), rm);
+          const item = { from, to };
+          rm.addEventListener("click", () => { rows.splice(rows.indexOf(item), 1); line.remove(); });
+          rows.push(item);
+          box.appendChild(line);
+        };
+        for (const [k, v] of Object.entries(cur && typeof cur === "object" && !Array.isArray(cur) ? cur : {})) add(k, String(v));
+        const more = button(t("task.mapAdd"), "small");
+        more.addEventListener("click", () => add("", ""));
+        el = h("div", { class: "field full" }, h("span", { class: "flabel" }, paramLabel(p.name)), box, h("div", { class: "actions" }, more), help ? h("small", null, help) : null);
+        get = () => {
+          const o = {};
+          for (const r of rows) { const k = r.from.value.trim(); if (k) o[k] = r.to.value.trim(); }
+          return Object.keys(o).length ? o : undefined;
+        };
+        break;
+      }
       case "int":
       case "bytes": {
         const num = numIn(cur === undefined || cur === null ? "" : cur, 0, undefined);
@@ -734,6 +885,39 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
   };
   if (!els.length) return { el: h("div", { class: "notice" }, type === COMPACT ? t("task.compactAbout") : t("task.noParams")), get };
   return { el: fields(...els), get };
+}
+
+// transferDialog starts an export or import at once (POST /-/api/export or
+// /-/api/import, which create a manual task and run it), with the task
+// type's own parameter form, then opens the task to follow its log.
+async function transferDialog(kind, types) {
+  const type = kind === "export" ? EXPORT : IMPORT;
+  const spec = ((types || []).find((x) => x.type === type) || {}).params || [];
+  let repos;
+  try { repos = await loadRepos(true); } catch (e) { handleError(e); return; }
+  const ed = paramsEditor(type, spec, null, repos, [], {});
+  const msg = h("div", { class: "notice amber", role: "alert", hidden: true });
+  const go = button(kind === "export" ? t("task.exportRun") : t("task.importRun"), "primary");
+  const cancel = button(t("common.cancel"));
+  const m = modal(kind === "export" ? t("task.exportTitle") : t("task.importTitle"),
+    [h("p", { class: "hint" }, kind === "export" ? t("task.exportAbout") : t("task.importAbout")), msg, ed.el], [cancel, go], { cls: "modal-wide" });
+  cancel.addEventListener("click", m.close);
+  go.addEventListener("click", async () => {
+    const pv = ed.get();
+    msg.hidden = true;
+    if (pv.errs.length) { put(msg, pv.errs.join(" ")); msg.hidden = false; return; }
+    go.disabled = true;
+    try {
+      const out = await api(kind, { method: "POST", body: pv.params });
+      m.close();
+      location.hash = taskLink(out.id);
+    } catch (e) {
+      go.disabled = false;
+      if (e.status === 401) { m.close(); handleError(e); return; }
+      put(msg, e.status === 409 && e.data && (e.data.runningName || e.data.running) ? t("task.conflict", { name: e.data.runningName || e.data.running }) : errList(e).join(" "));
+      msg.hidden = false;
+    }
+  });
 }
 
 // logLines shows a run log ("<RFC3339> LEVEL message" lines) in the concept's .log block.
@@ -834,7 +1018,9 @@ async function taskForm(view, id) {
   const msg = h("p", { class: "task-msg", role: "status" });
   // A rebuild of a Maven proxy removes cached files, not metadata.
   const purge = task.type === REBUILD && repos.some((r) => r.name === (task.params || {}).repo && r.type === "proxy");
-  const removedKey = purge ? "task.removedFiles" : { [CLEANUP]: "task.removedComp", [REBUILD]: "task.removedMeta" }[task.type] || "task.removed";
+  const removedKey = purge ? "task.removedFiles" : { [CLEANUP]: "task.removedComp", [REBUILD]: "task.removedMeta", [EXPORT]: "task.removedExport",
+    [IMPORT]: "task.removedImport", [MOVE]: "task.removedCopied", [RMMEMBER]: "task.removedCopied" }[task.type] || "task.removed";
+  const withBytes = [CLEANUP, EXPORT, IMPORT, MOVE, RMMEMBER].includes(task.type);
   const show = () => {
     put(summary,
       kv(t("col.status"), taskStatus(task)),
@@ -846,7 +1032,7 @@ async function taskForm(view, id) {
       kv(t("task.lastRun"), task.lastRun ? fmtDate(task.lastRun) : dash),
       task.lastRun ? kv(t("task.duration"), fmtNum(task.lastDurationMs) + " ms") : null,
       task.lastRun ? kv(t(removedKey), fmtNum(task.lastRemoved)) : null,
-      task.lastRun && task.type === CLEANUP ? kv(t("task.bytes"), fmtBytes(task.lastBytes)) : null,
+      task.lastRun && withBytes ? kv(t("task.bytes"), fmtBytes(task.lastBytes)) : null,
       task.lastMessage ? kv(t("task.message"), task.lastMessage) : null);
     run.disabled = task.status === "Running";
     stop.hidden = task.status !== "Running";
@@ -971,7 +1157,7 @@ const lines = (ta) => ta.value.split("\n").map((x) => x.trim()).filter(Boolean);
 const MODE_KEYS = { BLOCK: "rr.block", ALLOW: "rr.allow" };
 const modeBadge = (m) => badge(MODE_KEYS[m] ? t(MODE_KEYS[m]) : m, m === "BLOCK" ? "amber" : "blue");
 const amber = (text) => h("div", { class: "notice amber" }, text);
-const checks = (items, selected) => {
+export const checks = (items, selected) => {
   const boxes = items.map(([v, label]) => ({ v, box: h("input", { type: "checkbox", value: v, checked: selected.includes(v) }), label }));
   return { el: h("div", { class: "checks" }, boxes.map((b) => h("label", { class: "check" }, b.box, b.label))), values: () => boxes.filter((b) => b.box.checked).map((b) => b.v) };
 };
@@ -1283,4 +1469,250 @@ export async function viewWebhooks(view, id) {
   const del = deleter(isLive, "webhooks", cur.id, t("wh.delText", { name: cur.name }), t("wh.delTitle"), whLink(), () => "");
   put(view, pageHead(cur.name, h("p", null, cur.repo ? badge(cur.repo, "blue") : badge(t("wh.global")), " ", cur.enabled ? badge(t("wh.on"), "green") : badge(t("wh.off"), "red"), " ", t("wh.detailSub")), acts(back, del), eb),
     fs.ok, h("div", { class: "two" }, formCard, h("div", { class: "stack" }, card(t("wh.testTitle"), t("wh.testSub"), [h("div", { class: "actions" }, run), tb.result]), about)), dcard);
+}
+
+// ---- tags and staging ----------------------------------------------------------------
+//   #admin/repository/tags[:create|:<name>]
+//   #admin/repository/staging
+// Components are selected by the Nexus search parameters (exact, "*" wildcards).
+
+const tagLink = (name) => "#admin/repository/tags" + (name ? ":" + enc(name) : "");
+const coordOf = (c) => (c.group ? c.group + ":" : "") + c.name;
+const attrsText = (a) => { const s = JSON.stringify(a || {}); return s === "{}" ? dash : s.length > 120 ? s.slice(0, 117) + "…" : s; };
+
+// selector is the component search form; query() gives its filled fields.
+// o.repos: a repository select (else the caller names the repository);
+// o.tags: a tag select.
+function selector(o) {
+  const repo = o.repos ? sel([["", t("stg.anyRepo")]].concat(o.repos.map((r) => [r.name, r.name + " · " + r.format + " · " + r.type])), "") : null;
+  const format = o.repos ? sel([["", t("repos.allFormats")]].concat(FORMATS.map((f) => [f, FORMAT_NAMES[f]])), "") : null;
+  const tag = o.tags ? sel([["", t("stg.noTag")]].concat(o.tags.map((x) => [x, x])), "") : null;
+  const group = textIn("", { class: "mono", placeholder: "com.example" });
+  const name = textIn("", { class: "mono", placeholder: "my-lib*" });
+  const version = textIn("", { class: "mono", placeholder: "1.0.*" });
+  const q = textIn("", { placeholder: t("stg.keywordPh") });
+  const el = fields(
+    repo ? field(t("col.repo"), repo) : null, format ? field(t("col.format"), format) : null,
+    tag ? field(t("nav.tags"), tag, t("stg.tagHelp")) : null,
+    field(t("comp.group"), group), field(t("col.name"), name), field(t("col.version"), version),
+    field(t("stg.keyword"), q, t("stg.keywordHelp")));
+  const query = () => {
+    const p = new URLSearchParams();
+    for (const [k, c] of [["repository", repo], ["format", format], ["tag", tag], ["group", group], ["name", name], ["version", version], ["q", q]]) {
+      if (c && c.value.trim()) p.set(k, c.value.trim());
+    }
+    return p;
+  };
+  return { el, query, picked: () => [tag, group, name, version, q].some((c) => c && c.value.trim()) };
+}
+
+// compTable lists component entries of a tag or staging answer; failed ones carry an error.
+function compTable(list, emptyText, noResult) {
+  return tbl([t("col.repo"), t("comp.component"), t("col.version"), noResult ? null : t("stg.result")].filter(Boolean), (list || []).map((c) => h("tr", null,
+    h("td", { class: "nowrap" }, c.repository),
+    h("td", { class: "name" }, c.repository && c.version && !c.error && !c.gone ? h("a", { href: componentLink({ repo: c.repository, group: c.group, name: c.name, version: c.version }) }, coordOf(c)) : coordOf(c)),
+    h("td", null, c.version || dash),
+    noResult ? null : h("td", null, c.error ? [badge(t("stg.failed"), "red"), h("div", { class: "tiny muted" }, c.error)] : badge(t("stg.done"), "green")))), emptyText || t("stg.none"));
+}
+
+export async function viewTags(view, name) {
+  const isLive = alive();
+  const eb = polEyebrow();
+  const back = h("a", { class: "btn", href: tagLink() }, t("tag.back"));
+  if (name === undefined) {
+    const d = await api("tags");
+    if (!isLive()) return;
+    const body = h("tbody");
+    const rowOf = (x) => h("tr", null,
+      h("td", { class: "name" }, h("a", { href: tagLink(x.name) }, h("strong", null, x.name))),
+      h("td", null, h("code", null, attrsText(x.attributes))),
+      h("td", { class: "nowrap" }, fmtDate(x.lastUpdated)),
+      h("td", { class: "act" }, h("a", { class: "btn small", href: tagLink(x.name) }, t("col.open"))));
+    const list = d.tags || [];
+    body.append(...list.map(rowOf));
+    let token = d.continuationToken || "";
+    const more = button(t("search.loadMore"));
+    more.hidden = !token;
+    more.addEventListener("click", async () => {
+      more.disabled = true;
+      try {
+        const n = await api("tags?continuationToken=" + enc(token));
+        if (!isLive()) return;
+        body.append(...(n.tags || []).map(rowOf));
+        token = n.continuationToken || "";
+        more.hidden = !token;
+      } catch (e) { handleError(e); } finally { more.disabled = false; }
+    });
+    put(view, pageHead(t("nav.tags"), sub(t("tag.sub")), acts(h("a", { class: "btn", href: "#admin/repository/staging" }, t("nav.staging")), h("a", { class: "btn primary", href: tagLink("create") }, t("tag.create"))), eb),
+      h("section", { class: "card" }, list.length ? h("div", { class: "tablewrap" }, h("table", null,
+        h("thead", null, h("tr", null, [t("col.name"), t("tag.attrs"), t("col.updated")].map((x) => h("th", { scope: "col" }, x)), h("th", { scope: "col", class: "act" }, h("span", { class: "sr-only" }, t("col.actions"))))),
+        body)) : h("div", { class: "empty" }, t("tag.none"))),
+      h("div", { class: "toolbar end" }, more),
+      h("div", { class: "notice" }, t("tag.note")));
+    return;
+  }
+  const creating = name === "create";
+  let cur = { name: "", attributes: {} };
+  if (!creating) {
+    try { cur = await api("tags/" + encSeg(name)); } catch (e) {
+      if (e.status !== 404) throw e;
+      if (!isLive()) return;
+      put(view, pageHead(t("nav.tags"), null, acts(back), eb), notFound(t("tag.notFound", { name })));
+      return;
+    }
+  }
+  const repos = await loadRepos(true);
+  if (!isLive()) return;
+  const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 256, class: "mono" });
+  const attrs = h("textarea", { class: "mono", rows: 8, spellcheck: "false", placeholder: '{"build": "1234", "stage": "qa"}' }, JSON.stringify(cur.attributes || {}, null, 2));
+  const save = h("button", { type: "submit", class: "btn primary" }, creating ? t("tag.createBtn") : t("roles.save"));
+  const form = h("form", { novalidate: true });
+  const fs = formState(form);
+  put(form, fs.err, fields(
+    field(t("col.name"), nameIn, creating ? t("tag.nameHelp") : null, { req: creating, full: true }),
+    field(t("tag.attrs"), attrs, t("tag.attrsHelp"), { full: true })),
+    h("div", { class: "actions end" }, save));
+  form.addEventListener("submit", saver(fs, isLive, save, creating, "tags", cur.name, () => {
+    const errs = [];
+    let a = null;
+    const text = attrs.value.trim();
+    try { a = text ? JSON.parse(text) : {}; } catch (e) { errs.push(t("tag.e.json", { msg: e.message })); }
+    if (!errs.length && (a === null || typeof a !== "object" || Array.isArray(a))) errs.push(t("tag.e.object"));
+    else if (!errs.length && JSON.stringify(a).length > 16384) errs.push(t("tag.e.size"));
+    const b = creating ? { name: nameIn.value.trim(), attributes: a } : { attributes: a };
+    if (creating && !/^[A-Za-z0-9_][A-Za-z0-9._-]{0,255}$/.test(b.name)) errs.unshift(t("tag.e.name"));
+    return { body: b, errs };
+  }, (o) => tagLink(o.name), [t("tag.created"), t("tag.saved")]));
+  const formCard = card(creating ? t("tag.createTitle") : t("tag.settings"), t("tag.settingsSub"), form);
+  if (creating) {
+    put(view, pageHead(t("tag.createTitle"), sub(t("tag.createSub")), acts(back), eb), fs.ok, h("div", { class: "two" }, formCard, h("div", { class: "notice" }, t("tag.note"))));
+    nameIn.focus();
+    return;
+  }
+
+  // associate / dissociate by search parameters
+  const pick = selector({ repos });
+  const assoc = button(t("tag.associate"), "primary"), dis = button(t("tag.dissociate"));
+  const result = h("div", { class: "pv-result", "aria-live": "polite" });
+  const tagged = h("div", null, loading());
+  const loadTagged = async () => {
+    try {
+      const d = await api("search/components?" + new URLSearchParams({ tag: cur.name }));
+      if (!isLive()) return;
+      const comps = d.components || [];
+      put(tagged, compTable(comps.map((c) => ({ repository: c.repo, group: c.group, name: c.name, version: c.version })), t("tag.noComps"), true),
+        d.continuationToken || d.truncated ? h("p", { class: "tiny muted" }, t("tag.firstPage", { n: fmtNum(comps.length) })) : null);
+    } catch (e) { if (isLive()) put(tagged, h("div", { class: "empty" }, e.message)); }
+  };
+  const runAssoc = (method) => async () => {
+    if (!pick.picked() && !pick.query().get("repository") && !pick.query().get("format")) { put(result, amber(t("stg.e.selector"))); return; }
+    assoc.disabled = dis.disabled = true;
+    put(result, loading());
+    try {
+      const d = await api("tags/" + encSeg(cur.name) + "/associate?" + pick.query(), { method });
+      if (!isLive()) return;
+      const list = ((d && d.data) || {})[method === "POST" ? "components associated" : "components disassociated"] || [];
+      put(result, h("p", null, badge(method === "POST" ? t("tag.associated", { n: fmtNum(list.length) }) : t("tag.dissociated", { n: fmtNum(list.length) }), "green")), compTable(list));
+      loadTagged();
+    } catch (e) {
+      if (!isLive()) return;
+      put(result, amber(errList(e).join(" ")));
+      if (e.status === 401) handleError(e);
+    } finally { assoc.disabled = dis.disabled = false; }
+  };
+  assoc.addEventListener("click", runAssoc("POST"));
+  dis.addEventListener("click", runAssoc("DELETE"));
+  loadTagged();
+  const del = deleter(isLive, "tags", cur.name, t("tag.delText", { name: cur.name }), t("tag.delTitle"), tagLink(), () => "");
+  put(view, pageHead(cur.name, sub(t("tag.detailSub", { time: fmtDate(cur.firstCreated) })), acts(back, del), eb), fs.ok,
+    h("div", { class: "two" },
+      h("div", { class: "stack" }, formCard, card(t("tag.tagged"), t("tag.taggedSub"), tagged)),
+      card(t("tag.assocTitle"), t("tag.assocSub"), [pick.el, h("div", { class: "actions" }, assoc, dis), result])));
+}
+
+// stagingResult shows a move or delete answer (also the 409 that some failed).
+function stagingResult(d, kind) {
+  const data = (d && d.data) || {};
+  // moved components now live in the destination, so their links go there
+  const done = (data[kind === "move" ? "components moved" : "components deleted"] || [])
+    .map((c) => (kind === "move" && data.destination ? Object.assign({}, c, { repository: data.destination }) : Object.assign({}, c, { gone: true })));
+  const failed = data["components failed"] || [];
+  return [
+    h("p", null, badge(d.message || "", failed.length ? "amber" : "green"), " ",
+      kind === "move" ? t("stg.movedN", { n: fmtNum(done.length), to: data.destination || "" }) : t("stg.deletedN", { n: fmtNum(done.length) }),
+      failed.length ? [" · ", t("stg.failedN", { n: fmtNum(failed.length) })] : null),
+    compTable(failed.concat(done))];
+}
+
+export async function viewStaging(view) {
+  const isLive = alive();
+  const [repos, td] = await Promise.all([loadRepos(true), api("tags").catch(() => ({}))]);
+  if (!isLive()) return;
+  const hosted = repos.filter((r) => r.type === "hosted");
+  const tags = (td.tags || []).map((x) => x.name);
+  const opts = (list) => list.map((r) => [r.name, r.name + " · " + (FORMAT_NAMES[r.format] || r.format)]);
+
+  // move
+  const src = sel([["", t("stg.pickSource")]].concat(opts(hosted)), "");
+  const dst = sel([["", t("stg.pickDest")]], "");
+  const syncDst = () => {
+    const s = hosted.find((r) => r.name === src.value);
+    const keep = dst.value;
+    const list = s ? hosted.filter((r) => r.format === s.format && r.name !== s.name) : [];
+    put(dst, h("option", { value: "" }, list.length || !s ? t("stg.pickDest") : t("stg.noDest")), list.map((r) => h("option", { value: r.name }, r.name)));
+    if (list.some((r) => r.name === keep)) dst.value = keep;
+  };
+  src.addEventListener("change", syncDst);
+  const mvPick = selector({ tags });
+  const mvBtn = button(t("stg.move"), "primary");
+  const mvOut = h("div", { class: "pv-result", "aria-live": "polite" });
+  mvBtn.addEventListener("click", async () => {
+    if (!src.value || !dst.value) { put(mvOut, amber(t("stg.e.repos"))); return; }
+    if (!mvPick.picked()) { put(mvOut, amber(t("stg.e.selector"))); return; }
+    const q = mvPick.query();
+    q.set("repository", src.value);
+    q.set("destination", dst.value);
+    if (!(await confirmDelete(t("stg.moveText", { from: src.value, to: dst.value }), t("stg.moveTitle"), t("stg.move")))) return;
+    mvBtn.disabled = true;
+    put(mvOut, loading());
+    try {
+      const d = await api("staging/move?" + q, { method: "POST" });
+      if (isLive()) put(mvOut, stagingResult(d, "move"));
+    } catch (e) {
+      if (!isLive()) return;
+      if (e.status === 409 && e.data && e.data.data) put(mvOut, stagingResult(e.data, "move"));
+      else { put(mvOut, amber(errList(e).join(" "))); if (e.status === 401) handleError(e); }
+    } finally { mvBtn.disabled = false; }
+  });
+
+  // delete
+  const delRepo = sel([["", t("stg.pickRepo")]].concat(opts(hosted)), "");
+  const delPick = selector({ tags });
+  const delBtn = button(t("stg.delete"), "danger");
+  const delOut = h("div", { class: "pv-result", "aria-live": "polite" });
+  delBtn.addEventListener("click", async () => {
+    if (!delRepo.value) { put(delOut, amber(t("stg.e.repo"))); return; }
+    if (!delPick.picked()) { put(delOut, amber(t("stg.e.selector"))); return; }
+    const q = delPick.query();
+    q.set("repository", delRepo.value);
+    if (!(await confirmDelete(t("stg.delText", { repo: delRepo.value, q: [...delPick.query()].map(([k, v]) => k + "=" + v).join(" ") }), t("stg.delTitle")))) return;
+    delBtn.disabled = true;
+    put(delOut, loading());
+    try {
+      const d = await api("staging/delete?" + q, { method: "POST" });
+      if (isLive()) put(delOut, stagingResult(d, "delete"));
+    } catch (e) {
+      if (!isLive()) return;
+      if (e.status === 409 && e.data && e.data.data) put(delOut, stagingResult(e.data, "delete"));
+      else { put(delOut, amber(errList(e).join(" "))); if (e.status === 401) handleError(e); }
+    } finally { delBtn.disabled = false; }
+  });
+
+  put(view, pageHead(t("nav.staging"), sub(t("stg.sub")), acts(h("a", { class: "btn", href: tagLink() }, t("nav.tags"))), polEyebrow()),
+    h("div", { class: "two" },
+      card(t("stg.moveTitle"), t("stg.moveSub"), [fields(field(t("stg.source"), src, null, { req: true }), field(t("stg.dest"), dst, t("stg.destHelp"), { req: true })),
+        h("h3", { class: "sub-title" }, t("stg.which")), mvPick.el, h("div", { class: "actions end" }, mvBtn), mvOut]),
+      card(t("stg.delTitle"), t("stg.delSub"), [fields(field(t("col.repo"), delRepo, null, { req: true, full: true })),
+        h("h3", { class: "sub-title" }, t("stg.which")), delPick.el, h("div", { class: "actions end" }, delBtn), delOut])),
+    h("div", { class: "notice" }, t("stg.note")));
 }

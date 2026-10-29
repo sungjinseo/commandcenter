@@ -7,8 +7,8 @@
 //   #admin/security/realms
 //   #user/account
 import {
-  state, h, put, api, enc, alive, filterBar, row, pageHead, loading, card, kv, tbl, handleError, needLogin, icon,
-  loadRepos, FORMATS, FORMAT_NAMES,
+  state, h, put, api, enc, encSeg, alive, filterBar, row, pageHead, loading, card, kv, tbl, handleError, needLogin, icon,
+  loadRepos, FORMATS, FORMAT_NAMES, fmtDate, fmtNum, copyLine, copyButton, markBusy,
 } from "./util.js";
 import { t } from "./i18n.js";
 import { confirmDelete } from "./browse.js";
@@ -32,15 +32,17 @@ const IN_USE = /in use/;
 const WRONG_PW = /the current password is incorrect/;
 const REENTER = /re-enter the bind password/;
 const REENTER_OIDC = /re-enter the client secret/;
+const REENTER_CROWD = /re-enter the application password/;
 const ACTIONS = ["browse", "read", "add", "edit", "delete"];
 
 const userLink = (id) => "#admin/security/users" + (id ? ":" + enc(id) : "");
 const roleLink = (id) => "#admin/security/roles" + (id ? ":" + enc(id) : "");
 // dynamic keys go through tables, so every key stays a literal for the i18n test
-const REALM_KEYS = { local: ["realms.name.local", "realms.desc.local"], token: ["realms.name.token", "realms.desc.token"], ldap: ["realms.name.ldap", "realms.desc.ldap"], oidc: ["realms.name.oidc", "realms.desc.oidc"] };
+const REALM_KEYS = { local: ["realms.name.local", "realms.desc.local"], token: ["realms.name.token", "realms.desc.token"], ldap: ["realms.name.ldap", "realms.desc.ldap"], oidc: ["realms.name.oidc", "realms.desc.oidc"],
+  crowd: ["realms.name.crowd", "realms.desc.crowd"], rutauth: ["realms.name.rutauth", "realms.desc.rutauth"], saml: ["realms.name.saml", "realms.desc.saml"] };
 // isDir: users of these sources live in a directory or identity provider; their
 // stored rows are overrides and their owner key is "<source>:<id>".
-const isDir = (src) => src === "ldap" || src === "oidc";
+const isDir = (src) => ["ldap", "oidc", "crowd", "rutauth", "saml"].includes(src);
 const realmName = (id) => (REALM_KEYS[id] ? t(REALM_KEYS[id][0]) : id);
 const realmDesc = (id) => (REALM_KEYS[id] ? t(REALM_KEYS[id][1]) : "");
 const roleBadges = (roles) => (roles && roles.length ? roles.map((r) => badge(r, "blue")) : dash);
@@ -119,7 +121,7 @@ async function userCreate(view) {
   const idIn = textIn("", { required: true, maxlength: 64 });
   const nameIn = textIn("", { maxlength: 200 });
   const emailIn = textIn("", { maxlength: 200 });
-  const source = sel([["local", realmName("local")], ["ldap", realmName("ldap")], ["oidc", realmName("oidc")]], "local");
+  const source = sel([["local", realmName("local")], ["ldap", realmName("ldap")], ["oidc", realmName("oidc")], ["crowd", realmName("crowd")], ["rutauth", realmName("rutauth")]], "local");
   const pw = pwIn(), pw2 = pwIn();
   const status = sel([["active", t("users.active")], ["disabled", t("users.disabled")]], "active");
   const rg = checkGroup(roleItems(roles), []);
@@ -555,6 +557,21 @@ export async function viewRealms(view) {
       if (!isLive()) return [];
       return oidcSettings(od, rl, isLive);
     },
+    crowd: async () => {
+      const [cd, rl] = await Promise.all([api("realms/crowd"), api("roles")]);
+      if (!isLive()) return [];
+      return crowdSettings(cd, rl, isLive);
+    },
+    rutauth: async () => {
+      const [rd, rl] = await Promise.all([api("realms/rutauth"), api("roles")]);
+      if (!isLive()) return [];
+      return rutSettings(rd, rl, isLive);
+    },
+    saml: async () => {
+      const [sd, rl] = await Promise.all([api("realms/saml"), api("roles")]);
+      if (!isLive()) return [];
+      return samlSettings(sd, rl, isLive);
+    },
   };
   const types = avail.filter((id) => editors[id]);
   const panels = new Map();
@@ -843,17 +860,422 @@ function oidcSettings(od, rl, isLive) {
   return [card(t("oidc.title"), t("oidc.sub"), form), testCard];
 }
 
+// ---- Crowd, RUT and SAML realms ----------------------------------------------------
+
+// mappingRows edits group → roles mappings in the LDAP layout.
+function mappingRows(roleOpts, list, placeholder, fs) {
+  const maps = [], box = h("div");
+  const add = (m) => {
+    const group = textIn(m.group, { class: "mono", placeholder, "aria-label": t("oidc.mapGroup") });
+    const roles = checkGroup(roleOpts, m.roles || []);
+    const rm = button(t("ldap.mapRemove"), "small danger");
+    const el = h("div", { class: "edit-row" }, h("div", { class: "row" }, h("div", { class: "field grow" }, h("span", { class: "flabel" }, t("oidc.mapGroup")), group), rm), roles.el);
+    const item = { group, roles };
+    rm.addEventListener("click", () => { maps.splice(maps.indexOf(item), 1); el.remove(); fs.dirty(); });
+    maps.push(item);
+    box.appendChild(el);
+  };
+  (list || []).forEach(add);
+  const addBtn = button(t("ldap.mapAdd"));
+  addBtn.addEventListener("click", () => { add({ group: "", roles: [] }); fs.dirty(); });
+  return {
+    el: [h("h3", { class: "sub-title" }, t("ldap.maps")), box, h("div", { class: "actions" }, addBtn)],
+    values: () => maps.map((m) => ({ group: m.group.value.trim(), roles: m.roles.values() })),
+    errs: () => maps.map((m, i) => (m.group.value.trim() ? null : t("ldap.e.group", { n: i + 1 }))).filter(Boolean),
+  };
+}
+const linesOf = (ta) => ta.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+const checkBox = (on, label, help) => {
+  const box = h("input", { type: "checkbox", checked: !!on });
+  return { box, el: h("div", { class: "field full" }, h("label", { class: "check" }, box, label), help ? h("small", null, help) : null) };
+};
+
+// rutSettings: the Remote User Token realm (a trusted proxy's header names the user).
+function rutSettings(rd, rl, isLive) {
+  const roleOpts = roleItems(rl.roles || []);
+  const form = h("form", { novalidate: true });
+  const fs = formState(form);
+  const header = textIn(rd.header || "REMOTE_USER", { class: "mono", maxlength: 100 });
+  const groupHeader = textIn(rd.groupHeader, { class: "mono", maxlength: 100, placeholder: "X-Forwarded-Groups" });
+  const proxies = h("textarea", { class: "mono", rows: 3, spellcheck: "false", autocomplete: "off", placeholder: "10.0.0.0/8\n192.168.1.10/32" }, (rd.trustedProxies || []).join("\n"));
+  const defaults = checkGroup(roleOpts, rd.defaultRoles || []);
+  const maps = mappingRows(roleOpts, rd.groupMappings, "platform-admins", fs);
+  const save = h("button", { type: "submit", class: "btn primary" }, t("rut.save"));
+  put(form, fs.err, fs.ok, notice(t("rut.warn"), "amber"), fields(
+    field(t("rut.header"), header, t("rut.headerHelp")),
+    field(t("rut.groupHeader"), groupHeader, t("rut.groupHeaderHelp")),
+    field(t("rut.proxies"), proxies, t("rut.proxiesHelp"), { full: true, req: true }),
+    groupField(t("ldap.defaults"), defaults.el, t("rut.defaultsHelp"))),
+    maps.el, h("p", { class: "hint" }, t("rut.mapsHelp")), h("div", { class: "savebar" }, save));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    fs.clear();
+    fs.ok.hidden = true;
+    const errs = maps.errs();
+    if (!header.value.trim()) errs.unshift(t("rut.e.header"));
+    if (errs.length) { fs.show(errs, t("rut.errOne")); return; }
+    save.disabled = true;
+    try {
+      await api("realms/rutauth", { method: "PUT", body: { header: header.value.trim(), groupHeader: groupHeader.value.trim(), trustedProxies: linesOf(proxies),
+        defaultRoles: defaults.values(), groupMappings: maps.values() } });
+      if (!isLive()) return;
+      fs.clean();
+      put(fs.ok, t("rut.saved"));
+      fs.ok.hidden = false;
+    } catch (e) {
+      if (isLive()) failWith(fs, e, t("rut.errOne"));
+    } finally { save.disabled = false; }
+  });
+  return [card(t("rut.title"), t("rut.sub"), form)];
+}
+
+const CROWD_STEPS = { application: "crowd.step.application", authenticate: "crowd.step.authenticate", user: "crowd.step.user", groups: "crowd.step.groups", name: "crowd.step.name" };
+
+// crowdSettings: Atlassian Crowd (server, application credentials, caching, roles) and a test.
+function crowdSettings(cd, rl, isLive) {
+  const roleOpts = roleItems(rl.roles || []);
+  const form = h("form", { novalidate: true });
+  const fs = formState(form);
+  let pwSet = !!cd.applicationPasswordSet;
+  const url = textIn(cd.url, { type: "url", class: "mono", placeholder: "https://crowd.example.com/crowd", maxlength: 300 });
+  const app = textIn(cd.applicationName, { class: "mono", maxlength: 200, autocomplete: "off" });
+  const pw = h("input", { type: "password", autocomplete: "new-password", placeholder: pwSet ? t("rf.unchanged") : "" });
+  const clearPw = h("input", { type: "checkbox" });
+  const clearRow = h("div", { class: "field" }, h("label", { class: "check" }, clearPw, t("crowd.clearPw")));
+  clearRow.hidden = !pwSet;
+  clearPw.addEventListener("change", () => { pw.disabled = clearPw.checked; if (clearPw.checked) pw.value = ""; });
+  const pwHelp = h("span");
+  const syncSet = () => put(pwHelp, pwSet ? [h("span", { class: "rf-set" }, t("rf.passSet")), " — ", t("rf.keepEmpty")] : t("crowd.pwHelp"));
+  syncSet();
+  const pwErr = errBox();
+  const pwField = field(t("crowd.appPw"), pw, pwHelp);
+  pwField.append(pwErr);
+  const timeout = textIn(cd.timeoutSeconds || "", { type: "number", min: 0, max: 60 });
+  const cache = textIn(cd.cacheMinutes || "", { type: "number", min: 0, max: 1440 });
+  const defaults = checkGroup(roleOpts, cd.defaultRoles || []);
+  const maps = mappingRows(roleOpts, cd.groupMappings, "crowd-administrators", fs);
+  const save = h("button", { type: "submit", class: "btn primary" }, t("crowd.save"));
+  put(form, fs.err, fs.ok, fields(
+    field(t("crowd.url"), url, t("crowd.urlHelp"), { full: true }),
+    field(t("crowd.app"), app, t("crowd.appHelp")), pwField, clearRow,
+    field(t("ldap.timeout"), timeout, t("crowd.timeoutHelp")),
+    field(t("crowd.cache"), cache, t("crowd.cacheHelp")),
+    groupField(t("ldap.defaults"), defaults.el, t("crowd.defaultsHelp"))),
+    maps.el, h("div", { class: "savebar" }, save));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    fs.clear();
+    pwErr.hidden = true;
+    fs.ok.hidden = true;
+    const secret = pw.value;
+    pw.value = ""; // the secret never stays in the page
+    const tm = timeout.value.trim() === "" ? 0 : Number(timeout.value), cm = cache.value.trim() === "" ? 0 : Number(cache.value);
+    const errs = maps.errs();
+    if (!Number.isInteger(tm) || tm < 0 || !Number.isInteger(cm) || cm < 0) errs.unshift(t("crowd.e.numbers"));
+    if (errs.length) { fs.show(errs, t("crowd.errOne")); return; }
+    save.disabled = true;
+    try {
+      const out = await api("realms/crowd", { method: "PUT", body: { url: url.value.trim(), applicationName: app.value.trim(), applicationPassword: secret,
+        clearApplicationPassword: clearPw.checked, timeoutSeconds: tm, cacheMinutes: cm, groupMappings: maps.values(), defaultRoles: defaults.values() } });
+      if (!isLive()) return;
+      fs.clean();
+      pwSet = !!(out && out.applicationPasswordSet);
+      clearPw.checked = false;
+      pw.disabled = false;
+      pw.placeholder = pwSet ? t("rf.unchanged") : "";
+      clearRow.hidden = !pwSet;
+      syncSet();
+      put(fs.ok, t("crowd.saved"));
+      fs.ok.hidden = false;
+    } catch (e) {
+      if (!isLive()) return;
+      if (e.status === 400 && REENTER_CROWD.test(e.message)) { put(pwErr, t("crowd.reenter")); pwErr.hidden = false; pw.focus(); } else failWith(fs, e, t("crowd.errOne"));
+    } finally { save.disabled = false; }
+  });
+
+  // test with the saved configuration; a user and password are optional
+  const tUser = textIn("", { autocomplete: "off" });
+  const tPw = h("input", { type: "password", autocomplete: "new-password" });
+  const run = button(t("ldap.test"), "primary");
+  const result = h("div", { "aria-live": "polite" });
+  run.addEventListener("click", async () => {
+    const body = { username: tUser.value.trim(), password: tPw.value };
+    tPw.value = ""; // never kept
+    run.disabled = true;
+    put(result, loading());
+    try {
+      const d = await api("realms/crowd/test", { method: "POST", body });
+      if (!isLive()) return;
+      put(result, badge(d.ok ? t("ldap.testOk") : t("ldap.testFail"), d.ok ? "green" : "red"),
+        (d.steps || []).map((x) => h("div", { class: "listrow" },
+          h("span", null, h("strong", null, CROWD_STEPS[x.step] ? t(CROWD_STEPS[x.step]) : x.step), x.detail ? h("small", null, x.detail) : null),
+          badge(x.ok ? t("ldap.stepOk") : t("ldap.stepFail"), x.ok ? "green" : "red"))));
+    } catch (e) {
+      if (!isLive()) return;
+      if (e.status === 401 || e.status === 403) { handleError(e); put(result); } else put(result, notice(e.message, "amber"));
+    } finally { run.disabled = false; }
+  });
+  const testCard = card(t("crowd.testTitle"), t("crowd.testSub"), [
+    fields(field(t("ldap.testUser"), tUser, t("crowd.testUserHelp")), field(t("ldap.testPw"), tPw)),
+    h("div", { class: "actions end" }, run), result]);
+  return [card(t("crowd.title"), t("crowd.sub"), form), testCard];
+}
+
+// certRows shows SAML certificates: subject, SHA-256 fingerprint and expiry.
+const certRows = (list) => list.map((c) => h("div", { class: "listrow" },
+  h("span", { class: "wrap" }, h("strong", null, c.subject || dash), h("small", { class: "mono" }, "SHA-256 " + c.sha256)),
+  c.expired ? badge(t("ssl.expired"), "red") : h("span", { class: "tiny muted nowrap" }, t("saml.until", { time: fmtDate(c.notAfter) }))));
+
+// samlSettings: the SAML 2.0 service provider (what the IdP needs), the IdP
+// it trusts (parsed from the metadata) and the form.
+function samlSettings(sd, rl, isLive) {
+  const roleOpts = roleItems(rl.roles || []);
+  const spBox = h("div"), idpBox = h("div");
+  const showInfo = (d) => {
+    put(spBox, d.acsUrl ? [
+      field(t("saml.acs"), copyLine(d.acsUrl, t("saml.acs")), null),
+      field(t("saml.metadataUrl"), copyLine(d.metadataUrl, t("saml.metadataUrl")), t("saml.metadataUrlHelp")),
+      kv(t("saml.entity"), h("code", null, d.effectiveEntityId || dash)),
+      d.spCertificateInfo ? [h("h3", { class: "sub-title" }, t("saml.spCert")), certRows([d.spCertificateInfo])] : h("p", { class: "hint" }, t("saml.noCert")),
+      h("div", { class: "actions" }, h("a", { class: "btn small", href: "/-/api/realms/saml/sp-metadata", download: "sp-metadata.xml" }, t("saml.download")))]
+      : notice(t("saml.noBase"), "amber"));
+    const i = d.idp;
+    put(idpBox, i ? [
+      kv(t("saml.idpEntity"), h("code", null, i.entityId)),
+      kv(t("saml.sso"), h("span", { class: "mono" }, i.ssoUrl)),
+      kv(t("saml.fetched"), i.fetchedAt ? fmtDate(i.fetchedAt) : t("saml.pasted")),
+      i.wantAuthnRequestsSigned && !d.signAuthnRequests ? notice(t("saml.wantSigned"), "amber") : null,
+      h("h3", { class: "sub-title" }, t("saml.idpCerts")), (i.certificates || []).length ? certRows(i.certificates) : notice(t("saml.noIdpCert"), "amber")]
+      : d.idpError ? notice(t("saml.idpError", { msg: d.idpError }), "amber") : h("p", { class: "hint" }, t("saml.noIdp")));
+  };
+  showInfo(sd);
+
+  const form = h("form", { novalidate: true });
+  const fs = formState(form);
+  const src = sel([["xml", t("saml.srcXML")], ["url", t("saml.srcURL")]], sd.idpMetadataURL ? "url" : "xml");
+  const xml = h("textarea", { class: "mono", rows: 6, spellcheck: "false", autocomplete: "off", placeholder: "<md:EntityDescriptor …>" }, sd.idpMetadataXML || "");
+  const murl = textIn(sd.idpMetadataURL, { type: "url", class: "mono", placeholder: "https://idp.example.com/app/metadata", maxlength: 500 });
+  const fXml = field(t("saml.xml"), xml, t("saml.xmlHelp"), { full: true }), fUrl = field(t("saml.url"), murl, t("saml.urlHelp"), { full: true });
+  const syncSrc = () => { fXml.hidden = src.value !== "xml"; fUrl.hidden = src.value !== "url"; };
+  src.addEventListener("change", syncSrc);
+  syncSrc();
+  const displayName = textIn(sd.displayName, { maxlength: 60, placeholder: "SAML" });
+  const entityId = textIn(sd.entityId, { class: "mono", maxlength: 300, placeholder: sd.effectiveEntityId || "" });
+  const attr = (v, ph) => textIn(v, { class: "mono", maxlength: 200, placeholder: ph });
+  const aUser = attr(sd.usernameAttribute, "uid"), aFirst = attr(sd.firstNameAttribute, "givenName"), aLast = attr(sd.lastNameAttribute, "sn");
+  const aEmail = attr(sd.emailAttribute, "mail"), aGroups = attr(sd.groupsAttribute, "groups");
+  const defaults = checkGroup(roleOpts, sd.defaultRoles || []);
+  const maps = mappingRows(roleOpts, sd.groupMappings, "platform-admins", fs);
+  const vResp = checkBox(sd.validateResponseSignature !== false, t("saml.vResp"));
+  const vAssert = checkBox(sd.validateAssertionSignature !== false, t("saml.vAssert"), t("saml.vHelp"));
+  const sha1 = checkBox(sd.allowSHA1Signatures, t("saml.sha1"), t("saml.sha1Help"));
+  const idpInit = checkBox(sd.allowIdpInitiated, t("saml.idpInit"), t("saml.idpInitHelp"));
+  const signReq = checkBox(sd.signAuthnRequests, t("saml.signReq"), t("saml.signReqHelp"));
+  const skew = textIn(String(sd.clockSkewSeconds ?? 120), { type: "number", min: 0, max: 600 });
+  const save = h("button", { type: "submit", class: "btn primary" }, t("saml.save"));
+  put(form, fs.err, fs.ok, fields(
+    field(t("saml.src"), src, null, { full: true }), fXml, fUrl,
+    field(t("oidc.displayName"), displayName, t("saml.displayNameHelp")),
+    field(t("saml.entityId"), entityId, t("saml.entityIdHelp", { id: sd.effectiveEntityId || dash })),
+    h("div", { class: "field full" }, h("h3", { class: "sub-title" }, t("saml.attrs")), h("small", null, t("saml.attrsHelp"))),
+    field(t("saml.aUser"), aUser), field(t("saml.aEmail"), aEmail), field(t("saml.aFirst"), aFirst), field(t("saml.aLast"), aLast),
+    field(t("saml.aGroups"), aGroups, t("saml.aGroupsHelp"), { full: true }),
+    groupField(t("ldap.defaults"), defaults.el, t("saml.defaultsHelp"))),
+    maps.el,
+    h("h3", { class: "sub-title" }, t("saml.security")),
+    fields(vResp.el, vAssert.el, sha1.el, idpInit.el, signReq.el, field(t("saml.skew"), skew, t("saml.skewHelp"))),
+    h("div", { class: "savebar" }, save));
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    fs.clear();
+    fs.ok.hidden = true;
+    const sk = skew.value.trim() === "" ? 120 : Number(skew.value);
+    const errs = maps.errs();
+    if (!Number.isInteger(sk) || sk < 0) errs.unshift(t("saml.e.skew"));
+    if (src.value === "url" && murl.value.trim() && !/^https:\/\//.test(murl.value.trim())) errs.unshift(t("saml.e.url"));
+    if (errs.length) { fs.show(errs, t("saml.errOne")); return; }
+    save.disabled = true;
+    try {
+      const out = await api("realms/saml", { method: "PUT", body: {
+        displayName: displayName.value.trim(), idpMetadataXML: src.value === "xml" ? xml.value.trim() : "", idpMetadataURL: src.value === "url" ? murl.value.trim() : "",
+        entityId: entityId.value.trim(), usernameAttribute: aUser.value.trim(), firstNameAttribute: aFirst.value.trim(), lastNameAttribute: aLast.value.trim(),
+        emailAttribute: aEmail.value.trim(), groupsAttribute: aGroups.value.trim(), groupMappings: maps.values(), defaultRoles: defaults.values(),
+        validateResponseSignature: vResp.box.checked, validateAssertionSignature: vAssert.box.checked, allowSHA1Signatures: sha1.box.checked,
+        allowIdpInitiated: idpInit.box.checked, clockSkewSeconds: sk, signAuthnRequests: signReq.box.checked } });
+      if (!isLive()) return;
+      fs.clean();
+      showInfo(out); // the first save creates the SP certificate; the IdP is parsed again
+      entityId.placeholder = out.effectiveEntityId || "";
+      put(fs.ok, t("saml.saved"));
+      fs.ok.hidden = false;
+    } catch (e) {
+      if (isLive()) failWith(fs, e, t("saml.errOne"));
+    } finally { save.disabled = false; }
+  });
+  return [h("div", { class: "equal" }, card(t("saml.spTitle"), t("saml.spSub"), spBox), card(t("saml.idpTitle"), t("saml.idpSub"), idpBox)),
+    card(t("saml.title"), t("saml.sub"), form)];
+}
+
+// ---- user tokens: a name code and pass code that build tools send instead of the password
+//   #user/user-token               the caller's own token
+//   #admin/security/user-tokens    the same, then every user's token
+
+const XML_ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&apos;" };
+const xmlEsc = (v) => String(v).replace(/[&<>"']/g, (ch) => XML_ESC[ch]);
+const RESET_WORD = "RESET";
+
+export async function viewUserTokens(view, admin) {
+  if (state.me.anonymous) return needLogin(view, t("nav.userTokens"));
+  const isLive = alive();
+  const me = state.me;
+  const shown = h("div");
+  const ok = h("div", { class: "notice ok", role: "status", hidden: true });
+  let unBusy = null; // the pass code on screen is in-progress work for a language change
+  const hideShown = () => { put(shown); if (unBusy) { unBusy(); unBusy = null; } };
+  const codeField = (label, text) => h("div", { class: "field" }, h("span", { class: "flabel" }, label), copyLine(text, label));
+  const showCodes = (x) => {
+    if (!unBusy) unBusy = markBusy("usertoken");
+    const hide = button(t("tok.hide"), "small");
+    hide.addEventListener("click", hideShown);
+    const snippet = "<server>\n  <id>commandcenter</id>\n  <username>" + xmlEsc(x.nameCode) + "</username>\n  <password>" + xmlEsc(x.passCode) + "</password>\n</server>";
+    const pre = h("pre", { class: "code" }, snippet);
+    put(shown, h("div", { class: "token-box", role: "status" },
+      h("strong", null, t("ut.showTitle")),
+      h("p", { class: "sub" }, t("ut.showText", { user: x.user })),
+      fields(codeField(t("ut.nameCode"), x.nameCode), codeField(t("ut.passCode"), x.passCode)),
+      h("div", { class: "snippet-head" }, h("span", null, t("ut.maven")), copyButton(snippet, pre, t("ut.mavenCopy"))), pre,
+      h("p", { class: "tiny muted" }, t("ut.otherTools")),
+      h("div", { class: "actions end" }, hide)));
+  };
+
+  const mine = h("div", null, loading());
+  const loadMine = async () => {
+    const d = await api("me/usertoken");
+    if (!isLive()) return;
+    const create = button(d.exists ? t("ut.reset") : t("ut.create"), d.exists ? null : "primary");
+    create.disabled = !d.enabled;
+    create.addEventListener("click", async () => {
+      if (d.exists && !(await confirmDelete(t("ut.resetText"), t("ut.resetTitle"), t("ut.reset")))) return;
+      create.disabled = true;
+      try {
+        const x = await api("me/usertoken", { method: "POST" });
+        if (!isLive()) return;
+        showCodes(x);
+        await loadMine();
+        if (admin) await loadAll();
+      } catch (e) { create.disabled = false; handleError(e); }
+    });
+    let del = null;
+    if (d.exists) {
+      del = button(t("common.delete"), "danger");
+      del.addEventListener("click", async () => {
+        if (!(await confirmDelete(t("ut.delText"), t("ut.delTitle")))) return;
+        del.disabled = true;
+        try {
+          await api("me/usertoken", { method: "DELETE" });
+          if (!isLive()) return;
+          hideShown();
+          await loadMine();
+          if (admin) await loadAll();
+        } catch (e) { del.disabled = false; handleError(e); }
+      });
+    }
+    put(mine,
+      !d.enabled ? notice(t("ut.disabled"), "amber") : d.required ? notice(t("ut.requiredNote")) : null,
+      d.exists ? [
+        kv(t("ut.nameCode"), h("code", null, d.nameCode)),
+        kv(t("tok.created"), fmtDate(d.created)),
+        kv(t("ut.expires"), d.expires ? h("span", null, fmtDate(d.expires), d.expired ? [" ", badge(t("ut.expired"), "red")] : null) : t("ut.never")),
+        kv(t("tok.lastUsed"), d.lastUsed ? fmtDate(d.lastUsed) : t("tok.never"))] : h("p", { class: "hint" }, d.enabled ? t("ut.noneMine") : ""),
+      h("div", { class: "actions" }, create, del));
+  };
+
+  const list = admin ? h("div", null, loading()) : null;
+  const loadAll = async () => {
+    const d = await api("usertokens");
+    if (!isLive()) return;
+    const toks = d.userTokens || [];
+    const rows = toks.map((x) => {
+      const rm = button(t("ut.resetOne"), "small danger");
+      rm.addEventListener("click", async () => {
+        if (!(await confirmDelete(t("ut.resetOneText", { user: x.user }), t("ut.resetOneTitle"), t("ut.resetOne")))) return;
+        rm.disabled = true;
+        try {
+          await api("usertokens/" + encSeg(x.user), { method: "DELETE" });
+          if (!isLive()) return;
+          if (x.user === me.owner) { hideShown(); await loadMine(); }
+          await loadAll();
+        } catch (e) { rm.disabled = false; handleError(e); }
+      });
+      return row([
+        [[h("strong", null, x.userId), x.source !== "local" ? h("div", { class: "tiny muted mono" }, x.user) : null], "name"],
+        [badge(realmName(x.source), x.source === "local" ? null : "purple")],
+        [h("code", null, x.nameCode)],
+        [fmtDate(x.created), "nowrap"],
+        [x.expires ? h("span", null, fmtDate(x.expires), x.expired ? [" ", badge(t("ut.expired"), "red")] : null) : t("ut.never"), "nowrap"],
+        [x.lastUsed ? fmtDate(x.lastUsed) : badge(t("tok.never")), "nowrap"],
+        [rm, "act"],
+      ], x.user + " " + x.nameCode);
+    });
+    const f = filterBar(rows, t("ut.filter"), "ut.count");
+    const all = button(t("ut.resetAll"), "small danger");
+    all.disabled = !toks.length;
+    all.addEventListener("click", () => resetAllDialog(toks.length));
+    const c = card(t("ut.all"), t("ut.allSub"), null, all);
+    c.append(f.bar, tbl([t("users.user"), t("users.realm"), t("ut.nameCode"), t("tok.created"), t("ut.expires"), t("tok.lastUsed"), actHead()], rows, t("ut.none")), f.none);
+    put(list, c);
+  };
+
+  // resetAllDialog deletes every user token after the admin types RESET.
+  const resetAllDialog = (n) => {
+    const input = h("input", { type: "text", autocomplete: "off", spellcheck: "false", autofocus: true });
+    const msg = h("div", { class: "form-msg", role: "alert" });
+    const cancel = button(t("common.cancel"));
+    const go = h("button", { type: "submit", class: "btn danger", disabled: true, form: "ut-all-f" }, t("ut.resetAll"));
+    const form = h("form", { id: "ut-all-f", novalidate: true }, h("div", { class: "notice amber" }, t("ut.resetAllText", { n: fmtNum(n) })),
+      field(t("ut.typeWord", { word: RESET_WORD }), input), msg);
+    const m = modal(t("ut.resetAllTitle"), form, [cancel, go], { cls: "modal-small" });
+    cancel.addEventListener("click", m.close);
+    input.addEventListener("input", () => { go.disabled = input.value !== RESET_WORD; });
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      if (input.value !== RESET_WORD) return;
+      go.disabled = true;
+      try {
+        const out = await api("usertokens?confirm=true", { method: "DELETE" });
+        m.close();
+        if (!isLive()) return;
+        hideShown();
+        put(ok, t("ut.resetAllDone", { n: fmtNum((out && out.deleted) || 0) }));
+        ok.hidden = false;
+        await Promise.all([loadMine(), loadAll()]);
+      } catch (e) {
+        go.disabled = false;
+        if (e.status === 401) { m.close(); handleError(e); return; }
+        msg.textContent = e.message;
+      }
+    });
+  };
+
+  put(view, pageHead(t("nav.userTokens"), sub(t("ut.sub", { user: me.user })),
+    admin ? acts(h("a", { class: "btn", href: "#admin/system/general" }, t("ut.settings"))) : null, eyebrow()),
+    ok, shown,
+    h("div", { class: "two" }, card(t("ut.mine"), t("ut.mineSub"), mine), h("div", { class: "notice" }, icon("info", "hint-ico"), t("ut.about"))),
+    list);
+  await Promise.all([loadMine(), admin ? loadAll() : null]);
+}
+
 // ---- account ---------------------------------------------------------------------
 
 export async function viewAccount(view) {
   if (state.me.anonymous) return needLogin(view, t("nav.account"));
   const me = state.me;
   const tokens = me.admin ? "#admin/security/usertoken" : "#user/usertoken";
-  const dirSource = me.realm === "LDAP" ? "ldap" : me.realm === "OIDC" ? "oidc" : "";
+  const dirSource = { LDAP: "ldap", OIDC: "oidc", Crowd: "crowd", RUT: "rutauth", SAML: "saml" }[me.realm] || "";
   const ldap = dirSource !== "";
   let pwCard;
   if (ldap) {
-    pwCard = card(t("acct.pwTitle"), null, notice(t(dirSource === "oidc" ? "acct.oidc" : "acct.ldap")));
+    pwCard = card(t("acct.pwTitle"), null, notice(dirSource === "oidc" ? t("acct.oidc") : dirSource === "ldap" ? t("acct.ldap") : t("acct.external", { realm: realmName(dirSource) })));
   } else {
     const cur = pwIn(), pw = pwIn(), pw2 = pwIn();
     cur.autocomplete = "current-password";
@@ -885,7 +1307,8 @@ export async function viewAccount(view) {
     });
     pwCard = card(t("acct.pwTitle"), t("acct.pwSub"), form);
   }
-  put(view, pageHead(t("nav.account"), sub(me.user), acts(h("a", { class: "btn", href: tokens }, icon("token"), t("nav.tokens"))), eyebrow()),
+  put(view, pageHead(t("nav.account"), sub(me.user), acts(h("a", { class: "btn", href: tokens }, icon("token"), t("nav.tokens")),
+    h("a", { class: "btn", href: me.admin ? "#admin/security/user-tokens" : "#user/user-token" }, icon("key"), t("nav.userTokens"))), eyebrow()),
     h("div", { class: "two" },
       card(t("users.info"), t("users.infoSub"), [
         kv(t("users.id"), me.user),

@@ -6,8 +6,8 @@
 // Settings screens are admin-only; the form checks again so a non-admin
 // never sees a create or edit control.
 import {
-  state, h, put, api, apiRepo, adminRepoLink, browseLink, typeBadge, fmtBytes, fmtNum, FORMAT_NAMES,
-  copyLine, pageHead, needAdmin, loadRepos, handleError, card, kv, alive, icon, markBusy,
+  state, h, put, api, apiRepo, adminRepoLink, browseLink, typeBadge, fmtBytes, fmtNum, fmtDate, FORMAT_NAMES,
+  copyLine, pageHead, needAdmin, loadRepos, handleError, card, kv, alive, icon, markBusy, bar, OSV_FORMATS, SEVERITIES, sevBadge, sevText, repoFlags,
 } from "./util.js";
 import { modal, rerender } from "./shell.js";
 import { t } from "./i18n.js";
@@ -44,6 +44,8 @@ const REMOTE_EXAMPLE = {
   cocoapods: "https://cdn.cocoapods.org/", huggingface: "https://huggingface.co/", terraform: "https://registry.terraform.io/", // swift: no public registry, so no example
 };
 const ANON = [["", "rf.anonInherit"], ["true", "rf.anonAllow"], ["false", "rf.anonDeny"]];
+const DISPOSITION = ["raw", "gitlfs"]; // formats with a contentDisposition setting
+const MOVE_STATES = { copying: ["rf.mvCopying", "blue"], switching: ["rf.mvSwitching", "blue"], failed: ["rf.mvFailed", "red"], interrupted: ["rf.mvInterrupted", "amber"] };
 
 let uidN = 0;
 const uid = (p) => "rf-" + p + "-" + (++uidN);
@@ -227,6 +229,94 @@ export function deleteDialog(name, isLive) {
   });
 }
 
+// ---- status, vulnerabilities and the blob store move ------------------------------
+
+// statusCard shows the live state the form does not edit: the proxy's remote
+// (auto-)block, an unfinished blob store move with its progress, and the last
+// vulnerability scan. It returns null when there is nothing to show.
+function statusCard(info) {
+  const rs = info.remoteStatus, mv = info.blobStoreMove, v = info.vulnerabilities;
+  if (!rs && !mv && !v) return null;
+  const rows = [];
+  if (rs) {
+    rows.push(kv(t("rf.remoteState"), rs.blocked ? repoFlags({ remoteStatus: rs }) : h("span", { class: "badge green" }, t("rf.remoteOk"))));
+    if (rs.blocked && rs.until) rows.push(kv(t("rf.blockedUntil"), fmtDate(rs.until)));
+    if (rs.lastError) rows.push(kv(t("rf.lastError"), h("span", { class: "mono" }, rs.lastError)));
+  }
+  if (mv) {
+    const st = MOVE_STATES[mv.state] || [null, ""];
+    const pct = mv.total > 0 ? (mv.copied / mv.total) * 100 : 0;
+    rows.push(kv(t("rf.move"), [h("span", { class: "badge" + (st[1] ? " " + st[1] : "") }, st[0] ? t(st[0]) : mv.state), " ", mv.source + " → " + mv.target]),
+      kv(t("rf.moveProgress"), t("rf.moveCount", { n: fmtNum(mv.copied), total: fmtNum(mv.total) })), bar(pct));
+    if (mv.state === "failed" || mv.state === "interrupted") rows.push(h("div", { class: "notice amber" }, t("rf.moveRetry"), " ", h("a", { href: "#admin/system/tasks" }, t("nav.tasks"))));
+  }
+  if (v) {
+    rows.push(kv(t("rf.vulnScan"), t("rf.vulnScanText", { n: fmtNum(v.components), bad: fmtNum(v.vulnerable), mal: fmtNum(v.malicious) })),
+      kv(t("vul.severity"), h("span", null, SEVERITIES.map((s) => [sevBadge(s), " " + fmtNum(v[s] || 0) + "  "]))));
+    if (v.scanned) rows.push(kv(t("rf.vulnScanned"), fmtDate(v.scanned)));
+  }
+  return card(t("rf.status"), t("rf.statusSub"), rows);
+}
+
+// vulnSummaryCard loads the repository's last vulnerability.scan summary
+// (the 20 worst components) into a card; uncovered formats give no card.
+function vulnSummaryCard(name, isLive) {
+  const body = h("div", null, h("div", { class: "loading" }, t("common.loading")));
+  const c = card(t("rf.vulnTitle"), t("rf.vulnSub"), body);
+  api(apiRepo(name, "/vulnerabilities/summary")).then((d) => {
+    if (!isLive()) return;
+    if (!d.covered) { c.hidden = true; return; }
+    const top = d.top || [];
+    put(body,
+      d.scanned ? null : h("div", { class: "notice" }, t("rf.vulnNever"), " ", h("a", { href: "#admin/system/tasks:create" }, t("rf.vulnScanTask"))),
+      h("p", { class: "tiny muted" }, t("rf.vulnSummary", { n: fmtNum(d.components), bad: fmtNum(d.vulnerable), mal: fmtNum(d.malicious), un: fmtNum(d.unchecked) })),
+      top.length ? h("div", { class: "tablewrap" }, h("table", null,
+        h("thead", null, h("tr", null, h("th", { scope: "col" }, t("comp.component")), h("th", { scope: "col" }, t("vul.severity")), h("th", { scope: "col", class: "num" }, t("rf.vulnCount")))),
+        h("tbody", null, top.map((x) => h("tr", null,
+          h("td", { class: "name" }, h("strong", null, x.component), (x.ids || []).length ? h("div", { class: "tiny muted mono" }, x.ids.slice(0, 4).join(", ") + (x.ids.length > 4 ? " …" : "")) : null),
+          h("td", { class: "nowrap" }, x.malicious ? [h("span", { class: "badge red" }, t("vul.malicious")), " "] : null, x.unchecked ? h("span", { class: "badge" }, t("rf.vulnUnchecked")) : sevBadge(x.severity)),
+          h("td", { class: "num" }, fmtNum(x.vulnerabilities))))))) : h("div", { class: "empty" }, d.scanned ? t("vul.none") : t("rf.vulnNoData")));
+  }, (e) => {
+    if (!isLive()) return;
+    if (e.status === 404 || e.status === 501) c.hidden = true;
+    else put(body, h("div", { class: "empty" }, e.message));
+  });
+  return c;
+}
+
+// moveStoreDialog starts moving the repository's blobs to another store
+// (POST …/blobstore, a repository.change-blobstore task).
+async function moveStoreDialog(name, current, isLive) {
+  let list;
+  try { list = (await api("blobstores")).blobstores || []; } catch (e) { handleError(e); return; }
+  if (!isLive()) return;
+  const names = list.filter((s) => s.name !== current).map((s) => [s.name, s.name + " · " + (s.type || "file")]);
+  const to = select(names.length ? names : [["", t("rf.moveNone")]], names.length ? names[0][0] : "");
+  const msg = h("div", { class: "form-msg", role: "alert" });
+  const cancel = h("button", { type: "button", class: "btn" }, t("common.cancel"));
+  const go = h("button", { type: "submit", class: "btn primary", disabled: !names.length, form: to.id + "-f" }, t("rf.moveStart"));
+  const form = h("form", { id: to.id + "-f", novalidate: true },
+    h("p", null, strong("rf.moveText", name)),
+    field(t("rf.moveTo"), to, t("rf.moveHelp", { from: current }), { full: true }), msg);
+  const m = modal(t("rf.moveTitle"), form, [cancel, go], { cls: "modal-small" });
+  cancel.addEventListener("click", m.close);
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    if (!to.value) return;
+    go.disabled = true;
+    try {
+      const out = await api(apiRepo(name, "/blobstore"), { method: "POST", body: { blobStore: to.value } });
+      m.close();
+      flash = { to: adminRepoLink(name), text: t("rf.moveStarted", { target: out.target, task: out.task }) };
+      if (isLive()) rerender();
+    } catch (e) {
+      go.disabled = false;
+      if (e.status === 401) { m.close(); handleError(e); return; }
+      msg.textContent = (e.errors && e.errors.length ? e.errors : [e.message]).join(" ");
+    }
+  });
+}
+
 // ---- form -----------------------------------------------------------------------
 
 // viewRepoForm shows the create form (o.recipe) or the edit form (o.name).
@@ -258,6 +348,8 @@ export async function viewRepoForm(view, o) {
       members: [], writeMember: "", versionPolicy: r.format === "maven" && r.type === "hosted" ? "release" : "",
       writePolicy: r.type === "hosted" ? "allow_once" : "", anonymousRead: null,
       distribution: r.format === "apt" && r.type === "hosted" ? "stable" : "", component: r.format === "apt" && r.type === "hosted" ? "main" : "", depth: 0,
+      strictContentTypeValidation: false, contentDisposition: "", blocked: false, autoBlock: r.type === "proxy",
+      firewall: r.type === "proxy" && OSV_FORMATS.includes(r.format) ? { enabled: false, blockMalicious: true, blockSeverityAtLeast: "none", allowList: [] } : null,
     };
   }
   // Routing rule (proxy only): the rule names; null when the list fails, so the stored name is kept.
@@ -339,6 +431,19 @@ export async function viewRepoForm(view, o) {
       if (c) c.box.addEventListener("change", () => { inp.disabled = c.box.checked; if (c.box.checked) inp.value = ""; });
     }
   }
+  // Proxy: a manual block, and the auto-block after repeated remote failures (on by default).
+  const blocked = isProxy ? checkbox(t("rf.blocked"), cfg.blocked) : null;
+  const autoBlock = isProxy ? checkbox(t("rf.autoBlock"), cfg.autoBlock !== false) : null;
+  // Proxy of a format with OSV data: the firewall.
+  const fw0 = cfg.firewall || { enabled: false, blockMalicious: true, blockSeverityAtLeast: "none", allowList: [] };
+  const hasFw = isProxy && OSV_FORMATS.includes(cfg.format);
+  const fwOn = hasFw ? checkbox(t("rf.fwEnabled"), fw0.enabled) : null;
+  const fwMal = hasFw ? checkbox(t("rf.fwMalicious"), fw0.blockMalicious !== false) : null;
+  const fwSev = hasFw ? select([["none", t("rf.fwSevNone")]].concat(SEVERITIES.slice().reverse().map((s) => [s, t("rf.fwSevAtLeast", { sev: sevText(s) })])), fw0.blockSeverityAtLeast || "none") : null;
+  const fwAllow = hasFw ? h("textarea", { id: uid("fa"), class: "mono", rows: 4, spellcheck: "false", autocomplete: "off", placeholder: "^lodash@4\\.17\\.20$" }, (fw0.allowList || []).join("\n")) : null;
+  // Content: strict content type validation (hosted) and Content-Disposition (raw, gitlfs).
+  const strict = isHosted ? checkbox(t("rf.strict"), cfg.strictContentTypeValidation) : null;
+  const disposition = DISPOSITION.includes(cfg.format) ? select([["inline", t("rf.dispInline")], ["attachment", t("rf.dispAttachment")]], cfg.contentDisposition || "inline") : null;
   const storedRule = cfg.routingRule || "";
   let rule = null, ruleHint = null;
   if (isProxy && rules) {
@@ -391,6 +496,32 @@ export async function viewRepoForm(view, o) {
   const authErr = h("div", { class: "form-errors", hidden: true }, t("rf.hostChanged"));
   if (authCard) authCard.querySelector(".card-body").prepend(authErr);
 
+  // Blob store (edit): read-only here; "Change blob store" moves the files with a task.
+  const moving = (x) => !!(x && x.blobStoreMove && ["copying", "switching"].includes(x.blobStoreMove.state));
+  let moveRow = null, storeIn = null;
+  if (editing && !isGroup) {
+    storeIn = textInput(cfg.blobStore || "default", { readonly: true, "aria-label": t("rf.blobStore") });
+    const mv = h("button", { type: "button", class: "btn small", disabled: moving(info) }, t("rf.moveBtn"));
+    mv.addEventListener("click", () => moveStoreDialog(cfg.name, storeIn.value, isLive));
+    moveRow = h("div", { class: "row" }, h("div", { class: "grow" }, storeIn), mv);
+  }
+  // The status card follows a running move every 3 s until it settles.
+  let statusBox = info ? statusCard(info) : null;
+  if (moving(info)) {
+    const timer = setInterval(async () => {
+      if (!isLive()) { clearInterval(timer); return; }
+      try {
+        const next = await api(apiRepo(cfg.name));
+        if (!isLive()) return;
+        const c = statusCard(next) || h("div", { hidden: true });
+        statusBox.replaceWith(c);
+        statusBox = c;
+        if (next.blobStore && storeIn) storeIn.value = next.blobStore;
+        if (!moving(next)) { clearInterval(timer); moveRow.querySelector("button").disabled = false; }
+      } catch (e) { clearInterval(timer); }
+    }, 3000);
+    state.leaving.push(() => clearInterval(timer));
+  }
   const save = h("button", { type: "submit", class: "btn primary" }, editing ? t("rf.save") : t("rf.create"));
   const cancel = h("a", { class: "btn", href: editing ? adminRepoLink(cfg.name) : adminRepoLink() }, editing ? t("rf.discard") : t("common.cancel"));
   if (editing) cancel.addEventListener("click", (ev) => { ev.preventDefault(); rerender(); }); // reload the stored values
@@ -405,13 +536,15 @@ export async function viewRepoForm(view, o) {
     errBox,
     h("div", { class: "form-layout" },
       h("div", { class: "stack" },
+        statusBox,
         card(t("rf.basic"), t("rf.basicSub"), fields(
           field(t("rf.name"), name, editing ? null : t("rf.nameHelp"), { req: !editing }),
           field(t("col.format"), format),
           field(t("col.type"), textInput(tk("rf.type", cfg.type), { readonly: true })),
           h("div", { class: "field" }, h("span", { class: "flabel" }, t("col.status")), online.el, h("small", null, t("rf.statusHelp"))),
           bstore ? field(t("rf.blobStore"), bstore, t("rf.blobStoreHelp")) : null,
-          editing && !isGroup ? field(t("rf.blobStore"), textInput(cfg.blobStore || "default", { readonly: true }), t("rf.blobStoreFixed")) : null,
+          editing && !isGroup ? field(t("rf.blobStore"), moveRow, t("rf.blobStoreMoveHelp"), { group: true }) : null,
+          disposition ? field(t("rf.disposition"), disposition, t("rf.dispositionHelp")) : null,
           info ? field(t("rf.url"), copyLine(info.url, t("rf.copyUrl")), null, { group: true, full: true }) : null)),
         cfg.format === "maven" ? card(t("rf.maven"), t("rf.mavenSub"), fields(
           version ? field(t("rf.version"), version, t("rf.versionHelp")) : null,
@@ -423,6 +556,7 @@ export async function viewRepoForm(view, o) {
           signingKey ? field(t("rf.signingKey"), signingKey, cfg.signingKeySet ? [h("span", { class: "rf-set" }, t("rf.signingKeySet")), " — ", t("rf.keepEmpty")] : t("rf.signingKeyHelp"), { full: true }) : null,
           clrKey ? h("div", { class: "field full" }, clrKey.el) : null,
           depth ? field(t("rf.depth"), depth, t("rf.depthHelp")) : null,
+          h("div", { class: "field full" }, strict.el, h("small", null, t("rf.strictHelp"))),
           gpgKey ? field(t("rf.gpgKey"), gpgKey, t("rf.gpgKeyHelp"), { full: true }) : null)) : null,
         isProxy ? card(t("rf.proxy"), t("rf.proxySub"), fields(
           field(t("rf.remote"), remote, cfg.format === "swift" ? t("rf.remoteSwift") : t("rf.remoteHelp"), { req: true, full: true }),
@@ -430,7 +564,14 @@ export async function viewRepoForm(view, o) {
           field(t("rf.ctAge"), ctAge, t("rf.ageHelp")),
           field(t("rf.mdAge"), mdAge, t("rf.ageHelp")),
           field(t("rf.negTTL"), negTTL, t("rf.negHelp")),
-          rule ? field(t("rf.rule"), rule, t("rf.ruleHelp"), { full: true }) : ruleHint)) : null,
+          rule ? field(t("rf.rule"), rule, t("rf.ruleHelp"), { full: true }) : ruleHint,
+          h("div", { class: "field full" }, autoBlock.el, h("small", null, t("rf.autoBlockHelp"))),
+          h("div", { class: "field full" }, blocked.el, h("small", null, t("rf.blockedHelp"))))) : null,
+        hasFw ? card(t("rf.fw"), t("rf.fwSub"), fields(
+          h("div", { class: "field full" }, fwOn.el, h("small", null, t("rf.fwEnabledHelp"), " ", h("a", { href: "#admin/system/vulnerability" }, t("nav.vulnerability")))),
+          h("div", { class: "field full" }, fwMal.el, h("small", null, t("rf.fwMaliciousHelp"))),
+          field(t("rf.fwSev"), fwSev, t("rf.fwSevHelp"), { full: true }),
+          field(t("rf.fwAllow"), fwAllow, t("rf.fwAllowHelp"), { full: true }))) : null,
         authCard,
         isGroup ? card(t("rf.group"), t("rf.groupSub"), fields(
           field(t("rf.memberRepos"), picker.el, t("rf.membersHelp"), { group: true, full: true }),
@@ -440,7 +581,8 @@ export async function viewRepoForm(view, o) {
         info ? card(t("rf.storage"), t("rf.storageSub"), [
           kv(t("col.files"), fmtNum(info.assets)),
           kv(t("col.size"), fmtBytes(info.bytes) + " (" + t("asset.bytes", { n: fmtNum(info.bytes) }) + ")"),
-        ]) : null),
+        ]) : null,
+        info && OSV_FORMATS.includes(cfg.format) && !isGroup ? vulnSummaryCard(cfg.name, isLive) : null),
       help));
 
   function showErrors(list, hostChange) {
@@ -474,6 +616,10 @@ export async function viewRepoForm(view, o) {
       // Always sent, so an edit keeps the stored policy when no select is shown.
       cleanupPolicy: policy ? policy.value : storedPolicy,
       online: online.box.checked,
+      // A PUT replaces the definition: every stored setting goes back, also those without a control here.
+      strictContentTypeValidation: strict ? strict.box.checked : !!cfg.strictContentTypeValidation,
+      contentDisposition: disposition ? disposition.value : cfg.contentDisposition || "",
+      blocked: false,
     };
     if (bstore) b.blobStore = bstore.value;
     if (version) b.versionPolicy = version.value;
@@ -485,6 +631,10 @@ export async function viewRepoForm(view, o) {
       b.negativeCacheTTL = negTTL.value.trim();
       if (hidden && hidden.box.checked) b.clearRemoteHiddenParts = true;
       b.routingRule = rule ? rule.value : storedRule;
+      b.blocked = blocked.box.checked;
+      b.autoBlock = autoBlock.box.checked;
+      if (hasFw) b.firewall = { enabled: fwOn.box.checked, blockMalicious: fwMal.box.checked, blockSeverityAtLeast: fwSev.value, allowList: fwAllow.value.split("\n").map((x) => x.trim()).filter(Boolean) };
+      else if (cfg.firewall) b.firewall = cfg.firewall;
       const a = { username: user.value.trim(), password: pass.value, bearerToken: bearer.value };
       if (clrPass && clrPass.box.checked) a.clearPassword = true;
       if (clrBearer && clrBearer.box.checked) a.clearBearerToken = true;
@@ -514,6 +664,7 @@ export async function viewRepoForm(view, o) {
     else if (!editing && b.name === RESERVED) errs.push(t("rf.e.reserved", { name: RESERVED }));
     if (isProxy && !b.remote) errs.push(t("rf.e.remote"));
     if (isGroup && !b.members.length) errs.push(t("rf.e.members"));
+    if (b.firewall && b.firewall.allowList.some((x) => x.length > 512)) errs.push(t("rf.e.fwLong"));
     return errs;
   }
 

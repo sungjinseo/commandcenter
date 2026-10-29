@@ -4,7 +4,7 @@
 import {
   state, h, put, api, APIError, apiRepo, enc, encPath, browseLink, searchLink, adminRepoLink, fmtBytes, fmtNum, fmtDate, alive,
   fmtBadge, typeBadge, fmtTile, nameCell, onlineBadge, FORMATS, FORMAT_NAMES, canUpload, uploadLink, repoBase, copyButton, copyLine,
-  pageHead, loading, truncNote, card, kv, tbl, handleError, showError, icon,
+  pageHead, loading, truncNote, card, kv, tbl, handleError, showError, icon, repoFlags, OSV_FORMATS, sevBadge, osvLink,
 } from "./util.js";
 import { modal, dropdown } from "./shell.js";
 import { deleteDialog } from "./repoform.js";
@@ -53,7 +53,7 @@ export async function viewRepos(view, admin) {
       h("td", { class: "name" }, nameCell(r.format, h("a", { href: admin ? adminRepoLink(r.name) : browseLink(r.name) }, h("strong", null, r.name)), FORMAT_NAMES[r.format] || r.format)),
       h("td", null, typeBadge(r.type)),
       admin ? h("td", null, r.type === "group" ? "—" : r.blobStore || "default") : null,
-      h("td", null, onlineBadge(r.online)),
+      h("td", null, onlineBadge(r.online), repoFlags(r).map((b) => [" ", b])),
       h("td", { class: "num" }, r.type === "group" ? "—" : fmtNum(r.assets)),
       h("td", { class: "num" }, r.type === "group" ? "—" : fmtBytes(r.bytes)),
       h("td", { class: "act" }, menu));
@@ -200,6 +200,7 @@ const sameOrigin = (r, p) => repoBase(r) + encPath(p);
 // tabs renders WAI-ARIA tabs in the concept's subtab style; each entry is
 // [label, render], render returning the panel's nodes when it is picked.
 function tabs(list) {
+  list = list.filter(Boolean); // a null entry is a tab this format does not have
   const panel = h("div", { role: "tabpanel", class: "tabpanel" });
   const btns = list.map(([label]) => h("button", { type: "button", class: "subtab", role: "tab", id: uid("tab"), "aria-selected": "false", tabindex: "-1" }, label));
   const pick = (i, focus) => {
@@ -478,6 +479,34 @@ function metadataBox(r, c) {
   return box;
 }
 
+// vulnBox lists the OSV advisories of one component version (malicious first,
+// then by severity, as the server sorts them).
+function vulnBox(r, c) {
+  const box = h("div", null, loading());
+  const q = new URLSearchParams({ group: c.group || "", name: c.name, version: c.version });
+  api(apiRepo(r.name, "/components/vulnerabilities?" + q)).then((d) => {
+    if (d.status === "disabled") { put(box, h("div", { class: "notice" }, t("vul.disabled"))); return; }
+    if (d.status === "not-covered" || !d.covered) { put(box, h("div", { class: "notice" }, t("vul.notCovered"))); return; }
+    const list = d.vulnerabilities || [];
+    put(box,
+      d.status === "unknown" ? h("div", { class: "notice amber" }, t("vul.unknown")) : null,
+      h("p", { class: "tiny muted" }, t("vul.ecosystem", { eco: d.ecosystem, n: fmtNum(list.length) })),
+      tbl([t("vul.id"), t("vul.severity"), { t: t("vul.score"), cls: "num" }, t("vul.summary"), t("vul.fixedIn")], list.map((v) => h("tr", null,
+        h("td", { class: "nowrap" }, osvLink(v.id), (v.aliases || []).length ? h("div", { class: "tiny muted" }, v.aliases.join(", ")) : null),
+        h("td", { class: "nowrap" }, v.malicious ? [h("span", { class: "badge red" }, t("vul.malicious")), " "] : null, sevBadge(v.severity)),
+        h("td", { class: "num" }, typeof v.score === "number" ? v.score.toFixed(1) : "—"),
+        h("td", null, v.summary || "—"),
+        h("td", null, (v.fixedIn || []).length ? v.fixedIn.join(", ") : "—"))),
+      d.status === "ok" ? t("vul.none") : t("vul.unknownNone")));
+  }, (e) => {
+    put(box, h("div", { class: "empty" }, e && e.status === 404 ? t("route.notFound") : t("detail.loadFailed")));
+    if (!e || e.status !== 404) handleError(e);
+  });
+  return box;
+}
+
+const tagBadges = (tags) => (tags || []).map((tg) => [" ", h("span", { class: "badge purple", title: t("tag.badge") }, tg)]);
+
 // componentView renders a component in the concept's layout: a hero, tabs
 // (overview, metadata, assets, versions), then resource status and actions. assets are
 // {path, size, lastModified}; opts gives assetHref, onAsset, onPath (to open
@@ -511,7 +540,7 @@ export function componentView(r, c, assets, opts) {
     h("td", { class: "num", title: a.lastDownloaded ? t("comp.lastDownloaded") + ": " + fmtDate(a.lastDownloaded) : null }, a.downloads === undefined ? "—" : fmtNum(a.downloads)),
     h("td", { class: "act" }, h("a", { class: "btn small", href: sameOrigin(r, a.path), download: "" }, t("asset.download")))));
   const mainCard = h("section", { class: "card" },
-    hero(r.format, c.name, blue(c.version), [c.group || r.name, FORMAT_NAMES[r.format] || r.format, fmtBytes(total)].join(" · ")),
+    hero(r.format, c.name, [blue(c.version), tagBadges(c.tags)], [c.group || r.name, FORMAT_NAMES[r.format] || r.format, fmtBytes(total)].join(" · ")),
     h("div", { class: "card-body" }, tabs([
       [t("comp.overview"), () => [
         kv(t("comp.group"), c.group), kv(t("comp.name"), c.name), kv(t("col.version"), c.version),
@@ -519,8 +548,10 @@ export function componentView(r, c, assets, opts) {
         kv(t("col.updated"), updated ? fmtDate(updated) : ""),
         known.length ? kv(t("comp.downloads"), fmtNum(downloads)) : null,
         known.length ? kv(t("comp.lastDownloaded"), lastDl ? fmtDate(lastDl) : t("comp.neverDownloaded")) : null,
+        (c.tags || []).length ? kv(t("nav.tags"), h("span", null, tagBadges(c.tags))) : null,
         usageBlock(r.format, c)]],
       [t("meta.title"), once(() => metadataBox(r, c))],
+      OSV_FORMATS.includes(r.format) ? [t("vul.tab"), once(() => vulnBox(r, c))] : null,
       [t("comp.assets", { n: assets.length }), () => tbl([t("col.file"), { t: t("col.bytes"), cls: "num" }, t("col.updated"), { t: t("comp.downloads"), cls: "num" }, { t: t("col.actions"), cls: "act" }], assetRows, t("comp.noAssets"))],
       [t("comp.versions"), once(() => versionsBox(r, c, opts))],
     ])));
@@ -883,7 +914,7 @@ export async function viewTree(view, name, path) {
   let alive = true;
   state.leaving.push(() => { alive = false; });
   const fmt = r.format;
-  const head = pageHead(r.name, h("p", { class: "badges" }, fmtBadge(fmt), typeBadge(r.type)),
+  const head = pageHead(r.name, h("p", { class: "badges" }, fmtBadge(fmt), typeBadge(r.type), repoFlags(r)),
     h("div", { class: "actions" },
       h("a", { class: "btn", href: browseLink() }, "← " + t("tree.back")),
       full(copyButton(r.url, null, t("repos.copyUrlFor", { name: r.name }), t("repos.copyUrl"))),

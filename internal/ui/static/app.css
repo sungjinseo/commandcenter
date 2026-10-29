@@ -829,3 +829,15 @@ td .params { overflow-wrap: anywhere; }
 
 /* a Hugging Face version is a 40-hex commit sha: the hero badge wraps instead of leaving the card */
 .componenthero h2 .badge { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+/* wave 4: row editors (mappings, members, failover buckets) and long result lists */
+.map-row { align-items: center; margin-bottom: 8px; }
+.map-row .grow { flex: 1 1 140px; min-width: 0; }
+.map-row .grow > input, .map-row .grow > select { width: 100%; }
+.map-row .check { white-space: nowrap; }
+.scroll-y { max-height: 440px; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); margin: 10px 0; }
+.scroll-y .tablewrap { border: 0; margin: 0; }
+.scroll-y thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.listrow > .wrap { min-width: 0; overflow-wrap: anywhere; }
+.fields.more { margin-top: 14px; }
+.subtabs { overflow-x: auto; scrollbar-width: none; }
+.subtab { flex: none; white-space: nowrap; }

@@ -119,6 +119,10 @@ const ICONS = {
   moon: ["M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"],
   monitor: ["M3 5h18v11H3z", "M8 20h8", "M12 16v4"],
   cert: ["M4 4h16v12H4z", "M8 8h8", "M8 11h5", "M15 16v5l2-1.5l2 1.5v-5"],
+  tag: ["M3 12V4h8l9 9l-8 8z", "M7.5 7.5h.1"],
+  move: ["M4 12h14", "M14 7l5 5l-5 5", "M4 5v14"],
+  shield: ["M12 3l8 3v6c0 5-4 8-8 9c-4-1-8-4-8-9V6z", "M12 8v5", "M12 16v.5"],
+  key: ["M3 15a4 4 0 1 0 8 0a4 4 0 1 0-8 0z", "M10 12l9-9", "M16 6l2 2", "M14 8l2 2"],
   lifebuoy: ["M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8z", "M5.6 5.6l3.6 3.6", "M14.8 14.8l3.6 3.6", "M18.4 5.6l-3.6 3.6", "M9.2 14.8l-3.6 3.6"],
 };
 
@@ -166,6 +170,24 @@ export const fmtTile = (f) => h("span", { class: "format" + (FORMATS.includes(f)
 // nameCell is a tile, a main line and an optional small second line.
 export const nameCell = (f, main, sub) => h("div", { class: "namecell" }, fmtTile(f), h("span", null, main, sub ? h("small", null, sub) : null));
 export const onlineBadge = (online) => (online === false ? h("span", { class: "badge red" }, h("span", { class: "dot", "aria-hidden": "true" }), t("repo.down")) : h("span", { class: "badge green" }, h("span", { class: "dot", "aria-hidden": "true" }), t("repo.up")));
+
+// OSV_FORMATS have vulnerability data (the server's config.FirewallFormats).
+export const OSV_FORMATS = ["npm", "pypi", "maven", "go", "cargo", "nuget", "rubygems", "composer", "conan", "r"];
+// Severities from worst; "none" and "unknown" are the OSV extremes.
+export const SEVERITIES = ["critical", "high", "medium", "low"];
+const SEV = { critical: ["sev.critical", "red"], high: ["sev.high", "red"], medium: ["sev.medium", "amber"], low: ["sev.low", "blue"], none: ["sev.none", ""], unknown: ["sev.unknown", ""] };
+export const sevText = (s) => (SEV[s] ? t(SEV[s][0]) : String(s || ""));
+export const sevBadge = (s) => h("span", { class: "badge" + (SEV[s] && SEV[s][1] ? " " + SEV[s][1] : "") }, sevText(s));
+// repoFlags are the list badges of a repository: a blocked remote and the last vulnerability scan.
+export function repoFlags(r) {
+  const out = [];
+  const rs = r.remoteStatus;
+  if (rs && rs.blocked) out.push(h("span", { class: "badge red", title: [rs.until ? t("rs.until", { time: fmtDate(rs.until) }) : "", rs.lastError].filter(Boolean).join(" · ") || null }, rs.auto ? t("rs.autoBlocked") : t("rs.blocked")));
+  const v = r.vulnerabilities;
+  if (v && v.malicious) out.push(h("span", { class: "badge red" }, t("vul.maliciousN", { n: fmtNum(v.malicious) })));
+  if (v && v.vulnerable) out.push(h("span", { class: "badge " + (v.critical || v.high ? "red" : "amber"), title: t("vul.countsTitle", { c: v.critical || 0, h: v.high || 0, m: v.medium || 0, l: v.low || 0 }) }, t("vul.vulnerableN", { n: fmtNum(v.vulnerable) })));
+  return out;
+}
 
 // ---- concept building blocks ------------------------------------------------
 
@@ -233,6 +255,13 @@ export const uploadLink = (repo) => "#browse/upload" + (repo ? "/" + enc(repo) :
 // host than the browser uses, and the session cookie needs the same origin.
 export function repoBase(r) {
   try { return new URL(r.url, location.href).pathname; } catch (e) { return "/repository/" + enc(r.name) + "/"; }
+}
+// osvLink opens an advisory on osv.dev; the URL is built here from the id,
+// never taken from the API, so it is the only off-site link the UI makes.
+export function osvLink(id) {
+  const a = h("a", { target: "_blank", rel: "noopener noreferrer" }, id);
+  a.setAttribute("href", "https://osv.dev/vulnerability/" + encodeURIComponent(id));
+  return a;
 }
 export const adminRepoLink = (repo) => "#admin/repository/repositories" + (repo ? ":" + enc(repo) : "");
 export const searchLink = (kind, params) => {
@@ -415,6 +444,17 @@ export function markBusy(reason) {
 
 // taskName is the task's display name (the built-in compaction is translated).
 export const taskName = (x) => (x.id === "compact-blobstore" ? t("task.compact") : x.name);
+
+// saveBlob offers data as a download through a Blob URL, then revokes it.
+export function saveBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = h("a", { download: name, hidden: true });
+  a.setAttribute("href", url); // trusted URL created above
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
 
 export function debounce(fn, ms) {
   let timer = 0;

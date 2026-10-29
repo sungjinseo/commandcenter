@@ -281,6 +281,7 @@ function renderWho() {
     h("div", { class: "menu-head", role: "presentation" }, h("strong", null, me.user), h("span", { class: "sub" }, role)),
     menuLink("#user/account", t("nav.account"), "user"),
     menuLink(me.admin ? "#admin/security/usertoken" : "#user/usertoken", t("nav.tokens"), "token"),
+    menuLink(me.admin ? "#admin/security/user-tokens" : "#user/user-token", t("nav.userTokens"), "key"),
     h("div", { class: "menu-sep", role: "separator" }),
     ...THEMES.map((mode) => menuButton((themePref() === mode ? "✓ " : "") + themeLabel(mode), THEME_ICON[mode], () => {
       setPref("theme", mode === "system" ? null : mode);
@@ -339,6 +340,11 @@ function pageTitle(key) {
     case "admin/security/roles": return t("nav.roles");
     case "admin/security/realms": return t("nav.realms");
     case "admin/security/usertoken": case "user/usertoken": return t("nav.tokens");
+    case "admin/security/user-tokens": case "user/user-token": return t("nav.userTokens");
+    case "admin/repository/tags": return t("nav.tags");
+    case "admin/repository/staging": return t("nav.staging");
+    case "admin/repository/quarantine": return t("nav.quarantine");
+    case "admin/system/vulnerability": return t("nav.vulnerability");
     case "admin/support/status": return t("nav.status");
     case "admin/support/systeminformation": return t("nav.sysinfo");
     case "user/account": return t("nav.account");
@@ -359,6 +365,8 @@ function renderCrumb(route) {
     id = t("pol.createTitle");
   } else if (key === "admin/repository/blobstores" && id === "create") {
     id = t("blob.createTitle");
+  } else if (key === "admin/repository/tags" && id === "create") {
+    id = t("tag.createTitle");
   } else if (key === "admin/system/tasks" && id === "create") {
     id = t("task.createTitle");
   } else if ((key === "admin/security/users" || key === "admin/security/roles") && id === "create") {
@@ -412,6 +420,9 @@ function navSections() {
       ["#admin/repository/blobstores", t("nav.blobstores"), "blob", is("admin/repository/blobstores")],
       ["#admin/repository/cleanuppolicies", t("nav.cleanup"), "cleanup", is("admin/repository/cleanuppolicies")],
       ["#admin/repository/routingrules", t("nav.routingrules"), "custom", is("admin/repository/routingrules")],
+      ["#admin/repository/tags", t("nav.tags"), "tag", is("admin/repository/tags")],
+      ["#admin/repository/staging", t("nav.staging"), "move", is("admin/repository/staging")],
+      ["#admin/repository/quarantine", t("nav.quarantine"), "shield", is("admin/repository/quarantine")],
       ["#admin/system/tasks", t("nav.tasks"), "tasks", is("admin/system/tasks")],
     ]]);
   }
@@ -423,12 +434,14 @@ function navSections() {
       me.admin ? ["#admin/security/contentselectors", t("nav.selectors"), "browse", is("admin/security/contentselectors")] : null,
       me.admin ? ["#admin/security/certificates", t("nav.certificates"), "cert", is("admin/security/certificates")] : null,
       [me.admin ? "#admin/security/usertoken" : "#user/usertoken", t("nav.tokens"), "token", is("admin/security/usertoken", "user/usertoken")],
+      [me.admin ? "#admin/security/user-tokens" : "#user/user-token", t("nav.userTokens"), "key", is("admin/security/user-tokens", "user/user-token")],
     ]]);
   }
   if (me.admin) {
     out.push([t("nav.sec.system"), [
       ["#admin/system/general", t("nav.general"), "settings", is("admin/system/general")],
       ["#admin/system/webhooks", t("nav.webhooks"), "upload", is("admin/system/webhooks")],
+      ["#admin/system/vulnerability", t("nav.vulnerability"), "shield", is("admin/system/vulnerability")],
       ["#admin/support/status", t("nav.status"), "health", is("admin/support/status", "admin/support/systeminformation")],
       ["#admin/system/support", t("nav.support"), "lifebuoy", is("admin/system/support")],
     ]]);
