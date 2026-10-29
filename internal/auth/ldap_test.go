@@ -529,15 +529,15 @@ func TestLDAPTokenAtMostOneSearchPerMinute(t *testing.T) {
 
 func TestLDAPOnUserChangedAndReload(t *testing.T) {
 	f := newLDAPFixture(t)
-	f.a.Sessions = NewSessions()
+	f.a.Sessions = NewSessions(testDB(t), nil)
 	ctx := context.Background()
 	p, err := f.a.CheckPassword(ctx, "alice", "alice-pw")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid := f.a.Sessions.Create(p.Owner())
+	sid := f.a.Sessions.create(t, p.Owner())
 	f.a.OnUserChanged("alice")
-	if _, ok := f.a.Sessions.User(sid); ok {
+	if _, ok := f.a.Sessions.user(sid); ok {
 		t.Fatal("LDAP session survived OnUserChanged")
 	}
 	if _, err := f.a.CheckPassword(ctx, "alice", "alice-pw"); err != nil {

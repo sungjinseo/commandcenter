@@ -9,6 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- UI sessions are stored in the database: they survive restarts on both drivers, and on PostgreSQL every
+  node accepts them. On PostgreSQL the per-name sign-in throttle is shared by all nodes, OIDC and SAML
+  login state is single-use across nodes and SAML assertion replay is refused across nodes, OIDC, SAML,
+  RUT and Crowd identities are shared for up to 7 days after the login, Docker and Conan tokens verify
+  on every node, and the secret key is checked at start.
 - Scheduling on several nodes (PostgreSQL, ahead of high availability):
   - Only the scheduler lease holder runs due tasks and prunes request statistics, the negative cache
     and events.
@@ -371,12 +376,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Webhooks no longer send a delivery twice when a poll read it while a worker was sending it.
 
 ### Upgrade notes
-- The database schema version is now 6. It adds the columns `tasks.running_node`,
-  `tasks.running_since`, `webhook_deliveries.claimed_by` and `webhook_deliveries.claim_until`, and the
-  index `webhook_deliveries_due`, on the first start of this version. The change only adds: on
-  PostgreSQL compat stays 5, so version 5 still starts on the upgraded database and you can roll
-  back to it without a restore. On SQLite an older version refuses the upgraded database, as
-  before.
+- The database schema version is now 6: the columns `tasks.running_node`, `tasks.running_since`,
+  `webhook_deliveries.claimed_by`, `webhook_deliveries.claim_until` and the index
+  `webhook_deliveries_due`, and the tables `sessions`, `login_states`, `saml_replay`, `auth_failures`
+  and `sso_identities` plus the settings rows `registry.tokenKey` and `secretKey.check`, created on the
+  first start of this version. Compat is 6: a full stop, older versions refuse the upgraded database,
+  so stop every older instance first and take a backup if you may need to go back.
+- UI sessions now survive restarts (SQLite too). On PostgreSQL, SSO identities also survive restarts,
+  for up to 7 days after the login.
+- On PostgreSQL a start with a different secret key, or with none after one was used, is refused;
+  `secret-key rotate` needs every node stopped. Without a secret key the token signing key is stored
+  in plain text on PostgreSQL.
 - The database schema version is now 5: new tables `nodes` and `leases`, and on PostgreSQL the column
   `schema_version.compat`, created on the first start of this version. From now on the stamp also says
   which older builds may still run on the database: a build starts on a database of a newer schema only

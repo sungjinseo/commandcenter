@@ -14,7 +14,11 @@ import (
 )
 
 func (e *env) cookieFor(user string) *http.Cookie {
-	return &http.Cookie{Name: auth.SessionCookie, Value: e.ses.Create(user)}
+	id, err := e.ses.Create(context.Background(), user)
+	if err != nil {
+		panic(err)
+	}
+	return &http.Cookie{Name: auth.SessionCookie, Value: id}
 }
 
 // bearer GETs path with an API token and returns the status.

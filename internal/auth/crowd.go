@@ -29,9 +29,12 @@ import (
 // for cacheMinutes under the user name and a hash of the password (never the
 // password), and a later success with another password drops the older
 // entries. Sessions and tokens of the user ("crowd:<id>") resolve through an
-// in-memory entry that is re-read from Crowd once it is older than
-// cacheMinutes; while Crowd cannot be reached the user is denied (fail
-// closed; local admins are unaffected). Roles are computed on every use
+// entry that is re-read from Crowd once it is older than cacheMinutes; while
+// Crowd cannot be reached the user is denied (fail closed; local admins are
+// unaffected). With Shared (PostgreSQL) every read from Crowd is also
+// stored as an identity row (identity.go), so another node uses it, until
+// it is cacheMinutes old, without asking Crowd; the password successes stay
+// on the node that checked them. Roles are computed on every use
 // from the live snapshot: the group mappings, the default roles and an
 // optional override row (source=crowd, same id) whose roles are added and
 // which denies the user when disabled.
@@ -318,8 +321,40 @@ func (a *Authenticator) crowdPassword(ctx context.Context, s *Snapshot, name, pa
 	a.crowdUsers[u.ID] = crowdEntry{user: u, checkedAt: now}
 	a.crowdPass[key] = crowdPassHit{id: u.ID, exp: now.Add(crowdTTL(s.settings.Crowd))}
 	a.crowdMu.Unlock()
+	a.shareCrowd(ctx, s, u, now)
 	p.Via = ViaPassword
 	return p, true
+}
+
+// shareCrowd stores u, read from Crowd at at, for the other nodes (Shared).
+func (a *Authenticator) shareCrowd(ctx context.Context, s *Snapshot, u CrowdUser, at time.Time) {
+	if err := a.shareIdentity(ctx, s, sourceCrowd, OIDCUser(u), at); err != nil {
+		a.logger().Warn("could not store a crowd user for the other nodes; they ask crowd themselves", "user", u.ID, "err", logsafe.Err(err))
+	}
+}
+
+// sharedCrowd returns Crowd user id as another node read it from Crowd
+// less than cacheMinutes ago (Shared), and keeps it as this node's entry.
+func (a *Authenticator) sharedCrowd(ctx context.Context, s *Snapshot, id string, now time.Time) (CrowdUser, bool) {
+	if a.Shared == nil {
+		return CrowdUser{}, false
+	}
+	row, err := a.Shared.GetIdentity(ctx, sourceCrowd, id, realmConf(s, sourceCrowd))
+	if err != nil || now.Sub(row.At) >= crowdTTL(s.settings.Crowd) {
+		return CrowdUser{}, false
+	}
+	o, ok := decodeIdentity(row)
+	if !ok {
+		return CrowdUser{}, false
+	}
+	u := CrowdUser(o)
+	a.crowdMu.Lock()
+	if a.crowdUsers == nil || len(a.crowdUsers) >= crowdMax {
+		a.crowdUsers = map[string]crowdEntry{}
+	}
+	a.crowdUsers[id] = crowdEntry{user: u, checkedAt: row.At}
+	a.crowdMu.Unlock()
+	return u, true
 }
 
 // crowdPrincipal builds the principal of u under s. A disabled override row
@@ -358,6 +393,9 @@ func (a *Authenticator) crowdLookup(ctx context.Context, id string) (Principal, 
 	case ok && !e.failedAt.IsZero() && now.Sub(e.failedAt) < crowdRetry:
 		return Principal{}, false
 	}
+	if u, ok := a.sharedCrowd(ctx, s, id, now); ok {
+		return a.crowdPrincipal(s, u)
+	}
 	v, err, _ := a.crowdFlight.Do(id, func() (any, error) {
 		// Not the caller's context: one caller leaving must not fail the
 		// others; the configured timeout bounds the call.
@@ -367,6 +405,12 @@ func (a *Authenticator) crowdLookup(ctx context.Context, id string) (Principal, 
 	switch {
 	case errors.As(err, &ce) && ce.refusal():
 		a.dropCrowd(id)
+		if a.Shared != nil {
+			if err := a.Shared.DeleteIdentity(ctx, sourceCrowd, id); err != nil {
+				a.logger().Warn("could not delete a crowd user Crowd no longer admits; the other nodes deny it once their copy is "+
+					"cacheMinutes old", "user", id, "err", logsafe.Err(err))
+			}
+		}
 		return Principal{}, false
 	case err != nil:
 		a.logger().Warn("crowd re-check failed: denying until Crowd answers", "user", id, "err", logsafe.Err(err))
@@ -379,32 +423,39 @@ func (a *Authenticator) crowdLookup(ctx context.Context, id string) (Principal, 
 		a.crowdMu.Unlock()
 		return Principal{}, false
 	}
-	u := v.(CrowdUser)
+	u, at := v.(CrowdUser), a.clock()
 	a.crowdMu.Lock()
 	if a.crowdUsers == nil || len(a.crowdUsers) >= crowdMax {
 		a.crowdUsers = map[string]crowdEntry{}
 	}
-	a.crowdUsers[id] = crowdEntry{user: u, checkedAt: a.clock()}
+	a.crowdUsers[id] = crowdEntry{user: u, checkedAt: at}
 	a.crowdMu.Unlock()
+	a.shareCrowd(ctx, s, u, at)
 	return a.crowdPrincipal(s, u)
 }
 
-// CrowdUsers returns the cached Crowd users that are currently allowed,
-// with their roles under the live snapshot, ordered by id. It never
-// contacts Crowd.
+// CrowdUsers returns the cached Crowd users (with Shared, every node's)
+// that are currently allowed, with their roles under the live snapshot,
+// ordered by id. It never contacts Crowd.
 func (a *Authenticator) CrowdUsers() []CrowdUser {
 	s := a.snap.Load()
 	if !crowdUsable(s) {
 		return nil
 	}
-	a.crowdMu.Lock()
 	var users []CrowdUser
-	for _, e := range a.crowdUsers {
-		if !e.checkedAt.IsZero() {
-			users = append(users, e.user)
+	if a.Shared != nil {
+		for _, o := range a.ssoList(s, nil, sourceCrowd) {
+			users = append(users, CrowdUser(o))
 		}
+	} else {
+		a.crowdMu.Lock()
+		for _, e := range a.crowdUsers {
+			if !e.checkedAt.IsZero() {
+				users = append(users, e.user)
+			}
+		}
+		a.crowdMu.Unlock()
 	}
-	a.crowdMu.Unlock()
 	var out []CrowdUser
 	for _, u := range users {
 		if p, ok := a.crowdPrincipal(s, u); ok {

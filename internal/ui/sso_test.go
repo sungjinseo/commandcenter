@@ -163,6 +163,33 @@ func TestSSOTokensForOIDCUser(t *testing.T) {
 	}
 }
 
+// A login started on one node finishes on another, once; the session and
+// the identity it recorded work on both (HA design 2.4, 2.5).
+func TestSSOAcrossNodes(t *testing.T) {
+	a, idp := oidcEnv(t, false)
+	b := a.twin(t)
+	cb, state := a.ssoStart(t, idp, "")
+	r := b.req(t, "GET", cb, "", "", state, false)
+	wantStatus(t, r, http.StatusFound)
+	sc := sessionCookie(r)
+	if sc == nil {
+		t.Fatalf("no session cookie: %v", r.cookie)
+	}
+	for _, n := range []*env{a, b} {
+		if r := n.req(t, "GET", cb, "", "", state, false); r.status != http.StatusBadRequest || sessionCookie(r) != nil {
+			t.Fatalf("callback again: %d %s", r.status, r.body)
+		}
+	}
+	if m := a.req(t, "GET", "/-/api/me", "", "", sc, false).json(t); m["owner"] != "oidc:alice" {
+		t.Fatalf("B's session on A: %v", m)
+	}
+	r = b.req(t, "POST", "/-/api/tokens", "", "", sc, true)
+	wantStatus(t, r, http.StatusCreated)
+	if st := a.bearer(t, "/-/api/me", r.json(t)["token"].(string)); st != http.StatusOK {
+		t.Fatalf("a token of a user who signed in on B, on A: %d", st)
+	}
+}
+
 func TestSSOStateChecks(t *testing.T) {
 	e, idp := oidcEnv(t, false)
 	// Wrong state cookie.

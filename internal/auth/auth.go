@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 )
 
@@ -139,6 +140,12 @@ type Authenticator struct {
 	// Sessions enables cookie authentication for the UI; nil disables it.
 	Sessions *Sessions
 
+	// Shared, set on PostgreSQL, keeps in the database the auth state every
+	// node must agree on: the sign-in failures of each name (throttle.go)
+	// and the identities the SSO realms asserted (identity.go). nil keeps
+	// them in this process, the one instance on SQLite.
+	Shared *meta.DB
+
 	// AnonymousRead returns a repository's anonymousRead override, or nil to
 	// inherit the global setting. It is asked on every check, so it can follow
 	// a live registry. New sets a lookup over cfg.Repositories; the app
@@ -180,8 +187,7 @@ type Authenticator struct {
 	ldapFails      int                    // consecutive dial-phase login failures
 	ldapFailsSince time.Time              // when the first of them happened
 
-	oidcMu    sync.Mutex
-	oidcUsers map[string]oidcEntry // OIDC id -> identity (oidc.go)
+	oidcUsers ssoUsers // OIDC id -> identity (oidc.go)
 
 	// CrowdHTTP builds the HTTP client for a Crowd URL (the app: the
 	// egress policy and proxy settings); nil uses one trusting the SSL
@@ -193,11 +199,8 @@ type Authenticator struct {
 	crowdHTTP    *http.Client
 	crowdHTTPURL string
 	crowdFlight  singleflight.Group
-	rutMu        sync.Mutex
-	rutUsers     map[string][]string // RUT id -> groups of its last trusted request (rutauth.go)
-
-	samlMu    sync.Mutex
-	samlUsers map[string]oidcEntry // SAML id -> identity (saml.go)
+	rutUsers     ssoUsers // RUT id -> the groups of its last trusted request (rutauth.go)
+	samlUsers    ssoUsers // SAML id -> identity (saml.go)
 }
 
 const (
@@ -237,11 +240,13 @@ func Open(ctx context.Context, src Source, tokens TokenStore) (*Authenticator, e
 // Reload rebuilds the snapshot from Source and publishes it. The API layer
 // calls it after every write to users, roles, realms or settings, and the
 // app every few seconds for changes another process wrote ("commandcenter
-// user reset-password", QA N-2). Whoever made the change, a user whose
-// password changed, or who was disabled or removed, since the last snapshot
-// loses its sessions and cached logins (OnUserChanged), as an API change
-// does. This runs under reloadMu: the API creates the new session of its
-// own password change only after its own Reload, so it is never ended here.
+// user reset-password", QA N-2, or another node). Whoever made the change, a
+// user whose password changed, or who was disabled or removed, since the
+// last snapshot loses what this node cached of it and its sessions started
+// before the change (the row's updatedAt; all of a removed user's): another
+// node may see the change late, after the new session of a password change
+// already started, and must not end that one. The API ends the rest at
+// once (OnUserChanged).
 func (a *Authenticator) Reload(ctx context.Context) error {
 	if a.Source == nil {
 		return errors.New("auth: no source to reload from")
@@ -260,7 +265,9 @@ func (a *Authenticator) Reload(ctx context.Context) error {
 	for id, was := range old.users {
 		if u, ok := s.users[id]; !ok || u.PasswordHash != was.PasswordHash ||
 			(was.Status == meta.StatusActive && u.Status != meta.StatusActive) {
-			a.OnUserChanged(id)
+			if err := a.forget(ctx, id, u.UpdatedAt); err != nil { // zero for a removed user: every session
+				a.logger().Warn("could not end the sessions of a changed user", "user", id, "err", logsafe.Err(err))
+			}
 		}
 	}
 	return nil
@@ -294,20 +301,29 @@ func (a *Authenticator) setSnapshot(s *Snapshot) {
 func (a *Authenticator) Snapshot() *Snapshot { return a.snap.Load() }
 
 // OnUserChanged invalidates what was derived from user id: its UI sessions
-// and its cached password successes, and the same for the LDAP user with
-// that id (whose override row may have changed). Tokens are checked against
-// the snapshot on every use, so no token principal is cached. It also ends
-// a sign-in refusal of the name, so a password reset lets the user in. Call
-// it after Reload when a password changed or the user was disabled or
-// deleted (Decision 1).
-func (a *Authenticator) OnUserChanged(id string) {
+// and its cached password successes, and the same for the LDAP, OIDC,
+// Crowd, RUT and SAML users with that id (whose override row may have
+// changed): their recorded identities too, on every node with Shared.
+// Tokens are checked against the snapshot on every use, so no token
+// principal is cached. It also ends a sign-in refusal of the name, so a
+// password reset lets the user in. Call it after Reload when a password
+// changed or the user was disabled or deleted (Decision 1); an error says
+// that sessions or shared state may remain.
+func (a *Authenticator) OnUserChanged(id string) error {
+	ctx := context.Background() // the change is done, even if its client is gone
+	err := a.forget(ctx, id, time.Time{})
+	if a.Shared != nil {
+		err = errors.Join(err, a.Shared.ClearAuthFailures(ctx, strings.ToLower(id)), a.Shared.DeleteIdentity(ctx, "", id))
+	}
+	return err
+}
+
+// forget drops what this node derived from user id and the sessions of
+// its owner keys started before before (every one when zero).
+func (a *Authenticator) forget(ctx context.Context, id string, before time.Time) error {
+	var err error
 	if a.Sessions != nil {
-		a.Sessions.DeleteUser(id)
-		a.Sessions.DeleteUser(ldapOwnerPrefix + id)
-		a.Sessions.DeleteUser(oidcOwnerPrefix + id)
-		a.Sessions.DeleteUser(crowdOwnerPrefix + id)
-		a.Sessions.DeleteUser(rutOwnerPrefix + id)
-		a.Sessions.DeleteUser(samlOwnerPrefix + id)
+		err = a.Sessions.DeleteUser(ctx, before, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id, crowdOwnerPrefix+id, rutOwnerPrefix+id, samlOwnerPrefix+id)
 	}
 	a.dropLDAP(id)
 	a.dropOIDC(id)
@@ -323,6 +339,7 @@ func (a *Authenticator) OnUserChanged(id string) {
 	}
 	delete(a.fails, nameKey(id))
 	a.mu.Unlock()
+	return err
 }
 
 // TokenUser is the Basic username that accepts a token of any owner.
@@ -422,7 +439,7 @@ func (a *Authenticator) cookiePrincipal(r *http.Request) Principal {
 	}
 	user := ""
 	for _, c := range r.CookiesNamed(a.SessionCookieName()) {
-		u, ok := a.Sessions.User(c.Value)
+		u, ok := a.Sessions.User(r.Context(), c.Value)
 		if !ok {
 			continue
 		}
@@ -611,8 +628,8 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 		}
 		p = lp
 	} else if id, isOIDC := splitOIDCOwner(user); isOIDC {
-		// An OIDC user's token: the oidc realm must be on and the user in
-		// the cache (signed in since the last restart).
+		// An OIDC user's token: the oidc realm must be on and the user's
+		// identity recorded (identity.go).
 		if owner != "" && id != owner {
 			return Principal{}, ErrBadCredentials
 		}
@@ -634,7 +651,7 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 		p = cp
 	} else if id, isRUT := splitRUTOwner(user); isRUT {
 		// A RUT user's token: the realm on and the user seen through the
-		// gateway since the last restart.
+		// gateway (identity.go).
 		if owner != "" && id != owner {
 			return Principal{}, ErrBadCredentials
 		}
@@ -644,8 +661,8 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 		}
 		p = rp
 	} else if id, isSAML := splitSAMLOwner(user); isSAML {
-		// A SAML user's token: the saml realm must be on and the user in
-		// the cache (signed in since the last restart), as for OIDC.
+		// A SAML user's token: the saml realm must be on and the user's
+		// identity recorded, as for OIDC.
 		if owner != "" && id != owner {
 			return Principal{}, ErrBadCredentials
 		}

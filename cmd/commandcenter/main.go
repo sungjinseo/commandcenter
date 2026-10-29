@@ -298,6 +298,11 @@ func resetPassword(ctx context.Context, cfg *config.Config, name, pw string, adm
 	if err != nil {
 		return err
 	}
+	// A refusal of the name ends with the reset: the servers' own counts
+	// (SQLite) when they reload, the shared one (PostgreSQL) here.
+	if err := db.ClearAuthFailures(ctx, strings.ToLower(name)); err != nil {
+		return err
+	}
 	for _, c := range changes {
 		fmt.Fprintln(stdout, c)
 	}

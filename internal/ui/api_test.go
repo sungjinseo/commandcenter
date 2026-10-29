@@ -82,7 +82,10 @@ func newEnvWith(t *testing.T, baseURL string, mutate func(*config.Config)) *env 
 	}
 	authn := auth.New(cfg, db)
 	authn.Source = db
-	authn.Sessions = auth.NewSessions()
+	authn.Sessions = auth.NewSessions(db, authn.SessionIdle)
+	if db.Driver() == "postgresql" { // as the app
+		authn.Shared = db
+	}
 	if _, err := db.ImportRepositories(context.Background(), cfg.Repositories); err != nil {
 		t.Fatal(err)
 	}
@@ -106,6 +109,38 @@ func newEnvWith(t *testing.T, baseURL string, mutate func(*config.Config)) *env 
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return &env{ts: ts, db: db, ses: authn.Sessions, ui: webUI, srv: s}
+}
+
+// twin is a second node on e's database, with an Authenticator, UI and
+// server of its own, as another process of a cluster. PostgreSQL only.
+func (e *env) twin(t *testing.T) *env {
+	t.Helper()
+	if !metatest.Postgres() {
+		t.Skip("nodes share a database on PostgreSQL only")
+	}
+	authn, err := auth.Open(context.Background(), e.db, e.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authn.Sessions = auth.NewSessions(e.db, authn.SessionIdle)
+	authn.Shared = e.db
+	authn.AnonymousRead = e.ui.Repos.AnonymousRead
+	webUI := &UI{Repos: e.ui.Repos, Auth: authn, DB: e.db, Version: "test",
+		Started: time.Now(), Log: e.ui.Log, Config: e.ui.Config, DataDir: t.TempDir(), Tasks: e.ui.Tasks}
+	s := &server.Server{Registry: e.ui.Repos, Handlers: map[string]repo.Handler{}, Auth: authn, Log: e.ui.Log, UI: webUI}
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	return &env{ts: ts, db: e.db, ses: authn.Sessions, ui: webUI, srv: s}
+}
+
+// session starts a UI session of owner.
+func (e *env) session(t *testing.T, owner string) string {
+	t.Helper()
+	id, err := e.ses.Create(context.Background(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 var t0 = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
@@ -355,7 +390,7 @@ func TestLogin(t *testing.T) {
 	if len(c.Value) != 64 {
 		t.Errorf("session id %q", c.Value)
 	}
-	if u, ok := e.ses.User(c.Value); !ok || u != "ci" {
+	if u, ok := e.ses.User(context.Background(), c.Value); !ok || u != "ci" {
 		t.Errorf("session user %q %v", u, ok)
 	}
 
@@ -464,7 +499,7 @@ func TestLoginSecureCookie(t *testing.T) {
 // gone once the user signs in again.
 func TestLoginEndsEveryCookieSession(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
-	planted, own, stale := e.ses.Create("reader"), e.ses.Create("ci"), e.ses.Create("ci")
+	planted, own, stale := e.session(t, "reader"), e.session(t, "ci"), e.session(t, "ci")
 	send := func(method, path, body string, cookies ...*http.Cookie) resp {
 		t.Helper()
 		r, _ := http.NewRequest(method, e.ts.URL+path, strings.NewReader(body))
@@ -488,7 +523,7 @@ func TestLoginEndsEveryCookieSession(t *testing.T) {
 		&http.Cookie{Name: auth.SessionCookie, Value: own}, &http.Cookie{Name: auth.HostSessionCookie, Value: stale})
 	wantStatus(t, r, http.StatusOK)
 	for _, id := range []string{planted, own, stale} {
-		if _, ok := e.ses.User(id); ok {
+		if _, ok := e.ses.User(context.Background(), id); ok {
 			t.Fatal("a session named by a cookie survived the login")
 		}
 	}
@@ -497,7 +532,7 @@ func TestLoginEndsEveryCookieSession(t *testing.T) {
 		t.Fatalf("after signing in again: me %v", got)
 	}
 	wantStatus(t, send("POST", "/-/api/logout", "", plantedC, r.cookie[0]), http.StatusNoContent)
-	if _, ok := e.ses.User(r.cookie[0].Value); ok {
+	if _, ok := e.ses.User(context.Background(), r.cookie[0].Value); ok {
 		t.Fatal("session survived logout")
 	}
 }
@@ -507,7 +542,7 @@ func TestLogout(t *testing.T) {
 	c := login(t, e, "reader")
 	// without the UI header the cookie is not even accepted
 	wantStatus(t, e.req(t, "POST", "/-/api/logout", "", "", c, false), http.StatusForbidden)
-	if _, ok := e.ses.User(c.Value); !ok {
+	if _, ok := e.ses.User(context.Background(), c.Value); !ok {
 		t.Fatal("session deleted without the UI header")
 	}
 	r := e.req(t, "POST", "/-/api/logout", "", "", c, true)
@@ -520,7 +555,7 @@ func TestLogout(t *testing.T) {
 	if lc := r.cookie[2]; lc.Name != "repolite_session" || lc.MaxAge >= 0 || lc.Path != "/" {
 		t.Fatalf("legacy cookie not expired: %v", r.header.Values("Set-Cookie"))
 	}
-	if _, ok := e.ses.User(c.Value); ok {
+	if _, ok := e.ses.User(context.Background(), c.Value); ok {
 		t.Fatal("session survived logout")
 	}
 	me := e.req(t, "GET", "/-/api/me", "", "", c, false).json(t)

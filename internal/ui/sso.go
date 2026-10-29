@@ -5,7 +5,6 @@ import (
 	"html"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"commandcenter/internal/auth"
@@ -16,63 +15,44 @@ import (
 
 // OIDC browser login (the oidc realm). GET /-/sso/oidc/start sends the
 // browser to the provider with a state, a nonce and a PKCE verifier kept in
-// memory under the state; the provider returns it to /-/sso/oidc/callback,
-// which redeems the code, verifies the ID token, records the identity in
-// the authenticator and starts a session owned by "oidc:<username>".
-//
-// ponytail: the pending logins live in this process (single replica, like
-// the sessions); a second replica would need them in the database.
+// the database under the state (meta.LoginState), so the provider may
+// return the browser to /-/sso/oidc/callback on any node. The callback
+// takes the state (once: a second use, on any node, fails), redeems the
+// code, verifies the ID token, records the identity in the authenticator
+// and starts a session owned by "oidc:<username>".
 
 const (
 	ssoStateCookie     = "cc_oidc_state"
 	ssoHostStateCookie = "__Host-" + ssoStateCookie
-	ssoStateTTL        = 10 * time.Minute
-	ssoStateMax        = 10000
 	ssoNextMax         = 512
 )
 
-type ssoState struct {
-	nonce, verifier, next string
-	created               time.Time
+// putLoginState stores a pending login, answering the browser when it
+// cannot.
+func (u *UI) putLoginState(w http.ResponseWriter, r *http.Request, realm, state string, st meta.LoginState) bool {
+	ok, err := u.DB.PutLoginState(r.Context(), realm, state, st, time.Now())
+	switch {
+	case err != nil:
+		u.ssoWarn(r, realm+" login could not start", err)
+		ssoPage(w, http.StatusServiceUnavailable, "the login could not be started; try again")
+	case !ok:
+		ssoPage(w, http.StatusServiceUnavailable, "too many logins are pending; try again in a few minutes")
+	}
+	return ok && err == nil
 }
 
-// ssoStates holds the pending logins keyed by state.
-type ssoStates struct {
-	mu sync.Mutex
-	m  map[string]ssoState
-}
-
-// put stores st under state after dropping expired entries; it fails when
-// the store is full.
-func (s *ssoStates) put(state string, st ssoState, now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.m == nil {
-		s.m = map[string]ssoState{}
+// takeLoginState takes the pending login of state, answering the browser
+// when there is none.
+func (u *UI) takeLoginState(w http.ResponseWriter, r *http.Request, realm, state string) (meta.LoginState, bool) {
+	st, err := u.DB.TakeLoginState(r.Context(), realm, state, time.Now())
+	switch {
+	case errors.Is(err, meta.ErrNotFound):
+		ssoPage(w, http.StatusBadRequest, "login failed: the login expired or was already used; start again")
+	case err != nil:
+		u.ssoWarn(r, realm+" login failed", err)
+		ssoPage(w, http.StatusServiceUnavailable, "the login could not be completed; start again")
 	}
-	for k, v := range s.m {
-		if now.Sub(v.created) > ssoStateTTL {
-			delete(s.m, k)
-		}
-	}
-	if len(s.m) >= ssoStateMax {
-		return false
-	}
-	s.m[state] = st
-	return true
-}
-
-// take returns and removes the entry of state; a missing or expired one is
-// not found.
-func (s *ssoStates) take(state string, now time.Time) (ssoState, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, ok := s.m[state]
-	delete(s.m, state)
-	if !ok || now.Sub(st.created) > ssoStateTTL {
-		return ssoState{}, false
-	}
-	return st, true
+	return st, err == nil
 }
 
 func (u *UI) ssoRoutes(mux *http.ServeMux) {
@@ -179,11 +159,10 @@ func (u *UI) ssoStart(w http.ResponseWriter, r *http.Request) {
 		ssoPage(w, http.StatusBadGateway, "the identity provider could not be reached")
 		return
 	}
-	if !u.sso.put(state, ssoState{nonce: nonce, verifier: verifier, next: next, created: time.Now()}, time.Now()) {
-		ssoPage(w, http.StatusServiceUnavailable, "too many logins are pending; try again in a few minutes")
+	if !u.putLoginState(w, r, meta.RealmOIDC, state, meta.LoginState{Nonce: nonce, Verifier: verifier, Next: next}) {
 		return
 	}
-	http.SetCookie(w, u.ssoCookie(state, int(ssoStateTTL.Seconds())))
+	http.SetCookie(w, u.ssoCookie(state, int(meta.LoginStateTTL.Seconds())))
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
@@ -209,9 +188,8 @@ func (u *UI) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		ssoPage(w, http.StatusBadRequest, "login failed: the login state does not match; start again")
 		return
 	}
-	st, ok := u.sso.take(state, time.Now())
+	st, ok := u.takeLoginState(w, r, meta.RealmOIDC, state)
 	if !ok {
-		ssoPage(w, http.StatusBadRequest, "login failed: the login expired or was already used; start again")
 		return
 	}
 	p, err := u.oidcProvider()
@@ -219,7 +197,7 @@ func (u *UI) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		ssoPage(w, http.StatusServiceUnavailable, "single sign-on is misconfigured: "+err.Error())
 		return
 	}
-	id, err := p.Exchange(r.Context(), q.Get("code"), u.baseURL()+"/-/sso/oidc/callback", st.verifier, st.nonce)
+	id, err := p.Exchange(r.Context(), q.Get("code"), u.baseURL()+"/-/sso/oidc/callback", st.Verifier, st.Nonce)
 	if err != nil {
 		u.ssoWarn(r, "oidc login failed", err)
 		ssoPage(w, http.StatusBadRequest, "login failed: the identity provider's answer could not be verified")
@@ -231,7 +209,7 @@ func (u *UI) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		ssoPage(w, http.StatusBadRequest, "login failed: unusable username (it must be 1-64 letters, digits, '.', '_', '@' or '-')")
 		return
 	}
-	pr, err := u.Auth.RecordOIDC(auth.OIDCUser{ID: name, Name: id.Name, Email: id.Email, Groups: id.Groups})
+	pr, err := u.Auth.RecordOIDC(r.Context(), auth.OIDCUser{ID: name, Name: id.Name, Email: id.Email, Groups: id.Groups})
 	if errors.Is(err, auth.ErrOIDCRefused) {
 		ssoPage(w, http.StatusForbidden, "login failed: this account is not allowed to sign in")
 		return
@@ -240,11 +218,13 @@ func (u *UI) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
-	u.endCookieSessions(r)
-	sc := u.cookie(u.Auth.Sessions.Create(pr.Owner()), sessionMaxAge)
+	sc, ok := u.startSession(w, r, pr.Owner())
+	if !ok {
+		return
+	}
 	http.SetCookie(w, sc)
 	u.expireCookies(w, sc.Name)
-	http.Redirect(w, r, "/"+st.next, http.StatusFound)
+	http.Redirect(w, r, "/"+st.Next, http.StatusFound)
 }
 
 // ssoWarn logs a failed login without the code, tokens or state.

@@ -21,18 +21,16 @@ import (
 
 // SAML 2.0 login (the saml realm). GET /-/sso/saml/login sends the browser
 // to the identity provider with an AuthnRequest (HTTP-Redirect binding);
-// the request ID and the return location wait in memory under a random
-// state, which travels as RelayState and in a cookie. The IdP posts the
-// Response to /-/sso/saml/acs (HTTP-POST binding), where the RelayState
-// must match the cookie, the Response must answer the stored request ID and
-// pass internal/saml's checks, and its assertion ID must be new (replay);
-// then the identity is recorded in the authenticator and a session owned by
-// "saml:<username>" starts, as for OIDC (sso.go). Single logout is not
-// implemented: signing out ends the local session only.
-//
-// ponytail: the pending logins, the replay cache and the fetched IdP
-// metadata live in this process (single replica, like the sessions); a
-// second replica would need them in the database.
+// the request ID and the return location wait in the database under a
+// random state (meta.LoginState), which travels as RelayState and in a
+// cookie. The IdP posts the Response to /-/sso/saml/acs (HTTP-POST
+// binding) on any node, where the RelayState must match the cookie, the
+// Response must answer the stored request ID and pass internal/saml's
+// checks, and its assertion ID must be new to every node
+// (meta.DB.FirstAssertion); then the identity is recorded in the
+// authenticator and a session owned by "saml:<username>" starts, as for
+// OIDC (sso.go). Single logout is not implemented: signing out ends the
+// local session only. Each node fetches the IdP metadata itself.
 
 const (
 	samlStateCookie     = "cc_saml_state"
@@ -45,11 +43,8 @@ const (
 	samlFormMax         = 1 << 20
 )
 
-// samlRealm is the SAML login state of the UI.
+// samlRealm is the IdP metadata this node fetched.
 type samlRealm struct {
-	states ssoStates
-	replay saml.ReplayCache
-
 	mu        sync.Mutex // held across a metadata fetch, so logins wait for one fetch
 	src       string     // the metadata source idp was built from
 	idp       *saml.IdP
@@ -297,11 +292,10 @@ func (u *UI) samlLogin(w http.ResponseWriter, r *http.Request) {
 		ssoPage(w, http.StatusServiceUnavailable, "SAML single sign-on is misconfigured: "+err.Error())
 		return
 	}
-	if !u.saml.states.put(state, ssoState{nonce: id, next: next, created: now}, now) {
-		ssoPage(w, http.StatusServiceUnavailable, "too many logins are pending; try again in a few minutes")
+	if !u.putLoginState(w, r, meta.RealmSAML, state, meta.LoginState{Nonce: id, Next: next}) {
 		return
 	}
-	http.SetCookie(w, u.samlCookie(state, int(ssoStateTTL.Seconds())))
+	http.SetCookie(w, u.samlCookie(state, int(meta.LoginStateTTL.Seconds())))
 	http.Redirect(w, r, target, http.StatusFound)
 }
 
@@ -327,12 +321,11 @@ func (u *UI) samlACS(w http.ResponseWriter, r *http.Request) {
 	c, cerr := r.Cookie(u.samlCookie("", 0).Name)
 	switch {
 	case relay != "" && cerr == nil && c.Value == relay:
-		st, ok := u.saml.states.take(relay, now)
+		st, ok := u.takeLoginState(w, r, meta.RealmSAML, relay)
 		if !ok {
-			ssoPage(w, http.StatusBadRequest, "login failed: the login expired or was already used; start again")
 			return
 		}
-		reqID, next = st.nonce, st.next
+		reqID, next = st.Nonce, st.Next
 	case cfg.AllowIdPInitiated:
 		next = samlReturn(relay) // an IdP-initiated login: no request to answer
 	default:
@@ -351,7 +344,13 @@ func (u *UI) samlACS(w http.ResponseWriter, r *http.Request) {
 		ssoPage(w, http.StatusBadRequest, "login failed: "+err.Error())
 		return
 	}
-	if !u.saml.replay.Add(a.ID, a.Expires, now) {
+	fresh, err := u.DB.FirstAssertion(r.Context(), a.ID, a.Expires, now)
+	if err != nil {
+		u.ssoWarn(r, "saml login failed", err)
+		ssoPage(w, http.StatusServiceUnavailable, "the login could not be completed; start again")
+		return
+	}
+	if !fresh {
 		u.ssoWarn(r, "saml login refused: replayed assertion", nil)
 		ssoPage(w, http.StatusBadRequest, "login failed: this response was already used; start again")
 		return
@@ -377,7 +376,7 @@ func (u *UI) samlACS(w http.ResponseWriter, r *http.Request) {
 		groups = a.Values(cfg.GroupsAttribute)
 	}
 	full := strings.TrimSpace(attr(cfg.FirstNameAttribute) + " " + attr(cfg.LastNameAttribute))
-	pr, err := u.Auth.RecordSAML(auth.SAMLUser{ID: name, Name: full, Email: attr(cfg.EmailAttribute), Groups: groups})
+	pr, err := u.Auth.RecordSAML(r.Context(), auth.SAMLUser{ID: name, Name: full, Email: attr(cfg.EmailAttribute), Groups: groups})
 	if errors.Is(err, auth.ErrSAMLRefused) {
 		ssoPage(w, http.StatusForbidden, "login failed: this account is not allowed to sign in")
 		return
@@ -386,8 +385,10 @@ func (u *UI) samlACS(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
-	u.endCookieSessions(r)
-	sc := u.cookie(u.Auth.Sessions.Create(pr.Owner()), sessionMaxAge)
+	sc, ok := u.startSession(w, r, pr.Owner())
+	if !ok {
+		return
+	}
 	http.SetCookie(w, sc)
 	u.expireCookies(w, sc.Name)
 	if next == "" {

@@ -341,7 +341,10 @@ func (u *UI) applied(w http.ResponseWriter, r *http.Request, invalidate string) 
 		return false
 	}
 	if invalidate != "" {
-		u.Auth.OnUserChanged(invalidate)
+		if err := u.Auth.OnUserChanged(invalidate); err != nil {
+			u.fail(w, r, err)
+			return false
+		}
 	}
 	return true
 }
@@ -678,7 +681,12 @@ func (u *UI) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Via == auth.ViaSession && u.Auth.Sessions != nil {
-		http.SetCookie(w, u.cookie(u.Auth.Sessions.Create(p.User), sessionMaxAge))
+		id, err := u.Auth.Sessions.Create(r.Context(), p.User)
+		if err != nil {
+			u.fail(w, r, err)
+			return
+		}
+		http.SetCookie(w, u.cookie(id, sessionMaxAge))
 	}
 	u.emit(r, "user.password", "", p.User, "self")
 	w.WriteHeader(http.StatusNoContent)

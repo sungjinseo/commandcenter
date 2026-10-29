@@ -71,8 +71,9 @@ type App struct {
 	Mail     *mail.Sender      // failure and test e-mail; Close drains its queue
 	Events   *events.Recorder  // activity events; written by a goroutine that Close stops
 	Deleters *cleanup.Registry // per-format component deleters used by cleanup
-	// DockerKey signs the Docker registry's bearer tokens: random per
-	// process (one instance), so a restart only makes clients fetch new ones.
+	// DockerKey signs the Docker registry's and Conan's bearer tokens: on
+	// PostgreSQL the key every node shares (meta.DB.TokenKey), on SQLite
+	// random per process, so a restart only makes clients fetch new ones.
 	DockerKey []byte
 	Tasks     *tasks.Service      // scheduled tasks; the scheduler runs while Serve does
 	Webhooks  *webhook.Dispatcher // webhook deliveries, sent while Serve runs; Close stops it before the database closes
@@ -207,21 +208,29 @@ func OpenDB(cfg *config.Config) (*meta.DB, error) {
 // in the config file names a file holding it instead (QA N-29).
 const secretKeyEnv = "COMMANDCENTER_SECRET_KEY"
 
-// useSecretKey gives db the secret key, if one is configured, and seals the
-// secrets still stored in plain text. Without a key secrets stay plain text,
-// as before, and one warning says so. The key is never logged.
+// useSecretKey gives db the secret key, if one is configured, checks that
+// it is the key the database was started with (PostgreSQL: the same on
+// every node, meta.DB.CheckSecretKey) and seals the secrets still stored in
+// plain text. Without a key secrets stay plain text, as before, and one
+// warning says so. The key is never logged.
 func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
 	key, err := secretKey(cfg)
 	if err != nil {
 		return err
 	}
-	if key == nil {
-		log.Warn("no secret key is configured: the SMTP password, the LDAP bind password and proxy remoteAuth " +
-			"credentials are stored in meta.db in plain text; set " + secretKeyEnv + " or secretKeyFile to encrypt them")
-		return nil
+	if key != nil {
+		if err := db.SetSecretKey(key); err != nil {
+			return err
+		}
 	}
-	if err := db.SetSecretKey(key); err != nil {
+	if err := db.CheckSecretKey(context.Background()); err != nil {
 		return err
+	}
+	if key == nil {
+		log.Warn("no secret key is configured: the SMTP password, the LDAP bind password, proxy remoteAuth " +
+			"credentials and, on PostgreSQL, the key that signs Docker and Conan tokens are stored in the database in plain text; set " +
+			secretKeyEnv + " or secretKeyFile to encrypt them")
+		return nil
 	}
 	n, err := db.SealSecrets(context.Background())
 	if err != nil {
@@ -231,6 +240,22 @@ func useSecretKey(cfg *config.Config, log *slog.Logger, db *meta.DB) error {
 		log.Info("encrypted the stored secrets that were plain text", "rows", n)
 	}
 	return nil
+}
+
+// tokenKey returns the key that signs the Docker and Conan bearer tokens:
+// on PostgreSQL the one stored for every node, so a token one node issued
+// verifies on another; on SQLite a random one.
+func tokenKey(db *meta.DB) ([]byte, error) {
+	if db.Driver() == "postgresql" {
+		key, err := db.TokenKey(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("registry token key: %w", err)
+		}
+		return key, nil
+	}
+	key := make([]byte, 32)
+	rand.Read(key)
+	return key, nil
 }
 
 // secretKey returns the key in COMMANDCENTER_SECRET_KEY or in the file
@@ -390,8 +415,10 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	podsH := cocoapods.New(store, fetcher, baseURL)
 	hfH := huggingface.New(store, fetcher)
 	terraformH := terraform.New(store, fetcher, authn, baseURL)
-	dockerKey := make([]byte, 32)
-	rand.Read(dockerKey)
+	dockerKey, err := tokenKey(db)
+	if err != nil {
+		return nil, err
+	}
 	dockerH := docker.New(store, docker.NewFetcher(store, maxConcurrentFetches), authn, nil, baseURL, dockerKey) // Repos: the registry, below
 	dockerH.MaxUpload = func() int64 { return int64(authn.Snapshot().Settings().MaxUploadMiB) << 20 }
 	conanH := conan.New(store, conan.NewFetcher(store, maxConcurrentFetches), authn, baseURL, dockerKey)
@@ -541,8 +568,10 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 			}
 		})
 	}
-	authn.Sessions = auth.NewSessions()
-	authn.Sessions.SetIdle(time.Duration(settings.SessionIdleMinutes) * time.Minute)
+	authn.Sessions = auth.NewSessions(db, authn.SessionIdle)
+	if db.Driver() == "postgresql" { // the nodes share the sign-in throttle and the SSO identities
+		authn.Shared = db
+	}
 	a := &App{Config: cfg, DB: db, Store: store, Auth: authn, Registry: registry, Metrics: recorder, Events: evts, Mail: mailer, Deleters: deleters, DockerKey: dockerKey, Webhooks: hooks, Node: node, log: log}
 	taskSvc.Repos, taskSvc.Events = registry, hooks
 	taskSvc.Transfer.Repos, taskSvc.Transfer.Events = registry, hooks

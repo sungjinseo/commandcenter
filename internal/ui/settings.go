@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"time"
 
 	"commandcenter/internal/meta"
 )
@@ -305,9 +304,6 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 	if err := u.Auth.Reload(r.Context()); err != nil {
 		u.fail(w, r, err)
 		return
-	}
-	if u.Auth.Sessions != nil {
-		u.Auth.Sessions.SetIdle(time.Duration(s.SessionIdleMinutes) * time.Minute)
 	}
 	if body.HTTP != nil {
 		u.emit(r, "settings.http", "", "", httpDetail)

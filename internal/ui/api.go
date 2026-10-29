@@ -155,12 +155,30 @@ const legacySessionCookie = "repolite_session"
 
 // endCookieSessions ends the sessions named by the request's session
 // cookies, under both names, so none of them outlives a login or logout.
-func (u *UI) endCookieSessions(r *http.Request) {
+func (u *UI) endCookieSessions(r *http.Request) error {
 	for _, name := range []string{auth.SessionCookie, auth.HostSessionCookie} {
 		for _, c := range r.CookiesNamed(name) {
-			u.Auth.Sessions.Delete(c.Value)
+			if err := u.Auth.Sessions.Delete(r.Context(), c.Value); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+// startSession ends the request's sessions and returns the cookie of a new
+// one for owner; it answers the request when it cannot.
+func (u *UI) startSession(w http.ResponseWriter, r *http.Request, owner string) (*http.Cookie, bool) {
+	err := u.endCookieSessions(r)
+	id := ""
+	if err == nil {
+		id, err = u.Auth.Sessions.Create(r.Context(), owner)
+	}
+	if err != nil {
+		u.fail(w, r, err)
+		return nil, false
+	}
+	return u.cookie(id, sessionMaxAge), true
 }
 
 // expireCookies expires the session cookie names other than keep: the
@@ -202,8 +220,10 @@ func (u *UI) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid user name or password")
 		return
 	}
-	u.endCookieSessions(r)
-	c := u.cookie(u.Auth.Sessions.Create(p.Owner()), sessionMaxAge)
+	c, ok := u.startSession(w, r, p.Owner())
+	if !ok {
+		return
+	}
 	http.SetCookie(w, c)
 	u.expireCookies(w, c.Name)
 	writeJSON(w, http.StatusOK, map[string]any{"user": p.User, "admin": p.Admin})
@@ -224,7 +244,10 @@ func (u *UI) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u.Auth.Sessions != nil {
-		u.endCookieSessions(r)
+		if err := u.endCookieSessions(r); err != nil {
+			u.fail(w, r, err)
+			return
+		}
 	}
 	u.expireCookies(w, "")
 	w.WriteHeader(http.StatusNoContent)

@@ -273,6 +273,34 @@ func TestSAMLIdPInitiatedAndReplay(t *testing.T) {
 	wantStatus(t, e.samlLogin(t, idp, nil), http.StatusSeeOther)
 }
 
+// A login started on one node finishes on another; neither takes the
+// response again, nor an IdP-initiated assertion the other took (HA design
+// 2.4).
+func TestSAMLAcrossNodes(t *testing.T) {
+	a, idp := samlEnv(t, `,"allowIdpInitiated":true`)
+	b := a.twin(t)
+	reqID, relay, state, _ := a.samlStart(t, idp, "")
+	doc := samlResponse(t, idp, reqID, nil)
+	r := b.acs(t, doc, relay, state)
+	wantStatus(t, r, http.StatusSeeOther)
+	sc := sessionCookie(r)
+	if sc == nil {
+		t.Fatalf("no session cookie: %v", r.cookie)
+	}
+	if r := a.acs(t, doc, relay, state); r.status != http.StatusBadRequest || sessionCookie(r) != nil {
+		t.Fatalf("the response again on A: %d %s", r.status, r.body)
+	}
+	if m := a.req(t, "GET", "/-/api/me", "", "", sc, false).json(t); m["owner"] == nil || !strings.HasPrefix(m["owner"].(string), "saml:") {
+		t.Fatalf("B's session on A: %v", m)
+	}
+
+	doc = samlResponse(t, idp, "", func(p *samltest.Params) { p.InResponseTo = "" })
+	wantStatus(t, b.acs(t, doc, "", nil), http.StatusSeeOther)
+	if r := a.acs(t, doc, "", nil); r.status != http.StatusBadRequest || sessionCookie(r) != nil || !strings.Contains(r.body, "already used") {
+		t.Fatalf("an IdP-initiated assertion B took, on A: %d %s", r.status, r.body)
+	}
+}
+
 func TestSAMLGroupsAndOverride(t *testing.T) {
 	e, idp := samlEnv(t, `,"usernameAttribute":"email"`)
 	sc := sessionCookie(e.samlLogin(t, idp, func(p *samltest.Params) {

@@ -79,9 +79,8 @@ type UI struct {
 	blobChecker    func() (bool, string)      // test hook; nil runs checkBlobStore
 	blobBusy       atomic.Bool                // a blob check goroutine is still running
 
-	// OIDC login (sso.go): the pending logins, and the provider client of
-	// the configuration it was built from.
-	sso      ssoStates
+	// OIDC login (sso.go): the provider client of the configuration it
+	// was built from.
 	oidcMu   sync.Mutex
 	oidcCfg  meta.OIDC
 	oidcProv *oidc.Provider

@@ -400,13 +400,3 @@ func TestAuthnRequest(t *testing.T) {
 		}
 	}
 }
-
-func TestReplayCache(t *testing.T) {
-	var c saml.ReplayCache
-	if !c.Add("a", now.Add(time.Minute), now) || c.Add("a", now.Add(time.Minute), now) {
-		t.Fatal("replay accepted")
-	}
-	if !c.Add("a", now.Add(time.Hour), now.Add(2*time.Minute)) {
-		t.Fatal("an expired entry still blocks")
-	}
-}

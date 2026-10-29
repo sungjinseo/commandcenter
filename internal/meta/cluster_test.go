@@ -397,7 +397,9 @@ func TestSchemaCompat(t *testing.T) {
 		{3, 3, "webhooks, routing rules and content selectors"},
 		{4, 4, "user tokens, blob store groups, cleanup criteria, tags, store moves, vulnerability data"},
 		{5, 5, "nodes, leases, compat: a full stop, as the single-writer guard must refuse a second instance, which older builds would not"},
-		{6, 5, "tasks.running_node and running_since, webhook delivery claims: expand-only, an older build alone on the database ignores them"},
+		{6, 6, "task run marks and webhook delivery claims (expand-only) together with sessions and auth state in the database, " +
+			"the shared token key and the secret key check: a full stop, as an older build would keep sessions in memory and leave " +
+			"stored sessions of a changed user valid for this one"},
 	}
 	for i, d := range decisions {
 		if d.version != i+1 || d.compat < d.version-1 || d.compat > d.version || d.note == "" {

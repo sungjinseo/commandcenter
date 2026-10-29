@@ -152,7 +152,7 @@ func TestAuthenticatedRead(t *testing.T) {
 func TestDisabledUser(t *testing.T) {
 	f := newFixture(t)
 	a := f.auth(t)
-	a.Sessions = NewSessions()
+	a.Sessions = NewSessions(testDB(t), nil)
 	ctx := context.Background()
 	if _, err := a.CheckPassword(ctx, "off", "pw"); !errors.Is(err, ErrBadCredentials) {
 		t.Fatalf("disabled password login: %v", err)
@@ -180,7 +180,7 @@ func TestDisabledUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sid := a.Sessions.Create("off")
+	sid := a.Sessions.create(t, "off")
 	cookieReq := httptest.NewRequest("GET", "/", nil)
 	cookieReq.AddCookie(&http.Cookie{Name: SessionCookie, Value: sid})
 	if p, err := a.Authenticate(req("Bearer " + tok)); err != nil || p.User != "off" {
@@ -270,10 +270,10 @@ func TestCheckLockout(t *testing.T) {
 func TestOnUserChangedInvalidates(t *testing.T) {
 	f := newFixture(t)
 	a := f.auth(t)
-	a.Sessions = NewSessions()
+	a.Sessions = NewSessions(testDB(t), nil)
 	ctx := context.Background()
-	sid := a.Sessions.Create("adder")
-	other := a.Sessions.Create("plain")
+	sid := a.Sessions.create(t, "adder")
+	other := a.Sessions.create(t, "plain")
 	if _, err := a.CheckPassword(ctx, "adder", "pw"); err != nil {
 		t.Fatal(err)
 	}
@@ -284,10 +284,10 @@ func TestOnUserChangedInvalidates(t *testing.T) {
 		t.Fatal("password checks were not cached")
 	}
 	a.OnUserChanged("adder")
-	if _, ok := a.Sessions.User(sid); ok {
+	if _, ok := a.Sessions.user(sid); ok {
 		t.Fatal("session survived OnUserChanged")
 	}
-	if _, ok := a.Sessions.User(other); !ok {
+	if _, ok := a.Sessions.user(other); !ok {
 		t.Fatal("another user's session was ended")
 	}
 	if a.cachedCount("adder") != 0 || a.cachedCount("plain") != 1 {
@@ -393,10 +393,10 @@ func TestReloadEndsSessionsOfChangedUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Sessions = NewSessions()
+	a.Sessions = NewSessions(testDB(t), nil)
 	sid := map[string]string{}
 	for _, id := range ids {
-		sid[id] = a.Sessions.Create(id)
+		sid[id] = a.Sessions.create(t, id)
 	}
 	for _, u := range []meta.User{
 		{ID: "newpw", PasswordHash: hash(t, "new-pw")},
@@ -414,7 +414,7 @@ func TestReloadEndsSessionsOfChangedUsers(t *testing.T) {
 		t.Fatal(err)
 	}
 	for id, alive := range map[string]bool{"newpw": false, "off": false, "gone": false, "renamed": true} {
-		if _, ok := a.Sessions.User(sid[id]); ok != alive {
+		if _, ok := a.Sessions.user(sid[id]); ok != alive {
 			t.Errorf("%s: session alive = %v, want %v", id, ok, alive)
 		}
 	}
@@ -441,7 +441,7 @@ func TestReloadUnderConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Sessions = NewSessions()
+	a.Sessions = NewSessions(testDB(t), nil)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {

@@ -157,8 +157,9 @@ func (p *pool) ExecContext(ctx context.Context, q string, args ...any) (sql.Resu
 
 // execFree runs a single-statement write without the write lock (on
 // SQLite as ExecContext), for the bookkeeping tables no transaction that
-// checks an invariant reads: nodes, leases. It keeps frequent small writes,
-// such as heartbeats, from queueing behind the one writer.
+// checks an invariant reads: nodes, leases and the auth state (authstate.go).
+// It keeps frequent small writes, such as heartbeats, from queueing behind
+// the one writer.
 func (p *pool) execFree(ctx context.Context, q string, args ...any) (sql.Result, error) {
 	return p.db.ExecContext(ctx, p.bind(q), args...)
 }
@@ -419,4 +420,13 @@ CREATE TABLE IF NOT EXISTS nodes(
   id TEXT COLLATE "C" PRIMARY KEY, hostname TEXT COLLATE "C" NOT NULL, version TEXT COLLATE "C" NOT NULL,
   schema BIGINT NOT NULL, started_at BIGINT NOT NULL, heartbeat_at BIGINT NOT NULL, draining BIGINT NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS leases(name TEXT COLLATE "C" PRIMARY KEY, holder TEXT COLLATE "C" NOT NULL, expires_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions(key TEXT COLLATE "C" PRIMARY KEY, owner TEXT COLLATE "C" NOT NULL, created_at BIGINT NOT NULL,
+  last_seen BIGINT NOT NULL);
+CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner, last_seen);
+CREATE TABLE IF NOT EXISTS login_states(state TEXT COLLATE "C" PRIMARY KEY, realm TEXT COLLATE "C" NOT NULL, nonce TEXT COLLATE "C" NOT NULL,
+  verifier TEXT COLLATE "C" NOT NULL DEFAULT '', next TEXT COLLATE "C" NOT NULL DEFAULT '', created_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS saml_replay(id TEXT COLLATE "C" PRIMARY KEY, expires_at BIGINT NOT NULL);
+CREATE UNLOGGED TABLE IF NOT EXISTS auth_failures(key TEXT COLLATE "C" PRIMARY KEY, fails BIGINT NOT NULL, last_fail BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS sso_identities(realm TEXT COLLATE "C" NOT NULL, id TEXT COLLATE "C" NOT NULL, conf TEXT COLLATE "C" NOT NULL,
+  data TEXT COLLATE "C" NOT NULL, checked_at BIGINT NOT NULL, PRIMARY KEY(realm, id));
 `

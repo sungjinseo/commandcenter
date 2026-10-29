@@ -548,7 +548,7 @@ func TestThrottleIgnoresStaleTokens(t *testing.T) {
 // the fewest failures, so a flood of fresh names does not end a refusal.
 func TestThrottleBounded(t *testing.T) {
 	a, now := throttleAuth(t)
-	fail := func(name string) { a.noteFailure(name, nameKey(name), "") }
+	fail := func(name string) { a.noteFailure(context.Background(), name, nameKey(name), "") }
 	for i := 0; i < failKeysMax-1; i++ {
 		fail(fmt.Sprintf("old%d", i))
 	}
@@ -567,7 +567,7 @@ func TestThrottleBounded(t *testing.T) {
 	if n := len(a.fails); n > failKeysMax {
 		t.Fatalf("%d records, cap %d", n, failKeysMax)
 	}
-	if a.refusal(nameKey("victim"), "") <= 0 {
+	if wait, _, _ := a.refusal(context.Background(), "victim", nameKey("victim"), ""); wait <= 0 {
 		t.Fatal("a flood of fresh names ended the refusal")
 	}
 }

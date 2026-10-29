@@ -295,7 +295,10 @@ func TestServeAppliesOutOfProcessAccessChanges(t *testing.T) {
 	}
 	defer a.Close()
 	ctx := context.Background()
-	sid := a.Auth.Sessions.Create("ci")
+	sid, err := a.Auth.Sessions.Create(context.Background(), "ci")
+	if err != nil {
+		t.Fatal(err)
+	}
 	sctx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- a.Serve(sctx) }()
@@ -330,7 +333,7 @@ func TestServeAppliesOutOfProcessAccessChanges(t *testing.T) {
 	if _, err := a.Auth.CheckPassword(ctx, "ci", "pw"); err == nil {
 		t.Fatal("the old password still works")
 	}
-	if _, ok := a.Auth.Sessions.User(sid); ok {
+	if _, ok := a.Auth.Sessions.User(context.Background(), sid); ok {
 		t.Fatal("the session of ci survived the reset")
 	}
 }

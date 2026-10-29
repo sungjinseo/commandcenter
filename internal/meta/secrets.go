@@ -17,8 +17,9 @@ import (
 
 // The stored secrets are the SMTP password, the LDAP bind password, the
 // OIDC client secret, a proxy's remoteAuth password and bearer token, an S3 blob store's
-// secret key, a webhook's signing secret, the Crowd application password and the
-// SAML service provider key.
+// secret key, a webhook's signing secret, the Crowd application password, the
+// SAML service provider key and, on PostgreSQL, the key that signs the Docker
+// and Conan tokens (TokenKey).
 // They must be sent as they are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
 // with AES-256-GCM on write and opened on read, so a copy of meta.db or of a
 // backup does not give them away (QA N-29). A sealed value is sealedPrefix
@@ -33,8 +34,11 @@ var (
 )
 
 // sealer seals and opens secrets; the zero value has no key and stores
-// secrets as given.
-type sealer struct{ aead cipher.AEAD }
+// secrets as given. check is the key's keyCheck.
+type sealer struct {
+	aead  cipher.AEAD
+	check string
+}
 
 // SetSecretKey makes d seal secrets with key (32 bytes) from now on and open
 // the sealed ones. Call it before d is used.
@@ -59,7 +63,7 @@ func newSealer(key []byte) (sealer, error) {
 	if err != nil {
 		return sealer{}, err
 	}
-	return sealer{aead}, nil
+	return sealer{aead, keyCheck(key)}, nil
 }
 
 // HasSecretKey reports whether SetSecretKey gave d a key.
@@ -245,13 +249,14 @@ func (d *DB) SealSecrets(ctx context.Context) (int, error) {
 			return v, err
 		}
 		return d.box.seal(v)
-	})
+	}, "")
 }
 
 // RotateSecretKey seals every stored secret with newKey (32 bytes) instead
 // of d's key, and the ones still in plain text too, in one transaction:
 // nothing is written when a sealed one does not open with d's key (or d has
-// none). From then on d uses newKey. It returns how many sealed secrets it
+// none). A stored key check (CheckSecretKey) changes to newKey's in the same
+// transaction. From then on d uses newKey. It returns how many sealed secrets it
 // sealed again and how many plain-text ones it sealed. Nothing else may use
 // the database meanwhile: a server goes on sealing with the key it has.
 func (d *DB) RotateSecretKey(ctx context.Context, newKey []byte) (resealed, plain int, err error) {
@@ -270,7 +275,7 @@ func (d *DB) RotateSecretKey(ctx context.Context, newKey []byte) (resealed, plai
 			return v, err
 		}
 		return to.seal(p)
-	})
+	}, to.check)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -280,9 +285,9 @@ func (d *DB) RotateSecretKey(ctx context.Context, newKey []byte) (resealed, plai
 
 // rewriteSecrets passes every stored secret that is not empty through fn and
 // writes back the rows in which fn changed one, in one transaction: nothing
-// is written when fn fails. It returns how many settings and repository rows
-// it rewrote.
-func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)) (int, error) {
+// is written when fn fails. A check other than "" replaces a stored key
+// check. It returns how many settings and repository rows it rewrote.
+func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error), check string) (int, error) {
 	// rewrite passes *v through fn unless it is empty, and notes a change.
 	rewrite := func(v *string, changed *bool) error {
 		if *v == "" {
@@ -306,13 +311,14 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 		httpc := DefaultHTTP()
 		crowd := DefaultCrowd()
 		samlc := DefaultSAML()
+		var tokenKey string
 		for _, st := range []struct {
 			key    string
 			v      any
 			secret *string
 		}{{SettingSMTP, &smtp, &smtp.Password}, {SettingLDAP, &ldap, &ldap.BindPassword}, {SettingOIDC, &oidc, &oidc.ClientSecret},
 			{SettingHTTP, &httpc, &httpc.Proxy.Password}, {SettingCrowd, &crowd, &crowd.ApplicationPassword},
-			{SettingSAML, &samlc, &samlc.SPPrivateKey}} {
+			{SettingSAML, &samlc, &samlc.SPPrivateKey}, {settingTokenKey, &tokenKey, &tokenKey}} {
 			found, err := getSettingJSON(ctx, tx.q, st.key, st.v)
 			if err != nil {
 				return err
@@ -335,6 +341,12 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 				return err
 			}
 			n++
+		}
+		if check != "" {
+			js, _ := json.Marshal(check)
+			if _, err := tx.q.ExecContext(ctx, `UPDATE settings SET value = ? WHERE key = ?`, string(js), settingKeyCheck); err != nil {
+				return err
+			}
 		}
 		rows, err := tx.q.QueryContext(ctx, pg(tx.q, `SELECT name, config FROM repositories WHERE json_extract(config, '$.remoteAuth') IS NOT NULL OR json_extract(config, '$.signingKey') IS NOT NULL`,
 			`SELECT name, config FROM repositories WHERE config::json ->> 'remoteAuth' IS NOT NULL OR config::json ->> 'signingKey' IS NOT NULL`))

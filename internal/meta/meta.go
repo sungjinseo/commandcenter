@@ -162,6 +162,14 @@ CREATE TABLE IF NOT EXISTS nodes(
   id TEXT PRIMARY KEY, hostname TEXT NOT NULL, version TEXT NOT NULL, schema INTEGER NOT NULL,
   started_at INTEGER NOT NULL, heartbeat_at INTEGER NOT NULL, draining INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY, holder TEXT NOT NULL, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sessions(key TEXT PRIMARY KEY, owner TEXT NOT NULL, created_at INTEGER NOT NULL, last_seen INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS sessions_owner ON sessions(owner, last_seen);
+CREATE TABLE IF NOT EXISTS login_states(state TEXT PRIMARY KEY, realm TEXT NOT NULL, nonce TEXT NOT NULL,
+  verifier TEXT NOT NULL DEFAULT '', next TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS saml_replay(id TEXT PRIMARY KEY, expires_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_failures(key TEXT PRIMARY KEY, fails INTEGER NOT NULL, last_fail INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS sso_identities(realm TEXT NOT NULL, id TEXT NOT NULL, conf TEXT NOT NULL, data TEXT NOT NULL,
+  checked_at INTEGER NOT NULL, PRIMARY KEY(realm, id)) WITHOUT ROWID;
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in
@@ -201,6 +209,11 @@ CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY, holder TEXT NOT NULL, e
 //	   and claim_until (high availability, scheduling): expand-only, an older
 //	   build ignores them and, alone on the database (the single-writer
 //	   guard), needs neither the claims nor the marks.
+//	6: sessions, login_states, saml_replay, auth_failures, sso_identities
+//	   (authstate.go) and the settings rows registry.tokenKey and
+//	   secretKey.check: an older build would keep its sessions in memory,
+//	   leave a changed user's stored sessions for this one to accept again,
+//	   and seal with another secret key unchecked.
 const schemaVersion = 6
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
@@ -221,7 +234,7 @@ const schemaVersion = 6
 //     when compat rises above its schemaVersion.
 //
 // TestSchemaCompat pins every version's decision, so a bump needs one.
-const schemaCompat = 5
+const schemaCompat = 6
 
 // Open opens the metadata database and creates or upgrades its tables:
 // PostgreSQL when target is a postgres:// or postgresql:// URL (see

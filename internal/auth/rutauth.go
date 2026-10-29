@@ -4,9 +4,11 @@ import (
 	"context"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 
 	"commandcenter/internal/ldap"
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 )
 
@@ -15,14 +17,14 @@ import (
 // a request that carries the configured header, comes from a trusted proxy
 // (its RemoteAddr: a forwarded address is just another header) and has no
 // Authorization is the named user, on every request. Tokens of such a user
-// ("rutauth:<id>") resolve through an in-memory entry the last trusted
-// request left, as OIDC tokens do, and fail closed after a restart until
-// the user comes through the gateway again.
+// ("rutauth:<id>") resolve through the identity the last trusted request
+// recorded (identity.go), as OIDC tokens do, and fail closed without one
+// (after a restart without Shared) until the user comes through the
+// gateway again.
 
 const (
 	rutOwnerPrefix = "rutauth:"
 	sourceRUT      = "rutauth"
-	rutMax         = 1000
 
 	// ViaRUT marks a principal the trusted proxy named; the UI treats it
 	// as a signed-in session (requireInteractive).
@@ -38,17 +40,9 @@ func rutChanged(old, cur *Snapshot) bool {
 	return old == nil || !reflect.DeepEqual(old.settings.RUT, cur.settings.RUT)
 }
 
-func (a *Authenticator) clearRUT() {
-	a.rutMu.Lock()
-	a.rutUsers = map[string][]string{}
-	a.rutMu.Unlock()
-}
+func (a *Authenticator) clearRUT() { a.rutUsers.clear() }
 
-func (a *Authenticator) dropRUT(id string) {
-	a.rutMu.Lock()
-	delete(a.rutUsers, id)
-	a.rutMu.Unlock()
-}
+func (a *Authenticator) dropRUT(id string) { a.rutUsers.drop(id) }
 
 // rutPrincipal authenticates r through the realm; ok is false when r is not
 // a trusted proxy's request for a valid user.
@@ -74,12 +68,18 @@ func (a *Authenticator) rutPrincipal(r *http.Request) (Principal, bool) {
 	if !ok {
 		return Principal{}, false
 	}
-	a.rutMu.Lock()
-	if a.rutUsers == nil || len(a.rutUsers) >= rutMax {
-		a.rutUsers = map[string][]string{}
+	// The gateway asserts the user on every request: the shared identity is
+	// written when it is new or changed, and otherwise once an hour.
+	u, now := OIDCUser{ID: id, Groups: groups}, a.clock()
+	e, seen := a.rutUsers.get(id)
+	if a.Shared == nil || seen && slices.Equal(e.user.Groups, groups) && now.Sub(e.checkedAt) < identityRefresh {
+		if !seen {
+			e.checkedAt = now
+		}
+		a.rutUsers.put(id, ssoEntry{user: u, checkedAt: e.checkedAt, cachedAt: now})
+	} else if err := a.recordSSO(r.Context(), s, &a.rutUsers, sourceRUT, u); err != nil {
+		a.logger().Warn("could not record a gateway user for the other nodes; its tokens work here only", "user", id, "err", logsafe.Err(err))
 	}
-	a.rutUsers[id] = groups
-	a.rutMu.Unlock()
 	return p, true
 }
 
@@ -101,20 +101,19 @@ func (a *Authenticator) rutBuild(s *Snapshot, id string, groups []string) (Princ
 	return Principal{User: id, Admin: hasRole(roles, meta.AdminRole), roles: roles, source: sourceRUT, Via: ViaRUT}, true
 }
 
-// rutLookup resolves a token owner "rutauth:<id>" from the cache, failing
-// closed when the user has not come through the gateway since the start.
-func (a *Authenticator) rutLookup(_ context.Context, id string) (Principal, bool) {
+// rutLookup resolves a token owner "rutauth:<id>" from its recorded
+// identity, failing closed when the user has not come through the gateway
+// (since the start, without Shared).
+func (a *Authenticator) rutLookup(ctx context.Context, id string) (Principal, bool) {
 	s := a.snap.Load()
 	if !rutUsable(s) {
 		return Principal{}, false
 	}
-	a.rutMu.Lock()
-	groups, ok := a.rutUsers[id]
-	a.rutMu.Unlock()
+	u, ok := a.ssoUser(ctx, s, &a.rutUsers, sourceRUT, id)
 	if !ok {
 		return Principal{}, false
 	}
-	return a.rutBuild(s, id, groups)
+	return a.rutBuild(s, id, u.Groups)
 }
 
 func splitRUTOwner(owner string) (id string, isRUT bool) {

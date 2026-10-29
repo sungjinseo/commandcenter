@@ -24,7 +24,7 @@ func newOIDCFixture(t *testing.T) *oidcFixture {
 	f.settings.OIDC = c
 	f.settings.Realms = []meta.Realm{{ID: meta.RealmLocal, Enabled: true}, {ID: meta.RealmToken, Enabled: true}, {ID: meta.RealmOIDC, Enabled: true}}
 	f.a = New(&config.Config{}, f.tok)
-	f.a.Sessions = NewSessions()
+	f.a.Sessions = NewSessions(testDB(t), nil)
 	f.apply()
 	return f
 }
@@ -33,11 +33,11 @@ func (f *oidcFixture) apply() { f.a.setSnapshot(NewSnapshot(f.users, f.roles, f.
 
 func TestOIDCRecordAndLookup(t *testing.T) {
 	f := newOIDCFixture(t)
-	p, err := f.a.RecordOIDC(OIDCUser{ID: "alice", Name: "Alice", Email: "a@x", Groups: []string{"cc-admins"}})
+	p, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "alice", Name: "Alice", Email: "a@x", Groups: []string{"cc-admins"}})
 	if err != nil || p.User != "alice" || !p.IsOIDC() || p.IsLDAP() || !p.Admin || p.Owner() != "oidc:alice" {
 		t.Fatalf("principal %+v %v", p, err)
 	}
-	bob, err := f.a.RecordOIDC(OIDCUser{ID: "bob", Groups: []string{"org:devs"}})
+	bob, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "bob", Groups: []string{"org:devs"}})
 	if err != nil || bob.Admin || bob.Roles()[0] != "adder" {
 		t.Fatalf("bob %+v %v", bob, err)
 	}
@@ -60,21 +60,21 @@ func TestOIDCRecordAndLookup(t *testing.T) {
 	if _, ok := f.a.Lookup("oidc:alice"); ok {
 		t.Fatal("found after a configuration change")
 	}
-	if _, err := f.a.RecordOIDC(OIDCUser{ID: "alice", Groups: []string{"cc-admins"}}); err != nil {
+	if _, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "alice", Groups: []string{"cc-admins"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := f.a.Lookup("oidc:alice"); got.Admin || got.Roles()[0] != "editor" {
 		t.Fatalf("after mapping change %+v", got)
 	}
 	// Invalid ids never enter.
-	if _, err := f.a.RecordOIDC(OIDCUser{ID: "not valid!"}); !errors.Is(err, ErrOIDCRefused) {
+	if _, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "not valid!"}); !errors.Is(err, ErrOIDCRefused) {
 		t.Fatalf("invalid id: %v", err)
 	}
 }
 
 func TestOIDCOverrideRow(t *testing.T) {
 	f := newOIDCFixture(t)
-	if _, err := f.a.RecordOIDC(OIDCUser{ID: "alice", Groups: []string{"org:devs"}}); err != nil {
+	if _, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "alice", Groups: []string{"org:devs"}}); err != nil {
 		t.Fatal(err)
 	}
 	// An override row adds roles.
@@ -89,7 +89,7 @@ func TestOIDCOverrideRow(t *testing.T) {
 	if _, ok := f.a.Lookup("oidc:alice"); ok {
 		t.Fatal("disabled override admitted")
 	}
-	if _, err := f.a.RecordOIDC(OIDCUser{ID: "alice"}); !errors.Is(err, ErrOIDCRefused) {
+	if _, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "alice"}); !errors.Is(err, ErrOIDCRefused) {
 		t.Fatalf("login with disabled override: %v", err)
 	}
 	if n := len(f.a.OIDCUsers()); n != 0 {
@@ -112,7 +112,7 @@ func TestOIDCOverrideRow(t *testing.T) {
 func TestOIDCTokens(t *testing.T) {
 	f := newOIDCFixture(t)
 	ctx := context.Background()
-	p, err := f.a.RecordOIDC(OIDCUser{ID: "alice", Groups: []string{"cc-admins"}})
+	p, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "alice", Groups: []string{"cc-admins"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +149,7 @@ func TestOIDCTokens(t *testing.T) {
 	if _, err := f.a.Authenticate(req("Bearer " + tok)); !errors.Is(err, ErrBadCredentials) {
 		t.Fatalf("after restart: %v", err)
 	}
-	if _, err := f.a.RecordOIDC(OIDCUser{ID: "alice", Groups: []string{"cc-admins"}}); err != nil {
+	if _, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "alice", Groups: []string{"cc-admins"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.a.Authenticate(req("Bearer " + tok)); err != nil {
@@ -160,7 +160,7 @@ func TestOIDCTokens(t *testing.T) {
 	if _, err := f.a.Authenticate(req("Bearer " + tok)); !errors.Is(err, ErrBadCredentials) {
 		t.Fatalf("realm off: %v", err)
 	}
-	if _, err := f.a.RecordOIDC(OIDCUser{ID: "alice"}); !errors.Is(err, ErrOIDCRefused) {
+	if _, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "alice"}); !errors.Is(err, ErrOIDCRefused) {
 		t.Fatalf("login with realm off: %v", err)
 	}
 	if _, _, err := f.a.CreateTokenFor(ctx, p); !errors.Is(err, ErrUserDisabled) {
@@ -170,15 +170,15 @@ func TestOIDCTokens(t *testing.T) {
 
 func TestOIDCSessionsEndOnUserChange(t *testing.T) {
 	f := newOIDCFixture(t)
-	if _, err := f.a.RecordOIDC(OIDCUser{ID: "alice"}); err != nil {
+	if _, err := f.a.RecordOIDC(context.Background(), OIDCUser{ID: "alice"}); err != nil {
 		t.Fatal(err)
 	}
-	id := f.a.Sessions.Create("oidc:alice")
-	if _, ok := f.a.Sessions.User(id); !ok {
+	id := f.a.Sessions.create(t, "oidc:alice")
+	if _, ok := f.a.Sessions.user(id); !ok {
 		t.Fatal("no session")
 	}
 	f.a.OnUserChanged("alice")
-	if _, ok := f.a.Sessions.User(id); ok {
+	if _, ok := f.a.Sessions.user(id); ok {
 		t.Fatal("session survived OnUserChanged")
 	}
 	if _, ok := f.a.Lookup("oidc:alice"); ok {

@@ -8,6 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"commandcenter/internal/logsafe"
+	"commandcenter/internal/meta"
 )
 
 // Password-guessing throttle (QA L-1). Every password check (Basic auth, UI
@@ -37,11 +40,18 @@ import (
 // refusal would let one client lock everyone out. Refusals end on their own
 // (nothing stays locked until an administrator acts), and tokens and
 // existing sessions are never affected.
+//
+// With Shared (PostgreSQL) a name's failures are counted in the database,
+// so the nodes of a cluster refuse a name together: N nodes do not allow N
+// times the guesses. A name's checks run one at a time per node, and the
+// address limit counts per node (N nodes allow an address N times its
+// failures before it is slowed). When the count cannot be read, the
+// attempt is refused unchecked (fail closed).
 const (
 	accountLimit = 5
 	refuseFirst  = time.Minute
 	refuseMax    = 15 * time.Minute
-	failForget   = time.Hour // a name's failures are forgotten after this long without another
+	failForget   = meta.AuthFailureForget // a name's failures are forgotten after this long without another
 	addrLimit    = 20
 	addrWindow   = 15 * time.Minute
 	failKeysMax  = 10000 // tracked names and addresses together
@@ -141,7 +151,11 @@ func (a *Authenticator) throttle(ctx context.Context, name string, check func(ca
 			"user", strconv.Quote(name), "remote", addr)
 		return Principal{}, ErrBadCredentials
 	}
-	if wait := a.refusal(k, addr); wait > 0 {
+	wait, counted, err := a.refusal(ctx, name, k, addr)
+	if err != nil {
+		return Principal{}, err
+	}
+	if wait > 0 {
 		return Principal{}, &ThrottledError{Wait: wait}
 	}
 	p, ok := check(true)
@@ -151,7 +165,10 @@ func (a *Authenticator) throttle(ctx context.Context, name string, check func(ca
 			return Principal{}, ErrBadCredentials
 		}
 		defer unlock()
-		if wait := a.refusal(k, addr); wait > 0 {
+		if wait, counted, err = a.refusal(ctx, name, k, addr); err != nil {
+			return Principal{}, err
+		}
+		if wait > 0 {
 			return Principal{}, &ThrottledError{Wait: wait}
 		}
 		if p, ok = check(true); !ok {
@@ -160,13 +177,18 @@ func (a *Authenticator) throttle(ctx context.Context, name string, check func(ca
 	}
 	if !ok {
 		if ctx.Err() == nil {
-			a.noteFailure(name, k, addr)
+			a.noteFailure(ctx, name, k, addr)
 		}
 		return Principal{}, ErrBadCredentials
 	}
 	a.mu.Lock()
 	delete(a.fails, k)
 	a.mu.Unlock()
+	if counted && a.Shared != nil {
+		if err := a.Shared.ClearAuthFailures(ctx, strings.ToLower(name)); err != nil {
+			a.logger().Warn("could not forget the failed sign-ins of a name after a success", "user", name, "err", logsafe.Err(err))
+		}
+	}
 	return p, nil
 }
 
@@ -199,34 +221,54 @@ func (a *Authenticator) lockName(ctx context.Context, k string) (unlock func(), 
 	}
 }
 
-// refusal is how long attempts for name key k from addr are still refused.
-func (a *Authenticator) refusal(k, addr string) time.Duration {
+// refusal is how long attempts for name (key k) from addr are still
+// refused, and whether failures of the name are counted. An error (the
+// shared count could not be read) refuses the attempt.
+func (a *Authenticator) refusal(ctx context.Context, name, k, addr string) (time.Duration, bool, error) {
 	now := a.clock()
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	limit := accountLimit
 	if r, ok := a.fails[addrKey(addr)]; ok && addr != "" && !lapsed(addrKey(addr), r, now) && r.n >= addrLimit {
 		limit = 1
 	}
 	r, ok := a.fails[k]
-	if !ok || lapsed(k, r, now) || r.n < limit {
-		return 0
+	a.mu.Unlock()
+	if a.Shared != nil {
+		n, at, err := a.Shared.AuthFailures(ctx, strings.ToLower(name))
+		if err != nil {
+			a.logger().Warn("sign-in refused: the failed sign-ins of the name could not be read", "user", name, "err", logsafe.Err(err))
+			return 0, false, ErrBadCredentials
+		}
+		r, ok = failRec{n: n, at: at}, n > 0
 	}
-	return r.at.Add(min(refuseFirst<<min(r.n-limit, 10), refuseMax)).Sub(now)
+	if !ok || lapsed(k, r, now) || r.n < limit {
+		return 0, ok, nil
+	}
+	return r.at.Add(min(refuseFirst<<min(r.n-limit, 10), refuseMax)).Sub(now), ok, nil
 }
 
 // noteFailure counts a failed attempt of name (key k) from addr and logs
 // when the name or the address reaches its limit.
-func (a *Authenticator) noteFailure(name, k, addr string) {
+func (a *Authenticator) noteFailure(ctx context.Context, name, k, addr string) {
 	now := a.clock()
-	a.mu.Lock()
-	r := a.fails[k]
-	if lapsed(k, r, now) {
-		r.n = 0
+	var r failRec
+	if a.Shared != nil {
+		n, err := a.Shared.AddAuthFailure(ctx, strings.ToLower(name), now)
+		if err != nil {
+			a.logger().Warn("could not count a failed sign-in", "user", name, "err", logsafe.Err(err))
+		}
+		r.n = n
 	}
-	r.n++
-	r.at = now
-	a.putFail(k, r, now)
+	a.mu.Lock()
+	if a.Shared == nil {
+		r = a.fails[k]
+		if lapsed(k, r, now) {
+			r.n = 0
+		}
+		r.n++
+		r.at = now
+		a.putFail(k, r, now)
+	}
 	ar := a.fails[addrKey(addr)]
 	if addr != "" {
 		if lapsed(addrKey(addr), ar, now) {

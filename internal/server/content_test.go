@@ -58,7 +58,7 @@ func newMavenServer(t *testing.T) (*httptest.Server, *auth.Sessions) {
 	t.Cleanup(func() { db.Close() })
 	store := &repo.Store{Blobs: map[string]*blob.Store{repo.DefaultStore: b}, DB: db, Now: time.Now}
 	authn := auth.New(cfg, db)
-	authn.Sessions = auth.NewSessions()
+	authn.Sessions = auth.NewSessions(db, nil)
 	s := &Server{
 		Registry: repo.NewRegistry(nil, cfg.Repositories),
 		Handlers: map[string]repo.Handler{"maven": maven.New(store, &resolve.Resolver{Store: store, Fetcher: proxy.New(store, http.DefaultClient, 4)})},
@@ -68,6 +68,16 @@ func newMavenServer(t *testing.T) (*httptest.Server, *auth.Sessions) {
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts, authn.Sessions
+}
+
+// newSession starts a UI session of owner.
+func newSession(t *testing.T, s *auth.Sessions, owner string) string {
+	t.Helper()
+	id, err := s.Create(context.Background(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func send(t *testing.T, method, url, body string, mod func(*http.Request)) *http.Response {
@@ -129,7 +139,7 @@ func TestRepositoryCachePrivateForAuthenticated(t *testing.T) {
 // Decision 7: a session cookie deletes Maven assets only with the UI header.
 func TestMavenDeleteWithSession(t *testing.T) {
 	ts, ses := newMavenServer(t)
-	cookie := &http.Cookie{Name: auth.SessionCookie, Value: ses.Create("ci")}
+	cookie := &http.Cookie{Name: auth.SessionCookie, Value: newSession(t, ses, "ci")}
 	put := func() {
 		if res := send(t, "PUT", ts.URL+jarPath, "x", basic); res.StatusCode != http.StatusCreated && res.StatusCode != http.StatusOK {
 			t.Fatalf("PUT status %d", res.StatusCode)
@@ -254,7 +264,7 @@ func TestCrossSiteUploadRefused(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 	store := &repo.Store{Blobs: map[string]*blob.Store{repo.DefaultStore: b}, DB: db, Now: time.Now}
 	authn := auth.New(cfg, db)
-	authn.Sessions = auth.NewSessions()
+	authn.Sessions = auth.NewSessions(db, nil)
 	s := &Server{
 		Registry: repo.NewRegistry(nil, cfg.Repositories),
 		Handlers: map[string]repo.Handler{"pypi": pypi.New(store, proxy.New(store, http.DefaultClient, 4), func() string { return "http://localhost" })},
@@ -292,7 +302,7 @@ func TestCrossSiteUploadRefused(t *testing.T) {
 		t.Fatalf("CLI upload: %d, then GET %d", c, stored("1.0"))
 	}
 	ui := func(r *http.Request) { // as the browser sends the web UI's upload
-		r.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: authn.Sessions.Create("ci")})
+		r.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: newSession(t, authn.Sessions, "ci")})
 		r.Header.Set(auth.UIHeader, "1")
 		r.Header.Set("Sec-Fetch-Site", "same-origin")
 		r.Header.Set("Origin", ts.URL)

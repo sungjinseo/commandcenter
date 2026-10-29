@@ -77,6 +77,7 @@ type Member struct {
 
 	draining     atomic.Bool
 	leader       atomic.Bool
+	authPruned   time.Time              // the last pruneAuthState; beat runs on one goroutine at a time
 	incompatible atomic.Pointer[string] // why the database schema is not this build's, or nil
 
 	stop  context.CancelFunc
@@ -220,6 +221,12 @@ ON CONFLICT(id) DO UPDATE SET heartbeat_at = excluded.heartbeat_at, draining = e
 	if leader {
 		if _, err := d.sql.execFree(ctx, `DELETE FROM nodes WHERE heartbeat_at < `+now+` - ?`, nodePrune.Milliseconds()); err != nil {
 			return err
+		}
+		if t := time.Now(); t.Sub(m.authPruned) >= authPruneEvery {
+			if err := d.pruneAuthState(ctx, t); err != nil {
+				return err
+			}
+			m.authPruned = t
 		}
 	}
 	version, compat, err := readSchema(ctx, d.sql)
