@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"commandcenter/internal/csel"
 	"commandcenter/internal/meta"
 )
 
@@ -31,10 +32,21 @@ var actionBits = map[string]actionSet{
 
 // compiledRole is a role's privileges as bit sets per target kind.
 type compiledRole struct {
-	all     actionSet
-	formats map[string]actionSet
-	repos   map[string]actionSet
+	all       actionSet
+	formats   map[string]actionSet
+	repos     map[string]actionSet
+	selectors []selectorGrant
 }
+
+// selectorGrant is a "selector:<name>" privilege: bits on the paths the
+// selector matches, in the repositories named by repos ("*" for any).
+type selectorGrant struct {
+	name  string
+	repos map[string]bool
+	bits  actionSet
+}
+
+func (g selectorGrant) inScope(repo string) bool { return g.repos["*"] || g.repos[repo] }
 
 func compileRole(r meta.Role) *compiledRole {
 	c := &compiledRole{formats: map[string]actionSet{}, repos: map[string]actionSet{}}
@@ -56,6 +68,12 @@ func compileRole(r meta.Role) *compiledRole {
 		case strings.HasPrefix(p.Target, "repo:"):
 			n := strings.TrimPrefix(p.Target, "repo:")
 			c.repos[n] |= bits
+		case strings.HasPrefix(p.Target, meta.SelectorPrefix):
+			g := selectorGrant{name: strings.TrimPrefix(p.Target, meta.SelectorPrefix), repos: map[string]bool{}, bits: bits}
+			for _, r := range p.Repos {
+				g.repos[r] = true
+			}
+			c.selectors = append(c.selectors, g)
 		}
 	}
 	return c
@@ -71,16 +89,31 @@ type Snapshot struct {
 	roleList []meta.Role // sorted by id
 	settings meta.Settings
 	realms   map[string]bool // enabled realm ids
+	// selectors are the parsed content selectors by name; a "selector:"
+	// privilege on a name that is missing here (deleted, or an expression
+	// this build cannot parse) grants nothing.
+	selectors map[string]*csel.Expr
 }
 
-// NewSnapshot builds a snapshot from stored records. The inputs are copied,
-// so the caller may keep changing them. The built-in admin role is always
-// present.
+// NewSnapshot is NewSnapshotWith without content selectors.
 func NewSnapshot(users []meta.User, roles []meta.Role, settings meta.Settings) *Snapshot {
+	return NewSnapshotWith(users, roles, settings, nil)
+}
+
+// NewSnapshotWith builds a snapshot from stored records. The inputs are
+// copied, so the caller may keep changing them. The built-in admin role is
+// always present.
+func NewSnapshotWith(users []meta.User, roles []meta.Role, settings meta.Settings, selectors []meta.ContentSelector) *Snapshot {
 	s := &Snapshot{
-		users:  make(map[string]meta.User, len(users)),
-		roles:  make(map[string]*compiledRole, len(roles)+1),
-		realms: map[string]bool{},
+		users:     make(map[string]meta.User, len(users)),
+		roles:     make(map[string]*compiledRole, len(roles)+1),
+		realms:    map[string]bool{},
+		selectors: make(map[string]*csel.Expr, len(selectors)),
+	}
+	for _, sel := range selectors {
+		if e, err := csel.Parse(sel.Expression); err == nil {
+			s.selectors[sel.Name] = e
+		}
 	}
 	for _, u := range users {
 		u.Roles = append([]string{}, u.Roles...)
@@ -119,6 +152,9 @@ func copyRole(r meta.Role) meta.Role {
 	privs := make([]meta.Privilege, len(r.Privileges))
 	for i, p := range r.Privileges {
 		privs[i] = meta.Privilege{Target: p.Target, Actions: append([]string{}, p.Actions...)}
+		if p.Repos != nil {
+			privs[i].Repos = append([]string{}, p.Repos...)
+		}
 	}
 	r.Privileges = privs
 	return r
@@ -186,8 +222,18 @@ func (s *Snapshot) canPasswordLogin(u meta.User) bool {
 }
 
 // has reports whether any of roles grants one of the actions in want on the
-// repository named repo of format format ("" if unknown).
+// repository named repo of format format ("" if unknown). A selector
+// privilege counts when the repository is in its scope: it could match some
+// path there, so listings work; hasPath is the exact check.
 func (s *Snapshot) has(roles []string, repo, format string, want actionSet) bool {
+	return s.hasPath(roles, repo, format, want, "", false)
+}
+
+// hasPath is has for one path (the part after /repository/<name>/, or a
+// docker image name): a selector privilege counts only when the repository
+// is in its scope and its expression matches (format in Nexus spelling,
+// "/"+path). With exact false the expression is not consulted.
+func (s *Snapshot) hasPath(roles []string, repo, format string, want actionSet, path string, exact bool) bool {
 	for _, id := range roles {
 		r := s.roles[id]
 		if r == nil {
@@ -196,8 +242,29 @@ func (s *Snapshot) has(roles []string, repo, format string, want actionSet) bool
 		if r.all&want != 0 || r.repos[repo]&want != 0 || (format != "" && r.formats[format]&want != 0) {
 			return true
 		}
+		for _, g := range r.selectors {
+			if g.bits&want == 0 || !g.inScope(repo) {
+				continue
+			}
+			e := s.selectors[g.name]
+			if e == nil {
+				continue
+			}
+			if !exact || e.Match(NexusFormat(format), "/"+strings.TrimPrefix(path, "/")) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// NexusFormat is the format name content selectors see: Nexus's spelling,
+// "maven2" for maven and the others unchanged.
+func NexusFormat(format string) string {
+	if format == "maven" {
+		return "maven2"
+	}
+	return format
 }
 
 // ErrLockout reports a change that would leave nobody able to administer

@@ -115,6 +115,9 @@ func userJSON(x meta.User) userDTO {
 type privilegeDTO struct {
 	Target  string   `json:"target"`
 	Actions []string `json:"actions"`
+	// Repos scopes a "selector:<name>" target to repositories ("*" for
+	// any); absent for the other targets.
+	Repos []string `json:"repos,omitempty"`
 }
 
 type roleDTO struct {
@@ -132,7 +135,7 @@ func roleJSON(x meta.Role) roleDTO {
 		if acts == nil {
 			acts = []string{}
 		}
-		privs = append(privs, privilegeDTO{Target: p.Target, Actions: acts})
+		privs = append(privs, privilegeDTO{Target: p.Target, Actions: acts, Repos: p.Repos})
 	}
 	return roleDTO{ID: x.ID, Description: x.Description, Privileges: privs,
 		CreatedAt: rfc3339(x.CreatedAt), UpdatedAt: rfc3339(x.UpdatedAt)}
@@ -209,16 +212,53 @@ func (u *UI) checkRoleRefs(ctx context.Context, v *validation, ids []string) err
 // validatePrivileges checks a role's privileges. A "repo:" target must name
 // an existing repository (QA N-25) unless the stored role (kept) already
 // has it: a privilege an older version left from a deleted repository may
-// stay while the role is edited.
+// stay while the role is edited. A "selector:" target must name a stored
+// content selector and list the repositories it applies to ("*" for any);
+// a repository the stored privilege already named may stay.
 func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta.Privilege) {
 	valid := map[string]bool{}
 	for _, a := range meta.Actions {
 		valid[a] = true
 	}
+	var selectors map[string]bool // loaded on the first selector target
 	targets := map[string]bool{}
 	for i, p := range privs {
 		at := fmt.Sprintf("privilege %d", i+1)
+		key := p.Target
 		switch {
+		case strings.HasPrefix(p.Target, meta.SelectorPrefix):
+			if selectors == nil {
+				selectors = map[string]bool{}
+				if list, err := u.DB.ListContentSelectors(context.Background()); err == nil {
+					for _, s := range list {
+						selectors[s.Name] = true
+					}
+				}
+			}
+			if name := strings.TrimPrefix(p.Target, meta.SelectorPrefix); !selectors[name] {
+				v.add("%s: unknown content selector %q", at, name)
+			}
+			if len(p.Repos) == 0 {
+				v.add(`%s: a selector privilege needs repos (repository names, or "*" for any)`, at)
+			}
+			wasKept := func(repo string) bool {
+				return slices.ContainsFunc(kept, func(k meta.Privilege) bool { return k.Target == p.Target && slices.Contains(k.Repos, repo) })
+			}
+			for _, repo := range p.Repos {
+				if repo != "*" && u.Repos.Get(repo) == nil && !wasKept(repo) {
+					v.add("%s: unknown repository %q", at, repo)
+				}
+			}
+			key += "|" + strings.Join(p.Repos, ",")
+		case len(p.Repos) > 0:
+			v.add(`%s: repos is only valid with a "selector:<name>" target`, at)
+		}
+		if targets[key] {
+			v.add("%s: duplicate target %q", at, p.Target)
+		}
+		targets[key] = true
+		switch {
+		case strings.HasPrefix(p.Target, meta.SelectorPrefix):
 		case p.Target == "*":
 		case strings.HasPrefix(p.Target, "format:"):
 			if f := strings.TrimPrefix(p.Target, "format:"); !contains(accessFormats, f) {
@@ -232,12 +272,8 @@ func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta
 				v.add("%s: unknown repository %q", at, name)
 			}
 		default:
-			v.add(`%s: target %q must be "*", "format:<format>" or "repo:<name>"`, at, p.Target)
+			v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>" or "selector:<name>"`, at, p.Target)
 		}
-		if targets[p.Target] {
-			v.add("%s: duplicate target %q", at, p.Target)
-		}
-		targets[p.Target] = true
 		if len(p.Actions) == 0 {
 			v.add("%s: at least one action is required", at)
 		}
@@ -650,6 +686,18 @@ func (u *UI) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 
 // ---- roles ----
 
+// NexusPrivRolePrefix starts the id of a role the Nexus API's privilege
+// endpoints manage (one privilege each, so Nexus role assignment works):
+// "priv:<privilege name>". The rest of the id follows the role name rules.
+const NexusPrivRolePrefix = "priv:"
+
+func checkRoleID(id string) error {
+	if rest, ok := strings.CutPrefix(id, NexusPrivRolePrefix); ok {
+		return repo.CheckName("role", rest)
+	}
+	return repo.CheckName("role", id)
+}
+
 func (u *UI) listRoles(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
@@ -686,7 +734,11 @@ func (u *UI) getRole(w http.ResponseWriter, r *http.Request) {
 func toPrivileges(in []privilegeDTO) []meta.Privilege {
 	out := make([]meta.Privilege, 0, len(in))
 	for _, p := range in {
-		out = append(out, meta.Privilege{Target: p.Target, Actions: append([]string{}, p.Actions...)})
+		np := meta.Privilege{Target: p.Target, Actions: append([]string{}, p.Actions...)}
+		if strings.HasPrefix(p.Target, meta.SelectorPrefix) {
+			np.Repos = append([]string{}, p.Repos...)
+		}
+		out = append(out, np)
 	}
 	return out
 }
@@ -706,7 +758,7 @@ func (u *UI) createRole(w http.ResponseWriter, r *http.Request) {
 	u.accessMu.Lock() // load, lockout check, write and reload as one step (final review I3)
 	defer u.accessMu.Unlock()
 	var v validation
-	if err := repo.CheckName("role", body.ID); err != nil {
+	if err := checkRoleID(body.ID); err != nil {
 		v = append(v, err.(*repo.ValidationError).Errors...)
 	} else if strings.EqualFold(body.ID, meta.AdminRole) {
 		v.add("role id %q is reserved for the built-in administrator role", body.ID)

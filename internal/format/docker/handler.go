@@ -111,9 +111,9 @@ func (h *Handler) allowed(c caller, name, action string) bool {
 	if c.tok != nil {
 		return c.tok.has("repository", name, action)
 	}
-	repoName, _, _ := strings.Cut(name, "/")
+	repoName, image, _ := strings.Cut(name, "/")
 	acc, ok := accessFor(action)
-	return ok && h.Auth.Can(c.p, repoName, acc)
+	return ok && h.Auth.CanPath(c.p, repoName, acc, image)
 }
 
 // deny is the error for a caller that may not: 401 (with the challenge) for

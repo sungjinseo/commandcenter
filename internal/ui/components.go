@@ -377,7 +377,7 @@ func (u *UI) deleteComponent(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	c := Component{Repo: rp.Name, Format: rp.Format, Group: q.Get("group"), Name: q.Get("name"), Version: q.Get("version")}
 	switch {
-	case !u.Auth.Can(p, rp.Name, auth.Delete):
+	case !u.Auth.CanPath(p, rp.Name, auth.Delete, ""): // a component spans paths: the whole repository is needed
 		writeError(w, http.StatusForbidden, fmt.Sprintf("user %q may not delete in %q", p.User, rp.Name))
 	case u.Deleters == nil:
 		writeError(w, http.StatusNotImplemented, "component deletion is not available")

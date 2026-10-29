@@ -138,13 +138,13 @@ func (h *Handler) grant(p auth.Principal, s scope) scope {
 			out.Actions = []string{"*"}
 		}
 	case "repository":
-		repoName, _, _ := strings.Cut(s.Name, "/")
+		repoName, image, _ := strings.Cut(s.Name, "/")
 		readOnly := false
 		if rp := h.Repos.Get(repoName); rp != nil && rp.Type != "hosted" {
 			readOnly = true
 		}
 		for _, a := range s.Actions {
-			if acc, ok := accessFor(a); ok && h.Auth.Can(p, repoName, acc) && (a == "pull" || !readOnly) {
+			if acc, ok := accessFor(a); ok && h.Auth.CanPath(p, repoName, acc, image) && (a == "pull" || !readOnly) {
 				out.Actions = append(out.Actions, a)
 			}
 		}

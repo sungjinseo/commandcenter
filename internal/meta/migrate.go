@@ -27,6 +27,8 @@ var copyTables = []struct{ name, cols string }{
 		"last_duration_ms, last_message, last_log, next_run, last_removed, last_bytes, notify_email"},
 	{"webhooks", "id, name, url, secret, events, repo, enabled, created_at, updated_at"},
 	{"webhook_deliveries", "id, webhook_id, event, status, attempts, last_error, created_at, next_at, response_code, payload"},
+	{"routing_rules", "name, description, mode, matchers, created_at, updated_at"},
+	{"content_selectors", "name, description, expression, created_at, updated_at"},
 }
 
 // copyBatchParams bounds the bind parameters of one INSERT (SQLite's

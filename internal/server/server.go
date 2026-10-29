@@ -141,13 +141,25 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	if acc.IsWrite() && rp.WriteTarget != nil {
 		target = rp.WriteTarget.Name
 	}
-	if !s.Auth.Can(p, target, acc) {
+	if !s.Auth.CanPath(p, target, acc, path) {
 		if !s.Auth.Can(p, rp.Name, auth.Read) {
 			h = nil // its format's error body would tell it from a missing repository
 		}
 		deny(w, r, p, h)
 		return
 	}
+	// A proxy's routing rule refuses the path before anything is served,
+	// cached or not (a group member's rule makes the member skip the path).
+	if rp.Type == "proxy" && !s.Registry.RouteAllowed(rp, path) {
+		err := repo.Errorf(http.StatusForbidden, "path %q is blocked by routing rule %q", "/"+path, rp.RoutingRule)
+		if ew, ok := h.(repo.ErrorWriter); ok {
+			ew.WriteError(w, r, err)
+		} else {
+			repo.WriteError(w, r, err)
+		}
+		return
+	}
+	r = r.WithContext(auth.WithPath(r.Context(), path)) // for the handlers' own Permits checks
 	// Only callers who may use the repository learn that it is offline. A
 	// group write goes to its writeMember, so an offline one answers the same
 	// 503 (final review M4); a group read whose members are all offline

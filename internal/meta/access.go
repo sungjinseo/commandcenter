@@ -57,10 +57,13 @@ type User struct {
 	UpdatedAt    time.Time
 }
 
-// Privilege grants actions on a target: "*", "format:<fmt>" or "repo:<name>".
+// Privilege grants actions on a target: "*", "format:<fmt>", "repo:<name>"
+// or "selector:<content selector>". Repos scopes a selector target to
+// repositories ("*" is any); it is empty for the other targets.
 type Privilege struct {
 	Target  string   `json:"target"`
 	Actions []string `json:"actions"`
+	Repos   []string `json:"repos,omitempty"`
 }
 
 // Role is a stored role. Privileges is never nil when read back.
@@ -381,6 +384,9 @@ func (d *DB) ImportAccess(ctx context.Context, cfg *config.Config) (bool, error)
 			if err := insertUser(ctx, tx.q, u); err != nil {
 				return fmt.Errorf("user %q: %w", u.ID, err)
 			}
+		}
+		if err := importSecurity(ctx, tx.q, cfg); err != nil {
+			return err
 		}
 		if err := saveSettings(ctx, tx.q, SettingsFromConfig(cfg)); err != nil {
 			return err

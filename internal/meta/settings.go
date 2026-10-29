@@ -298,9 +298,10 @@ func saveSettings(ctx context.Context, q querier, s Settings) error {
 
 // AccessData is everything the auth snapshot is built from.
 type AccessData struct {
-	Users    []User
-	Roles    []Role
-	Settings Settings
+	Users     []User
+	Roles     []Role
+	Settings  Settings
+	Selectors []ContentSelector // the content selectors "selector:" privileges name
 }
 
 // LoadAccess reads users, roles and settings in one read transaction, so a
@@ -319,6 +320,9 @@ func (d *DB) LoadAccess(ctx context.Context) (AccessData, error) {
 	}
 	if out.Roles, err = listRoles(ctx, q); err != nil {
 		return AccessData{}, fmt.Errorf("load roles: %w", err)
+	}
+	if out.Selectors, err = listContentSelectors(ctx, q); err != nil {
+		return AccessData{}, fmt.Errorf("load content selectors: %w", err)
 	}
 	if out.Settings, err = loadSettings(ctx, q); err != nil {
 		return AccessData{}, fmt.Errorf("load settings: %w", err)

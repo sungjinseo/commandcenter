@@ -349,4 +349,10 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries(
   next_at BIGINT NOT NULL DEFAULT 0, response_code BIGINT NOT NULL DEFAULT 0, payload TEXT COLLATE "C" NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS webhook_deliveries_hook ON webhook_deliveries(webhook_id, created_at);
 CREATE TABLE IF NOT EXISTS schema_version(version BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS routing_rules(
+  name TEXT COLLATE "C" PRIMARY KEY, description TEXT COLLATE "C" NOT NULL DEFAULT '', mode TEXT COLLATE "C" NOT NULL,
+  matchers TEXT COLLATE "C" NOT NULL DEFAULT '[]', created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
+CREATE TABLE IF NOT EXISTS content_selectors(
+  name TEXT COLLATE "C" PRIMARY KEY, description TEXT COLLATE "C" NOT NULL DEFAULT '', expression TEXT COLLATE "C" NOT NULL,
+  created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);
 `

@@ -202,7 +202,7 @@ func TestRepositoriesCreateUpdateDelete(t *testing.T) {
 	  "httpClient":{"blocked":false,"autoBlock":true,
 	    "connection":{"retries":0,"userAgentSuffix":"string","timeout":60,"enableCircularRedirects":false,"enableCookies":false,"useTrustStore":false},
 	    "authentication":{"type":"username","username":"bob","password":"secret"}},
-	  "routingRule":"string","npm":{"removeNonCataloged":false,"removeQuarantined":false}}`
+	  "npm":{"removeNonCataloged":false,"removeQuarantined":false}}`
 	const group = `{"name":"maven-all","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true},
 	  "group":{"memberNames":["maven-releases","maven-snapshots","maven-central"],"writableMember":"maven-snapshots"}}`
 

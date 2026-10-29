@@ -120,6 +120,11 @@ type Config struct {
 	Roles               map[string]Role `yaml:"roles"`
 	Repositories        []Repository    `yaml:"repositories"`
 
+	// RoutingRules and ContentSelectors are imported with users and roles on
+	// the first start and managed in the web UI afterwards.
+	RoutingRules     []RoutingRule     `yaml:"routingRules"`
+	ContentSelectors []ContentSelector `yaml:"contentSelectors"`
+
 	// Present names the top-level keys the file sets, so the app can warn
 	// about keys that the database has superseded.
 	Present map[string]bool `yaml:"-"`
@@ -154,6 +159,25 @@ type Role struct {
 	Write []string `yaml:"write"`
 }
 
+// RoutingRule decides which paths a proxy may ask its remote for: BLOCK
+// refuses the paths a matcher matches, ALLOW refuses every other path.
+// Matchers are RE2 regular expressions matched against the request path
+// with a leading "/" (Nexus uses Java regular expressions there).
+type RoutingRule struct {
+	Name        string   `yaml:"name"`
+	Description string   `yaml:"description"`
+	Mode        string   `yaml:"mode"` // BLOCK | ALLOW
+	Matchers    []string `yaml:"matchers"`
+}
+
+// ContentSelector names a csel expression that a "selector:<name>"
+// privilege scopes to paths.
+type ContentSelector struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Expression  string `yaml:"expression"`
+}
+
 type RemoteAuth struct {
 	Username    string `yaml:"username" json:"username,omitempty"`
 	Password    string `yaml:"password" json:"password,omitempty"`
@@ -171,6 +195,9 @@ type Repository struct {
 	MetadataMaxAge   Duration    `yaml:"metadataMaxAge" json:"metadataMaxAge,omitempty"`
 	ContentMaxAge    Duration    `yaml:"contentMaxAge" json:"contentMaxAge,omitempty"`
 	NegativeCacheTTL Duration    `yaml:"negativeCacheTTL" json:"negativeCacheTTL,omitempty"`
+	// RoutingRule names the routing rule applied to remote requests (proxy
+	// only; "" is none). The registry checks the rule exists.
+	RoutingRule string `yaml:"routingRule,omitempty" json:"routingRule,omitempty"`
 
 	// group
 	Members     []string `yaml:"members" json:"members,omitempty"`
@@ -488,6 +515,9 @@ func ValidateDefinition(r Repository) error {
 	if r.Type == "group" && r.VersionPolicy != "" {
 		errs = append(errs, fmt.Errorf("repository %q: versionPolicy is not valid for group repositories", r.Name))
 	}
+	if r.Type != "proxy" && r.RoutingRule != "" {
+		errs = append(errs, fmt.Errorf("repository %q: routingRule is only valid for proxy repositories", r.Name))
+	}
 	if (r.Distribution != "" || r.Component != "" || r.SigningKey != "") && (r.Format != "apt" || r.Type != "hosted") {
 		errs = append(errs, fmt.Errorf("repository %q: distribution, component and signingKey are only valid for apt hosted repositories", r.Name))
 	}
@@ -710,4 +740,4 @@ func topLevelKeys(b []byte) map[string]bool {
 
 // AccessKeys are the top-level keys imported into the database once
 // (plan 12) and ignored afterwards.
-var AccessKeys = []string{"users", "roles", "anonymousRead", "baseURL", "maxUploadMiB"}
+var AccessKeys = []string{"users", "roles", "anonymousRead", "baseURL", "maxUploadMiB", "routingRules", "contentSelectors"}

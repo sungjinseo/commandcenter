@@ -366,6 +366,22 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 
 	registry.Policies = cleanup.PolicyLookup(db)
 	dockerH.Repos = registry
+	// Routing rules: loaded once here, reloaded by the UI after a change,
+	// and applied by both fetchers before any remote request.
+	rules, err := db.ListRoutingRules(context.Background())
+	if err == nil {
+		err = registry.SetRoutingRules(rules)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load routing rules: %w", err)
+	}
+	fetcher.RouteAllowed, dockerH.Fetcher.RouteAllowed = registry.RouteAllowed, registry.RouteAllowed
+	for _, rp := range registry.Snapshot().Sorted {
+		if rp.RoutingRule != "" && registry.Route(rp.RoutingRule) == nil {
+			log.Warn("repository names a routing rule that does not exist; every path goes to the remote until the rule is created or the repository edited",
+				"repository", rp.Name, "routingRule", rp.RoutingRule)
+		}
+	}
 	// Route each repository's blob I/O to the store it names; an unknown or
 	// empty name resolves to the default store.
 	store.StoreFor = func(name string) string {

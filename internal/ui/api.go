@@ -59,6 +59,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.oidcRealmRoutes(mux)
 	u.taskRoutes(mux)
 	u.webhookRoutes(mux)
+	u.securityRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }
@@ -459,7 +460,7 @@ func (u *UI) asset(w http.ResponseWriter, r *http.Request) {
 		"lastDownloaded": rfc3339(a.LastDownloaded),
 		"downloadUrl":    u.repoURL(rp.Name) + escapePath(a.Path),
 		// browse alone shows the asset but cannot download it (Decision 2)
-		"canDownload": u.Auth.Can(principal(r), rp.Name, auth.Read),
+		"canDownload": u.Auth.CanPath(principal(r), rp.Name, auth.Read, a.Path),
 	}
 	// A crate file's path holds the name lowercased; the asset view's
 	// `cargo add` needs the published spelling (QA L-20).

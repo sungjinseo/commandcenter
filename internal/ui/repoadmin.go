@@ -50,10 +50,12 @@ type repoRequest struct {
 	NegativeCacheTTL       string   `json:"negativeCacheTTL"`
 	Members                []string `json:"members"`
 	WriteMember            string   `json:"writeMember"`
-	VersionPolicy          string   `json:"versionPolicy"`
-	WritePolicy            string   `json:"writePolicy"`
-	Depth                  int      `json:"depth"` // yum hosted: 0 | 1
-	AnonymousRead          *bool    `json:"anonymousRead"`
+	// RoutingRule names the proxy's routing rule; "" is none.
+	RoutingRule   string `json:"routingRule"`
+	VersionPolicy string `json:"versionPolicy"`
+	WritePolicy   string `json:"writePolicy"`
+	Depth         int    `json:"depth"` // yum hosted: 0 | 1
+	AnonymousRead *bool  `json:"anonymousRead"`
 	// CleanupPolicy: absent (null) keeps the stored policy on update and
 	// means none on create; "" clears it; a name sets it.
 	CleanupPolicy *string `json:"cleanupPolicy"`
@@ -90,6 +92,7 @@ type repoConfigResponse struct {
 	NegativeCacheTTL     string            `json:"negativeCacheTTL"`
 	Members              []string          `json:"members"`
 	WriteMember          string            `json:"writeMember"`
+	RoutingRule          string            `json:"routingRule"`
 	VersionPolicy        string            `json:"versionPolicy"`
 	WritePolicy          string            `json:"writePolicy"`
 	Depth                int               `json:"depth"`
@@ -128,6 +131,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		NegativeCacheTTL:     d.NegativeCacheTTL.Text(),
 		Members:              append([]string{}, d.Members...),
 		WriteMember:          d.WriteMember,
+		RoutingRule:          d.RoutingRule,
 		VersionPolicy:        d.VersionPolicy,
 		WritePolicy:          d.WritePolicy,
 		Depth:                d.Depth,
@@ -152,7 +156,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error) {
 	d := config.Repository{
 		Name: b.Name, Format: b.Format, Type: b.Type, Remote: b.Remote,
-		Members: b.Members, WriteMember: b.WriteMember,
+		Members: b.Members, WriteMember: b.WriteMember, RoutingRule: b.RoutingRule,
 		VersionPolicy: b.VersionPolicy, WritePolicy: b.WritePolicy, Depth: b.Depth,
 		AnonymousRead: b.AnonymousRead, Online: b.Online,
 		BlobStore:    b.BlobStore,

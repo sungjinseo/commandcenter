@@ -109,6 +109,12 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries(
   attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
   next_at INTEGER NOT NULL DEFAULT 0, response_code INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS webhook_deliveries_hook ON webhook_deliveries(webhook_id, created_at);
+CREATE TABLE IF NOT EXISTS routing_rules(
+  name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', mode TEXT NOT NULL,
+  matchers TEXT NOT NULL DEFAULT '[]', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS content_selectors(
+  name TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '', expression TEXT NOT NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
 `
 
 // schemaVersion is the database layout this build reads and writes, kept in
@@ -126,6 +132,8 @@ CREATE INDEX IF NOT EXISTS webhook_deliveries_hook ON webhook_deliveries(webhook
 //	3: webhooks and webhook_deliveries. An older build would not misread
 //	   them, but upgrade runs no DDL on a database already at its own
 //	   version, so the tables are only created by a bump.
+//	3: routing_rules and content_selectors: an older build would send a
+//	   proxy's blocked paths to the remote and drop "selector:" privileges.
 const schemaVersion = 3
 
 // Open opens the metadata database and creates or upgrades its tables:

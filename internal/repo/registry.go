@@ -33,6 +33,9 @@ type Registry struct {
 	snap atomic.Pointer[Snapshot]
 	db   *meta.DB
 
+	// routes are the compiled routing rules by name (routing.go).
+	routes atomic.Pointer[map[string]*Route]
+
 	// gens gives each repository incarnation a distinct Gen: it changes when a
 	// repository is created again or its remote changes, never otherwise.
 	gens    map[string]uint64
@@ -185,6 +188,9 @@ func (r *Registry) CreateDef(ctx context.Context, def config.Repository) (config
 	if err := r.checkPolicy(ctx, def); err != nil {
 		return config.Repository{}, err
 	}
+	if err := r.checkRoute(def); err != nil {
+		return config.Repository{}, err
+	}
 	if err := r.db.CreateRepository(ctx, def); err != nil {
 		if errors.Is(err, meta.ErrExists) {
 			return config.Repository{}, &ValidationError{Errors: []string{fmt.Sprintf("duplicate repository name %q", def.Name)}}
@@ -269,6 +275,9 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 		return config.Repository{}, err
 	}
 	if err := r.checkPolicy(ctx, def); err != nil {
+		return config.Repository{}, err
+	}
+	if err := r.checkRoute(def); err != nil {
 		return config.Repository{}, err
 	}
 	if err := r.db.UpdateRepository(ctx, def); err != nil {

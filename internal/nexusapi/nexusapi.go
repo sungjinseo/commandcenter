@@ -81,6 +81,7 @@ func (h *Handler) init() {
 	m.HandleFunc("GET "+p+"/security/roles", h.roles)
 	m.HandleFunc("GET "+p+"/blobstores", h.blobStores)
 	m.HandleFunc("GET "+p+"/tasks", h.tasks)
+	h.securityRoutes(m, p)
 	m.HandleFunc(p+"/", func(w http.ResponseWriter, r *http.Request) { writeMessage(w, http.StatusNotFound, "not found") })
 	h.mux = m
 }
@@ -314,6 +315,7 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 			hc["authentication"] = map[string]any{"type": "bearerToken"}
 		}
 		out["httpClient"] = hc
+		out["routingRule"], out["routingRuleName"] = d.RoutingRule, d.RoutingRule
 	case "group":
 		g := map[string]any{"memberNames": append([]string{}, d.Members...)}
 		if d.WriteMember != "" {
@@ -407,6 +409,10 @@ type repoBody struct {
 	Maven struct {
 		VersionPolicy string `json:"versionPolicy"`
 	} `json:"maven"`
+	// RoutingRule is the request field, RoutingRuleName the one Nexus
+	// returns; either is accepted.
+	RoutingRule     *string `json:"routingRule"`
+	RoutingRuleName *string `json:"routingRuleName"`
 }
 
 // minutesText renders Nexus minutes in the config format.
@@ -438,6 +444,11 @@ func uiRepo(format, typ string, b repoBody) map[string]any {
 	}
 	if typ == "group" { // Nexus group bodies name a blob store; Command Center groups have none
 		out["blobStore"] = ""
+	}
+	if b.RoutingRule != nil {
+		out["routingRule"] = *b.RoutingRule
+	} else if b.RoutingRuleName != nil {
+		out["routingRule"] = *b.RoutingRuleName
 	}
 	if b.Cleanup != nil { // ponytail: one policy per repository here; Nexus allows several
 		name := ""

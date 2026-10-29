@@ -181,7 +181,7 @@ const (
 // the app uses Open over the database.
 func New(cfg *config.Config, tokens TokenStore) *Authenticator {
 	a := &Authenticator{tokens: tokens, cache: map[string]time.Time{}}
-	a.setSnapshot(NewSnapshot(meta.UsersFromConfig(cfg), meta.RolesFromConfig(cfg), meta.SettingsFromConfig(cfg)))
+	a.setSnapshot(NewSnapshotWith(meta.UsersFromConfig(cfg), meta.RolesFromConfig(cfg), meta.SettingsFromConfig(cfg), meta.SelectorsFromConfig(cfg)))
 	anon := map[string]*bool{}
 	formats := map[string]string{}
 	for _, r := range cfg.Repositories {
@@ -223,7 +223,7 @@ func (a *Authenticator) Reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	old, s := a.snap.Load(), NewSnapshot(data.Users, data.Roles, data.Settings)
+	old, s := a.snap.Load(), NewSnapshotWith(data.Users, data.Roles, data.Settings, data.Selectors)
 	a.setSnapshot(s)
 	if old == nil {
 		return nil
@@ -565,8 +565,22 @@ func principal(u meta.User) Principal {
 // Read and Browse: anonymous read (the repository's override, else the global
 // setting) admits everyone; otherwise a signed-in user needs authenticatedRead
 // or a read privilege (Browse also accepts a browse privilege). Add, Edit and
-// Delete need the matching privilege. Admins may do everything.
+// Delete need the matching privilege. Admins may do everything. A
+// "selector:" privilege counts whenever the repository is in its scope (the
+// user could reach some path there); CanPath is the exact, per-path check.
 func (a *Authenticator) Can(p Principal, repo string, acc Access) bool {
+	return a.can(p, repo, acc, "", false)
+}
+
+// CanPath is Can for one path of the repository: the path after
+// /repository/<name>/ (a docker image name for docker). A "selector:"
+// privilege counts only when its selector matches the path; "" is the
+// repository root ("/"), which only a selector matching "/" grants.
+func (a *Authenticator) CanPath(p Principal, repo string, acc Access, path string) bool {
+	return a.can(p, repo, acc, path, true)
+}
+
+func (a *Authenticator) can(p Principal, repo string, acc Access, path string, exact bool) bool {
 	if acc == Public {
 		return true
 	}
@@ -596,7 +610,7 @@ func (a *Authenticator) Can(p Principal, repo string, acc Access) bool {
 	if a.RepoFormat != nil {
 		format = a.RepoFormat(repo)
 	}
-	return s.has(p.roles, repo, format, accessBits[acc])
+	return s.hasPath(p.roles, repo, format, accessBits[acc], path, exact)
 }
 
 func (a *Authenticator) anonymousRead(s *Snapshot, repo string) bool {
@@ -722,6 +736,21 @@ func FromContext(ctx context.Context) Principal {
 	return p
 }
 
+type pathKey struct{}
+
+// WithPath records the request's repository path, so Permits can apply
+// "selector:" privileges to it. The server sets it for every repository
+// request.
+func WithPath(ctx context.Context, path string) context.Context {
+	return context.WithValue(ctx, pathKey{}, path)
+}
+
+// PathFromContext returns the path WithPath stored and whether one was.
+func PathFromContext(ctx context.Context) (string, bool) {
+	p, ok := ctx.Value(pathKey{}).(string)
+	return p, ok
+}
+
 // tokenShaped reports whether s has the form of an issued token: a token
 // prefix and 64 hex digits (storeToken).
 func tokenShaped(s string) bool {
@@ -745,12 +774,16 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
-// Permits reports whether the principal in ctx may perform acc on repo. A nil
+// Permits reports whether the principal in ctx may perform acc on repo, on
+// the request path when the server recorded one (WithPath). A nil
 // Authenticator permits everything: handlers built without one (unit tests)
 // rely on the server's check alone.
 func (a *Authenticator) Permits(ctx context.Context, repo string, acc Access) bool {
 	if a == nil {
 		return true
+	}
+	if path, ok := PathFromContext(ctx); ok {
+		return a.CanPath(FromContext(ctx), repo, acc, path)
 	}
 	return a.Can(FromContext(ctx), repo, acc)
 }

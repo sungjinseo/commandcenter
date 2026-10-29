@@ -80,8 +80,14 @@ type Fetcher struct {
 	Client *http.Client
 	Now    func() time.Time
 	Stats  Stats // optional counters
-	sf     singleflight.Group
-	sem    chan struct{}
+	// RouteAllowed, if set, applies the proxy's routing rule to the remote
+	// path (with a leading "/") before the cache is consulted: a refused
+	// path is not found, cached or not, and no remote request is made
+	// (repo.Registry.RouteAllowed). A group skips such a member for the
+	// path; the server answers a direct request with 403.
+	RouteAllowed func(rp *repo.Repository, path string) bool
+	sf           singleflight.Group
+	sem          chan struct{}
 }
 
 // New creates a Fetcher that runs at most maxConcurrent remote requests at once.
@@ -103,6 +109,9 @@ func (f *Fetcher) Fetch(ctx context.Context, rp *repo.Repository, path string, k
 func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target, kind Kind) (Result, error) {
 	if t.SHA256 != "" && !IsSHA256Hex(t.SHA256) {
 		return Result{}, repo.Errorf(http.StatusInternalServerError, "malformed expected sha256 for %s", t.Key)
+	}
+	if f.RouteAllowed != nil && !f.RouteAllowed(rp, routePath(t)) {
+		return Result{}, repo.ErrNotFound
 	}
 	now := f.Now()
 	a, err := f.Store.Get(ctx, rp.Name, t.Key)
@@ -139,6 +148,18 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 	case <-ctx.Done():
 		return Result{}, ctx.Err()
 	}
+}
+
+// routePath is the path a routing rule sees for t: the remote path, or the
+// path of an absolute URL, with one leading "/".
+func routePath(t Target) string {
+	p := t.Remote
+	if p == "" && t.URL != "" {
+		if u, err := url.Parse(t.URL); err == nil {
+			p = u.Path
+		}
+	}
+	return "/" + strings.TrimPrefix(p, "/")
 }
 
 func (f *Fetcher) count(repo string, hit bool) {
