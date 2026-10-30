@@ -22,8 +22,9 @@ const (
 // (remote fetches, webhooks, OIDC). An empty Host means none: the
 // HTTP_PROXY, HTTPS_PROXY and NO_PROXY environment applies. Password is a
 // secret: stored sealed, never returned by the API. NonProxyHosts are
-// patterns of hosts reached directly: a host name, "*.corp.local" (any
-// subdomain) or "10.*" (an address prefix), compared case-insensitively.
+// patterns of hosts reached directly, compared case-insensitively: a host
+// name, a "*" at its start or end ("*.corp.local", "*corp.local", "10.*")
+// as in Java's http.nonProxyHosts, or ".corp.local" (any subdomain).
 type HTTPProxy struct {
 	Host          string   `json:"host"`
 	Port          int      `json:"port"`
@@ -58,7 +59,7 @@ func (c HTTP) Copy() HTTP {
 
 // Limits of the HTTP settings.
 const (
-	MaxHTTPTimeoutSeconds  = 600
+	MaxHTTPTimeoutSeconds  = 3600
 	MaxHTTPRetries         = 10
 	MaxUserAgentSuffixLen  = 100
 	MaxTrustedCertificates = 200
@@ -96,8 +97,8 @@ func ValidateHTTP(c HTTP) error {
 		return fmt.Errorf("http.proxy.username must not contain spaces or control characters")
 	}
 	for _, h := range p.NonProxyHosts {
-		if h == "" || hasSpaceOrControl(h) || strings.ContainsAny(h, "/@") {
-			return fmt.Errorf("http.proxy.nonProxyHosts: %q is not a host pattern", h)
+		if h == "" || hasSpaceOrControl(h) || strings.ContainsAny(h, "/@|") || strings.Contains(strings.Trim(h, "*"), "*") {
+			return fmt.Errorf("http.proxy.nonProxyHosts: %q is not a host pattern (a name or address, with \"*\" only at its start or end)", h)
 		}
 	}
 	return nil

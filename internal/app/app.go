@@ -158,7 +158,7 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 			return nil, err
 		}
 	} // db.Close leaves the registry on the error returns below
-	blobs, err := openBlobStores(cfg, db)
+	blobs, unopened, err := openBlobStores(cfg, db, log)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -167,6 +167,9 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 	if err != nil {
 		db.Close()
 		return nil, err
+	}
+	for name, err := range unopened {
+		a.Store.SetUnopened(name, err)
 	}
 	a.member = member
 	return a, nil
@@ -336,17 +339,29 @@ func RotateSecretKey(cfg *config.Config, newKeyFile string) (resealed, plain int
 // <dataDir>/blobs, so nothing moves; its row's path is refreshed to the
 // current dataDir) and opens every stored store at repo.StoreRoot, returning
 // the name→store map used for routing and garbage collection. The default
-// store is always present.
-func openBlobStores(cfg *config.Config, db *meta.DB) (map[string]*blob.Store, error) {
+// store is always present. Any other store that does not open is logged and
+// returned in unopened instead, so the node starts: its repositories answer
+// 503, and the store opens on a later SyncStores once it can.
+func openBlobStores(cfg *config.Config, db *meta.DB, log *slog.Logger) (stores map[string]*blob.Store, unopened map[string]error, err error) {
 	ctx := context.Background()
 	if err := db.SeedBlobStore(ctx, repo.DefaultStore, cfg.DataDir); err != nil {
-		return nil, fmt.Errorf("seed default blob store: %w", err)
+		return nil, nil, fmt.Errorf("seed default blob store: %w", err)
 	}
 	rows, err := db.ListBlobStores(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list blob stores: %w", err)
+		return nil, nil, fmt.Errorf("list blob stores: %w", err)
 	}
-	stores := make(map[string]*blob.Store, len(rows))
+	stores = make(map[string]*blob.Store, len(rows))
+	unopened = map[string]error{}
+	failed := func(bs meta.BlobStore, err error) error {
+		err = fmt.Errorf("open blob store %q at %s: %w", bs.Name, repo.StoreRoot(cfg.DataDir, bs), err)
+		if bs.Name == repo.DefaultStore {
+			return err
+		}
+		log.Error("a blob store did not open: its repositories answer 503 until it does (retried every few seconds)", "err", logsafe.Err(err))
+		unopened[bs.Name] = err
+		return nil
+	}
 	var groups []meta.BlobStore // opened once their members are
 	for _, bs := range rows {
 		if bs.Type == meta.BlobStoreGroup {
@@ -355,25 +370,29 @@ func openBlobStores(cfg *config.Config, db *meta.DB) (map[string]*blob.Store, er
 		}
 		s, err := repo.OpenStore(cfg.DataDir, bs)
 		if err != nil {
-			return nil, fmt.Errorf("open blob store %q at %s: %w", bs.Name, repo.StoreRoot(cfg.DataDir, bs), err)
+			if err := failed(bs, err); err != nil {
+				return nil, nil, err
+			}
+			continue
 		}
 		stores[bs.Name] = s
 	}
 	for _, bs := range groups {
 		s, err := repo.OpenGroup(cfg.DataDir, bs, func(name string) *blob.Store { return stores[name] })
 		if err != nil {
-			return nil, fmt.Errorf("open blob store group %q: %w", bs.Name, err)
+			failed(bs, err) // a group is never the default store
+			continue
 		}
 		stores[bs.Name] = s
 	}
 	if stores[repo.DefaultStore] == nil { // defensive: the seed guarantees it
 		s, err := blob.Open(cfg.DataDir)
 		if err != nil {
-			return nil, fmt.Errorf("open default blob store: %w", err)
+			return nil, nil, fmt.Errorf("open default blob store: %w", err)
 		}
 		stores[repo.DefaultStore] = s
 	}
-	return stores, nil
+	return stores, unopened, nil
 }
 
 func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, db *meta.DB, logs *logring.Ring, logLevel *slog.LevelVar, node string) (*App, error) {
@@ -668,6 +687,16 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Nexus: nexus, Requests: recorder.Request, Docker: dockerH,
 		ReadOnly: func() string { return recoveryRefusal(db.Recovery()) },
 		Seen:     recorder.Seen}
+	srv.Unavailable = func(rp *repo.Repository) string {
+		if rp.Type == "group" { // its members answer for themselves
+			return ""
+		}
+		name := repo.StoreOf(rp.Repository)
+		if store.Unopened(name) == "" {
+			return ""
+		}
+		return fmt.Sprintf("blob store %q of this repository is not available on this node", name)
+	}
 	srv.TerraformDiscovery = func() []byte {
 		return terraform.RootDiscovery(registry.Snapshot().Sorted, authn.Snapshot().Settings().TerraformDefaultRepository, baseURL())
 	}

@@ -25,7 +25,9 @@ func TestValidateHTTP(t *testing.T) {
 	for name, mut := range map[string]func(*HTTP){
 		"retries":      func(c *HTTP) { c.Retries = 11 },
 		"connect 0":    func(c *HTTP) { c.ConnectTimeoutSeconds = 0 },
-		"timeout big":  func(c *HTTP) { c.TimeoutSeconds = 601 },
+		"timeout big":  func(c *HTTP) { c.TimeoutSeconds = 3601 },
+		"glob middle":  func(c *HTTP) { c.Proxy.NonProxyHosts = []string{"a*b"} },
+		"glob bar":     func(c *HTTP) { c.Proxy.NonProxyHosts = []string{"a|b"} },
 		"host scheme":  func(c *HTTP) { c.Proxy.Host = "http://proxy" },
 		"host space":   func(c *HTTP) { c.Proxy.Host = "pro xy" },
 		"port":         func(c *HTTP) { c.Proxy.Port = 0 },

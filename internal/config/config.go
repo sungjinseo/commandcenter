@@ -19,26 +19,36 @@ import (
 )
 
 // Duration is a time.Duration that unmarshals from strings like "24h".
-// The value "-1" means "never expire". Zero means "use the default".
+// The value "-1" means "never expire". Zero (an empty string) means "use
+// the default"; a written zero ("0", "0s", "0m") is Zero.
 type Duration time.Duration
 
 // Never marks a cache entry that never expires.
 const Never Duration = -1
+
+// Zero is a zero duration that was asked for, as opposed to the unset 0
+// that ApplyRepositoryDefaults replaces with a default: a max age of Zero
+// revalidates on every request, a negativeCacheTTL of Zero records no
+// misses (Nexus's 0). It is stored and shown as "0s".
+const Zero Duration = -2
+
+// Off reports whether d caches nothing: Zero, or the 0 that NormalizeStored
+// leaves for a negative duration an older build stored.
+func (d Duration) Off() bool { return d == Zero || d == 0 }
 
 func (d *Duration) UnmarshalYAML(n *yaml.Node) error {
 	var s string
 	if err := n.Decode(&s); err != nil {
 		return err
 	}
-	if s == "-1" {
-		*d = Never
-		return nil
+	if s == "" {
+		return fmt.Errorf("invalid duration %q", s)
 	}
-	v, err := time.ParseDuration(s)
+	v, err := ParseDuration(s)
 	if err != nil {
-		return fmt.Errorf("invalid duration %q: %w", s, err)
+		return err
 	}
-	*d = Duration(v)
+	*d = v
 	return nil
 }
 
@@ -50,6 +60,8 @@ func (d Duration) Text() string {
 		return ""
 	case d == Never:
 		return "-1"
+	case d == Zero:
+		return "0s"
 	}
 	v := time.Duration(d)
 	switch {
@@ -63,10 +75,11 @@ func (d Duration) Text() string {
 	return v.String()
 }
 
-// ParseDuration parses the config format: "" (zero), "-1" (never) or a Go
-// duration. It accepts negative durations, which older builds stored: the
-// definition being created or updated rejects them (ValidateDefinition), and
-// a stored row treats them as 0 (NormalizeStored; final review C1).
+// ParseDuration parses the config format: "" (unset), "-1" (never) or a Go
+// duration, a zero one being Zero. It accepts negative durations, which
+// older builds stored: the definition being created or updated rejects them
+// (ValidateDefinition), and a stored row treats them as 0 (NormalizeStored;
+// final review C1).
 func ParseDuration(s string) (Duration, error) {
 	switch s {
 	case "":
@@ -77,6 +90,9 @@ func ParseDuration(s string) (Duration, error) {
 	v, err := time.ParseDuration(s)
 	if err != nil {
 		return 0, fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	if v == 0 {
+		return Zero, nil
 	}
 	return Duration(v), nil
 }
@@ -198,6 +214,12 @@ type Repository struct {
 	MetadataMaxAge   Duration    `yaml:"metadataMaxAge" json:"metadataMaxAge,omitempty"`
 	ContentMaxAge    Duration    `yaml:"contentMaxAge" json:"contentMaxAge,omitempty"`
 	NegativeCacheTTL Duration    `yaml:"negativeCacheTTL" json:"negativeCacheTTL,omitempty"`
+	// NegativeCacheEnabled false records no misses whatever negativeCacheTTL
+	// says (Nexus negativeCache.enabled); nil reads as true.
+	NegativeCacheEnabled *bool `yaml:"negativeCacheEnabled,omitempty" json:"negativeCacheEnabled,omitempty"`
+	// Connection overrides the outbound HTTP settings for this proxy (nil
+	// follows them; connection.go).
+	Connection *Connection `yaml:"connection,omitempty" json:"connection,omitempty"`
 	// RoutingRule names the routing rule applied to remote requests (proxy
 	// only; "" is none). The registry checks the rule exists.
 	RoutingRule string `yaml:"routingRule,omitempty" json:"routingRule,omitempty"`
@@ -652,7 +674,7 @@ func ValidateDefinition(r Repository) error {
 		}
 	}
 	for _, f := range durationFields(&r) {
-		if *f.d < 0 && *f.d != Never {
+		if *f.d < 0 && *f.d != Never && *f.d != Zero {
 			errs = append(errs, fmt.Errorf("repository %q: %s %q must not be negative (use \"-1\" for never)", r.Name, f.name, f.d.Text()))
 		}
 	}
@@ -675,12 +697,15 @@ func ValidateDefinition(r Repository) error {
 	if err := validateReplication(r); err != nil {
 		errs = append(errs, err)
 	}
+	if err := validateConnection(r); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
 // NormalizeStored makes a stored definition that an older build accepted
-// usable: a negative duration other than "-1" becomes 0, which the proxy
-// treats as never fresh / expiring at once (as those builds behaved), a
+// usable: a negative duration other than "-1" becomes 0, which caches
+// nothing as Zero does (as those builds behaved), a
 // group member listed twice is kept once, and a remote outside a proxy or a
 // group's versionPolicy (both unused) is dropped. It returns one note per
 // change for the caller's warning; the stored row is not rewritten.
@@ -695,9 +720,9 @@ func NormalizeStored(r *Repository) []string {
 		r.VersionPolicy = ""
 	}
 	for _, f := range durationFields(r) {
-		if *f.d < 0 && *f.d != Never {
+		if *f.d < 0 && *f.d != Never && *f.d != Zero {
 			notes = append(notes, fmt.Sprintf("%s %q is negative, treated as 0 (no caching)", f.name, f.d.Text()))
-			*f.d = 0
+			*f.d = 0 // Off, as Zero
 		}
 	}
 	if len(r.Members) > 1 {

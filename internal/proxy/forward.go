@@ -24,7 +24,7 @@ func (f *Fetcher) Forward(ctx context.Context, rp *repo.Repository, w http.Respo
 	u := *rp.RemoteURL
 	u.Path, u.RawPath = rp.RemoteURL.Path+remotePath, ""
 	body := &capReader{Reader: http.MaxBytesReader(w, r.Body, maxBody)}
-	req, err := http.NewRequestWithContext(withRemote(ctx, rp.RemoteURL), r.Method, u.String(), body)
+	req, err := http.NewRequestWithContext(repoContext(ctx, rp), r.Method, u.String(), body)
 	if err != nil {
 		return err
 	}
@@ -42,7 +42,7 @@ func (f *Fetcher) Forward(ctx context.Context, rp *repo.Repository, w http.Respo
 			req.SetBasicAuth(ra.Username, ra.Password)
 		}
 	}
-	resp, err := f.Client.Do(req)
+	resp, err := f.client(rp).Do(req)
 	if err != nil {
 		if body.tooBig { // the cap, not the remote
 			return &repo.Error{Status: http.StatusRequestEntityTooLarge, Msg: fmt.Sprintf("request body larger than %d bytes", maxBody)}

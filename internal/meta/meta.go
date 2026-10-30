@@ -117,6 +117,11 @@ type querier interface {
 //	   deliveries this one stored with the headers they need.
 //	8: events.ip and events.node (who and where, as Nexus's audit records
 //	   have them): expand-only, an older build's rows leave them empty.
+//	8: a proxy's negativeCacheTTL "-1" means "never expires" (it disabled the
+//	   negative cache before): the upgrade rewrites stored "-1" TTLs to "0s"
+//	   (no negative caching), keeping what they did (migrateNegativeTTL).
+//	   Expand-only: an older build reads "0s" and the new -1 as no negative
+//	   caching and ignores the new connection and negativeCacheEnabled keys.
 const schemaVersion = 8
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
@@ -205,6 +210,11 @@ func upgrade(p *pool, name string) error {
 	}
 	if _, err := q.ExecContext(ctx, schema); err != nil {
 		return ddlError(err, name)
+	}
+	if version < 8 {
+		if err := migrateNegativeTTL(ctx, q); err != nil {
+			return err
+		}
 	}
 	if err := stampSchemaVersion(ctx, q, schemaVersion, schemaCompat); err != nil {
 		return err

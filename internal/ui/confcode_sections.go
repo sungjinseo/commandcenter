@@ -477,6 +477,14 @@ func repoRequestOf(d config.Repository) repoRequest {
 		ev = "inherit"
 	}
 	b.Evaluation = &ev
+	if d.Type == "proxy" { // always given, so an apply also clears them ({} is none)
+		on := d.NegativeCacheEnabled == nil || *d.NegativeCacheEnabled
+		b.NegativeCacheEnabled = &on
+		b.Connection = &config.Connection{}
+		if c := config.CleanConnection(d.Connection); c != nil {
+			b.Connection = c
+		}
+	}
 	return b
 }
 

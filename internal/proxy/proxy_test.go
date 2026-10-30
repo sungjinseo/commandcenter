@@ -371,7 +371,7 @@ func TestStallTimerCountsOnlyReads(t *testing.T) {
 	defer func(d time.Duration) { bodyIdle = d }(bodyIdle)
 	bodyIdle = 50 * time.Millisecond
 	var cancelled atomic.Bool
-	s := newStallReader(strings.NewReader("ab"), func() { cancelled.Store(true) })
+	s := newStallReader(strings.NewReader("ab"), bodyIdle, func() { cancelled.Store(true) })
 	p := make([]byte, 1)
 	for range 3 { // "a", "b", EOF
 		time.Sleep(4 * bodyIdle)

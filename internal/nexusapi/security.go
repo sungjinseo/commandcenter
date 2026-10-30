@@ -2,8 +2,10 @@ package nexusapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"commandcenter/internal/ui"
@@ -46,11 +48,47 @@ type routingRuleBody struct {
 }
 
 func ruleOut(r routingRuleBody) map[string]any {
-	m := r.Matchers
-	if m == nil {
-		m = []string{}
+	m := []string{}
+	for _, x := range r.Matchers {
+		m = append(m, unanchor(x))
 	}
 	return map[string]any{"name": r.Name, "description": r.Description, "mode": r.Mode, "matchers": m}
+}
+
+// Nexus matches a routing rule's matcher against the whole path (with its
+// leading "/"); Command Center finds it anywhere in the path, as rules
+// stored before keep doing. So this API stores a matcher m as ^(?:m)$,
+// which matches what m matches in Nexus, and returns it as m again.
+func anchor(ms []string) []string {
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, "^(?:"+m+")$")
+	}
+	return out
+}
+
+// anchorable answers 400 for a matcher that is not a regular expression by
+// itself (anchor would hide a stray ")" in its group).
+func anchorable(w http.ResponseWriter, ms []string) bool {
+	for i, m := range ms {
+		if _, err := regexp.Compile(m); err != nil {
+			writeValidation(w, []string{fmt.Sprintf("matcher %d: invalid regular expression: %v", i+1, err)})
+			return false
+		}
+	}
+	return true
+}
+
+// unanchor undoes anchor: ^(?:m)$ is m when m is a regular expression by
+// itself (then the group spans all of it); anything else is returned as stored.
+func unanchor(m string) string {
+	inner, ok := strings.CutPrefix(m, "^(?:")
+	if inner, ok2 := strings.CutSuffix(inner, ")$"); ok && ok2 {
+		if _, err := regexp.Compile(inner); err == nil {
+			return inner
+		}
+	}
+	return m
 }
 
 func (h *Handler) listRoutingRules(w http.ResponseWriter, r *http.Request) {
@@ -92,9 +130,10 @@ func (h *Handler) createRoutingRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b routingRuleBody
-	if !decodeSmall(w, r, &b) {
+	if !decodeSmall(w, r, &b) || !anchorable(w, b.Matchers) {
 		return
 	}
+	b.Matchers = anchor(b.Matchers)
 	status, body := h.call(r, http.MethodPost, "/-/api/routing-rules", b)
 	if status != http.StatusCreated {
 		writeUIError(w, status, body)
@@ -108,10 +147,11 @@ func (h *Handler) updateRoutingRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b routingRuleBody
-	if !decodeSmall(w, r, &b) {
+	if !decodeSmall(w, r, &b) || !anchorable(w, b.Matchers) {
 		return
 	}
 	b.Name = r.PathValue("name")
+	b.Matchers = anchor(b.Matchers)
 	status, body := h.call(r, http.MethodPut, "/-/api/routing-rules/"+url.PathEscape(b.Name), b)
 	if status != http.StatusOK {
 		writeUIError(w, status, body)

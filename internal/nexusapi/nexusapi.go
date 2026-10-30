@@ -118,6 +118,7 @@ func (h *Handler) init() {
 	h.azureBlobRoutes(m, p)
 	h.configRoutes(m, p)
 	h.repoAPIRoutes(m, p)
+	h.cacheRoutes(m, p)
 	h.mux = m
 }
 
@@ -343,8 +344,11 @@ func (h *Handler) usage(ctx context.Context) map[string]meta.RepoUsage {
 
 // minutes renders a config duration as Nexus does: minutes, -1 for never.
 func minutes(d config.Duration) int {
-	if d == config.Never {
+	switch {
+	case d == config.Never:
 		return -1
+	case d.Off():
+		return 0
 	}
 	return int(time.Duration(d) / time.Minute)
 }
@@ -371,8 +375,8 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 	switch d.Type {
 	case "proxy":
 		out["proxy"] = map[string]any{"remoteUrl": publicRemote(rp), "contentMaxAge": minutes(d.ContentMaxAge), "metadataMaxAge": minutes(d.MetadataMaxAge)}
-		out["negativeCache"] = map[string]any{"enabled": true, "timeToLive": minutes(d.NegativeCacheTTL)}
-		hc := map[string]any{"blocked": d.Blocked, "autoBlock": d.AutoBlocks(), "authentication": nil}
+		out["negativeCache"] = map[string]any{"enabled": d.NegativeCacheEnabled == nil || *d.NegativeCacheEnabled, "timeToLive": minutes(d.NegativeCacheTTL)}
+		hc := map[string]any{"blocked": d.Blocked, "autoBlock": d.AutoBlocks(), "authentication": nil, "connection": config.CleanConnection(d.Connection)}
 		if a := d.RemoteAuth; a != nil && a.BearerToken != "" { // the proxy sends the token when there is one
 			hc["authentication"] = map[string]any{"type": "bearerToken"}
 		} else if a != nil && a.Username != "" {
@@ -479,7 +483,8 @@ type repoBody struct {
 		MetadataMaxAge *int   `json:"metadataMaxAge"`
 	} `json:"proxy"`
 	NegativeCache struct {
-		TimeToLive *int `json:"timeToLive"`
+		Enabled    *bool `json:"enabled"`
+		TimeToLive *int  `json:"timeToLive"`
 	} `json:"negativeCache"`
 	Group struct {
 		MemberNames    []string `json:"memberNames"`
@@ -489,11 +494,13 @@ type repoBody struct {
 		Blocked        bool  `json:"blocked"`
 		AutoBlock      *bool `json:"autoBlock"`
 		Authentication *struct {
-			Type        string `json:"type"` // username | bearerToken
+			Type        string `json:"type"` // username (or empty), bearerToken; ntlm is refused
 			Username    string `json:"username"`
 			Password    string `json:"password"`
 			BearerToken string `json:"bearerToken"`
 		} `json:"authentication"`
+		// Connection is the proxy's own connection settings; absent keeps them.
+		Connection *config.Connection `json:"connection"`
 	} `json:"httpClient"`
 	Maven struct {
 		VersionPolicy string `json:"versionPolicy"`
@@ -545,6 +552,10 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 	}
 	if typ == "proxy" {
 		out["blocked"], out["autoBlock"] = b.HTTPClient.Blocked, b.HTTPClient.AutoBlock
+		out["negativeCacheEnabled"] = b.NegativeCache.Enabled
+		if c := b.HTTPClient.Connection; c != nil {
+			out["connection"] = c
+		}
 	}
 	if cur != nil {
 		out["anonymousRead"], out["depth"], out["gpgPublicKey"] = cur.AnonymousRead, cur.Depth, cur.GPGPublicKey
@@ -581,6 +592,21 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 	return out, formatRequest(ccFormat(format), typ, b, out, cur)
 }
 
+// supportedAuth refuses a remote authentication type Command Center does
+// not speak with 400, rather than sending the credentials as Basic.
+func supportedAuth(w http.ResponseWriter, b repoBody) bool {
+	a := b.HTTPClient.Authentication
+	if a == nil || a.Type == "" || a.Type == "username" || a.Type == "bearerToken" {
+		return true
+	}
+	msg := fmt.Sprintf("httpClient.authentication.type %q is not supported: use username or bearerToken", a.Type)
+	if a.Type == "ntlm" {
+		msg = "httpClient.authentication.type \"ntlm\" is not supported: NTLM remotes need a proxy that speaks NTLM to them, or username or bearerToken authentication"
+	}
+	writeValidation(w, []string{msg})
+	return false
+}
+
 func decodeRepoBody(w http.ResponseWriter, r *http.Request) (repoBody, bool) {
 	var b repoBody
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&b); err != nil {
@@ -595,7 +621,7 @@ func (h *Handler) createRepository(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, ok := decodeRepoBody(w, r)
-	if !ok {
+	if !ok || !supportedAuth(w, b) {
 		return
 	}
 	req, errs := uiRepo(r.PathValue("format"), r.PathValue("type"), b, nil)
@@ -616,7 +642,7 @@ func (h *Handler) updateRepository(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	b, ok := decodeRepoBody(w, r)
-	if !ok {
+	if !ok || !supportedAuth(w, b) {
 		return
 	}
 	name := r.PathValue("name")
@@ -1321,7 +1347,7 @@ func (h *Handler) blobStores(w http.ResponseWriter, r *http.Request) {
 		if s.FsFree != nil {
 			free = *s.FsFree
 		}
-		out = append(out, map[string]any{"name": s.Name, "type": typ, "unavailable": false, "blobCount": s.BlobCount,
+		out = append(out, map[string]any{"name": s.Name, "type": typ, "unavailable": s.Unavailable != "", "blobCount": s.BlobCount,
 			"totalSizeInBytes": s.UsedBytes, "availableSpaceInBytes": free, "softQuota": softQuota(s.Quota)})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -1371,6 +1397,8 @@ type blobStoreRow struct {
 	FsFree    *int64   `json:"fsFree"`
 	Quota     *uiQuota `json:"quota"`
 	Violated  bool     `json:"quotaViolated"`
+
+	Unavailable string `json:"unavailable"` // why it did not open on this node
 }
 
 // quotaStatus: GET /blobstores/{name}/quota-status.

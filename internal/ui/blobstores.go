@@ -92,6 +92,10 @@ type blobStoreJSON struct {
 	// An azure store's container and credentials, without the secrets.
 	Azure  *azureJSON `json:"azure,omitempty"`
 	Google *gcsJSON   `json:"google,omitempty"`
+
+	// Unavailable says why the store did not open on this node; its
+	// repositories answer 503 meanwhile.
+	Unavailable string `json:"unavailable,omitempty"`
 }
 
 // azureJSON is blob.AzureConfig without its secrets: what GET shows.
@@ -155,6 +159,7 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 	out.Quota = bs.Quota
 	if u.Store != nil {
 		out.MemberOf = u.Store.GroupOf(bs.Name)
+		out.Unavailable = u.Store.Unopened(bs.Name)
 	}
 	if bs.Type == meta.BlobStoreGroup && bs.Group != nil {
 		out.Members, out.FillPolicy = bs.Group.Members, bs.Group.FillPolicy

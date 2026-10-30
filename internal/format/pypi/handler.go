@@ -170,6 +170,8 @@ func indexTarget(project string) proxy.Target {
 		Key:    "simple/" + project + "/index",
 		Remote: "simple/" + project + "/",
 		Header: http.Header{"Accept": {jsonType + ", text/html;q=0.1"}},
+		// A refused project page fails a group closed (proxy.Target).
+		DeniedIsFailure: true,
 	}
 }
 

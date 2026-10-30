@@ -22,6 +22,23 @@ func (u *UI) repoAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /-/api/repositories", u.createRepo)
 	mux.HandleFunc("PUT /-/api/repositories/{name}", u.updateRepo)
 	mux.HandleFunc("DELETE /-/api/repositories/{name}", u.deleteRepo)
+	mux.HandleFunc("POST /-/api/repositories/{name}/invalidate-cache", u.invalidateCache)
+}
+
+// invalidateCache makes a proxy's cached content stale and forgets its
+// misses; a group does so for every proxy it reaches (repo.Registry.InvalidateCache).
+func (u *UI) invalidateCache(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+		return
+	}
+	name := r.PathValue("name")
+	proxies, err := u.Repos.InvalidateCache(r.Context(), name)
+	if err != nil {
+		u.writeRepoError(w, r, err)
+		return
+	}
+	u.emit(r, "repo.invalidate-cache", name, name, strings.Join(proxies, ","))
+	writeJSON(w, http.StatusOK, map[string]any{"invalidated": append([]string{}, proxies...)})
 }
 
 // repoAuthRequest is the request form of remoteAuth. An empty password or
@@ -94,6 +111,13 @@ type repoRequest struct {
 	// (or "") to follow the vulnerability settings; absent (null) keeps the
 	// stored value on update and means inherit on create.
 	Evaluation *string `json:"evaluation"`
+
+	// NegativeCacheEnabled (proxy) false records no misses; null or absent
+	// means true on create and unchanged on update.
+	NegativeCacheEnabled *bool `json:"negativeCacheEnabled"`
+	// Connection (proxy) overrides the outbound HTTP settings; absent (null)
+	// keeps the stored one on update and means none on create, {} clears it.
+	Connection *config.Connection `json:"connection"`
 }
 
 // repoAuthResponse never carries a secret.
@@ -138,6 +162,9 @@ type repoConfigResponse struct {
 	Replication       *config.Replication `json:"replication,omitempty"`
 	ReplicationSource *replicationSource  `json:"replicationSource,omitempty"`
 	Evaluation        string              `json:"evaluation"` // inherit, enabled or disabled
+
+	NegativeCacheEnabled bool               `json:"negativeCacheEnabled"` // proxies; false for the other types
+	Connection           *config.Connection `json:"connection"`           // proxies; null when unset
 }
 
 // replicationSource is the instance and hosted repository a proxy's remote
@@ -213,6 +240,9 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		AutoBlock:                   d.Type == "proxy" && d.AutoBlocks(),
 		Firewall:                    firewallOf(d),
 		Evaluation:                  cmp.Or(d.Evaluation, "inherit"),
+
+		NegativeCacheEnabled: d.Type == "proxy" && (d.NegativeCacheEnabled == nil || *d.NegativeCacheEnabled),
+		Connection:           config.CleanConnection(d.Connection),
 	}
 	if d.Type == "proxy" && config.ReplicationFormats[d.Format] {
 		out.Replication = &config.Replication{}
@@ -246,9 +276,10 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		StrictContentTypeValidation: b.StrictContentTypeValidation, ContentDisposition: b.ContentDisposition,
 		Blocked: b.Blocked, AutoBlock: b.AutoBlock,
 		Firewall: b.Firewall, Replication: b.Replication,
+		NegativeCacheEnabled: b.NegativeCacheEnabled, Connection: config.CleanConnection(b.Connection),
 	}
 	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey, KeepFirewall: b.Firewall == nil, KeepReplication: b.Replication == nil,
-		KeepEvaluation: b.Evaluation == nil}
+		KeepEvaluation: b.Evaluation == nil, KeepConnection: b.Connection == nil}
 	if b.Evaluation != nil && *b.Evaluation != "inherit" {
 		d.Evaluation = *b.Evaluation
 	}

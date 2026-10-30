@@ -373,7 +373,22 @@ func (u *UI) healthChecks(rctx context.Context) []check {
 			return true, "responding"
 		}),
 		runCheck("Cluster", u.checkCluster(rctx)),
-		runCheck("Blob store", u.checkBlobStoreTimed),
+		runCheck("Blob store", func() (bool, string) {
+			ok, msg := u.checkBlobStoreTimed()
+			if u.Store == nil {
+				return ok, msg
+			}
+			bad := u.Store.UnopenedStores()
+			if len(bad) == 0 {
+				return ok, msg
+			}
+			var names []string
+			for n, why := range bad {
+				names = append(names, fmt.Sprintf("%q (%s)", n, why))
+			}
+			sort.Strings(names)
+			return false, msg + "; not open on this node, their repositories answer 503: " + strings.Join(names, ", ")
+		}),
 		runCheck("Memory", u.checkMemory),
 	}
 	if u.FetchSlots != nil {

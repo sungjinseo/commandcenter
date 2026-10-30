@@ -232,7 +232,7 @@ func (h *Handler) tarballURL(rp *repo.Repository, name string) func(file string)
 
 // packumentTarget is the cache key and upstream request of a package document.
 func packumentTarget(name string) proxy.Target {
-	return proxy.Target{Key: PackumentKey(name), Remote: name, Header: http.Header{"Accept": {"application/json"}}}
+	return proxy.Target{Key: PackumentKey(name), Remote: name, Header: http.Header{"Accept": {"application/json"}}, DeniedIsFailure: true}
 }
 
 // packument resolves the stored package document for name in rp and the

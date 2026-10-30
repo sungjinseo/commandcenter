@@ -65,18 +65,26 @@ func TestRoutingRulesCompat(t *testing.T) {
 	e.want("GET", v1+"/routing-rules", "ci", "", 403)
 
 	e.want("POST", v1+"/routing-rules", "admin", `{"name":"bad","mode":"BLOCK","matchers":["("]}`, 400)
-	e.want("POST", v1+"/routing-rules", "admin", `{"name":"only-org","description":"d","mode":"ALLOW","matchers":["^/org/"]}`, 204)
-	e.want("POST", v1+"/routing-rules", "admin", `{"name":"only-org","mode":"ALLOW","matchers":["^/org/"]}`, 409)
+	e.want("POST", v1+"/routing-rules", "admin", `{"name":"only-org","description":"d","mode":"ALLOW","matchers":["/org/.*"]}`, 204)
+	e.want("POST", v1+"/routing-rules", "admin", `{"name":"only-org","mode":"ALLOW","matchers":["/org/.*"]}`, 409)
 	var rule map[string]any
 	e.get(v1+"/routing-rules/only-org", "admin", &rule)
-	if rule["mode"] != "ALLOW" || rule["description"] != "d" || len(rule["matchers"].([]any)) != 1 {
+	if rule["mode"] != "ALLOW" || rule["description"] != "d" || fmt.Sprint(rule["matchers"]) != "[/org/.*]" {
 		t.Fatalf("rule = %v", rule)
 	}
-	e.want("PUT", v1+"/routing-rules/only-org", "admin", `{"name":"only-org","mode":"BLOCK","matchers":["^/org/","^/com/"]}`, 204)
+	// Nexus matches the whole path: /org/.* is stored anchored, so a path
+	// that only contains /org/ is not matched by it.
+	e.want("PUT", v1+"/routing-rules/only-org", "admin", `{"name":"only-org","mode":"BLOCK","matchers":["/org/.*","/com/.*"]}`, 204)
 	e.get(v1+"/routing-rules/only-org", "admin", &rule)
-	if rule["mode"] != "BLOCK" || len(rule["matchers"].([]any)) != 2 {
+	if rule["mode"] != "BLOCK" || fmt.Sprint(rule["matchers"]) != "[/org/.* /com/.*]" {
 		t.Fatalf("updated rule = %v", rule)
 	}
+	var native map[string]any
+	e.get("/-/api/routing-rules/only-org", "admin", &native)
+	if fmt.Sprint(native["matchers"]) != "[^(?:/org/.*)$ ^(?:/com/.*)$]" {
+		t.Fatalf("stored matchers = %v", native["matchers"])
+	}
+
 	// The repository bodies carry routingRule (and routingRuleName on read).
 	e.want("PUT", v1+"/repositories/maven/proxy/maven-central", "admin",
 		`{"name":"maven-central","online":true,"storage":{"blobStoreName":"default"},"proxy":{"remoteUrl":"https://repo1.maven.org/maven2/","contentMaxAge":-1,"metadataMaxAge":60},"negativeCache":{"enabled":true,"timeToLive":5},"routingRule":"only-org"}`, 204)
@@ -86,6 +94,9 @@ func TestRoutingRulesCompat(t *testing.T) {
 		t.Fatalf("settings = %v", s)
 	}
 	e.want("GET", "/repository/maven-central/org/x.jar", "ci", "", 403)
+	if st, b, _ := e.do("GET", "/repository/maven-central/x/org/a.jar", "ci", ""); st == 403 { // goes to the remote
+		t.Fatalf("/x/org/a.jar: %d %s", st, b)
+	}
 	e.want("DELETE", v1+"/routing-rules/only-org", "admin", "", 400) // in use by maven-central: Nexus's 400
 	e.want("DELETE", v1+"/routing-rules/no-internal", "admin", "", 204)
 	e.want("GET", v1+"/routing-rules/no-internal", "admin", "", 404)

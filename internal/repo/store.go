@@ -31,6 +31,10 @@ type Store struct {
 	// (tests and startup).
 	Blobs  map[string]*blob.Store
 	blobMu sync.RWMutex
+	// unopened are the stored blob stores that did not open on this node,
+	// with why (SetUnopened): their repositories answer 503 until a later
+	// SyncStores opens them.
+	unopened map[string]string
 
 	DB  *meta.DB
 	Now func() time.Time
@@ -205,12 +209,50 @@ func (s *Store) blobsFor(name string) (*blob.Store, error) {
 		name = DefaultStore
 	}
 	s.blobMu.RLock()
-	bs := s.Blobs[name]
+	bs, why := s.Blobs[name], s.unopened[name]
 	s.blobMu.RUnlock()
-	if bs == nil {
+	switch {
+	case bs == nil && why != "":
+		return nil, Errorf(http.StatusServiceUnavailable, "blob store %q is not available on this node", name)
+	case bs == nil:
 		return nil, fmt.Errorf("blob store %q does not exist", name)
 	}
 	return bs, nil
+}
+
+// SetUnopened records that the named stored blob store did not open on
+// this node, and why (err; nil forgets it). Opening it (AddStore) does too.
+func (s *Store) SetUnopened(name string, err error) {
+	s.blobMu.Lock()
+	defer s.blobMu.Unlock()
+	if err == nil {
+		delete(s.unopened, name)
+		return
+	}
+	if s.unopened == nil {
+		s.unopened = map[string]string{}
+	}
+	s.unopened[name] = err.Error()
+}
+
+// Unopened returns why the named blob store did not open on this node, ""
+// when it did (or does not exist).
+func (s *Store) Unopened(name string) string {
+	s.blobMu.RLock()
+	defer s.blobMu.RUnlock()
+	return s.unopened[name]
+}
+
+// UnopenedStores returns every blob store that did not open on this node,
+// by name, with why.
+func (s *Store) UnopenedStores() map[string]string {
+	s.blobMu.RLock()
+	defer s.blobMu.RUnlock()
+	out := make(map[string]string, len(s.unopened))
+	for k, v := range s.unopened {
+		out[k] = v
+	}
+	return out
 }
 
 // BlobStore returns the blob store that holds the given repository's blobs,
@@ -275,6 +317,7 @@ func (s *Store) AddStore(name string, bs *blob.Store) {
 		s.Blobs = map[string]*blob.Store{}
 	}
 	s.Blobs[name] = bs
+	delete(s.unopened, name)
 	s.blobMu.Unlock()
 }
 
@@ -320,6 +363,7 @@ func (s *Store) SyncStores(ctx context.Context, dataDir string) error {
 		bs, err := OpenStore(dataDir, row)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("open blob store %q: %w", row.Name, err))
+			s.SetUnopened(row.Name, err)
 			continue
 		}
 		s.AddStore(row.Name, bs)
@@ -341,6 +385,7 @@ func (s *Store) SyncStores(ctx context.Context, dataDir string) error {
 		g, err := OpenGroup(dataDir, row, s.StoreByName)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("open blob store group %q: %w", row.Name, err))
+			s.SetUnopened(row.Name, err)
 			continue
 		}
 		s.AddStore(row.Name, g)
@@ -348,6 +393,11 @@ func (s *Store) SyncStores(ctx context.Context, dataDir string) error {
 	for _, name := range s.StoreNames() {
 		if !stored[name] && name != DefaultStore {
 			s.RemoveStore(name)
+		}
+	}
+	for name := range s.UnopenedStores() {
+		if !stored[name] {
+			s.SetUnopened(name, nil)
 		}
 	}
 	return errors.Join(errs...)

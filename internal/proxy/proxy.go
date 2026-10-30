@@ -74,6 +74,12 @@ type Target struct {
 	// 401 for an image that does not exist, to not reveal which do. A
 	// cached asset is served stale instead, as for any other failure.
 	DeniedIsNotFound bool
+	// DeniedIsFailure keeps a 403 for an asset that is not cached a failure
+	// (502), not a miss: for the document that decides which group member
+	// owns a package (npm packument, PyPI project page), so that a refused
+	// internal registry fails closed instead of letting a later member's
+	// same-named package stand in (resolve.Owner).
+	DeniedIsFailure bool
 }
 
 type Fetcher struct {
@@ -91,7 +97,8 @@ type Fetcher struct {
 	sem          chan struct{}
 
 	blockMu sync.Mutex
-	remotes map[string]*remoteState // auto-block state by repository incarnation (autoblock.go)
+	remotes map[string]*remoteState   // auto-block state by repository incarnation (autoblock.go)
+	jars    map[string]http.CookieJar // connection.enableCookies jars by repository incarnation (connection.go)
 }
 
 // New creates a Fetcher that runs at most maxConcurrent remote requests at once.
@@ -127,7 +134,7 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 		f.count(rp.Name, true)
 		return Result{Asset: a}, nil
 	}
-	if !cached {
+	if !cached && rp.NegativeCacheOn() {
 		hit, err := f.Store.DB.NegativeHit(ctx, rp.Name, t.Key, now)
 		if err != nil {
 			return Result{}, err
@@ -189,15 +196,49 @@ func IsSHA256Hex(s string) bool {
 	return true
 }
 
+// fresh reports whether a may be served without asking the remote: within
+// its max age (-1 never expires, 0 always asks), and not invalidated (a
+// zero CheckedAt, meta.DB.InvalidateCache).
 func fresh(rp *repo.Repository, kind Kind, a meta.Asset, now time.Time) bool {
 	maxAge := rp.ContentMaxAge
 	if kind == Metadata {
 		maxAge = rp.MetadataMaxAge
 	}
-	if maxAge == config.Never {
+	switch {
+	case a.CheckedAt.IsZero() || maxAge.Off():
+		return false
+	case maxAge == config.Never:
 		return true
 	}
 	return now.Sub(a.CheckedAt) < time.Duration(maxAge)
+}
+
+// forever is the expiry of a miss recorded under negativeCacheTTL -1.
+var forever = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// putNegative records a miss of key for rp's negativeCacheTTL, unless its
+// negative cache is off.
+func (f *Fetcher) putNegative(ctx context.Context, rp *repo.Repository, key string, now time.Time) error {
+	if !rp.NegativeCacheOn() {
+		return nil
+	}
+	exp := now.Add(time.Duration(rp.NegativeCacheTTL))
+	if rp.NegativeCacheTTL == config.Never {
+		exp = forever
+	}
+	return f.Store.DB.PutNegative(ctx, rp.Name, key, exp)
+}
+
+// remoteMiss reports whether a remote's answer to an asset that is not
+// cached means the asset is not there, as Nexus takes it: any 4xx but an
+// authentication failure (401, 407), 402 and 429 (passed through to the
+// client, not cached). S3 and CloudFront answer 403 for a missing key.
+func remoteMiss(status int) bool {
+	switch status {
+	case http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusProxyAuthRequired, http.StatusTooManyRequests:
+		return false
+	}
+	return status >= 400 && status < 500
 }
 
 func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target, a meta.Asset, cached bool) (Result, error) {
@@ -232,18 +273,25 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 	}
 
 	t0 := time.Now()
-	resp, err := f.Client.Do(req)
+	resp, err := f.client(rp).Do(req)
 	if f.Stats != nil {
 		f.Stats.Upstream(rp.Name, err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests, time.Since(t0))
 	}
+	// Only the remote's own host counts for its auto-block: an absolute
+	// target on a CDN or a mirror says nothing about it.
+	own := sendsCredentials(rp, req.URL)
 	if err != nil {
-		f.noteFailure(rp, err)
+		if own {
+			f.noteFailure(rp, err)
+		}
 		return f.stale(rp, t.Key, a, cached, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 500 {
+	switch {
+	case !own:
+	case resp.StatusCode >= 500:
 		f.noteFailure(rp, fmt.Errorf("remote status %d", resp.StatusCode))
-	} else {
+	default:
 		f.noteSuccess(rp)
 	}
 	now := f.Now()
@@ -268,7 +316,11 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{Asset: a}, nil
 
 	case status == http.StatusOK:
-		body := newStallReader(resp.Body, cancel)
+		idle := bodyIdle
+		if c := rp.Connection; c != nil && c.Timeout > 0 {
+			idle = time.Duration(c.Timeout) * time.Second
+		}
+		body := newStallReader(resp.Body, idle, cancel)
 		var na meta.Asset
 		var verr error
 		sums, err := f.Store.WriteBlob(rp.Name, body, func(s blob.Sums) error {
@@ -277,7 +329,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 				if f.Store.Current(rp) != nil {
 					return verr
 				}
-				if perr := f.Store.DB.PutNegative(ctx, rp.Name, t.Key, f.Now().Add(time.Duration(rp.NegativeCacheTTL))); perr != nil {
+				if perr := f.putNegative(ctx, rp, t.Key, f.Now()); perr != nil {
 					slog.Warn("recording checksum mismatch failed", "repo", rp.Name, "key", t.Key, "err", logsafe.Err(perr))
 				}
 				return verr
@@ -298,7 +350,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 			err = f.Store.DB.PutAsset(ctx, na)
 		}
 		if err != nil {
-			if verr != nil || errors.Is(err, blob.ErrDiskFull) {
+			if verr != nil || errors.Is(err, blob.ErrDiskFull) || repo.StatusOf(err) == http.StatusServiceUnavailable { // a store that did not open
 				return Result{}, err
 			}
 			return f.stale(rp, t.Key, a, cached, err)
@@ -309,13 +361,13 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{Asset: na}, nil
 
 	case status == http.StatusNotFound || status == http.StatusGone,
-		t.DeniedIsNotFound && !cached && (status == http.StatusUnauthorized || status == http.StatusForbidden):
+		t.DeniedIsNotFound && !cached && status == http.StatusUnauthorized,
+		!cached && remoteMiss(status) && !(t.DeniedIsFailure && status == http.StatusForbidden):
 		// A 404 from a remote that was replaced meanwhile must not outlive the change.
 		if cerr := f.Store.Current(rp); cerr != nil {
 			return Result{}, cerr
 		}
-		exp := now.Add(time.Duration(rp.NegativeCacheTTL))
-		if err := f.Store.DB.PutNegative(ctx, rp.Name, t.Key, exp); err != nil {
+		if err := f.putNegative(ctx, rp, t.Key, now); err != nil {
 			return Result{}, err
 		}
 		return Result{}, repo.ErrNotFound
@@ -337,13 +389,14 @@ var bodyIdle = 60 * time.Second
 // read and between reads (writing to a slow blob store) is not the remote's.
 type stallReader struct {
 	r       io.Reader
+	idle    time.Duration
 	timer   *time.Timer
 	stalled atomic.Bool
 }
 
-func newStallReader(r io.Reader, cancel context.CancelFunc) *stallReader {
-	s := &stallReader{r: r}
-	s.timer = time.AfterFunc(bodyIdle, func() {
+func newStallReader(r io.Reader, idle time.Duration, cancel context.CancelFunc) *stallReader {
+	s := &stallReader{r: r, idle: idle}
+	s.timer = time.AfterFunc(idle, func() {
 		s.stalled.Store(true)
 		cancel()
 	})
@@ -352,11 +405,11 @@ func newStallReader(r io.Reader, cancel context.CancelFunc) *stallReader {
 }
 
 func (s *stallReader) Read(p []byte) (int, error) {
-	s.timer.Reset(bodyIdle)
+	s.timer.Reset(s.idle)
 	n, err := s.r.Read(p)
 	s.timer.Stop()
 	if err != nil && s.stalled.Load() {
-		err = fmt.Errorf("remote body stalled for %v: %w", bodyIdle, err)
+		err = fmt.Errorf("remote body stalled for %v: %w", s.idle, err)
 	}
 	return n, err
 }
@@ -389,7 +442,7 @@ func (f *Fetcher) Slots() (inUse, max int) { return len(f.sem), cap(f.sem) }
 // newRequest builds a GET of target for rp: the user agent, the hop chain,
 // header, and the remote's credentials when target is on the remote's host.
 func (f *Fetcher) newRequest(ctx context.Context, rp *repo.Repository, target string, header http.Header) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(withRemote(ctx, rp.RemoteURL), http.MethodGet, target, nil)
+	req, err := http.NewRequestWithContext(repoContext(ctx, rp), http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +474,7 @@ func (f *Fetcher) Request(ctx context.Context, rp *repo.Repository, url string) 
 	if err != nil {
 		return nil, err
 	}
-	resp, err := f.Client.Do(req)
+	resp, err := f.client(rp).Do(req)
 	if err != nil {
 		slog.Warn("remote request failed", "repo", rp.Name, "url", logsafe.Path(url), "err", logsafe.Err(err))
 		return nil, ErrRemote

@@ -106,6 +106,7 @@ type ClearSecrets struct {
 	KeepFirewall      bool // keep the stored firewall, whatever def says (the API's absent field)
 	KeepReplication   bool // keep the stored replication, whatever def says (the API's absent field)
 	KeepEvaluation    bool // keep the stored evaluation, whatever def says (the API's absent field)
+	KeepConnection    bool // keep the stored connection settings, whatever def says (the API's absent field)
 }
 
 // NewRegistry publishes the first snapshot from defs, which must already be
@@ -370,6 +371,13 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	if def.AutoBlock == nil {
 		def.AutoBlock = cur.AutoBlock
 	}
+	if def.NegativeCacheEnabled == nil {
+		def.NegativeCacheEnabled = cloneDef(cur.Repository).NegativeCacheEnabled
+	}
+	if clear.KeepConnection {
+		def.Connection = cur.Connection
+	}
+	def.Connection = config.CleanConnection(def.Connection)
 	if clear.KeepCleanupPolicy {
 		def.CleanupPolicy = cur.CleanupPolicy
 	}
@@ -616,6 +624,11 @@ func cloneDef(def config.Repository) config.Repository {
 		p := *def.Replication
 		def.Replication = &p
 	}
+	if def.NegativeCacheEnabled != nil {
+		v := *def.NegativeCacheEnabled
+		def.NegativeCacheEnabled = &v
+	}
+	def.Connection = config.CleanConnection(def.Connection)
 	return def
 }
 

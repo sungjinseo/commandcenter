@@ -309,3 +309,64 @@ func TestUpdateRepositoryRemoteChangeClearsNegativeCache(t *testing.T) {
 		t.Fatal("other repositories keep their negative cache")
 	}
 }
+
+// Schema 8: a stored proxy negativeCacheTTL of -1 (no negative caching
+// before) is rewritten to 0s, which keeps that meaning now that -1 never
+// expires; other values and other types are left alone. A change of the
+// negative-cache settings forgets the recorded misses.
+func TestMigrateNegativeTTLAndSettingsChange(t *testing.T) {
+	db, path := openTestDB(t)
+	ctx := context.Background()
+	defs := []config.Repository{
+		{Name: "a", Format: "raw", Type: "proxy", Remote: "https://x.example/", NegativeCacheTTL: config.Never},
+		{Name: "b", Format: "raw", Type: "proxy", Remote: "https://x.example/", NegativeCacheTTL: config.Duration(time.Hour)},
+		{Name: "h", Format: "raw", Type: "hosted", NegativeCacheTTL: config.Never},
+	}
+	for _, d := range defs {
+		if err := db.CreateRepository(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := stampSchemaVersion(ctx, db.sql, 7, 6); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	db2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	got, err := db2.ListRepositories(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]config.Duration{"a": config.Zero, "b": config.Duration(time.Hour), "h": config.Never}
+	for _, d := range got {
+		if d.NegativeCacheTTL != want[d.Name] {
+			t.Errorf("%s: negativeCacheTTL %q, want %q", d.Name, d.NegativeCacheTTL.Text(), want[d.Name].Text())
+		}
+	}
+	b := defs[1]
+	if err := db2.PutNegative(ctx, "b", "x", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	b.NegativeCacheTTL = config.Never
+	if err := db2.UpdateRepository(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+	if hit, _ := db2.NegativeHit(ctx, "b", "x", time.Now()); hit {
+		t.Fatal("a TTL change keeps the recorded misses")
+	}
+	b.RemoteAuth = &config.RemoteAuth{Username: "u", Password: "p"}
+	for i, want := range []bool{false, true} { // new credentials forget them, the same ones keep them
+		if err := db2.PutNegative(ctx, "b", "x", time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := db2.UpdateRepository(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+		if hit, _ := db2.NegativeHit(ctx, "b", "x", time.Now()); hit != want {
+			t.Fatalf("update %d: hit %v, want %v", i, hit, want)
+		}
+	}
+}

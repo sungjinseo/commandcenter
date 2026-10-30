@@ -64,6 +64,7 @@ var apiDocs = []openapi.Route{
 	{Pattern: "POST /-/api/repositories", Summary: "Creates a repository", Tag: "repositories", Auth: docAdminUI, Request: "RepositoryRequest", Replies: map[int]string{201: "RepositoryConfig", 400: "Error"}},
 	{Pattern: "PUT /-/api/repositories/{name}", Summary: "Updates a repository", Tag: "repositories", Auth: docAdminUI, Request: "RepositoryRequest", Reply: "RepositoryConfig", Replies: map[int]string{400: "Error"}},
 	{Pattern: "DELETE /-/api/repositories/{name}", Summary: "Deletes a repository and its rows", Tag: "repositories", Auth: docAdminUI, Replies: map[int]string{204: "deleted", 409: "Error"}},
+	{Pattern: "POST /-/api/repositories/{name}/invalidate-cache", Summary: "Marks a proxy's cached content stale (the next request revalidates, even with contentMaxAge -1) and forgets its recorded misses; a group does so for every proxy it reaches", Tag: "repositories", Auth: docAdminUI, Reply: "CacheInvalidated", Replies: map[int]string{400: "Error", 404: "Error"}},
 	{Pattern: "GET /-/api/blobstores", Summary: "Blob stores with usage, quota and quotaViolated", Tag: "blobstores", Auth: docAdmin, Reply: "BlobStoreList"},
 	{Pattern: "POST /-/api/blobstores", Summary: "Creates a blob store (file, s3, group or azure; optional quota)", Tag: "blobstores", Auth: docAdminUI, Request: "BlobStoreRequest", Replies: map[int]string{201: "BlobStore", 400: "Error", 409: "Error"}},
 	{Pattern: "GET /-/api/blobstores/{name}", Summary: "One blob store", Tag: "blobstores", Auth: docAdmin, Reply: "BlobStore"},

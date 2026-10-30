@@ -49,6 +49,15 @@ func TestNoProxyPatterns(t *testing.T) {
 	if !noProxy("anything", []string{"*"}) || noProxy("anything", nil) {
 		t.Error("wildcard or empty list wrong")
 	}
+	// core-10: Java's globs, a "*" at either end, and ".suffix".
+	for host, want := range map[string]bool{
+		"foocorp.local": true, "corp.local": true, "hostname": true, "build-7.lan": true, "x.lan.example": true,
+		"corp.localhost": false, "myhost": false, "a.lan": true, "lan": false,
+	} {
+		if got := noProxy(host, []string{"*corp.local", "host*", "*build*", "*.lan.*", ".lan"}); got != want {
+			t.Errorf("glob noProxy(%q) = %v, want %v", host, got, want)
+		}
+	}
 }
 
 // The http.proxy setting routes plain-http fetches through the forward

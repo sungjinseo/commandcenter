@@ -69,6 +69,9 @@ type Server struct {
 	// client address (host:port) of each request Requests is told about
 	// (metrics.Recorder.Seen: the monthly distinct users and addresses).
 	Seen func(user, addr string)
+	// Unavailable, if set, returns why rp cannot serve on this node now (its
+	// blob store did not open), "" when it can: such a request is a 503.
+	Unavailable func(rp *repo.Repository) string
 }
 
 const realm = `Basic realm="commandcenter"`
@@ -209,6 +212,15 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 		(acc == auth.Read && rp.MembersOffline()) {
 		writeOffline(w)
 		return
+	}
+	if s.Unavailable != nil {
+		if why := s.Unavailable(rp); why != "" {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": why})
+			return
+		}
 	}
 	if acc.IsWrite() && s.refused(w, r, errorWriter(h)) {
 		return

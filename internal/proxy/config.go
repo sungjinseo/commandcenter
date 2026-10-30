@@ -79,28 +79,23 @@ func (c *Config) proxyFunc(env func(*http.Request) (*url.URL, error)) func(*http
 	}
 }
 
-// noProxy reports whether host matches a pattern: the host itself,
-// "*.suffix" (any subdomain of suffix) or "prefix.*" (an address or name
-// prefix), case-insensitively.
+// noProxy reports whether host matches a pattern, case-insensitively, as
+// Java's http.nonProxyHosts globs do: the host itself, a "*" at the start
+// (any prefix: "*.corp.local", "*corp.local"), at the end (any suffix:
+// "10.*", "build*") or both, plus ".suffix" for any subdomain of suffix.
 func noProxy(host string, patterns []string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	for _, p := range patterns {
 		p = strings.ToLower(strings.TrimSuffix(p, "."))
+		core := strings.Trim(p, "*")
+		lead, trail := strings.HasPrefix(p, "*"), strings.HasSuffix(p, "*")
 		switch {
-		case p == "*" || p == host:
+		case p == host,
+			strings.HasPrefix(p, ".") && strings.HasSuffix(host, p),
+			lead && trail && strings.Contains(host, core),
+			lead && !trail && strings.HasSuffix(host, core),
+			trail && !lead && strings.HasPrefix(host, core):
 			return true
-		case strings.HasPrefix(p, "*."):
-			if strings.HasSuffix(host, p[1:]) {
-				return true
-			}
-		case strings.HasSuffix(p, ".*"):
-			if strings.HasPrefix(host, p[:len(p)-1]) {
-				return true
-			}
-		case strings.HasPrefix(p, "."):
-			if strings.HasSuffix(host, p) {
-				return true
-			}
 		}
 	}
 	return false

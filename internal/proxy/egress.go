@@ -125,10 +125,18 @@ type egress struct {
 	mu     sync.Mutex
 	cfg    *Config // the Config base was built under; rebuilt when live changes
 	base   *http.Transport
-	direct map[int]*http.Transport
+	direct map[transportKey]*http.Transport
 	// ponytail: never pruned, one entry per remote host ever configured;
 	// drop expired entries if remotes churn.
 	known map[string]classified
+}
+
+// transportKey selects a clone of base: the classes a direct connection
+// may reach (0: through base's forward proxy, unchecked) and a
+// repository's connection timeout (0: the Config's).
+type transportKey struct {
+	allowed int
+	timeout time.Duration
 }
 
 type classified struct {
@@ -161,7 +169,7 @@ func (e *egress) current() *http.Transport {
 	for _, t := range e.direct {
 		t.CloseIdleConnections()
 	}
-	e.direct = map[int]*http.Transport{}
+	e.direct = map[transportKey]*http.Transport{}
 	if old != nil {
 		old.CloseIdleConnections()
 	}
@@ -196,15 +204,24 @@ func (c *Config) headerTimeout() time.Duration {
 
 func (e *egress) RoundTrip(req *http.Request) (*http.Response, error) {
 	cfg := current()
-	if cfg.UserAgentSuffix != "" {
+	suffix, retries := cfg.UserAgentSuffix, cfg.Retries
+	if c := connectionOf(req.Context()); c != nil { // a repository's own settings
+		if c.UserAgentSuffix != "" {
+			suffix = c.UserAgentSuffix
+		}
+		if c.Retries != nil {
+			retries = *c.Retries
+		}
+	}
+	if suffix != "" {
 		if ua := req.Header.Get("User-Agent"); ua != "" {
 			req = req.Clone(req.Context())
-			req.Header.Set("User-Agent", ua+" "+cfg.UserAgentSuffix)
+			req.Header.Set("User-Agent", ua+" "+suffix)
 		}
 	}
 	for attempt := 0; ; attempt++ {
 		resp, err := e.roundTrip(req)
-		if err == nil || attempt >= cfg.Retries || !retryable(req, err) {
+		if err == nil || attempt >= retries || !retryable(req, err) {
 			return resp, err
 		}
 		select {
@@ -226,6 +243,10 @@ func (e *egress) roundTrip(req *http.Request) (*http.Response, error) {
 	if u, _ := req.Context().Value(remoteKey{}).(*url.URL); u != nil {
 		remote = u.Hostname()
 	}
+	var timeout time.Duration
+	if c := connectionOf(req.Context()); c != nil {
+		timeout = time.Duration(c.Timeout) * time.Second
+	}
 	base := e.current()
 	if base.Proxy != nil {
 		px, err := base.Proxy(req)
@@ -242,10 +263,10 @@ func (e *egress) roundTrip(req *http.Request) (*http.Response, error) {
 					return nil, err
 				}
 			}
-			return base.RoundTrip(req)
+			return e.transport(transportKey{timeout: timeout}).RoundTrip(req)
 		}
 	}
-	return e.transport(allowedFor(e.classes(req.Context(), remote))).RoundTrip(req)
+	return e.transport(transportKey{allowedFor(e.classes(req.Context(), remote)), timeout}).RoundTrip(req)
 }
 
 // classTTL is how long the classes a lookup of a remote host found stand in
@@ -275,22 +296,33 @@ func (e *egress) classes(ctx context.Context, host string) int {
 	return c
 }
 
-func (e *egress) transport(allowed int) *http.Transport {
+func (e *egress) transport(k transportKey) *http.Transport {
 	base := e.current()
+	if k == (transportKey{}) {
+		return base
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	t := e.direct[allowed]
+	t := e.direct[k]
 	if t == nil {
 		t = base.Clone()
-		t.Proxy = nil
-		t.DialContext = newDialer(e.cfg, func(_, address string, _ syscall.RawConn) error {
-			ap, err := netip.ParseAddrPort(address)
-			if err != nil {
-				return err
+		cfg := *e.cfg
+		if k.timeout > 0 {
+			cfg.ConnectTimeout, t.ResponseHeaderTimeout = k.timeout, k.timeout
+		}
+		var control func(network, address string, c syscall.RawConn) error
+		if k.allowed != 0 {
+			t.Proxy = nil
+			control = func(_, address string, _ syscall.RawConn) error {
+				ap, err := netip.ParseAddrPort(address)
+				if err != nil {
+					return err
+				}
+				return checkAddr(ap.Addr(), k.allowed)
 			}
-			return checkAddr(ap.Addr(), allowed)
-		}).DialContext
-		e.direct[allowed] = t
+		}
+		t.DialContext = newDialer(&cfg, control).DialContext
+		e.direct[k] = t
 	}
 	return t
 }
@@ -321,7 +353,7 @@ func newClient(proxy func(*http.Request) (*url.URL, error), lookup func(context.
 		Transport: &egress{
 			proxy:  proxy,
 			lookup: lookup,
-			direct: map[int]*http.Transport{},
+			direct: map[transportKey]*http.Transport{},
 			known:  map[string]classified{},
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {

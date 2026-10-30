@@ -195,6 +195,18 @@ func (d *DB) UpdateRepositoryGen(ctx context.Context, def config.Repository) (ui
 			def.Format, def.Type, string(js), toMs(time.Now()), def.Name); err != nil {
 			return err
 		}
+		// Misses recorded under other negative-cache settings would outlive
+		// them (a TTL of -1 never expires), and other credentials may be
+		// let in where a 403 was recorded as a miss.
+		// (A stored secret that does not open, sealed with another key, is
+		// being replaced: other credentials.)
+		sameAuth := d.box.openRepo(&prev) == nil && (prev.RemoteAuth == nil) == (def.RemoteAuth == nil) &&
+			(def.RemoteAuth == nil || *prev.RemoteAuth == *def.RemoteAuth)
+		if prev.NegativeCacheTTL != def.NegativeCacheTTL || prev.NegativeCacheOn() != def.NegativeCacheOn() || !sameAuth {
+			if _, err := tx.q.ExecContext(ctx, `DELETE FROM negative_cache WHERE repo = ?`, def.Name); err != nil {
+				return err
+			}
+		}
 		// Misses recorded against the old remote say nothing about the new
 		// one, and what was fetched from it is another incarnation's.
 		if prev.Remote != def.Remote {
@@ -209,6 +221,35 @@ func (d *DB) UpdateRepositoryGen(ctx context.Context, def config.Repository) (ui
 		return nil
 	})
 	return uint64(gen), err
+}
+
+// migrateNegativeTTL rewrites a stored proxy negativeCacheTTL of "-1",
+// which builds before schema 8 read as "expire at once" (no negative
+// caching), to "0s", which says so; "-1" now means never expires.
+func migrateNegativeTTL(ctx context.Context, q querier) error {
+	_, err := q.ExecContext(ctx, `UPDATE repositories SET config = jsonb_set(config::jsonb, '{negativeCacheTTL}', '"0s"')::text
+WHERE type = 'proxy' AND config::jsonb->>'negativeCacheTTL' = '-1'`)
+	return err
+}
+
+// InvalidateCache makes every cached asset of the named repositories stale,
+// whatever their max age (checked_at 0: proxy.fresh), and forgets their
+// recorded misses, in one transaction: on every node at once, as the cache
+// state lives here.
+// ponytail: one row write per cached asset; a per-repository epoch column
+// makes it O(1) if very large proxies are invalidated often.
+func (d *DB) InvalidateCache(ctx context.Context, repos []string) error {
+	return d.Tx(ctx, func(tx *Tx) error {
+		for _, name := range repos {
+			if _, err := tx.q.ExecContext(ctx, `UPDATE assets SET checked_at = 0 WHERE repo = ? AND checked_at <> 0`, name); err != nil {
+				return err
+			}
+			if _, err := tx.q.ExecContext(ctx, `DELETE FROM negative_cache WHERE repo = ?`, name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // DeleteRepository removes the definition and, in the same transaction, every

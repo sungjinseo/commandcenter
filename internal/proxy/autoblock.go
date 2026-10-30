@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -112,7 +114,14 @@ func (f *Fetcher) Remote(rp *repo.Repository) repo.RemoteStatus {
 	return repo.RemoteStatus{LastError: st.lastErr}
 }
 
-func stateKey(rp *repo.Repository) string { return fmt.Sprintf("%s\x00%d", rp.Name, rp.Gen) }
+// stateKey names rp's remote state (and cookie jar): a change of how the
+// remote is reached (its credentials, connection settings or block
+// switches) starts afresh, as a new remote (Gen) does.
+func stateKey(rp *repo.Repository) string {
+	b, _ := json.Marshal([]any{rp.RemoteAuth, rp.Connection, rp.Blocked, rp.AutoBlock})
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("%s\x00%d\x00%x", rp.Name, rp.Gen, sum[:8])
+}
 
 // failure is the text of a remote failure that any signed-in user may see:
 // the innermost error, since a *url.Error and a dial error name the remote.

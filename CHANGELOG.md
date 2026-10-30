@@ -48,6 +48,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   /-/api/webhooks/events` lists them as `nexusEvents`.
 - Activity: events record the client IP and the node (`ip`, `node`); UI sign-in, sign-out and failed
   sign-in are recorded as `auth.login`, `auth.logout`, `auth.failed` (also webhook kinds).
+- Nexus `POST /service/rest/v1/repositories/{name}/invalidate-cache` and `POST /-/api/repositories/{name}/
+  invalidate-cache`: a proxy's cache goes stale (even with `contentMaxAge: -1`) and its negative cache is
+  cleared; groups cascade to every proxy member. `POST .../rebuild-index`: a no-op (204), 400 for groups.
+- Per-proxy `connection` settings (Nexus `httpClient.connection`): timeout, retries, User-Agent suffix,
+  cookies. Proxy `negativeCacheEnabled` (Nexus `negativeCache.enabled`).
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -66,6 +71,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sort` or `direction`, a bad `prerelease` or `last_updated` answers 400.
 - Activity keeps 10 000 uploads, deletes and failed sign-ins and, separately, 10 000 other events.
 - `repo.delete` events name the repository's format/type; `repository.deleted` payloads carry them.
+- A remote 4xx other than 401/402/407/429 for an uncached asset is a negative-cached 404, so groups move
+  on past S3/CloudFront 403s (npm packuments and PyPI pages keep failing closed).
+- Durations `"0"`/`"0s"` mean zero: max age 0 revalidates every request, negativeCacheTTL 0 records no
+  misses. negativeCacheTTL `-1` never expires; stored `-1` is migrated to `0s` (schema 8). TTL, enabled
+  switch or credential changes clear the negative cache.
+- Routing rules written through the Nexus API match the whole path (stored as `^(?:m)$`).
+- A blob store that fails to open no longer stops the node: its repositories answer 503 and status
+  checks name it; it is retried every few seconds.
+- Auto-block counts only the remote's own host and resets when remote access settings change.
+- HTTP settings: timeouts up to 3600 s; nonProxyHosts takes Java-style `*` globs.
 
 ### Fixed
 - A Nexus API repository PUT no longer resets the anonymous-read override, a yum repository's depth,
@@ -79,6 +94,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Raw search by `group=/dir` finds the directory's files.
 - Webhook deliveries waiting to be sent were deleted once a webhook had 200 newer ones; up to 5 000
   pending deliveries per webhook are now kept beside the 200 most recent sent or failed ones.
+- Nexus API: `metadataMaxAge`/`contentMaxAge`/`timeToLive` 0 and `negativeCache.enabled: false` were
+  replaced by defaults; NTLM credentials were sent as Basic (now 400).
 
 ### Upgrade notes
 - Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by
@@ -95,6 +112,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `webhooks.payload_format` (existing webhooks become `commandcenter`, their payloads unchanged) and
   `events.ip`, `events.node`. During the rollout older nodes deliver nothing to `nexus` webhooks or to
   aliases they do not know. Webhooks subscribed to `*` now also receive `auth.*` events.
+- Schema 8 also rewrites stored proxy `negativeCacheTTL: "-1"` to `"0s"`, keeping what it did ("no
+  negative caching"); set `-1` again after the upgrade for never-expiring misses. `"0s"` in the native API
+  and config.yaml now means zero rather than the default. Remote 403/400/405 for uncached assets are now a
+  cached 404 instead of an uncached 502, so 502 rates in monitoring drop. A Terraform re-apply of a
+  routing rule through the Nexus API changes it to whole-path matching. Saving a nonProxyHosts entry
+  with a middle `*` is now refused.
 
 ## [0.3.0] - 2026-10-30
 
