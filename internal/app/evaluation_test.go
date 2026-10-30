@@ -330,6 +330,12 @@ func TestRepositoryDashboard(t *testing.T) {
 			}
 		}
 	}
+	// /-/api/me tells the UI whether to show the dashboard and usage entries.
+	for user, want := range map[string]string{"ci": `"metrics":false`, "root": `"metrics":true`, "viewer": `"metrics":true`} {
+		if body := mustDo(t, 200, "GET", ts.URL+"/-/api/me", user, "", false); !strings.Contains(body, want) {
+			t.Fatalf("/-/api/me as %q: %s, want %s", user, body, want)
+		}
+	}
 	if st, body := do(t, "POST", ts.URL+"/-/api/roles", "root", `{"id":"bad","privileges":[{"target":"metrics","actions":["delete"]}]}`, true); st != 400 {
 		t.Fatalf("metrics delete privilege: %d %s", st, body)
 	}

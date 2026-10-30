@@ -440,6 +440,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and client addresses, kept for 24 months.
 - Privilege target `metrics` (action `read`): the dashboard, the evaluation results and the monthly
   metrics without the admin role.
+- Web UI for the above, in Nexus's places: a Replication card and an Evaluation select in the repository
+  form (with a source connection test), Azure and Google Cloud Storage in the blob store forms (Azure
+  credentials replaceable in place), Administration → System → Recovery (recovery mode, reconcile plans,
+  their items and execution; a banner on every admin page while recovery mode is on) and → Configuration
+  as Code (export, dry run with field-level plan, apply with step results), Repository → Repository
+  Dashboard with each repository's vulnerable components, Support → Usage with a monthly chart, the
+  evaluation toggles in the firewall settings and the `metrics` target in the role editor. Users with only
+  the `metrics` privilege see the dashboard and usage in the menu (`/-/api/me` reports `metrics`).
 
 ### Changed
 

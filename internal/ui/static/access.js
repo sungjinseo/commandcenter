@@ -325,11 +325,12 @@ async function userDetail(view, id) {
 
 // ---- roles -----------------------------------------------------------------------
 
-const targetKind = (tg) => (tg === "*" ? "all" : tg.startsWith("format:") ? "format" : tg.startsWith("selector:") ? "selector" : "repo");
-const targetValue = (tg) => (tg === "*" ? "" : tg.slice(tg.indexOf(":") + 1));
+const METRICS = "metrics"; // the usage data's target: action "read" only
+const targetKind = (tg) => (tg === "*" ? "all" : tg === METRICS ? METRICS : tg.startsWith("format:") ? "format" : tg.startsWith("selector:") ? "selector" : "repo");
+const targetValue = (tg) => (tg === "*" || tg === METRICS ? "" : tg.slice(tg.indexOf(":") + 1));
 const scopeText = (tg) => {
   const k = targetKind(tg), v = targetValue(tg);
-  return k === "all" ? t("roles.scopeAll") : k === "format" ? t("roles.scopeFormat", { v: FORMAT_NAMES[v] || v }) : k === "selector" ? t("roles.scopeSelector", { v }) : t("roles.scopeRepo", { v });
+  return k === "all" ? t("roles.scopeAll") : k === METRICS ? t("roles.kMetrics") : k === "format" ? t("roles.scopeFormat", { v: FORMAT_NAMES[v] || v }) : k === "selector" ? t("roles.scopeSelector", { v }) : t("roles.scopeRepo", { v });
 };
 
 export async function viewRoles(view, id) {
@@ -370,7 +371,7 @@ export async function viewRoles(view, id) {
   const rowsBox = h("div");
   const privs = [];
   const addPriv = (p) => {
-    const kind = sel([["all", t("roles.scopeAll")], ["format", t("roles.kFormat")], ["repo", t("roles.kRepo")], ["selector", t("roles.kSelector")]], targetKind(p.target));
+    const kind = sel([["all", t("roles.scopeAll")], ["format", t("roles.kFormat")], ["repo", t("roles.kRepo")], ["selector", t("roles.kSelector")], [METRICS, t("roles.kMetrics")]], targetKind(p.target));
     const val = h("select", { "aria-label": t("roles.target") });
     // withKept lists names plus a stored one the list no longer has (the "kept" rule).
     const withKept = (names, keep) => (names.includes(keep) || !keep ? names : names.concat(keep)).map((n) => [n, n]);
@@ -380,22 +381,25 @@ export async function viewRoles(view, id) {
       [["*", t("roles.anyRepo")]].concat(withKept(repoNames.filter((n) => n !== "*"), stored.find((n) => n !== "*" && !repoNames.includes(n))))
         .map(([v, l]) => h("option", { value: v, selected: stored.includes(v) }, l)));
     const reposF = h("div", { class: "field" }, h("span", { class: "flabel" }, t("roles.repos")), reposSel);
+    const valF = h("div", { class: "field grow" }, h("span", { class: "flabel" }, t("roles.target")), val);
     const fill = () => {
       const k = kind.value, keep = val.value || targetValue(p.target);
       const opts = k === "format" ? FORMATS.map((f) => [f, FORMAT_NAMES[f]]) : k === "repo" ? withKept(repoNames, keep) : k === "selector" ? withKept(selNames, keep) : [];
       put(val, opts.map(([v, l]) => h("option", { value: v }, l)));
       if (opts.some(([v]) => v === keep)) val.value = keep;
-      val.hidden = k === "all";
+      valF.hidden = k === "all" || k === METRICS;
       reposF.hidden = k !== "selector";
+      for (const b of ag.el.querySelectorAll("input")) b.closest("label").hidden = k === METRICS && b.value !== "read";
     };
     kind.id = uid("k");
+    const ag = checkGroup(ACTIONS.map((a) => [a, a]), p.actions || []);
     fill();
     kind.addEventListener("change", () => { val.value = ""; fill(); });
-    const ag = checkGroup(ACTIONS.map((a) => [a, a]), p.actions || []);
     const rm = button(t("roles.removePriv"), "small danger");
     const el = h("div", { class: "edit-row" }, h("div", { class: "row" },
-      h("div", { class: "field" }, h("label", { for: kind.id }, t("roles.scope")), kind), h("div", { class: "field grow" }, h("span", { class: "flabel" }, t("roles.target")), val), rm), reposF, ag.el);
-    const item = { el, target: () => (kind.value === "all" ? "*" : kind.value + ":" + val.value), actions: ag.values, kind,
+      h("div", { class: "field" }, h("label", { for: kind.id }, t("roles.scope")), kind), valF, rm), reposF, ag.el);
+    const item = { el, target: () => (kind.value === "all" ? "*" : kind.value === METRICS ? METRICS : kind.value + ":" + val.value),
+      actions: () => (kind.value === METRICS ? ag.values().filter((a) => a === "read") : ag.values()), kind,
       repos: () => (kind.value === "selector" ? [...reposSel.selectedOptions].map((o) => o.value) : undefined) };
     rm.addEventListener("click", () => { privs.splice(privs.indexOf(item), 1); el.remove(); fs.dirty(); });
     privs.push(item);

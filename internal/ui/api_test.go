@@ -342,12 +342,12 @@ func TestMe(t *testing.T) {
 	}
 	c := login(t, e, "admin")
 	r = e.req(t, "GET", "/-/api/me", "", "", c, false)
-	if got := r.json(t); !reflect.DeepEqual(got, map[string]any{"user": "admin", "admin": true, "anonymous": false, "roles": []any{"admin"}, "owner": "admin", "realm": "Local", "version": "test", "defaultLanguage": "ko"}) {
+	if got := r.json(t); !reflect.DeepEqual(got, map[string]any{"user": "admin", "admin": true, "anonymous": false, "roles": []any{"admin"}, "owner": "admin", "realm": "Local", "version": "test", "defaultLanguage": "ko", "metrics": true}) {
 		t.Fatalf("session me: %v", got)
 	}
 	c = login(t, e, "reader")
 	r = e.req(t, "GET", "/-/api/me", "", "", c, false)
-	if got := r.json(t); !reflect.DeepEqual(got, map[string]any{"user": "reader", "admin": false, "anonymous": false, "roles": []any{}, "owner": "reader", "realm": "Local", "version": "test", "defaultLanguage": "ko"}) {
+	if got := r.json(t); !reflect.DeepEqual(got, map[string]any{"user": "reader", "admin": false, "anonymous": false, "roles": []any{}, "owner": "reader", "realm": "Local", "version": "test", "defaultLanguage": "ko", "metrics": false}) {
 		t.Fatalf("roleless me: %v", got)
 	}
 	c = login(t, e, "ci")

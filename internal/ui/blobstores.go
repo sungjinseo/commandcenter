@@ -174,6 +174,8 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 		out.Azure = &azureJSON{AccountName: c.AccountName, ContainerName: c.ContainerName, Prefix: c.Prefix, Endpoint: c.Endpoint,
 			Auth: c.Auth, TenantID: c.TenantID, ClientID: c.ClientID, AuthorityHost: c.AuthorityHost, IMDSEndpoint: c.IMDSEndpoint,
 			AccountKeySet: c.AccountKey != "", SASTokenSet: c.SASToken != "", ClientSecretSet: c.ClientSecret != ""}
+		out.QuotaViolated, _ = quotaState(out) // a container: no local filesystem figures, as for S3
+		return out, nil
 	}
 	if bs.Type == meta.BlobStoreGoogle && bs.Google != nil {
 		c := bs.Google

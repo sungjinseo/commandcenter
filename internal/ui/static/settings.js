@@ -28,10 +28,46 @@ const storeLink = (name) => "#admin/repository/blobstores" + (name ? ":" + enc(n
 const known = (n) => typeof n === "number" && n > 0;
 const pctOf = (used, total) => (known(total) ? (Number(used) / total) * 100 : 0);
 
-const storeType = (s) => s.type === "s3" ? "S3" : s.type === "group" ? t("blob.group") : t("blob.file");
+const storeType = (s) => s.type === "s3" ? "S3" : s.type === "azure" ? "Azure" : s.type === "google" ? "Google Cloud" : s.type === "group" ? t("blob.group") : t("blob.file");
+const cloud = (s) => ["s3", "azure", "google"].includes(s.type); // no local filesystem figures
 const memberText = (m) => m.name + (m.readOnly ? " (" + t("blob.ro") + ")" : "");
 const storeLocation = (s) => s.type === "s3" ? "s3://" + ((s.s3 || {}).bucket || "") + "/" + ((s.s3 || {}).prefix || "")
+  : s.type === "azure" ? "azure://" + ((s.azure || {}).accountName || "") + "/" + ((s.azure || {}).containerName || "") + "/" + ((s.azure || {}).prefix || "")
+  : s.type === "google" ? "gs://" + ((s.google || {}).bucket || "") + "/" + ((s.google || {}).prefix || "")
   : s.type === "group" ? (s.members || []).map(memberText).join(", ") : s.path;
+// An Azure store's authentication: the methods and the fields each one takes; a
+// secret is write-only (the view says only whether it is set).
+const AZ_USES = { accountKey: ["accountKey"], sasToken: ["sasToken"], clientSecret: ["tenantId", "clientId", "clientSecret", "authorityHost"],
+  managedIdentity: ["clientId", "imdsEndpoint"], workloadIdentity: ["tenantId", "clientId", "authorityHost"] };
+const AZ = "blob.az.", AZ_HELP = "blob.azh."; // + the method or field name
+const AZ_SECRET = { accountKey: "accountKeySet", sasToken: "sasTokenSet", clientSecret: "clientSecretSet" };
+// azureAuth edits the method and its fields; cur is the store's view when the
+// credentials are replaced (an empty secret keeps the stored one).
+function azureAuth(cur) {
+  cur = cur || {};
+  const method = sel(Object.keys(AZ_USES).map((m) => [m, t(AZ + m)]), cur.authenticationMethod || "accountKey");
+  const inp = {}, fl = {};
+  for (const k of ["accountKey", "sasToken", "tenantId", "clientId", "clientSecret", "authorityHost", "imdsEndpoint"]) {
+    const set = AZ_SECRET[k] && cur[AZ_SECRET[k]];
+    inp[k] = AZ_SECRET[k] ? h("input", { type: "password", autocomplete: "new-password", placeholder: set ? t("rf.unchanged") : "" })
+      : textIn(cur[k] || "", { class: "mono", type: /Host|Endpoint/.test(k) ? "url" : "text", maxlength: 300 });
+    fl[k] = field(t(AZ + k), inp[k], set ? [h("span", { class: "rf-set" }, t("blob.secretSet")), " — ", t("rf.keepEmpty")] : t(AZ_HELP + k));
+  }
+  const sync = () => { for (const k in fl) fl[k].hidden = !AZ_USES[method.value].includes(k); };
+  method.addEventListener("change", sync);
+  sync();
+  return {
+    els: [field(t("blob.az.method"), method, t("blob.az.methodHelp"), { full: true }), ...Object.values(fl)],
+    value() {
+      const o = { authenticationMethod: method.value };
+      for (const k of AZ_USES[method.value]) o[k] = AZ_SECRET[k] ? inp[k].value : inp[k].value.trim();
+      return o;
+    },
+    clear() { for (const k in AZ_SECRET) inp[k].value = ""; },
+  };
+}
+// mask hides the secrets just sent in the server's messages.
+const mask = (list, secrets) => list.map((m) => secrets.filter(Boolean).reduce((x, v) => String(x).split(v).join("••••"), m));
 const MiB = 1048576, GiB = 1073741824;
 const quotaText = (q) => (q ? (q.type === "spaceRemainingBytes" ? t("blob.qRemainingText", { n: fmtBytes(q.limitBytes) }) : t("blob.qUsedText", { n: fmtBytes(q.limitBytes) })) : t("blob.qNone"));
 // storeFlags: a violated quota and the group a store belongs to.
@@ -121,7 +157,7 @@ export async function viewBlobStores(view, name) {
     ], list.map((s) => h("tr", null,
       h("td", null, h("a", { href: storeLink(s.name) }, h("strong", null, s.name)), storeFlags(s).length ? h("div", null, storeFlags(s)) : null),
       h("td", { class: "nowrap" }, storeType(s)), h("td", null, h("code", null, storeLocation(s))),
-      h("td", { class: "num" }, fmtBytes(s.usedBytes || 0), known(s.fsTotal) ? " / " + fmtBytes(s.fsTotal) : null),
+      h("td", { class: "num" }, fmtBytes(s.usedBytes || 0), known(s.fsTotal) && !cloud(s) ? " / " + fmtBytes(s.fsTotal) : null),
       h("td", { class: "num" }, fmtNum(s.blobCount || 0)),
       h("td", { class: "num" }, fmtNum(s.repoCount || 0)))), t("blob.none"))),
     notice(t("blob.note")));
@@ -134,7 +170,7 @@ async function storeCreate(view) {
   const back = h("a", { class: "btn", href: storeLink() }, t("blob.back"));
   const nameIn = textIn("", { required: true, maxlength: 64 });
   const pathIn = textIn("", { class: "mono", placeholder: "/data/blobstores/archive" });
-  const type = sel([["file", t("blob.file")], ["s3", "S3"], ["group", t("blob.group")]], "file");
+  const type = sel([["file", t("blob.file")], ["s3", "S3"], ["azure", "Azure Blob Storage"], ["google", "Google Cloud Storage"], ["group", t("blob.group")]], "file");
   const quota = quotaEditor(null);
   const cand = groupCandidates(all, "");
   const members = membersEditor(cand, cand.slice(0, 2).map((n) => ({ name: n, readOnly: false })));
@@ -164,22 +200,58 @@ async function storeCreate(view) {
     field(t("blob.accessKey"), accessKey), field(t("blob.secretKey"), secretKey, t("blob.secretHelp")),
     field(t("blob.pathStyle"), pathStyle), field(t("blob.encryption"), encType, t("blob.encryptionHelp")), kmsField,
     h("div", { class: "field full" }, h("span", { class: "flabel" }, t("blob.failover")), failover.el, h("small", null, t("blob.failoverHelp"))));
+  // Azure: the account, the container and the authentication.
+  const azAccount = textIn("", { class: "mono", placeholder: "mystorageaccount", maxlength: 24 }), azContainer = textIn("", { class: "mono", maxlength: 63 });
+  const azPrefix = textIn("", { class: "mono" }), azEndpoint = textIn("", { type: "url", class: "mono", placeholder: "https://<account>.blob.core.windows.net" });
+  const az = azureAuth(null);
+  const azFields = fields(field(t("blob.az.account"), azAccount, null, { req: true }), field(t("blob.az.container"), azContainer, t("blob.az.containerHelp"), { req: true }),
+    field(t("blob.prefix"), azPrefix), field(t("blob.endpoint"), azEndpoint, t("blob.az.endpointHelp")), ...az.els);
+  // Google Cloud Storage: the bucket and a service account key (pasted, or read from its file here).
+  const gBucket = textIn("", { class: "mono" }), gPrefix = textIn("", { class: "mono" });
+  const gEndpoint = textIn("", { type: "url", class: "mono", placeholder: "https://storage.googleapis.com" });
+  const gAuth = sel([["accountKey", t("blob.g.key")], ["applicationDefault", t("blob.g.adc")], ["none", t("blob.g.none")]], "accountKey");
+  const gKey = h("input", { type: "password", autocomplete: "off", placeholder: '{"type": "service_account", …}' });
+  const gFile = h("input", { type: "file", accept: ".json,application/json", "aria-label": t("blob.g.file") });
+  const gWho = h("span", { class: "rf-set" });
+  const keyOf = () => {
+    let email = "";
+    try { email = JSON.parse(gKey.value).client_email || ""; } catch (e) { /* not JSON yet */ }
+    gWho.textContent = gKey.value ? (email ? t("blob.g.keyFor", { email }) : t("blob.g.notKey")) : "";
+  };
+  gKey.addEventListener("input", keyOf);
+  gFile.addEventListener("change", async () => {
+    const f = gFile.files && gFile.files[0];
+    gKey.value = f ? await f.text() : ""; // newlines go: the key's own are \n escapes
+    gFile.value = "";
+    keyOf();
+  });
+  const fKey = field(t("blob.g.accountKey"), gKey, [gWho, " ", t("blob.g.keyHelp")], { full: true });
+  const fFile = h("div", { class: "field full" }, h("span", { class: "flabel" }, t("blob.g.file")), gFile);
+  const syncG = () => { fKey.hidden = fFile.hidden = gAuth.value !== "accountKey"; };
+  gAuth.addEventListener("change", syncG);
+  syncG();
+  const gFields = fields(field(t("blob.bucket"), gBucket, null, { req: true }), field(t("blob.prefix"), gPrefix),
+    field(t("blob.g.auth"), gAuth, t("blob.g.authHelp")), field(t("blob.endpoint"), gEndpoint, t("blob.g.endpointHelp")), fKey, fFile);
   const syncType = () => {
     fileFields.hidden = type.value !== "file";
     s3Fields.hidden = type.value !== "s3";
+    azFields.hidden = type.value !== "azure";
+    gFields.hidden = type.value !== "google";
+    if (type.value !== "azure") az.clear();
+    if (type.value !== "google") gKey.value = "";
     groupFields.hidden = type.value !== "group";
     pathIn.disabled = type.value !== "file";
     for (const el of s3Fields.querySelectorAll("input, select")) el.disabled = type.value !== "s3";
     if (type.value !== "s3") secretKey.value = "";
   };
-  for (const f of [fileFields, s3Fields, groupFields]) f.classList.add("more");
+  for (const f of [fileFields, s3Fields, azFields, gFields, groupFields]) f.classList.add("more");
   type.addEventListener("change", syncType);
   syncType();
   const save = h("button", { type: "submit", class: "btn primary" }, t("blob.createBtn"));
   const form = h("form", { novalidate: true });
   const fs = formState(form);
   put(form, fs.err,
-    fields(field(t("blob.name"), nameIn, t("blob.nameHelp"), { req: true }), field(t("blob.type"), type)), fileFields, s3Fields, groupFields,
+    fields(field(t("blob.name"), nameIn, t("blob.nameHelp"), { req: true }), field(t("blob.type"), type)), fileFields, s3Fields, azFields, gFields, groupFields,
     h("h3", { class: "sub-title" }, t("blob.quotaTitle")), fields(...quota.els),
     h("div", { class: "actions end" }, back, save));
   form.addEventListener("submit", async (ev) => {
@@ -200,6 +272,15 @@ async function storeCreate(view) {
         pathStyle: pathStyle.checked, accessKeyId: accessKey.value.trim(), secretAccessKey: secretKey.value,
         encryption: encType.value ? { type: encType.value, kmsKeyId: encType.value === "kmsManagedEncryption" ? kmsKey.value.trim() : "" } : null,
         failover: fo };
+    } else if (type.value === "azure") {
+      if (!azAccount.value.trim() || !azContainer.value.trim()) { fs.show([t("blob.e.azure")]); return; }
+      body.type = "azure";
+      body.azure = Object.assign({ accountName: azAccount.value.trim(), containerName: azContainer.value.trim(), prefix: azPrefix.value.trim(), endpoint: azEndpoint.value.trim() }, az.value());
+    } else if (type.value === "google") {
+      if (!gBucket.value.trim()) { fs.show([t("blob.e.gBucket")]); return; }
+      body.type = "google";
+      body.google = { bucket: gBucket.value.trim(), prefix: gPrefix.value.trim(), endpoint: gEndpoint.value.trim(), authentication: gAuth.value };
+      if (gAuth.value === "accountKey") body.google.accountKey = gKey.value;
     } else if (type.value === "group") {
       body.type = "group";
       body.members = members.values();
@@ -208,6 +289,9 @@ async function storeCreate(view) {
       if (body.members.every((m) => m.readOnly)) { fs.show([t("blob.e.writable")]); return; }
     } else body.path = pathIn.value.trim(); // retain compatibility with file-only servers
     secretKey.value = "";
+    const sent = [body.s3 && body.s3.secretAccessKey, ...(body.azure ? [body.azure.accountKey, body.azure.sasToken, body.azure.clientSecret] : []), body.google && body.google.accountKey];
+    az.clear();
+    gKey.value = "";
     save.disabled = true;
     try {
       const out = await api("blobstores", { method: "POST", body });
@@ -216,10 +300,12 @@ async function storeCreate(view) {
       save.disabled = false;
       if (!isLive()) return;
       if (e.status === 401 || e.status === 403) { handleError(e); return; }
-      const secret = body.s3 && body.s3.secretAccessKey;
-      fs.show(errList(e).map((msg) => secret ? String(msg).split(secret).join("••••") : msg));
+      fs.show(mask(errList(e), sent));
     } finally {
       if (body.s3) delete body.s3.secretAccessKey;
+      delete body.azure;
+      delete body.google;
+      keyOf();
     }
   });
   put(view, pageHead(t("blob.createTitle"), sub(t("blob.createSub")), acts(back), { eyebrow: t("blob.eyebrow") }),
@@ -284,6 +370,18 @@ async function storeDetail(view, name) {
       kv(t("blob.encryption"), (s.s3 || {}).encryption ? (s.s3.encryption.type === "kmsManagedEncryption" ? "SSE-KMS" : "SSE-S3") + (s.s3.encryption.kmsKeyId ? " · " + s.s3.encryption.kmsKeyId : "") : t("blob.encNone")),
       kv(t("blob.failover"), ((s.s3 || {}).failover || []).length ? h("span", null, s.s3.failover.map((f) => h("div", { class: "mono tiny" }, [f.region, f.bucket, f.endpoint].filter(Boolean).join(" · ")))) : dash),
     ] : null,
+    s.type === "azure" && s.azure ? [
+      kv(t("blob.az.account"), s.azure.accountName), kv(t("blob.az.container"), s.azure.containerName), kv(t("blob.prefix"), s.azure.prefix),
+      kv(t("blob.endpoint"), s.azure.endpoint), kv(t("blob.az.method"), t(AZ + s.azure.authenticationMethod)),
+      ["tenantId", "clientId", "authorityHost", "imdsEndpoint"].filter((k) => s.azure[k]).map((k) => kv(t(AZ + k), h("span", { class: "mono" }, s.azure[k]))),
+      Object.entries(AZ_SECRET).filter(([k]) => AZ_USES[s.azure.authenticationMethod]?.includes(k)).map(([k, f]) => kv(t(AZ + k), s.azure[f] ? t("blob.secretSet") : t("blob.secretUnset"))),
+    ] : null,
+    s.type === "google" && s.google ? [
+      kv(t("blob.bucket"), s.google.bucket), kv(t("blob.prefix"), s.google.prefix), kv(t("blob.endpoint"), s.google.endpoint),
+      kv(t("blob.g.auth"), { accountKey: t("blob.g.key"), applicationDefault: t("blob.g.adc"), none: t("blob.g.none") }[s.google.authentication] || s.google.authentication),
+      s.google.authentication === "accountKey" ? kv(t("blob.g.accountKey"), s.google.accountKeySet ? t("blob.secretSet") : t("blob.secretUnset")) : null,
+      s.google.serviceAccount ? kv(t("blob.g.account"), h("span", { class: "mono" }, s.google.serviceAccount)) : null,
+    ] : null,
     isGroup ? [kv(t("blob.fill"), (FILL().find(([v]) => v === s.fillPolicy) || [0, s.fillPolicy])[1]),
       kv(t("blob.members"), h("span", null, (s.members || []).map((m) => h("div", null, h("a", { href: storeLink(m.name) }, m.name), m.readOnly ? [" ", badge(t("blob.ro"))] : null))))] : null,
     s.memberOf ? kv(t("blob.memberOfLabel"), h("a", { href: storeLink(s.memberOf) }, s.memberOf)) : null,
@@ -294,8 +392,8 @@ async function storeDetail(view, name) {
     kv(t("blob.used"), fmtBytes(s.usedBytes || 0)),
     kv(t("blob.count"), fmtNum(s.blobCount || 0)),
     kv(t("blob.repos"), fmtNum(s.repoCount || 0)),
-    kv(t("blob.free"), known(s.fsTotal) && s.fsFree != null ? fmtBytes(s.fsFree) : t("blob.capUnknown")),
-    known(s.fsTotal) ? bar(p, p > 70 ? "amber" : null) : null]);
+    kv(t("blob.free"), known(s.fsTotal) && s.fsFree != null && !cloud(s) ? fmtBytes(s.fsFree) : t("blob.capUnknown")),
+    known(s.fsTotal) && !cloud(s) ? bar(p, p > 70 ? "amber" : null) : null]);
   const using = card(t("blob.usedBy"), t("blob.usedBySub"), users.length ? tbl([t("col.repo"), t("col.type")],
     users.map((r) => h("tr", null, h("td", { class: "name" }, h("a", { href: adminRepoLink(r.name) }, h("strong", null, r.name))), h("td", null, typeBadge(r.type)))))
     : h("div", { class: "empty" }, t("blob.noRepos")));
@@ -349,6 +447,33 @@ async function storeDetail(view, name) {
     groupCard = card(t("blob.groupTitle"), t("blob.groupSub"), gForm);
   }
 
+  // an Azure store's credentials (its account, container, prefix and endpoint stay)
+  let azCard = null;
+  if (s.type === "azure" && s.azure) {
+    const aForm = h("form", { novalidate: true });
+    const afs = formState(aForm);
+    const ed = azureAuth(s.azure);
+    const ro = (v) => textIn(v || "", { readonly: true, class: "mono" });
+    const aSave = h("button", { type: "submit", class: "btn primary" }, t("blob.az.save"));
+    put(aForm, afs.err, fields(field(t("blob.az.account"), ro(s.azure.accountName)), field(t("blob.az.container"), ro(s.azure.containerName)),
+      field(t("blob.prefix"), ro(s.azure.prefix)), field(t("blob.endpoint"), ro(s.azure.endpoint)), ...ed.els), h("div", { class: "actions end" }, aSave));
+    aForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      afs.clear();
+      const azure = ed.value();
+      ed.clear();
+      aSave.disabled = true;
+      try {
+        await api("blobstores/" + enc(s.name), { method: "PUT", body: { azure } });
+        if (isLive()) afs.done(storeLink(s.name), t("blob.az.saved"));
+      } catch (e) {
+        aSave.disabled = false;
+        if (isLive()) { if (e.status === 401 || e.status === 403) handleError(e); else afs.show(mask(errList(e), [azure.accountKey, azure.sasToken, azure.clientSecret])); }
+      }
+    });
+    azCard = card(t("blob.az.title"), t("blob.az.sub"), aForm);
+  }
+
   // health check of every target (directory, primary and failover buckets, members)
   const hRun = button(t("blob.health"), "small");
   const hOut = h("div", { "aria-live": "polite" }, h("p", { class: "hint" }, t("blob.healthIdle")));
@@ -399,7 +524,7 @@ async function storeDetail(view, name) {
 
   put(view, pageHead(s.name, h("p", null, storeFlags(s), storeFlags(s).length ? " " : null, t("blob.detailSub")), acts(back, convert, del), { eyebrow: t("blob.eyebrow") }),
     fs.ok,
-    h("div", { class: "two" }, h("div", { class: "stack" }, settings, groupCard, using), h("div", { class: "stack" }, usage, quotaCard, healthCard, notice(t("blob.note")))));
+    h("div", { class: "two" }, h("div", { class: "stack" }, settings, azCard, groupCard, using), h("div", { class: "stack" }, usage, quotaCard, healthCard, notice(t("blob.note")))));
 }
 
 // ---- general settings ------------------------------------------------------------
@@ -741,6 +866,8 @@ export async function viewVulnerability(view) {
   const hours = numIn(st.cacheHours || 24, 1, 720);
   const maxMiB = numIn(st.maxImportMiB || 1024, 1, 16384);
   const eco = checks(ECOSYSTEMS.map((x) => [x, x]), st.ecosystems || []);
+  const evHosted = h("input", { type: "checkbox", checked: !!st.evaluateHosted });
+  const evMembers = h("input", { type: "checkbox", checked: !!st.evaluateGroupMembers });
   const fApi = field(t("vs.apiURL"), apiURL, t("vs.apiURLHelp"), { full: true });
   const fHours = field(t("vs.cacheHours"), hours, t("vs.cacheHoursHelp"));
   const syncMode = () => { fApi.hidden = fHours.hidden = mode.value !== "online"; };
@@ -753,13 +880,16 @@ export async function viewVulnerability(view) {
     fApi, fHours,
     field(t("vs.dumpURL"), dumpURL, t("vs.dumpURLHelp"), { full: true }),
     field(t("vs.maxImport"), maxMiB, t("vs.maxImportHelp")),
-    h("div", { class: "field full", role: "group" }, h("span", { class: "flabel" }, t("vs.ecosystems")), eco.el, h("small", null, t("vs.ecosystemsHelp")))),
+    h("div", { class: "field full", role: "group" }, h("span", { class: "flabel" }, t("vs.ecosystems")), eco.el, h("small", null, t("vs.ecosystemsHelp"))),
+    h("h3", { class: "sub-title field full" }, t("vs.evalTitle")),
+    checkRow(evHosted, t("vs.evalHosted"), t("vs.evalHostedHelp")),
+    checkRow(evMembers, t("vs.evalMembers"), t("vs.evalMembersHelp"))),
     h("div", { class: "actions end" }, save));
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     fs.clear();
     const b = { enabled: on.checked, mode: mode.value, apiURL: apiURL.value.trim(), dumpURL: dumpURL.value.trim(),
-      cacheHours: intOf(hours), maxImportMiB: intOf(maxMiB), ecosystems: eco.values() };
+      cacheHours: intOf(hours), maxImportMiB: intOf(maxMiB), ecosystems: eco.values(), evaluateHosted: evHosted.checked, evaluateGroupMembers: evMembers.checked };
     const errs = [];
     if (!(b.cacheHours >= 1 && b.cacheHours <= 720)) errs.push(t("vs.e.hours"));
     if (!(b.maxImportMiB >= 1 && b.maxImportMiB <= 16384)) errs.push(t("vs.e.max"));

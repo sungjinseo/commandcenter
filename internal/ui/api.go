@@ -106,6 +106,9 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 		// Signed-in users see the version in the sidebar footer (plan 10);
 		// anonymous callers do not learn it.
 		out["version"] = u.Version
+		// Whether the dashboard and the monthly usage are open to it (an
+		// admin, or the read privilege on "metrics"): the nav shows them.
+		out["metrics"] = u.Auth.CanReadMetrics(p)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

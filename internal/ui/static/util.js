@@ -95,6 +95,7 @@ const ICONS = {
   roles: ["M12 3l8 4v6c0 4-8 8-8 8s-8-4-8-8V7l8-4z", "M8 12l3 3l5-6"],
   realms: ["M10 13a5 5 0 0 1 0-7l3-3a5 5 0 0 1 7 7l-3 3", "M14 11a5 5 0 0 1 0 7l-3 3a5 5 0 0 1-7-7l3-3"],
   health: ["M2 12h5l3-8l4 16l3-8h5"],
+  chart: ["M3 20h18", "M6 20v-8", "M11 20V5", "M16 20v-11", "M21 20v-5"],
   guide: ["M3 4h8l1 2l1-2h8v16h-8l-1 1l-1-1H3V4z", "M12 6v15"],
   user: ["M12 4a4 4 0 1 0 0 8a4 4 0 1 0 0-8z", "M4 21c.8-4 4-6.5 8-6.5s7.2 2.5 8 6.5"],
   token: ["M8 10a4 4 0 1 0 0 4", "M12 12h9", "M18 12v3", "M21 12v2"],
@@ -178,6 +179,8 @@ export const onlineBadge = (online) => (online === false ? h("span", { class: "b
 export const SEARCH_FORMATS = { apt: "Apt", cargo: "Cargo", cocoapods: "Cocoapods", composer: "Composer", conan: "Conan", conda: "Conda", docker: "Docker", gitlfs: "Git LFS", go: "Go", helm: "Helm", huggingface: "Hugging Face", maven: "Maven", npm: "npm", nuget: "NuGet", p2: "p2", pypi: "PyPI", r: "R", raw: "Raw", rubygems: "RubyGems", swift: "Swift", terraform: "Terraform", yum: "Yum" };
 // OSV_FORMATS have vulnerability data (the server's config.FirewallFormats).
 export const OSV_FORMATS = ["npm", "pypi", "maven", "go", "cargo", "nuget", "rubygems", "composer", "conan", "r"];
+// NO_REPLICATION: proxy formats without pull replication (the server's config.ReplicationFormats).
+export const NO_REPLICATION = ["docker", "p2", "cocoapods", "huggingface"];
 // Severities from worst; "none" and "unknown" are the OSV extremes.
 export const SEVERITIES = ["critical", "high", "medium", "low"];
 const SEV = { critical: ["sev.critical", "red"], high: ["sev.high", "red"], medium: ["sev.medium", "amber"], low: ["sev.low", "blue"], none: ["sev.none", ""], unknown: ["sev.unknown", ""] };
@@ -285,9 +288,12 @@ export async function api(path, opts) {
   const init = {
     method: opts.method || "GET",
     credentials: "same-origin",
-    headers: { "X-Command-Center-UI": "1", Accept: "application/json" },
+    headers: Object.assign({ "X-Command-Center-UI": "1", Accept: "application/json" }, opts.headers),
   };
-  if (opts.body !== undefined) {
+  if (opts.raw !== undefined) { // a text body sent as is (a YAML or JSON document)
+    init.body = opts.raw;
+    init.headers["Content-Type"] = "text/plain; charset=utf-8";
+  } else if (opts.body !== undefined) {
     init.body = JSON.stringify(opts.body);
     init.headers["Content-Type"] = "application/json";
   }
@@ -298,6 +304,7 @@ export async function api(path, opts) {
     throw new APIError(0, t("err.connect"));
   }
   if (res.status === 204) return null;
+  if (opts.blob && res.ok) return res.blob(); // a file to save
   let data = null;
   try { data = await res.json(); } catch (e) { /* not JSON */ }
   if (!res.ok) {

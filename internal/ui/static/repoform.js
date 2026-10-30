@@ -7,7 +7,7 @@
 // never sees a create or edit control.
 import {
   state, h, put, api, apiRepo, adminRepoLink, browseLink, typeBadge, fmtBytes, fmtNum, fmtDate, FORMAT_NAMES,
-  copyLine, pageHead, needAdmin, loadRepos, handleError, card, kv, alive, icon, markBusy, bar, OSV_FORMATS, SEVERITIES, sevBadge, sevText, repoFlags,
+  copyLine, pageHead, needAdmin, loadRepos, handleError, card, kv, alive, icon, markBusy, bar, OSV_FORMATS, SEVERITIES, sevBadge, sevText, repoFlags, NO_REPLICATION,
 } from "./util.js";
 import { modal, rerender } from "./shell.js";
 import { t } from "./i18n.js";
@@ -441,6 +441,35 @@ export async function viewRepoForm(view, o) {
   const fwMal = hasFw ? checkbox(t("rf.fwMalicious"), fw0.blockMalicious !== false) : null;
   const fwSev = hasFw ? select([["none", t("rf.fwSevNone")]].concat(SEVERITIES.slice().reverse().map((s) => [s, t("rf.fwSevAtLeast", { sev: sevText(s) })])), fw0.blockSeverityAtLeast || "none") : null;
   const fwAllow = hasFw ? h("textarea", { id: uid("fa"), class: "mono", rows: 4, spellcheck: "false", autocomplete: "off", placeholder: "^lodash@4\\.17\\.20$" }, (fw0.allowList || []).join("\n")) : null;
+  // Proxy of a format with pull replication: pre-emptive pull from the hosted repository the remote names.
+  const hasRepl = isProxy && !NO_REPLICATION.includes(cfg.format);
+  const rp0 = cfg.replication || {};
+  const rpOn = hasRepl ? checkbox(t("rf.rpOn"), rp0.preemptivePullEnabled) : null;
+  const rpRe = hasRepl ? textInput(rp0.assetPathRegex, { class: "mono", maxlength: 512, placeholder: "^org/acme/.*" }) : null;
+  const rpSum = hasRepl ? checkbox(t("rf.rpVerify"), rp0.verifyChecksums) : null;
+  let rpTest = null;
+  if (hasRepl && editing) {
+    const out = h("div", { class: "rp-out", "aria-live": "polite" });
+    const go = h("button", { type: "button", class: "btn small" }, t("rf.rpTest"));
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      put(out, h("span", { class: "tiny muted" }, t("common.loading")));
+      try {
+        const d = await api(apiRepo(cfg.name, "/replication/test"), { method: "POST" });
+        if (isLive()) put(out, h("span", { class: "badge " + (d.ok ? "green" : "red") }, d.ok ? t("st.ok") : t("st.bad")), " ", d.message);
+      } catch (e) {
+        if (!isLive()) return;
+        put(out, h("span", { class: "badge red" }, t("st.bad")), " ", e.message);
+        if (e.status === 401) handleError(e);
+      } finally { go.disabled = false; }
+    });
+    rpTest = h("div", { class: "field full" }, h("span", { class: "flabel" }, t("rf.rpSource")),
+      h("div", null, cfg.replicationSource ? h("code", null, cfg.replicationSource.url + " · " + cfg.replicationSource.repository) : h("span", { class: "tiny muted" }, t("rf.rpNoSource"))),
+      h("div", { class: "actions" }, go, out), h("small", null, t("rf.rpTestHelp")));
+  }
+  // Hosted and proxy of a format with OSV data: whether repository.evaluate monitors it.
+  const evalSel = !isGroup && OSV_FORMATS.includes(cfg.format)
+    ? select([["inherit", t("rf.evInherit")], ["enabled", t("rf.evOn")], ["disabled", t("rf.evOff")]], cfg.evaluation || "inherit") : null;
   // Content: strict content type validation (hosted) and Content-Disposition (raw, gitlfs).
   const strict = isHosted ? checkbox(t("rf.strict"), cfg.strictContentTypeValidation) : null;
   const disposition = DISPOSITION.includes(cfg.format) ? select([["inline", t("rf.dispInline")], ["attachment", t("rf.dispAttachment")]], cfg.contentDisposition || "inline") : null;
@@ -572,6 +601,12 @@ export async function viewRepoForm(view, o) {
           h("div", { class: "field full" }, fwMal.el, h("small", null, t("rf.fwMaliciousHelp"))),
           field(t("rf.fwSev"), fwSev, t("rf.fwSevHelp"), { full: true }),
           field(t("rf.fwAllow"), fwAllow, t("rf.fwAllowHelp"), { full: true }))) : null,
+        hasRepl ? card(t("rf.rp"), t("rf.rpSub"), fields(
+          h("div", { class: "field full" }, rpOn.el, h("small", null, t("rf.rpOnHelp"))),
+          field(t("rf.rpRegex"), rpRe, t("rf.rpRegexHelp"), { full: true }),
+          h("div", { class: "field full" }, rpSum.el, h("small", null, t("rf.rpVerifyHelp"))),
+          rpTest)) : null,
+        evalSel ? card(t("rf.ev"), t("rf.evSub"), fields(field(t("rf.ev"), evalSel, [t("rf.evHelp"), " ", h("a", { href: "#admin/firewall/settings" }, t("nav.vulnerability"))], { full: true }))) : null,
         authCard,
         isGroup ? card(t("rf.group"), t("rf.groupSub"), fields(
           field(t("rf.memberRepos"), picker.el, t("rf.membersHelp"), { group: true, full: true }),
@@ -622,6 +657,7 @@ export async function viewRepoForm(view, o) {
       blocked: false,
     };
     if (bstore) b.blobStore = bstore.value;
+    if (evalSel) b.evaluation = evalSel.value;
     if (version) b.versionPolicy = version.value;
     if (deploy) b.writePolicy = deploy.value;
     if (isProxy) {
@@ -635,6 +671,7 @@ export async function viewRepoForm(view, o) {
       b.autoBlock = autoBlock.box.checked;
       if (hasFw) b.firewall = { enabled: fwOn.box.checked, blockMalicious: fwMal.box.checked, blockSeverityAtLeast: fwSev.value, allowList: fwAllow.value.split("\n").map((x) => x.trim()).filter(Boolean) };
       else if (cfg.firewall) b.firewall = cfg.firewall;
+      if (hasRepl) b.replication = { preemptivePullEnabled: rpOn.box.checked, assetPathRegex: rpRe.value.trim(), verifyChecksums: rpSum.box.checked };
       const a = { username: user.value.trim(), password: pass.value, bearerToken: bearer.value };
       if (clrPass && clrPass.box.checked) a.clearPassword = true;
       if (clrBearer && clrBearer.box.checked) a.clearBearerToken = true;

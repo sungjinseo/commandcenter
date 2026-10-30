@@ -6,7 +6,7 @@
 //   #admin/system/tasks[:create|:<id>]
 import {
   state, h, put, api, enc, encSeg, alive, adminRepoLink, componentLink, safeURL, fmtBytes, fmtNum, fmtDate, FORMATS, FORMAT_NAMES,
-  fmtBadge, nameCell, pageHead, loading, card, kv, tbl, handleError, showError, icon, s, markBusy, taskName, loadRepos, debounce, saveBlob, OSV_FORMATS,
+  fmtBadge, nameCell, pageHead, loading, card, kv, tbl, handleError, showError, icon, s, markBusy, taskName, loadRepos, debounce, saveBlob, OSV_FORMATS, NO_REPLICATION,
 } from "./util.js";
 import { t, locale } from "./i18n.js";
 import { confirmDelete } from "./browse.js";
@@ -637,6 +637,8 @@ const CLEANUP = "repository.cleanup", REBUILD = "repository.rebuild-metadata", C
 const VERIFY = "repository.verify-blobs", PURGE = "maven.purge-snapshots", RECALC = "blobstore.recalculate-size", TEMP = "blobstore.delete-temp-files";
 const EXPORT = "repository.export", IMPORT = "repository.import", MOVE = "repository.change-blobstore", RMMEMBER = "blobstore.group-remove-member";
 const VSYNC = "vulnerability.sync", VSCAN = "vulnerability.scan";
+const REPL = "repository.pull-replication", EVAL = "repository.evaluate";
+export const RPLAN = "blobstore.reconcile-plan", REXEC = "blobstore.reconcile-execute";
 const TASK_STATUS = { Running: ["task.running", "blue"], Waiting: ["task.waiting"], Disabled: ["task.disabled"] };
 const taskStatus = (x) => (TASK_STATUS[x.status] ? badge(t(TASK_STATUS[x.status][0]), TASK_STATUS[x.status][1]) : badge(x.status));
 const RESULTS = { OK: ["task.ok", "green"], Failed: ["task.failed", "red"], Stopped: ["task.stopped", "amber"] };
@@ -646,13 +648,15 @@ const taskEyebrow = () => ({ eyebrow: t("task.eyebrow") });
 const typeLabel = (type, fallback) => ({ [COMPACT]: t("task.tCompact"), [CLEANUP]: t("task.tCleanup"), [REBUILD]: t("task.tRebuild"),
   [VERIFY]: t("task.tVerify"), [PURGE]: t("task.tPurge"), [RECALC]: t("task.tRecalc"), [TEMP]: t("task.tTemp"),
   [EXPORT]: t("task.tExport"), [IMPORT]: t("task.tImport"), [MOVE]: t("task.tMove"), [RMMEMBER]: t("task.tRmMember"),
-  [VSYNC]: t("task.tVulnSync"), [VSCAN]: t("task.tVulnScan") }[type] || fallback || type);
+  [VSYNC]: t("task.tVulnSync"), [VSCAN]: t("task.tVulnScan"), [REPL]: t("task.tRepl"), [EVAL]: t("task.tEval"),
+  [RPLAN]: t("task.tRPlan"), [REXEC]: t("task.tRExec") }[type] || fallback || type);
 // Parameter names the dictionaries label; any other name is shown as is.
 const PARAM_KEY = "task.p.", PARAM_HELP = "task.ph."; // + the parameter name
 const PARAM_KEYS = ["repos", "repo", "repository", "format", "blobStore", "checksum", "maxBytes", "minimumRetained", "snapshotRetentionDays", "lastDownloadedDays", "removeIfReleased", "gracePeriodDays", "preview",
-  "repositories", "destination", "includeProxies", "since", "hardLinks", "source", "createMissing", "overwrite", "target", "group", "member"];
+  "repositories", "destination", "includeProxies", "since", "hardLinks", "source", "createMissing", "overwrite", "target", "group", "member", "full", "sinceHours", "all", "planId"];
 // A parameter whose help depends on its task type: "<type>:<name>" → the help key suffix.
-const HELP_ALIAS = { [PURGE + ":repository"]: "purgeRepository", [IMPORT + ":repositories"]: "importRepositories", [VSCAN + ":repository"]: "vulnRepository", [MOVE + ":repo"]: "moveRepo" };
+const HELP_ALIAS = { [PURGE + ":repository"]: "purgeRepository", [IMPORT + ":repositories"]: "importRepositories", [VSCAN + ":repository"]: "vulnRepository", [MOVE + ":repo"]: "moveRepo",
+  [REPL + ":repository"]: "replRepository", [EVAL + ":repository"]: "evalRepository", [RPLAN + ":since"]: "reconcileSince" };
 const paramLabel = (name) => (PARAM_KEYS.includes(name) ? t(PARAM_KEY + name) : name);
 // paramParts lists a task's stored parameters as "name: value", by their API
 // names (short and the same in both languages); empty and false values are left out.
@@ -672,7 +676,8 @@ function paramParts(params) {
 // Repositories a "repository" parameter may name, per task type (the server checks too).
 const REBUILDABLE = (r) => (r.format === "maven" && r.type !== "group") || (["apt", "yum", "helm", "conda"].includes(r.format) && r.type === "hosted");
 const repoChoices = (type, repos) => (type === REBUILD ? repos.filter(REBUILDABLE) : type === PURGE ? repos.filter((r) => r.format === "maven" && r.type === "hosted")
-  : type === MOVE ? repos.filter((r) => r.type !== "group") : type === VSCAN ? repos.filter((r) => r.type !== "group" && OSV_FORMATS.includes(r.format)) : repos);
+  : type === MOVE ? repos.filter((r) => r.type !== "group") : type === VSCAN || type === EVAL ? repos.filter((r) => r.type !== "group" && OSV_FORMATS.includes(r.format))
+    : type === REPL ? repos.filter((r) => r.type === "proxy" && !NO_REPLICATION.includes(r.format)) : repos);
 
 // Schedules (plan 11 Decision 7), in server time.
 const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];

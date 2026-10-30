@@ -164,6 +164,7 @@ func populate(t *testing.T, n *ccNode, s3 *s3test.Server) {
 	n.must(t, "POST", "/-/api/repositories", `{"name":"tf","format":"terraform","type":"hosted"}`, 201)
 	n.must(t, "POST", "/-/api/roles", `{"id":"dev","description":"developers","privileges":[{"target":"repo:rel","actions":["read","browse"]},`+
 		`{"target":"selector:acme","actions":["read"],"repos":["*"]}]}`, 201)
+	n.must(t, "POST", "/-/api/roles", `{"id":"auditor","privileges":[{"target":"metrics","actions":["read"]}]}`, 201)
 	n.must(t, "POST", "/-/api/users", `{"id":"alice","name":"Alice","email":"alice@example.com","password":"alice-password-1","roles":["dev"]}`, 201)
 	n.must(t, "POST", "/-/api/users", `{"id":"bob","source":"ldap","roles":["dev"]}`, 201)
 	n.must(t, "PUT", "/-/api/settings", `{"baseURL":"https://cc.example.com","maxUploadMiB":99,"anonymousRead":true,"metricsAnonymous":true,`+

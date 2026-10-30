@@ -17,6 +17,7 @@ import { viewUploadList, viewUpload } from "./upload.js";
 // ADMIN_SCREENS: value is whether the screen takes a ":<id>" parameter.
 const ADMIN_SCREENS = {
   "admin/repository/repositories": true,
+  "admin/repository/dashboard": true,
   "admin/repository/blobstores": true,
   "admin/repository/selectors": true,
   "admin/repository/cleanuppolicies": true,
@@ -40,17 +41,22 @@ const ADMIN_SCREENS = {
   "admin/support/logs": false,
   "admin/support/logging": false,
   "admin/support/metrics": false,
+  "admin/support/usage": false,
   "admin/support/supportzip": false,
   "admin/support/systeminformation": false,
   "admin/support/status": true,
   "admin/system/api": false,
+  "admin/system/configuration": false,
   "admin/system/emailserver": false,
   "admin/system/http": false,
   "admin/system/nodes": false,
+  "admin/system/recovery": true,
   "admin/system/tasks": true,
   "admin/system/webhooks": true,
   "admin/system/general": false,
 };
+
+const METRICS_SCREENS = ["admin/repository/dashboard", "admin/support/usage"];
 
 // MOVED maps the route heads of the earlier layout to their homes now; the
 // rest of the hash (":<id>", "=<criteria>", "?<query>") is kept.
@@ -212,7 +218,8 @@ async function show(view, r) {
     case "user/apitokens": return viewTokens(view, false);
   }
   if (r.key.startsWith("browse/search/")) return viewSearch(view, r.key.slice("browse/search/".length), r.criteria);
-  if (!state.me.admin) return needAdmin(view, screenTitle(r.key));
+  // The usage screens also open for the read privilege on "metrics" (the server decides).
+  if (!state.me.admin && (state.me.anonymous || !METRICS_SCREENS.includes(r.key))) return needAdmin(view, screenTitle(r.key));
   const out = showSettings(view, r.key, p0, p1, r.criteria);
   if (out) return out;
   return viewNotFound(view);

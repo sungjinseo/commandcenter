@@ -809,7 +809,7 @@ repositories:
 
 ## 구성 코드화(내보내기와 적용)
 
-관리자가 설정할 수 있는 모든 것을 하나의 YAML(또는 JSON) 문서로 내보내고, 그 문서를 같은 인스턴스나 다른 인스턴스에 적용할 수 있습니다. 문서를 Git에 두고 검토한 뒤 적용하거나(GitOps), 새 인스턴스에 구성을 복제하거나, 드리프트를 확인하는 데 씁니다.
+관리자가 설정할 수 있는 모든 것을 하나의 YAML(또는 JSON) 문서로 내보내고, 그 문서를 같은 인스턴스나 다른 인스턴스에 적용할 수 있습니다. 문서를 Git에 두고 검토한 뒤 적용하거나(GitOps), 새 인스턴스에 구성을 복제하거나, 드리프트를 확인하는 데 씁니다. 화면은 관리 → 시스템 → 구성 코드(`#admin/system/configuration`)이며, 적용은 시험 실행으로 계획을 확인한 뒤에만 할 수 있습니다.
 
 ### 문서에 들어가는 것
 
@@ -2281,6 +2281,8 @@ scrape_configs:
 
 ### 저장소 대시보드와 월별 사용량
 
+화면은 관리 → 저장소 → 저장소 대시보드(`#admin/repository/dashboard`, 저장소를 누르면 취약 컴포넌트)와 관리 → 지원 → 월별 사용량(`#admin/support/usage`)입니다. `metrics` 읽기 권한만 있는 사용자도 이 두 화면을 메뉴에서 봅니다.
+
 `GET /-/api/dashboard/repositories`는 저장소마다 포맷과 종류, 컴포넌트 수와 asset 수, `bytes`(asset 크기의 합)와 `uniqueBytes`(같은 blob을 한 번만 센 크기), 마지막 업로드·다운로드 시각, 최근 24시간·30일 요청 수, 평가 상태(감시 여부, 마지막 평가, 심각도별 취약 컴포넌트 수)를 돌려줍니다. `sort`(`name`, `format`, `type`, `components`, `assets`, `bytes`, `uniqueBytes`, `lastUpload`, `lastDownload`, `requests24h`, `requests30d`, `vulnerable`), `order`(`asc`·`desc`), `limit`(기본 50, 최대 500), `offset`과 필터 `format`, `type`, `q`(이름에 포함, 대소문자 무시), `vulnerable=true`를 받습니다.
 
 - asset 수, 크기, 마지막 업로드 시각은 asset을 쓸 때마다 데이터베이스 트리거가 같은 트랜잭션에서 갱신합니다. 그래서 큰 저장소에서도 테이블을 훑지 않고 정확하며, 어느 노드가 쓰든(이전 버전 노드 포함) 같습니다. 다운로드와 요청 수는 다른 메트릭처럼 `metricsFlushSeconds`(기본 30초)마다 기록됩니다.
@@ -2482,7 +2484,7 @@ docker compose up -d
 
 ### DB 복원 뒤 blob store와 맞추기(reconcile)
 
-blob은 SHA-256 이름만 있고 저장소 경로를 모릅니다. 그래서 blob store보다 오래된 백업으로 DB를 되돌리면 백업 뒤에 올린 파일은 blob만 남고 DB에서 사라지며(404), 백업 뒤에 지운 파일은 DB에 다시 나타납니다. 이것을 되돌리는 것이 reconcile 저널과 두 작업입니다. Nexus의 "Repair - Reconcile component database from blob store"(계획과 실행)에 해당합니다.
+blob은 SHA-256 이름만 있고 저장소 경로를 모릅니다. 그래서 blob store보다 오래된 백업으로 DB를 되돌리면 백업 뒤에 올린 파일은 blob만 남고 DB에서 사라지며(404), 백업 뒤에 지운 파일은 DB에 다시 나타납니다. 이것을 되돌리는 것이 reconcile 저널과 두 작업입니다. Nexus의 "Repair - Reconcile component database from blob store"(계획과 실행)에 해당합니다. 화면은 관리 → 시스템 → 복구 모드(`#admin/system/recovery`)이며, 복구 모드 전환, 계획 만들기와 항목 확인, 실행을 한곳에서 합니다. 복구 모드가 켜져 있으면 모든 관리 화면 위에 알림이 나옵니다.
 
 - **저널**: 에셋·패키지 버전·dist-tag 행을 쓰거나 지우는 모든 커밋은 커밋 직후 그 저장소의 blob store에 작은 JSON 레코드를 남깁니다. 위치는 파일 store가 `<store>/meta/journal/YYYY/MM/DD/HH/<나노초>-<난수>.json`, S3·Azure·google store가 `<prefix>/meta/journal/...`입니다. 레코드에는 저장소, 경로, SHA-256 등 체크섬, 크기, Content-Type, 생성·수정 시각, 올린 사람, 포맷의 버전 문서가 들어 있습니다. 시각은 PostgreSQL 서버의 시계라서 여러 노드의 레코드도 커밋 순서대로 정렬됩니다. 쓰기는 비동기라 업로드를 기다리게 하지 않고(측정값: 4 KiB 업로드 평균 0.8 ms에 약 0.05 ms 증가), 저널을 쓰지 못해도 업로드는 성공합니다. 실패는 서버 로그와 `commandcenter_reconcile_journal_writes_total{result="failed"}`에 남습니다. blob store 그룹은 쓰기 가능한 모든 멤버에 같은 레코드를 쓰고, 읽을 때는 모든 멤버의 합집합을 봅니다. 커밋마다 작은 객체가 하나 더 쓰이므로 S3 계열 store는 PUT 요청이 하나 늘어납니다(proxy 캐시 저장 포함).
 - **보관 기간**: 기본 30일이며 `PUT /-/api/recovery`의 `journalRetentionDays`(1~3650)로 바꿉니다. compact 작업이 돌 때 기간이 지난 레코드를 지웁니다. **reconcile은 저널에 남아 있는 것만 되살립니다.** 백업 주기보다 길게 두세요. compact 작업을 끄면 저널도 정리되지 않습니다. `meta/` 아래도 blob과 함께 백업하세요.

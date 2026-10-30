@@ -286,7 +286,7 @@ function applyTexts() {
 // every route.
 function renderWho() {
   const me = state.me;
-  const key = getLang() + (me.anonymous ? ":-" : ":u:" + me.user + ":" + me.admin);
+  const key = getLang() + (me.anonymous ? ":-" : ":u:" + me.user + ":" + me.admin + ":" + !!me.metrics);
   if (els.whoKey === key) return;
   els.whoKey = key;
   if (me.anonymous) {
@@ -353,6 +353,7 @@ const USER = () => [[null, [
 const ADMIN = () => [
   [t("nav.g.repository"), [
     ["#admin/repository/repositories", t("nav.repositories"), "repository"],
+    ["#admin/repository/dashboard", t("nav.repoDashboard"), "dashboard"],
     ["#admin/repository/blobstores", t("nav.blobstores"), "blob"],
     ["#admin/repository/selectors", t("nav.selectors"), "browse"],
     ["#admin/repository/cleanuppolicies", t("nav.cleanup"), "cleanup"],
@@ -382,15 +383,18 @@ const ADMIN = () => [
     ["#admin/support/logs", t("nav.logs"), "file"],
     ["#admin/support/logging", t("nav.logging"), "settings"],
     ["#admin/support/metrics", t("nav.metrics"), "health"],
+    ["#admin/support/usage", t("nav.usage"), "chart"],
     ["#admin/support/supportzip", t("nav.supportzip"), "lifebuoy"],
     ["#admin/support/systeminformation", t("nav.sysinfo"), "info"],
     ["#admin/support/status", t("nav.status"), "ok"],
   ]],
   [t("nav.g.system"), [
     ["#admin/system/api", t("nav.api"), "custom"],
+    ["#admin/system/configuration", t("nav.confcode"), "file"],
     ["#admin/system/emailserver", t("nav.email"), "mail"],
     ["#admin/system/http", t("nav.http"), "globe"],
     ["#admin/system/nodes", t("nav.nodes"), "box"],
+    ["#admin/system/recovery", t("nav.recovery"), "lifebuoy"],
     ["#admin/system/tasks", t("nav.tasks"), "tasks"],
     ["#admin/system/webhooks", t("nav.webhooks"), "upload"],
     ["#admin/system/general", t("nav.general"), "settings"],
@@ -470,6 +474,10 @@ function brandMark() {
 function treeOf(mode) {
   const me = state.me;
   if (mode === "admin" && me.admin) return ADMIN();
+  // The metrics privilege alone opens the dashboard and the monthly usage.
+  if (mode === "admin" && me.metrics) return [
+    [t("nav.g.repository"), [["#admin/repository/dashboard", t("nav.repoDashboard"), "dashboard"]]],
+    [t("nav.g.support"), [["#admin/support/usage", t("nav.usage"), "chart"]]]];
   if (mode === "user" && !me.anonymous) return USER();
   const hide = new Set();
   if (!(state.repos || []).some(canUpload)) hide.add("#browse/upload");
@@ -497,10 +505,12 @@ function searchChildren(key) {
 // modeSwitch: Browse and, for admins, Administration. A non-admin sees it
 // only on a user screen, as the way back to browsing.
 function modeSwitch(mode) {
-  if (!state.me.admin && mode !== "user") return null;
+  const me = state.me;
+  if (!me.admin && !me.metrics && mode !== "user") return null;
   const btn = (m, href, ico) => h("a", { href, class: "mode-btn" + (mode === m ? " active" : ""), "aria-current": mode === m ? "true" : null }, icon(ico), h("span", null, modeLabel(m)));
+  const admin = me.admin ? "#admin/repository/repositories" : me.metrics ? "#admin/repository/dashboard" : null;
   return h("nav", { class: "mode-switch", "aria-label": t("mode.aria") }, btn("browse", "#browse/welcome", "repos"),
-    state.me.admin ? btn("admin", "#admin/repository/repositories", "settings") : null);
+    admin ? btn("admin", admin, "settings") : null);
 }
 
 function renderSidebar(route) {
@@ -645,6 +655,27 @@ export function initShell(rerender) {
   });
 }
 
+// ---- recovery mode: every admin screen says so while it is on ------------------
+
+let recSeq = 0;
+function renderRecovery(key) {
+  if (!els.rec) {
+    els.rec = h("div", { class: "notice amber rec-banner", role: "status", hidden: true });
+    document.getElementById("view").before(els.rec);
+  }
+  const n = ++recSeq;
+  if (!state.me.admin || !key.startsWith("admin/")) { els.rec.hidden = true; return; }
+  api("recovery").then((d) => { if (n === recSeq) showRecovery(d); }, () => {}); // older servers have no recovery mode
+}
+
+// showRecovery puts GET /-/api/recovery's answer into the banner.
+export function showRecovery(d) {
+  if (!els.rec) return;
+  els.rec.hidden = !(d && d.enabled);
+  if (!els.rec.hidden) put(els.rec, icon("shield", "hint-ico"), h("strong", null, t("rec.banner")), " ", d.message ? d.message + " " : null,
+    h("a", { href: "#admin/system/recovery" }, t("rec.manage")));
+}
+
 // renderChrome updates the topbar and sidebar for route.
 export function renderChrome(route) {
   lastRoute = route;
@@ -652,5 +683,6 @@ export function renderChrome(route) {
   renderWho();
   renderSidebar(route);
   renderCrumb(route);
+  renderRecovery(route.key || "");
   if (route.key === "browse/search" && route.criteria) els.search.value = route.criteria.get("keyword") || "";
 }

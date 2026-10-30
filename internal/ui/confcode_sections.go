@@ -597,8 +597,12 @@ func checkRoles(c *confRun, objs []confObj) {
 					v.add("%s: unknown format in %q", pat, p.Target)
 				}
 			case strings.HasPrefix(p.Target, "repo:"), strings.HasPrefix(p.Target, meta.SelectorPrefix):
+			case p.Target == auth.MetricsTarget: // as the role API checks it (access.go)
+				if len(p.Actions) != 1 || p.Actions[0] != meta.ActionRead {
+					v.add(`%s: the %q target takes the action "read" only`, pat, auth.MetricsTarget)
+				}
 			default:
-				v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>" or "selector:<name>"`, pat, p.Target)
+				v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>", "selector:<name>" or %q`, pat, p.Target, auth.MetricsTarget)
 			}
 			for _, a := range p.Actions {
 				if !valid[a] {

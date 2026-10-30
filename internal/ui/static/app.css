@@ -871,3 +871,31 @@ td .params { overflow-wrap: anywhere; }
 .api-chev { width: 16px; height: 16px; color: var(--text-3); transition: transform .15s; }
 .api-group[open] .api-chev { transform: rotate(90deg); }
 @media (max-width: 600px) { .sysinfo th:first-child { width: 42%; } }
+
+/* wave 5: recovery banner, dashboard sorting and paging, usage bars, reconcile and configuration results */
+.rec-banner { margin: 0 0 14px; font-size: 13px; }
+.rec-banner strong { margin-right: 2px; }
+.rec-banner a { font-weight: 600; white-space: nowrap; }
+th .sort { padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; white-space: nowrap; }
+th .sort:hover, th .sort.on { color: var(--text); }
+th.num .sort { text-align: right; }
+.pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 16px; font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+.pager > span { margin-right: auto; }
+.pager:empty, .pager:not(:has(> :not([hidden]))) { display: none; }
+.dash-tools input[type=search] { flex: 1 1 200px; }
+.chart .c-bar { fill: var(--text-2); fill-opacity: .55; }
+.chart .c-bar.cur { fill: var(--accent); fill-opacity: .85; }
+.adv + .adv { margin-top: 6px; }
+.adv .tiny { font-size: 12px; }
+.rp-out, .rec-out { font-size: 13px; overflow-wrap: anywhere; }
+.rp-out:empty { display: none; }
+.rec-out { margin-top: 10px; }
+.cc-doc { min-height: 220px; font-size: 12.5px; }
+.cc-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin-bottom: 12px; font: 12px var(--mono); color: var(--text-2); }
+.cc-summary .end { margin-left: auto; font-family: var(--font); }
+.cc-changes { min-width: 240px; }
+.cc-change { font: 12px/1.6 var(--mono); overflow-wrap: anywhere; }
+.cc-change code { color: var(--text); }
+.cc-changes .warn { color: var(--warn); }
+.cc-changes .err { color: var(--err); }
+.toolbar .check input { min-width: 0; height: auto; }
