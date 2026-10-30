@@ -222,18 +222,23 @@ func TestFetchTargetNotHTML(t *testing.T) {
 }
 
 func TestFetchSingleflight(t *testing.T) {
-	rm := &remote{delay: 100 * time.Millisecond}
+	// The remote is slow enough, and the callers start together, that all
+	// ten overlap even on a loaded machine.
+	rm := &remote{delay: 500 * time.Millisecond}
 	f, rp, _ := setup(t, rm)
 	var wg sync.WaitGroup
+	start := make(chan struct{})
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			if _, err := f.Fetch(ctx, rp, "g/big.jar", Content); err != nil {
 				t.Error(err)
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 	if rm.hits.Load() != 1 {
 		t.Fatalf("hits = %d, want 1", rm.hits.Load())
