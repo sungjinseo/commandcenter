@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a go command inside the golang:1.26 container (no local Go install needed).
+# Run a go command inside the golang:1.27 container (no local Go install needed).
 # Usage: scripts/go.sh test ./...
 # For "test" it also starts a PostgreSQL container (commandcenter-test-pg, on the
 # docker network commandcenter-test) unless COMMANDCENTER_TEST_POSTGRES_URL is set:
@@ -31,4 +31,4 @@ MSYS_NO_PATHCONV=1 exec docker run --rm \
   -v commandcenter-gomod:/go/pkg/mod \
   -e CGO_ENABLED=0 \
   ${extra[@]+"${extra[@]}"} \
-  golang:1.26 go "$@"
+  golang:1.27 go "$@"

@@ -19,13 +19,13 @@ welcome. Write issues and pull requests in Korean or English, whichever you pref
 
 ## Build and test
 
-You need Docker and bash. The scripts run Go in the `golang:1.26` container, so there is no local Go
+You need Docker and bash. The scripts run Go in the `golang:1.27` container, so there is no local Go
 to install. In Windows PowerShell, `.\scripts\go.ps1` takes the same arguments as `scripts/go.sh`.
 
 ```bash
 bash scripts/go.sh test ./...                                      # unit and integration tests (starts PostgreSQL in commandcenter-test-pg)
 bash scripts/go.sh vet ./...
-docker run --rm -v "$PWD":/src -w /src golang:1.26 gofmt -l .      # must print nothing
+docker run --rm -v "$PWD":/src -w /src golang:1.27 gofmt -l .      # must print nothing
 ```
 
 The unit tests must pass without network access. The end-to-end checks build the image and drive it

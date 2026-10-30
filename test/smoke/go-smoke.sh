@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the image, starts commandcenter, then uses the real go command (golang:1.26) to:
+# Builds the image, starts commandcenter, then uses the real go command (golang:1.27) to:
 #   1. publish example.com/hello v1.0.0 to go-hosted with PUT (.mod and .zip); a re-upload must get 409
 #   2. build an app that needs example.com/hello (hosted) and rsc.io/quote (proxy) through go-all
 #   3. list the hosted module's versions through the group
@@ -98,7 +98,7 @@ if [ "$ready" != 1 ]; then
   echo "FAIL: commandcenter did not become ready"; docker logs "$name"; exit 1
 fi
 
-docker run --rm --network "$net" -v "$root/$work:/work" golang:1.26 sh /work/run.sh
+docker run --rm --network "$net" -v "$root/$work:/work" golang:1.27 sh /work/run.sh
 
 echo "== memory"
 docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$name"

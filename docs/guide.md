@@ -2638,11 +2638,11 @@ docker compose start
 
 ## 개발
 
-로컬에 Go를 설치하지 않고 컨테이너(golang:1.26)에서 테스트합니다.
+로컬에 Go를 설치하지 않고 컨테이너(golang:1.27)에서 테스트합니다.
 
 테스트는 PostgreSQL이 필요합니다. `docker run -d --name cc-test-pg -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:17-alpine`로 띄우고 `COMMANDCENTER_TEST_POSTGRES_URL='postgres://postgres:pw@localhost:5432/postgres?sslmode=disable' go test ./...`로 실행합니다. 테스트마다 데이터베이스를 따로 만들고 지우므로 패키지가 병렬로 돌아도 겹치지 않습니다. 변수가 없으면 DB가 필요한 테스트는 그 이유를 밝히며 실패합니다. 스모크·부하 테스트(`test/smoke`, `test/load`)는 PostgreSQL 컨테이너(`postgres:17-alpine`, `SMOKE_PG_IMAGE`로 바꿈)를 함께 띄웁니다.
 
-main에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/ci.yml`)가 gofmt, `go vet`, `go test`(배포 바이너리처럼 CGO 끔, PostgreSQL 서비스 컨테이너), `go test -race`, govulncheck, UI 스크립트 구문 검사, 이미지 빌드(linux/amd64·arm64), Helm 차트와 참조 매니페스트 검사(`helm lint`, `helm template`, kubeconform)를 실행합니다. `ci.yml`의 `go-version`이 Dockerfile의 `golang` 태그(현재 1.26.10)와 다르거나, `THIRD_PARTY_LICENSES.txt`가 바이너리에 링크되는 모듈·Go 버전과 맞지 않으면(`scripts/third-party-licenses.sh --check`) CI가 실패합니다. Dependabot이 Go 모듈, 베이스 이미지, Actions 업데이트를 매주 PR로 올리는데, 링크되는 모듈이나 `golang` 태그를 바꾸는 PR은 이 검사에서 실패합니다. 그 PR 브랜치에서 `bash scripts/third-party-licenses.sh`로 `THIRD_PARTY_LICENSES.txt`를 다시 만들어 커밋하고(스크립트는 Dockerfile의 `golang` 이미지에서 돌므로 Docker만 있으면 됩니다), `golang` 태그가 바뀌었으면 `ci.yml`의 `go-version`도 같은 버전으로 올리세요.
+main에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/ci.yml`)가 gofmt, `go vet`, `go test`(배포 바이너리처럼 CGO 끔, PostgreSQL 서비스 컨테이너), `go test -race`, govulncheck, UI 스크립트 구문 검사, 이미지 빌드(linux/amd64·arm64), Helm 차트와 참조 매니페스트 검사(`helm lint`, `helm template`, kubeconform)를 실행합니다. `ci.yml`의 `go-version`이 Dockerfile의 `golang` 태그(현재 1.27.2)와 다르거나, `THIRD_PARTY_LICENSES.txt`가 바이너리에 링크되는 모듈·Go 버전과 맞지 않으면(`scripts/third-party-licenses.sh --check`) CI가 실패합니다. Dependabot이 Go 모듈, 베이스 이미지, Actions 업데이트를 매주 PR로 올리는데, 링크되는 모듈이나 `golang` 태그를 바꾸는 PR은 이 검사에서 실패합니다. 그 PR 브랜치에서 `bash scripts/third-party-licenses.sh`로 `THIRD_PARTY_LICENSES.txt`를 다시 만들어 커밋하고(스크립트는 Dockerfile의 `golang` 이미지에서 돌므로 Docker만 있으면 됩니다), `golang` 태그가 바뀌었으면 `ci.yml`의 `go-version`도 같은 버전으로 올리세요.
 
 릴리스는 태그를 푸시하면 됩니다(`git tag v1.2.3 && git push origin v1.2.3`). 결과물은 "릴리스 이미지와 바이너리"를 보세요. 여러 버전을 함께 낼 때(예: `v1.3.0`과 유지보수 릴리스 `v1.2.5`)는 태그를 한 번에 푸시하세요(`git push origin v1.2.5 v1.3.0`). 각 실행은 시작할 때 본 태그로 움직이는 태그를 정하므로, 낮은 버전의 실행이 높은 버전의 태그를 보지 못하면 `latest`가 낮은 버전으로 돌아갈 수 있습니다.
 

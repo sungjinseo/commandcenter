@@ -25,13 +25,13 @@ fails until the file is regenerated.
 | `github.com/jackc/pgpassfile` | v1.0.0 | Jack Christensen | <https://github.com/jackc/pgpassfile> | MIT |
 | `github.com/jackc/pgservicefile` | v0.0.0-20240606120523 | Jack Christensen | <https://github.com/jackc/pgservicefile> | MIT |
 | `github.com/jackc/puddle/v2` | v2.2.2 | Jack Christensen | <https://github.com/jackc/puddle> | MIT |
-| Go standard library | 1.26 | The Go Authors | <https://go.dev/> | BSD-3-Clause |
+| Go standard library | 1.27 | The Go Authors | <https://go.dev/> | BSD-3-Clause |
 
 ## Container image
 
 | Image | Use | License |
 |---|---|---|
-| `golang:1.26` | Build stage only; not shipped | BSD-3-Clause (Go) and the licenses of its Debian packages |
+| `golang:1.27` | Build stage only; not shipped | BSD-3-Clause (Go) and the licenses of its Debian packages |
 | `gcr.io/distroless/static-debian12:nonroot` | Runtime base of the published image | Apache-2.0 (distroless) and the licenses of its Debian packages, included in the image |
 
 ## Web UI

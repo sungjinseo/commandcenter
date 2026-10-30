@@ -213,8 +213,8 @@ A new Go minor version, such as 1.26 to 1.27, is a toolchain upgrade rather than
 so read the Go release notes. In the same pull request or right after it, also move these to the
 new version, because nothing checks them:
 
-- the floating `golang:1.26` image in `scripts/go.sh`, `scripts/go.ps1` and the tests in `test/`
-- the "Go 1.26" in CONTRIBUTING.md, ATTRIBUTION.md, the badges of both READMEs and the
+- the floating `golang:1.27` image in `scripts/go.sh`, `scripts/go.ps1` and the tests in `test/`
+- the "Go 1.27" in CONTRIBUTING.md, ATTRIBUTION.md, the badges of both READMEs and the
   development section of docs/guide.md
 
 Updates of the distroless runtime image's digest need nothing extra.

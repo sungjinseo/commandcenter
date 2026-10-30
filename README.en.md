@@ -10,7 +10,7 @@
 <p align="center">
   <a href="https://github.com/sungjinseo/commandcenter/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/sungjinseo/commandcenter/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/sungjinseo/commandcenter/releases"><img alt="Release" src="https://img.shields.io/github/v/release/sungjinseo/commandcenter?style=flat-square"></a>
-  <img alt="Go 1.26" src="https://img.shields.io/badge/Go-1.26-00add8?style=flat-square&logo=go&logoColor=white">
+  <img alt="Go 1.27" src="https://img.shields.io/badge/Go-1.27-00add8?style=flat-square&logo=go&logoColor=white">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
 </p>
 

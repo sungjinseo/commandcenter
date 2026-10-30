@@ -45,7 +45,7 @@ docker run -d --name "$name" --network "$net" -e COMMANDCENTER_DATABASE_URL="$pg
 rc=0
 docker run --rm --network "$net" --network-alias load \
   -v "$root:/src" -w /src -v commandcenter-gomod:/go/pkg/mod -v commandcenter-gocache:/root/.cache/go-build \
-  golang:1.26 go run ./test/load -target http://commandcenter:8081 -user admin -pass load-pass || rc=$?
+  golang:1.27 go run ./test/load -target http://commandcenter:8081 -user admin -pass load-pass || rc=$?
 
 if [ "$(docker inspect -f '{{.State.OOMKilled}}' "$name" 2>/dev/null)" = "true" ]; then
   echo "FAIL: commandcenter was OOM-killed"; rc=1

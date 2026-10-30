@@ -20,7 +20,7 @@
 #                  the PostgreSQL image, so nothing more to pull)
 #   HA_PG_IMAGE    PostgreSQL image (default postgres:17-alpine)
 #   HA_GOCACHE     a Go cache directory with build/ and mod/: build in
-#                  HA_GO_IMAGE (default golang:1.26.10) offline instead of
+#                  HA_GO_IMAGE (default golang:1.27.2) offline instead of
 #                  with the go command on the host
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -52,7 +52,7 @@ gobuild() { # gobuild OUT PACKAGE: a static linux binary in $work
   if [ -n "${HA_GOCACHE:-}" ]; then
     docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/cache/build -e GOMODCACHE=/cache/mod \
       -e GOFLAGS=-buildvcs=false -e GOPROXY=off -e CGO_ENABLED=0 -v "$HA_GOCACHE:/cache" -v "$root:/src:ro" -v "$work:/out" \
-      -w /src "${HA_GO_IMAGE:-golang:1.26.10}" go build -o "/out/$1" "$2"
+      -w /src "${HA_GO_IMAGE:-golang:1.27.2}" go build -o "/out/$1" "$2"
   else
     CGO_ENABLED=0 GOOS=linux go build -o "$work/$1" "$2"
   fi

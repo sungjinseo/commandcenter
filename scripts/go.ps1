@@ -1,4 +1,4 @@
-# Run a go command inside the golang:1.26 container (no local Go install needed).
+# Run a go command inside the golang:1.27 container (no local Go install needed).
 # Usage: .\scripts\go.ps1 test ./...
 # For "test" it also starts a PostgreSQL container (commandcenter-test-pg, on the
 # docker network commandcenter-test) unless COMMANDCENTER_TEST_POSTGRES_URL is set.
@@ -28,5 +28,5 @@ docker run --rm -v "${root}:/src" -w /src `
   -v commandcenter-gomod:/go/pkg/mod `
   -e CGO_ENABLED=0 `
   @extra `
-  golang:1.26 go @args
+  golang:1.27 go @args
 exit $LASTEXITCODE
