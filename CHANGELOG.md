@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- Nexus component upload API: `POST /service/rest/v1/components?repository=` takes Nexus's multipart
+  fields for maven2 (`groupId`, `artifactId`, `version`, `generate-pom`, `packaging`, `assetN`,
+  `assetN.classifier`, `assetN.extension`), raw (`directory`, `assetN.filename`), apt, npm, pypi, nuget,
+  rubygems, helm, yum (`directory`, `asset.filename`) and r (`asset.pathId`), plus conda, composer and
+  terraform modules. Each file goes through the format's own upload (same privileges, write policy,
+  validation, events and metadata); 204 on success, 400 validation lists as Nexus answers. Works with
+  `curl -F`, Jenkins `nexusPublisher` and `nexus3-cli`.
+- `GET /service/rest/v1/formats/upload-specs` and `/formats/{format}/upload-specs`: the fields each
+  format's component upload takes.
+
+### Changed
+- APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
+  `curl --data-binary` with a bare `multipart/form-data` type); a multipart form without a `file`
+  field now uses its first file part.
+
 ## [0.3.0] - 2026-10-30
 
 ### Added

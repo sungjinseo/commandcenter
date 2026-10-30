@@ -47,25 +47,13 @@ func checkPOM(r io.Reader, c *Coordinates) error {
 	if err != nil {
 		return err
 	}
-	vals, err := readPOM(bytes.NewReader(b))
-	if err != nil && !utf8.Valid(b) {
-		// Maven reads bytes that are not UTF-8 in a UTF-8 or undeclared POM
-		// (text saved in MS949, say) as U+FFFD. One that declares another
-		// encoding needs no second pass: latin1 reads any byte.
-		vals, err = readPOM(bytes.NewReader(bytes.ToValidUTF8(b, []byte("\uFFFD"))))
-	}
+	vals, err := parsePOM(b)
 	if err != nil {
-		return repo.Errorf(http.StatusBadRequest, "invalid .pom: %.300v", err)
+		return err
 	}
-	inherited := func(k string) string { // the project's own value, else the parent's
-		if v := vals[k]; v != "" {
-			return v
-		}
-		return vals["parent/"+k]
-	}
-	g, _ := expand(vals, inherited("groupId"))
+	g, _ := expand(vals, inherited(vals, "groupId"))
 	a, _ := expand(vals, vals["artifactId"])
-	raw := inherited("version")
+	raw := inherited(vals, "version")
 	v, _ := expand(vals, raw)
 	if sameCoord(g, c.GroupID) && sameCoord(a, c.ArtifactID) && (strings.Contains(raw, "${") || v == c.BaseVersion || v == c.Version) {
 		return nil
@@ -75,6 +63,29 @@ func checkPOM(r io.Reader, c *Coordinates) error {
 		got += " (version " + raw + ")"
 	}
 	return repo.Errorf(http.StatusBadRequest, ".pom declares %.300q, want %q", got, c.GroupID+":"+c.ArtifactID+":"+c.BaseVersion)
+}
+
+// parsePOM is readPOM of b, or a 400. Maven reads bytes that are not
+// UTF-8 in a UTF-8 or undeclared POM (text saved in MS949, say) as U+FFFD,
+// so such a POM is read a second time that way. One that declares another
+// encoding needs no second pass: latin1 reads any byte.
+func parsePOM(b []byte) (map[string]string, error) {
+	vals, err := readPOM(bytes.NewReader(b))
+	if err != nil && !utf8.Valid(b) {
+		vals, err = readPOM(bytes.NewReader(bytes.ToValidUTF8(b, []byte("\uFFFD"))))
+	}
+	if err != nil {
+		return nil, repo.Errorf(http.StatusBadRequest, "invalid .pom: %.300v", err)
+	}
+	return vals, nil
+}
+
+// inherited is readPOM's value of the project's own k, else the parent's.
+func inherited(vals map[string]string, k string) string {
+	if v := vals[k]; v != "" {
+		return v
+	}
+	return vals["parent/"+k]
 }
 
 // sameCoord reports whether s, a groupId or artifactId after expand, names

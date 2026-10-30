@@ -534,6 +534,7 @@ Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, T
 | `GET /repositorySettings`, `GET /repositories/{format}/{type}/{name}` | admin. `online`, `storage`, `cleanup`, `proxy`, `negativeCache`, `httpClient.authentication`(사용자 이름만), `group`, `maven` 등 Command Center에 대응 값이 있는 항목 |
 | `POST /repositories/{format}/{type}` → 201, `PUT /repositories/{format}/{type}/{name}` → 204, `DELETE /repositories/{name}` → 204 | admin. maven, npm, pypi, raw, docker, helm, go, cargo, nuget, apt, yum, rubygems, composer, conda. proxy 본문의 `routingRule`(응답에는 `routingRuleName`도) |
 | `GET /components?repository=`, `GET /components/{id}`, `DELETE /components/{id}` | 50개씩, `continuationToken`으로 다음 페이지 |
+| `POST /components?repository=` → 204, `GET /formats/upload-specs`, `GET /formats/{format}/upload-specs` | 컴포넌트 업로드(해당 저장소의 add 권한)와 포맷별로 받는 필드 목록(인증 없음). 아래 "컴포넌트 업로드 API" 참고 |
 | `GET /assets?repository=`, `GET /assets/{id}`, `DELETE /assets/{id}` | 삭제는 raw 파일만(아래 차이점) |
 | `GET /search`, `GET /search/assets`, `GET /search/assets/download` | `q`, `repository`, `format`, `group`, `name`, `version`(`*` 와일드카드), `sort`, `direction`, `maven.groupId/artifactId/baseVersion/extension/classifier`, `npm.scope`, `docker.imageName/imageTag` |
 | `GET /status`, `GET /status/writable`, `GET /status/check` | check는 admin, 상태 화면의 점검 결과를 Nexus 형식으로 |
@@ -604,6 +605,49 @@ Nexus와 다른 점:
 - `security/users`, `security/roles`는 읽기 전용이고 역할의 `privileges`는 `"<대상>:<동작>"` 문자열입니다(컨텐츠 셀렉터 권한은 `selector:<이름>:<동작>`). 스크립트 API는 없습니다. 모르는 경로는 JSON `404`입니다.
 
 구성 API도 지원합니다. `GET /service/rest/v1/configuration`(헤더 `X-Nexus-Migration-Protocol-Version: 1` 필요)은 구성 문서를 비밀값 없이 JSON으로 내보냅니다. `PUT /service/rest/v1/configuration`은 Nexus처럼 기존 설정을 덮어쓰지 않고 없는 객체만 만듭니다. Nexus는 문서 모양을 공개하지 않으므로 문서는 Command Center의 구성 문서입니다("구성 코드화" 참고).
+
+### 컴포넌트 업로드 API
+
+`POST /service/rest/v1/components?repository=<저장소>`는 Nexus의 컴포넌트 업로드와 같은 multipart/form-data 본문을 받습니다. 필드 이름은 `<포맷>.<필드>`(컴포넌트 필드), `<포맷>.asset[N]`(파일), `<포맷>.asset[N].<필드>`(그 파일의 필드)이며, 포맷 접두어는 생략해도 됩니다. 값이 빈 필드는 없는 것으로 봅니다. 각 파일은 그 포맷의 클라이언트가 보내는 요청(Maven PUT, npm publish, twine 업로드, gem push 등)으로 바뀌어 저장소 경로에서 처리됩니다. 그래서 권한 검사, `writePolicy`, 잠금, 검증, 활동 이벤트와 웹훅, 메타데이터 재생성이 네이티브 업로드와 같습니다. 성공하면 `204`입니다. Jenkins `nexusPublisher`(Nexus Platform 플러그인)와 `nexus3-cli` 같은 도구도 같은 필드를 보내므로 그대로 쓸 수 있습니다.
+
+| 포맷 | 필드 | 저장 위치 |
+|---|---|---|
+| maven2 | `groupId`, `artifactId`, `version`, `generate-pom`(선택, `true`/`on`), `packaging`(선택), `assetN`, `assetN.extension`, `assetN.classifier`(선택) | `g/r/o/u/p/<artifactId>/<version>/<artifactId>-<version>[-<classifier>].<extension>`. 분류자 없는 `pom` 파일을 함께 보내면 좌표를 그 POM에서 읽고(부모의 groupId·version, `${속성}` 치환 포함) 필드는 무시합니다. `generate-pom`은 POM 파일이 없을 때만 최소 POM을 만듭니다(`packaging`이 없으면 분류자 없는 파일의 확장자). POM을 먼저 저장하고, GA의 `maven-metadata.xml`과 체크섬은 파일마다 갱신됩니다. versionPolicy가 SNAPSHOT인 저장소는 거부합니다(`mvn deploy`를 쓰세요). |
+| raw | `directory`, `assetN`, `assetN.filename` | `<directory>/<filename>`(겹친 `/`와 앞뒤 `/`는 지웁니다). 파일 여러 개 |
+| apt | `asset` | 패키지의 pool 경로 |
+| npm | `asset`(`npm pack`의 .tgz) | `package.json`의 이름·버전으로 publish하고 `latest` 태그를 붙입니다 |
+| pypi | `asset`(.whl, .tar.gz, .zip) | 파일 메타데이터의 이름·버전으로 twine 업로드와 같이 |
+| nuget | `asset`(.nupkg) | push와 같이 |
+| rubygems | `asset`(.gem) | gem push와 같이 |
+| helm | `asset`(차트 .tgz) | Chart.yaml의 이름·버전 |
+| yum | `directory`(선택, depth 1이면 필요), `asset`, `asset.filename` | `<directory>/<filename>` |
+| r | `asset`, `asset.pathId` | `<pathId>/<파일 이름>`(예: `src/contrib`) |
+| conda(Command Center 확장) | `directory`(subdir, 예: `noarch`), `asset` | `<directory>/<파일 이름>` |
+| composer(확장) | `vendor`, `package`, `version`, `asset`(zip) | `packages/upload/<vendor>/<package>/<version>`와 같이 |
+| terraform(확장, 모듈) | `namespace`, `name`, `provider`, `version`, `asset`(모듈 아카이브) | 모듈 업로드와 같이 |
+
+```bash
+# Maven: jar와 소스 jar, POM 자동 생성
+curl -u ci:pw -F maven2.groupId=org.example -F maven2.artifactId=app -F maven2.version=1.0 \
+  -F maven2.generate-pom=true -F maven2.packaging=jar \
+  -F maven2.asset1=@app-1.0.jar -F maven2.asset1.extension=jar \
+  -F maven2.asset2=@app-1.0-sources.jar -F maven2.asset2.classifier=sources -F maven2.asset2.extension=jar \
+  'http://localhost:8081/service/rest/v1/components?repository=maven-releases'
+# raw: 여러 파일을 한 디렉터리에
+curl -u ci:pw -F raw.directory=/docs/1.0/ -F raw.asset1=@guide.pdf -F raw.asset1.filename=guide.pdf \
+  'http://localhost:8081/service/rest/v1/components?repository=raw-files'
+# 파일 하나인 포맷
+curl -u ci:pw -F npm.asset=@demo-1.2.0.tgz 'http://localhost:8081/service/rest/v1/components?repository=npm-hosted'
+# 포맷별로 받는 필드(인증 없음)
+curl http://localhost:8081/service/rest/v1/formats/upload-specs
+```
+
+- 본문이 multipart가 아니면 `400 {"message"}`, 익명이면 `401`, 저장소의 add 권한이 없으면 `403`입니다. 경로가 정해지는 포맷은 경로마다 컨텐츠 셀렉터까지 검사합니다. 볼 수 없는 저장소는 `404`입니다.
+- hosted가 아닌 저장소(proxy, group), offline 저장소, 업로드 API가 없는 포맷(docker, go, cargo, conan, swift, gitlfs)은 `400`입니다. 빠지거나 모르는 필드, 잘못된 파일, 이미 있는 버전(`allow_once`, 네이티브 경로에서 409인 경우 포함)도 `400`이며, 본문은 `[{"id", "message"}]` 목록입니다. npm은 npm publish와 같이 이미 있는 버전에 `403`으로 답합니다.
+- 본문 전체가 `maxUploadMiB`를 넘으면 `413`, 복구 모드에서는 `503`입니다.
+- 모든 파일을 먼저 검사합니다(경로, 버전 정책, 권한). 저장은 파일 하나씩이므로 저장 도중 실패하면 앞서 저장된 파일은 남습니다(Nexus와 같습니다).
+- 받은 파일은 처리하는 동안 `dataDir`에 임시로 두었다가 지웁니다.
+- Nexus와 달리 `generate-pom`과 POM 파일을 함께 보내면 올린 POM을 씁니다. conda, composer, terraform은 Nexus에 없는 Command Center 확장입니다.
 
 ## 웹 UI
 
@@ -1892,12 +1936,14 @@ echo "deb [signed-by=/usr/share/keyrings/commandcenter.gpg] http://localhost:808
 echo "deb [trusted=yes] http://localhost:8081/repository/apt-hosted stable main" | sudo tee /etc/apt/sources.list.d/commandcenter.list
 sudo apt update && sudo apt install hello
 
-# 올리기: 파일 PUT(curl) 또는 multipart POST(필드 이름 file). add 권한이 필요합니다. 응답 201과 저장된 경로를 JSON으로 돌려줍니다.
+# 올리기: 파일 PUT, 본문 그대로 POST(Nexus 문서의 방식), multipart POST, 컴포넌트 업로드 API(apt.asset). add 권한이 필요합니다. PUT과 POST는 201과 저장된 경로를 JSON으로 돌려줍니다.
 curl -u ci:<비밀번호> -T hello_1.0_amd64.deb http://localhost:8081/repository/apt-hosted/pool/hello_1.0_amd64.deb
+curl -u ci:<비밀번호> -H 'Content-Type: multipart/form-data' --data-binary @hello_1.0_amd64.deb http://localhost:8081/repository/apt-hosted/
 curl -u ci:<비밀번호> -F file=@hello_1.0_amd64.deb http://localhost:8081/repository/apt-hosted/
 ```
 
 - hosted는 올린 `.deb`(ar 아카이브)의 `control` 파일을 읽어 `Package`, `Version`, `Architecture`, `Maintainer`, `Depends`, `Description` 등 모든 필드를 `Packages` 항목으로 저장하고, 파일은 PUT 경로와 무관하게 Debian pool 규칙대로 `pool/<component>/<첫 글자 또는 lib?>/<패키지>/<패키지>_<버전>_<아키텍처>.deb`에 둡니다(버전의 `:`는 dpkg처럼 `%3a`로 씀). `Packages`에는 `Filename`, `Size`, `MD5sum`, `SHA1`, `SHA256`가 붙습니다. `Architecture: all` 패키지는 모든 아키텍처의 `Packages`에 함께 나오고, `Release`의 `Architectures`는 저장된 패키지에서 도출합니다(아키텍처별 패키지가 하나도 없으면 `all`만 나오므로 클라이언트 아키텍처의 패키지를 하나는 올려 두세요). 업로드 본문은 `maxUploadMiB`를 따릅니다.
+- `POST /`의 본문이 경계(boundary)가 있는 multipart 폼이면 `file` 필드를, 없으면 첫 파일 부분을 패키지로 읽습니다. 그 밖의 본문은 Content-Type과 관계없이 패키지 자체로 읽습니다. Nexus 문서의 curl 예(`-H "Content-Type: multipart/form-data" --data-binary @파일`)는 경계가 없으므로 본문 그대로 처리됩니다.
 - **control 아카이브는 무압축 `control.tar`와 gzip·xz·zstd·bzip2·lzma로 압축한 `control.tar.gz`·`.xz`·`.zst`·`.bz2`·`.lzma`를 모두 읽습니다.** Debian `dpkg-deb`의 기본값(xz)과 Ubuntu 21.10 이후의 기본값(zstd)으로 만든 패키지도 그대로 올릴 수 있습니다. 압축을 푼 control 아카이브는 64 MiB, `control` 파일은 1 MiB까지만 읽습니다. 압축 해제 창(xz 사전·zstd window)을 8 MiB보다 크게 선언한 아카이브(`xz -7` 이상, `zstd --ultra`·`--long=24` 이상 등), xz BCJ 필터나 zstd 사전(dictionary)을 쓴 아카이브, 그 밖의 압축(`.lz4` 등)은 400입니다. 패키지 이름은 소문자·숫자·`+.-` 두 글자 이상, 버전은 숫자로 시작해야 합니다(Debian 정책).
 - 저장소 설정 `distribution`(기본 `stable`)과 `component`(기본 `main`)가 `dists/<distribution>/<component>/…` 경로와 sources.list의 suite·component가 됩니다. `signingKey`에는 비밀번호 없는 RSA(2048비트 이상) OpenPGP 개인키를 ASCII armor로 넣습니다(`gpg --batch --passphrase '' --quick-gen-key 'CC <apt@example.com>' rsa4096 sign never` 뒤 `gpg --armor --export-secret-keys apt@example.com`). 키는 원격 인증 정보처럼 암호화되어 저장되고 API·UI에는 설정 여부(`signingKeySet`)만 나오며, 공개키는 `/repository/<저장소>/public.key`로 제공합니다. 키가 없으면 서명 파일 없이 제공하므로 클라이언트에 `[trusted=yes]`가 필요합니다. 비밀번호가 걸린 키, v5/v6 키, RSA가 아닌 주키는 거부합니다.
 - `writePolicy`: `allow_once`(기본)는 같은 패키지·버전·아키텍처 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.

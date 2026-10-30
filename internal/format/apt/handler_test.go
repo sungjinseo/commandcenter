@@ -490,12 +490,40 @@ func TestPostMultipart(t *testing.T) {
 	if w := e.do("POST", "apt-hosted", "", body, "Content-Type", ct); w.Code != 409 {
 		t.Fatalf("again: %d %s", w.Code, w.Body)
 	}
+	// Another field name: its first file part is the package.
 	body, ct = form("package", deb(t, control("other", "1.0", "amd64"), "control.tar.gz"))
-	if w := e.do("POST", "apt-hosted", "", body, "Content-Type", ct); w.Code != 400 || !strings.Contains(w.Body.String(), `"file" field`) {
-		t.Fatalf("wrong field: %d %s", w.Code, w.Body)
+	if w := e.do("POST", "apt-hosted", "", body, "Content-Type", ct); w.Code != 201 || !strings.Contains(w.Body.String(), `"package":"other"`) {
+		t.Fatalf("other file field: %d %s", w.Code, w.Body)
 	}
-	if w := e.do("POST", "apt-hosted", "", deb(t, control("other", "1.0", "amd64"), "control.tar.gz"), "Content-Type", "application/octet-stream"); w.Code != 400 || !strings.Contains(w.Body.String(), "multipart") {
-		t.Fatalf("not multipart: %d %s", w.Code, w.Body)
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("file2", "not a file part")
+	mw.Close()
+	if w := e.do("POST", "apt-hosted", "", buf.Bytes(), "Content-Type", mw.FormDataContentType()); w.Code != 400 || !strings.Contains(w.Body.String(), `"file" field`) {
+		t.Fatalf("no file part: %d %s", w.Code, w.Body)
+	}
+}
+
+// POST / with the package as the body (aptraw-01): Nexus's documented curl
+// (--data-binary with a bare multipart/form-data type), any other type, or
+// none.
+func TestPostRawBody(t *testing.T) {
+	e := newEnv(t)
+	for i, ct := range []string{"multipart/form-data", "application/octet-stream", "application/vnd.debian.binary-package", ""} {
+		pkg := fmt.Sprintf("raw%d", i)
+		hdr := []string{"Content-Type", ct}
+		if ct == "" {
+			hdr = nil
+		}
+		if w := e.do("POST", "apt-hosted", "", deb(t, control(pkg, "1.0", "amd64"), "control.tar.gz"), hdr...); w.Code != 201 || !strings.Contains(w.Body.String(), `"package":"`+pkg+`"`) {
+			t.Fatalf("POST %q: %d %s", ct, w.Code, w.Body)
+		}
+		if p := e.text(t, "apt-hosted", "dists/stable/main/binary-amd64/Packages"); !strings.Contains(p, "Package: "+pkg+"\n") {
+			t.Fatalf("Packages after %q:\n%s", ct, p)
+		}
+	}
+	if w := e.do("POST", "apt-hosted", "", []byte("not a deb"), "Content-Type", "multipart/form-data"); w.Code != 400 {
+		t.Fatalf("garbage: %d %s", w.Code, w.Body)
 	}
 }
 

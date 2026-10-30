@@ -251,3 +251,12 @@ func (h *Handler) delete(r *http.Request, rp *repo.Repository, p string) error {
 	h.Store.Emit(r, "delete", rp.Name, p, "")
 	return nil
 }
+
+// CheckUploadPath is the check a PUT of p makes of its path, for the
+// component upload API to refuse a bad path before it stores any file.
+func CheckUploadPath(p string) error {
+	if err := checkPath(p); err != nil {
+		return err
+	}
+	return validateWritePath(p)
+}

@@ -11,12 +11,12 @@ import (
 // Recovery mode (meta.RecoveryMode) makes the instance read-only for
 // clients: the uploads and deletes of every format (repository writes, as
 // the format's access decision says, and Docker pushes) and the API calls
-// that delete or move components answer 503 with the reason. Downloads and
-// proxy fetches go on, and so do the admin APIs, the tasks and the
+// that upload, delete or move components answer 503 with the reason.
+// Downloads and proxy fetches go on, and so do the admin APIs, the tasks and the
 // readiness check (GET /service/rest/v1/status/writable), which a load
 // balancer follows: recovery mode must not take the nodes out of service.
 
-// contentWrites matches the API routes that delete or move components (the
+// contentWrites matches the API routes that upload, delete or move components (the
 // patterns they are registered with).
 var contentWrites = func() *http.ServeMux {
 	m := http.NewServeMux()
@@ -25,6 +25,7 @@ var contentWrites = func() *http.ServeMux {
 	m.HandleFunc("POST /-/api/staging/move", match)
 	m.HandleFunc("POST /-/api/staging/delete", match)
 	m.HandleFunc("DELETE /service/rest/v1/components/{id}", match)
+	m.HandleFunc("POST /service/rest/v1/components", match)
 	m.HandleFunc("DELETE /service/rest/v1/assets/{id}", match)
 	m.HandleFunc("POST /service/rest/v1/staging/move/{destination}", match)
 	m.HandleFunc("POST /service/rest/v1/staging/delete", match)

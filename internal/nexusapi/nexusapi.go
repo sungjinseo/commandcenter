@@ -46,6 +46,14 @@ type Handler struct {
 	BaseURL func() string                       // the live baseURL, without trailing slash
 	UI      interface{ Routes(*http.ServeMux) } // the web UI, whose /-/api/ handlers do the writes
 
+	// Repository serves an in-process request for /repository/{name}/{path...}
+	// (server.Server.ServeRepository): the component upload sends each file
+	// there, as the format's own client would. nil: no component upload.
+	Repository func(http.ResponseWriter, *http.Request)
+	// TempDir holds the files of a component upload while it is processed;
+	// "" is the system's.
+	TempDir string
+
 	once sync.Once
 	mux  *http.ServeMux // this API
 	api  *http.ServeMux // the UI's routes, for in-process calls
@@ -71,6 +79,9 @@ func (h *Handler) init() {
 	m.HandleFunc("GET "+p+"/components", h.listComponents)
 	m.HandleFunc("GET "+p+"/components/{id}", h.getComponent)
 	m.HandleFunc("DELETE "+p+"/components/{id}", h.deleteComponent)
+	m.HandleFunc("POST "+p+"/components", h.uploadComponent)
+	m.HandleFunc("GET "+p+"/formats/upload-specs", h.uploadSpecList)
+	m.HandleFunc("GET "+p+"/formats/{format}/upload-specs", h.uploadSpecOne)
 	m.HandleFunc("GET "+p+"/assets", h.listAssets)
 	m.HandleFunc("GET "+p+"/assets/{id}", h.getAsset)
 	m.HandleFunc("DELETE "+p+"/assets/{id}", h.deleteAsset)

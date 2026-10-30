@@ -36,20 +36,8 @@ type distMeta struct{ Name, Version, RequiresPython string }
 // lacks that file, or the file has no Name or Version. Nothing read depends
 // on a size the archive claims.
 func readMetadata(r io.ReaderAt, size int64, filename, project, version string) (md distMeta, raw []byte, err error) {
-	lower := strings.ToLower(filename)
-	var dir, name string
-	switch {
-	case strings.HasSuffix(lower, ".whl"):
-		raw, name, err = fromWheel(r, size)
-	case strings.HasSuffix(lower, ".tar.gz"):
-		raw, name, dir, err = fromTarGz(io.NewSectionReader(r, 0, size))
-	default:
-		raw, name, dir, err = fromZip(r, size)
-	}
+	md, raw, dir, err := fileMeta(r, size, filename)
 	if err != nil {
-		return distMeta{}, nil, err
-	}
-	if md, err = parseMetadata(bytes.NewReader(raw), name); err != nil {
 		return distMeta{}, nil, err
 	}
 	if dir == "" { // a wheel
@@ -63,6 +51,36 @@ func readMetadata(r io.ReaderAt, size int64, filename, project, version string) 
 		return distMeta{}, nil, badDist("PKG-INFO is in %.100q, not in the %s-%s/ directory", dir, project, version)
 	}
 	return md, raw, nil
+}
+
+// fileMeta reads the metadata document of distribution file filename
+// (size bytes at r) and its Name, Version and Requires-Python; dir is the
+// sdist directory that holds it, "" for a wheel.
+func fileMeta(r io.ReaderAt, size int64, filename string) (md distMeta, raw []byte, dir string, err error) {
+	var name string
+	switch lower := strings.ToLower(filename); {
+	case strings.HasSuffix(lower, ".whl"):
+		raw, name, err = fromWheel(r, size)
+	case strings.HasSuffix(lower, ".tar.gz"):
+		raw, name, dir, err = fromTarGz(io.NewSectionReader(r, 0, size))
+	default:
+		raw, name, dir, err = fromZip(r, size)
+	}
+	if err == nil {
+		md, err = parseMetadata(bytes.NewReader(raw), name)
+	}
+	return md, raw, dir, err
+}
+
+// UploadFields reads the project name and version of distribution file
+// filename (size bytes at r) from its own metadata, for the component
+// upload API to send them as twine does. The upload checks the file again.
+func UploadFields(r io.ReaderAt, size int64, filename string) (name, version string, err error) {
+	if _, _, ok := splitUploadExt(filename); !ok || !validFile(filename) {
+		return "", "", repo.Errorf(http.StatusBadRequest, "unsupported file name %.200q: upload a .whl, .tar.gz or .zip", filename)
+	}
+	md, _, _, err := fileMeta(r, size, filename)
+	return md.Name, md.Version, err
 }
 
 // fromWheel reads the METADATA of a wheel's only .dist-info directory.

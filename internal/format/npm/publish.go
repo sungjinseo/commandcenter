@@ -248,22 +248,48 @@ var (
 	maxPackageJSON  int64 = 1 << 20
 )
 
-// checkTarball verifies that r is a gzip+tar npm tarball for name@version.
-// npm extracts with the first path component stripped (npm pack writes
-// package/), so exactly one entry must land on package.json: a regular file of
-// at most maxPackageJSON bytes with that name and version. It reads at most
-// *left bytes uncompressed and subtracts what it read, and it stops between
-// entries once ctx is done. Errors other than ctx's are 400s.
+// checkTarball verifies that r is a gzip+tar npm tarball for name@version:
+// its package.json (packageJSON) has that name and version. It reads at
+// most *left bytes uncompressed and subtracts what it read, and it stops
+// between entries once ctx is done. Errors other than ctx's are 400s.
 func checkTarball(ctx context.Context, r io.Reader, name, version string, left *int64) error {
 	bad := func(format string, a ...any) error {
 		return repo.Errorf(http.StatusBadRequest, "invalid tarball for %s@%s: %s", name, version, fmt.Sprintf(format, a...))
 	}
+	pj, err := packageJSON(ctx, r, left, bad)
+	if err != nil {
+		return err
+	}
+	if pj.Name != name {
+		return bad("package.json has name %q", pj.Name)
+	}
+	if pj.Version != version && cleanVersion(pj.Version) != version {
+		return bad("package.json has version %q", pj.Version)
+	}
+	return nil
+}
+
+// tarballManifest is a tarball's package.json: its name and version, and
+// the whole document.
+type tarballManifest struct {
+	Name, Version string
+	Raw           json.RawMessage
+}
+
+// packageJSON reads the package.json of the gzip+tar npm tarball r. npm
+// extracts with the first path component stripped (npm pack writes
+// package/), so exactly one entry must land on package.json: a regular file
+// of at most maxPackageJSON bytes holding a JSON object. It reads at most
+// *left bytes uncompressed and subtracts what it read, and it stops between
+// entries once ctx is done. Errors other than ctx's are bad's.
+func packageJSON(ctx context.Context, r io.Reader, left *int64, bad func(string, ...any) error) (tarballManifest, error) {
+	var pj tarballManifest
 	gz, err := gzip.NewReader(r)
 	if err == io.EOF {
-		return bad("the file is empty")
+		return pj, bad("the file is empty")
 	}
 	if err != nil {
-		return bad("not a gzip archive")
+		return pj, bad("not a gzip archive")
 	}
 	defer gz.Close()
 	lr := &io.LimitedReader{R: gz, N: *left + 1}
@@ -278,53 +304,51 @@ func checkTarball(ctx context.Context, r io.Reader, name, version string, left *
 	found := false
 	for {
 		if err := ctx.Err(); err != nil {
-			return err
+			return pj, err
 		}
 		h, err := tr.Next()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			return broken(err)
+			return pj, broken(err)
 		}
 		if _, rest, ok := strings.Cut(h.Name, "/"); !ok || path.Clean("/"+rest) != "/package.json" {
 			continue
 		}
 		if found {
-			return bad("more than one package.json in the top directory")
+			return pj, bad("more than one package.json in the top directory")
 		}
 		found = true
 		if h.Typeflag != tar.TypeReg {
-			return bad("%q is not a regular file", h.Name)
+			return pj, bad("%q is not a regular file", h.Name)
 		}
 		if h.Size > maxPackageJSON {
-			return bad("%q is larger than %d bytes", h.Name, maxPackageJSON)
+			return pj, bad("%q is larger than %d bytes", h.Name, maxPackageJSON)
 		}
 		data := make([]byte, h.Size)
 		if _, err := io.ReadFull(tr, data); err != nil {
-			return broken(err)
+			return pj, broken(err)
 		}
-		var pj struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
+		data = bytes.TrimPrefix(data, []byte("\uFEFF"))
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(data, &obj); err != nil || obj == nil {
+			if err == nil {
+				err = errors.New("not a JSON object")
+			}
+			return pj, bad("%q: %v", h.Name, err)
 		}
-		if err := json.Unmarshal(bytes.TrimPrefix(data, []byte("\uFEFF")), &pj); err != nil {
-			return bad("%q: %v", h.Name, err)
-		}
-		if pj.Name != name {
-			return bad("%q has name %q", h.Name, pj.Name)
-		}
-		if pj.Version != version && cleanVersion(pj.Version) != version {
-			return bad("%q has version %q", h.Name, pj.Version)
-		}
+		json.Unmarshal(obj["name"], &pj.Name)
+		json.Unmarshal(obj["version"], &pj.Version)
+		pj.Raw = data
 	}
 	if lr.N <= 0 {
-		return broken(nil)
+		return pj, broken(nil)
 	}
 	if !found {
-		return bad("no package.json in its top directory (npm packs files under package/)")
+		return pj, bad("no package.json in its top directory (npm packs files under package/)")
 	}
-	return nil
+	return pj, nil
 }
 
 // cleanVersion is the version npm publishes for a package.json version

@@ -652,7 +652,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	a.UI = webUI
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
-	nexus := &nexusapi.Handler{Repos: registry, Auth: authn, DB: db, BaseURL: baseURL, UI: webUI}
+	nexus := &nexusapi.Handler{Repos: registry, Auth: authn, DB: db, BaseURL: baseURL, UI: webUI, TempDir: cfg.DataDir}
 	// Staging selects components with the search API's matching and moves
 	// them with the format handlers that can take one in.
 	webUI.FindComponents = nexus.Find
@@ -665,6 +665,8 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		return terraform.RootDiscovery(registry.Snapshot().Sorted, authn.Snapshot().Settings().TerraformDefaultRepository, baseURL())
 	}
 	a.Handler = srv.Handler()
+	// The component upload API hands each file to the repository endpoint.
+	nexus.Repository = srv.ServeRepository
 	// Pull replication prefetches through the repository endpoint, as a
 	// client's HEAD: the server's checks and the format handler apply.
 	taskSvc.Replication = &replication.Service{DB: db, Store: store, Fetcher: fetcher,

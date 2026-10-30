@@ -163,19 +163,20 @@ func signingKey(rp *repo.Repository) string {
 }
 
 // upload takes a .deb into hosted rp: `PUT pool/<any>/<file>.deb` with the
-// file as the body, or `POST /` as a multipart form whose "file" field is
-// the package. The file is stored at its pool path, whatever path was
-// given, and the answer is 201 with the package, version, architecture
-// and filename as JSON. The server's maxUploadMiB bounds the body.
+// file as the body, or `POST /` with the package as the body, as Nexus
+// takes it (its documented curl sends --data-binary with a bare
+// multipart/form-data type, so a type without a boundary is no form). A
+// POST whose body is a multipart form (a boundary given) carries the
+// package in its "file" field or its first file part. The file is stored
+// at its pool path, whatever path was given, and the answer is 201 with
+// the package, version, architecture and filename as JSON. The server's
+// maxUploadMiB bounds the body.
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Repository) error {
 	if rp.WritePolicy == "deny" {
 		return repo.Errorf(http.StatusBadRequest, "repository %q is read-only", rp.Name)
 	}
 	body := io.Reader(r.Body)
-	if r.Method == http.MethodPost {
-		if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "multipart/form-data" {
-			return badDeb("POST needs a multipart/form-data body with the package in the \"file\" field")
-		}
+	if mt, params, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); r.Method == http.MethodPost && mt == "multipart/form-data" && params["boundary"] != "" {
 		mr, err := r.MultipartReader()
 		if err != nil {
 			return badDeb("%v", err)
@@ -183,12 +184,12 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		for {
 			part, err := mr.NextPart()
 			if err == io.EOF {
-				return badDeb(`multipart body has no "file" field`)
+				return badDeb(`multipart body has no "file" field or file part`)
 			}
 			if err != nil {
 				return uploadErr(err)
 			}
-			if part.FormName() == "file" {
+			if part.FormName() == "file" || part.FileName() != "" {
 				body = part
 				break
 			}
