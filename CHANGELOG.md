@@ -453,6 +453,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Built with Go 1.27.3, which distrusts compromised intermediate certificates in crypto/x509
+  (GO-2026-6809; the LDAP StartTLS connection verifies certificates through it).
 - The metadata database is PostgreSQL; `database.url` (or `COMMANDCENTER_DATABASE_URL`) is required.
   docker-compose.yml and the Helm chart run a PostgreSQL 17 alongside (`postgresql.*` values) unless an
   external one is configured (`database.existingSecret`).
