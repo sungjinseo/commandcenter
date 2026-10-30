@@ -222,9 +222,13 @@ func TestPullReplication(t *testing.T) {
 	if out.Result != tasks.ResultOK || !strings.Contains(out.Message, "fetched 1 assets") {
 		t.Fatalf("incremental run: %s %s\n%s", out.Result, out.Message, log)
 	}
-	// Older than the newest asset the last run listed: not even looked up.
+	// Older than the newest asset the last run listed: not even looked up
+	// (the newest itself may be looked up again: lastModified has
+	// milliseconds, and the maven-metadata.xml written after the jar may
+	// share the jar's or be newer).
 	out, log = replicate(t, tgt, "mirror", false)
-	if out.Result != tasks.ResultOK || !strings.Contains(out.Message, "fetched 0 assets") || !strings.Contains(log, "1 held already, 2 unchanged since the last run") {
+	if out.Result != tasks.ResultOK || !strings.Contains(out.Message, "fetched 0 assets") ||
+		!strings.Contains(log, "1 held already, 2 unchanged since the last run") && !strings.Contains(log, "0 held already, 3 unchanged since the last run") {
 		t.Fatalf("run without news: %s %s\n%s", out.Result, out.Message, log)
 	}
 	out, log = replicate(t, tgt, "mirror", true)

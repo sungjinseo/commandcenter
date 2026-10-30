@@ -799,7 +799,10 @@ func (h *Handler) systemInformation(w http.ResponseWriter, r *http.Request) {
 		"nexus-properties":    info["system-environment"],
 		"system-time": map[string]any{"timezone": time.Local.String(), "zone": zone, "offsetSeconds": offset,
 			"current": now.UnixMilli(), "iso8601": now.Format(time.RFC3339)},
-		"system-runtime":    rt,
-		"system-filestores": stores,
+		"system-runtime":     rt,
+		"system-filestores":  stores,
+		"system-environment": info["system-environment"], // also under nexus-properties, where earlier builds put it
+		"system-network":     systemNetwork(),
+		"system-properties":  systemProperties(),
 	})
 }

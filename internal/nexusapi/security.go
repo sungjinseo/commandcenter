@@ -100,7 +100,7 @@ func (h *Handler) createRoutingRule(w http.ResponseWriter, r *http.Request) {
 		writeUIError(w, status, body)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
+	w.WriteHeader(http.StatusNoContent) // Nexus answers no body
 }
 
 func (h *Handler) updateRoutingRule(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +125,9 @@ func (h *Handler) deleteRoutingRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status, body := h.call(r, http.MethodDelete, "/-/api/routing-rules/"+url.PathEscape(r.PathValue("name")), nil)
+	if status == http.StatusConflict {
+		status = http.StatusBadRequest // still used by a repository: Nexus's 400
+	}
 	if status != http.StatusNoContent {
 		writeUIError(w, status, body)
 		return

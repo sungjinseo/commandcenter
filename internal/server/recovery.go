@@ -57,12 +57,17 @@ func pattern(m *http.ServeMux, r *http.Request) string {
 	return p
 }
 
-// writeJSONError answers err as the APIs do: {"error": "..."}.
+// writeJSONError answers err as the APIs do: {"error": "..."}, or
+// {"id": "*", "message": "..."} on the Nexus API.
 func writeJSONError(w http.ResponseWriter, r *http.Request, err error) {
 	status, msg := repo.ErrorMessage(r, err)
+	body := map[string]string{"error": msg}
+	if strings.HasPrefix(r.URL.Path, "/service/rest/") {
+		body = map[string]string{"id": "*", "message": msg} // the Nexus API's error shape
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	json.NewEncoder(w).Encode(body)
 }
 
 // refused answers 503 with the reason when ReadOnly gives one, with

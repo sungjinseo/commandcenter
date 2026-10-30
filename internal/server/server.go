@@ -123,6 +123,12 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/service/rest/v1/", s.Nexus) // the exact status route above stays the plain ping
 		mux.Handle("GET /service/rest/swagger.json", s.Nexus)
 		mux.Handle("GET /service/rest/atlas/system-information", s.Nexus)
+		mux.Handle("/service/rest/beta/", s.Nexus) // Nexus's deprecated twins, rewritten to v1 there
+		mux.Handle("GET /service/metrics/", s.Nexus)
+		mux.Handle("GET /service/rest/metrics/ping", s.Nexus)
+		mux.Handle("GET /service/rest/metrics/prometheus", s.Nexus)
+		mux.Handle("GET /service/rest/metrics/data", s.Nexus)
+		mux.Handle("GET /service/rest/metrics/threads", s.Nexus)
 	}
 	return s.wrap(s.refuseWrites(mux))
 }

@@ -11,12 +11,16 @@ import (
 )
 
 // Soft quota through the Nexus API: softQuota on create and update (limit
-// in MB), the blob store list, and quota-status.
+// in bytes, as Nexus's REST API carries it), the blob store list, and
+// quota-status.
 func TestBlobStoreSoftQuota(t *testing.T) {
 	e := start(t, true)
 	e.want("POST", v1+"/blobstores/file", "ci", `{"name":"bs2"}`, 403)
 	e.want("POST", v1+"/blobstores/file", "admin", `{"name":"bs2","path":"bs2","softQuota":{"type":"bytes","limit":1}}`, 400)
-	e.want("POST", v1+"/blobstores/file", "admin", `{"name":"bs2","path":"bs2","softQuota":{"type":"spaceUsedQuota","limit":1}}`, 204)
+	e.want("POST", v1+"/blobstores/file", "admin", `{"name":"bs2","path":"bs2","softQuota":{"type":"spaceUsedQuota","limit":1048576}}`, 204)
+	if st, b := e.ui("GET", "/-/api/blobstores/bs2", ""); st != 200 || !strings.Contains(string(b), `"quota":{"type":"spaceUsedBytes","limitBytes":1048576}`) {
+		t.Fatalf("stored quota: %d %s", st, b)
+	}
 	var stores []struct {
 		Name      string
 		SoftQuota *struct {
@@ -28,7 +32,7 @@ func TestBlobStoreSoftQuota(t *testing.T) {
 	if len(stores) != 2 || stores[0].Name != "bs2" || stores[0].SoftQuota == nil || *stores[0].SoftQuota != (struct {
 		Type  string
 		Limit int64
-	}{"spaceUsedQuota", 1}) || stores[1].SoftQuota != nil {
+	}{"spaceUsedQuota", 1048576}) || stores[1].SoftQuota != nil {
 		t.Fatalf("blobstores = %+v", stores)
 	}
 	var qs map[string]any
@@ -36,8 +40,8 @@ func TestBlobStoreSoftQuota(t *testing.T) {
 	if qs["isViolation"] != false || qs["blobStoreName"] != "bs2" || qs["message"] != "" {
 		t.Fatalf("quota-status = %v", qs)
 	}
-	// 2^40 MB free is more than any filesystem has
-	e.want("PUT", v1+"/blobstores/file/bs2", "admin", `{"path":"bs2","softQuota":{"type":"spaceRemainingQuota","limit":1099511627776}}`, 204)
+	// 2^60 bytes free is more than any filesystem has
+	e.want("PUT", v1+"/blobstores/file/bs2", "admin", `{"path":"bs2","softQuota":{"type":"spaceRemainingQuota","limit":1152921504606846976}}`, 204)
 	e.get(v1+"/blobstores/bs2/quota-status", "admin", &qs)
 	if qs["isViolation"] != true || !strings.Contains(qs["message"].(string), "soft quota") {
 		t.Fatalf("quota-status = %v", qs)

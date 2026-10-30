@@ -115,12 +115,19 @@ func (h *Handler) init() {
 	h.proRoutes(m, p)
 	h.azureBlobRoutes(m, p)
 	h.configRoutes(m, p)
+	h.repoAPIRoutes(m, p)
 	h.mux = m
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.once.Do(h.init)
 	w.Header().Set("Cache-Control", "no-store")
+	if strings.HasPrefix(r.URL.Path, BetaPrefix+"/") {
+		if r = betaRequest(r); r == nil {
+			writeMessage(w, http.StatusNotFound, "not found")
+			return
+		}
+	}
 	h.mux.ServeHTTP(w, r)
 }
 
@@ -132,9 +139,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// writeMessage answers like Nexus's JSON errors: {"message": ...}.
+// writeMessage answers like Nexus's single-message errors: {"id": "*",
+// "message": ...}.
 func writeMessage(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"message": msg})
+	writeJSON(w, status, map[string]string{"id": "*", "message": msg})
 }
 
 // validation is one entry of Nexus's 400 body for repository bodies.
@@ -343,16 +351,23 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 		policies = []string{d.CleanupPolicy}
 	}
 	out := map[string]any{"name": d.Name, "format": nexusFormat(d.Format), "type": d.Type, "url": h.repoURL(d.Name),
-		"online": d.IsOnline(), "storage": storage, "cleanup": map[string]any{"policyNames": policies}}
+		"online": d.IsOnline(), "storage": storage}
+	if d.Type != "group" { // a Nexus group carries storage and group only
+		out["cleanup"] = map[string]any{"policyNames": policies}
+	}
+	if d.Type == "hosted" {
+		out["component"] = map[string]any{"proprietaryComponents": false}
+	}
+	formatBlocks(out, rp)
 	switch d.Type {
 	case "proxy":
 		out["proxy"] = map[string]any{"remoteUrl": publicRemote(rp), "contentMaxAge": minutes(d.ContentMaxAge), "metadataMaxAge": minutes(d.MetadataMaxAge)}
 		out["negativeCache"] = map[string]any{"enabled": true, "timeToLive": minutes(d.NegativeCacheTTL)}
 		hc := map[string]any{"blocked": d.Blocked, "autoBlock": d.AutoBlocks(), "authentication": nil}
-		if a := d.RemoteAuth; a != nil && a.Username != "" {
-			hc["authentication"] = map[string]any{"type": "username", "username": a.Username}
-		} else if a != nil && a.BearerToken != "" {
+		if a := d.RemoteAuth; a != nil && a.BearerToken != "" { // the proxy sends the token when there is one
 			hc["authentication"] = map[string]any{"type": "bearerToken"}
+		} else if a != nil && a.Username != "" {
+			hc["authentication"] = map[string]any{"type": "username", "username": a.Username}
 		}
 		out["httpClient"] = hc
 		out["routingRule"], out["routingRuleName"] = d.RoutingRule, d.RoutingRule
@@ -365,7 +380,7 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 		}
 		out["replication"] = repl
 	case "group":
-		g := map[string]any{"memberNames": append([]string{}, d.Members...)}
+		g := map[string]any{"memberNames": append([]string{}, d.Members...), "writableMember": nil}
 		if d.WriteMember != "" {
 			g["writableMember"] = d.WriteMember
 		}
@@ -440,6 +455,7 @@ type repoBody struct {
 	Storage struct {
 		BlobStoreName string `json:"blobStoreName"`
 		WritePolicy   string `json:"writePolicy"`
+		LatestPolicy  *bool  `json:"latestPolicy"` // docker hosted
 
 		StrictContentTypeValidation bool `json:"strictContentTypeValidation"`
 	} `json:"storage"`
@@ -462,8 +478,10 @@ type repoBody struct {
 		Blocked        bool  `json:"blocked"`
 		AutoBlock      *bool `json:"autoBlock"`
 		Authentication *struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
+			Type        string `json:"type"` // username | bearerToken
+			Username    string `json:"username"`
+			Password    string `json:"password"`
+			BearerToken string `json:"bearerToken"`
 		} `json:"authentication"`
 	} `json:"httpClient"`
 	Maven struct {
@@ -479,6 +497,7 @@ type repoBody struct {
 	// Replication is a proxy's pull replication (Nexus's replication
 	// object; verifyChecksums is Command Center's); absent keeps it.
 	Replication *config.Replication `json:"replication"`
+	formatBodies
 }
 
 // minutesText renders Nexus minutes in the config format.
@@ -493,8 +512,10 @@ func minutesText(m *int) string {
 }
 
 // uiRepo maps a Nexus body to the UI's repository request (its exact
-// fields: the UI refuses unknown ones).
-func uiRepo(format, typ string, b repoBody) map[string]any {
+// fields: the UI refuses unknown ones), or returns the values Command Center
+// cannot honour. cur is the stored definition on update (nil on create):
+// the settings a Nexus body has no field for are kept from it.
+func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]any, []string) {
 	out := map[string]any{
 		"name": b.Name, "format": ccFormat(format), "type": typ,
 		"remote":           b.Proxy.RemoteURL,
@@ -513,6 +534,10 @@ func uiRepo(format, typ string, b repoBody) map[string]any {
 	}
 	if typ == "proxy" {
 		out["blocked"], out["autoBlock"] = b.HTTPClient.Blocked, b.HTTPClient.AutoBlock
+	}
+	if cur != nil {
+		out["anonymousRead"], out["depth"], out["gpgPublicKey"] = cur.AnonymousRead, cur.Depth, cur.GPGPublicKey
+		out["contentDisposition"] = cur.ContentDisposition
 	}
 	if cd := strings.ToLower(b.Raw.ContentDisposition); cd != "" {
 		out["contentDisposition"] = cd
@@ -533,12 +558,16 @@ func uiRepo(format, typ string, b repoBody) map[string]any {
 		out["cleanupPolicy"] = name
 	}
 	if a := b.HTTPClient.Authentication; a != nil {
-		out["remoteAuth"] = map[string]any{"username": a.Username, "password": a.Password}
+		if strings.EqualFold(a.Type, "bearerToken") { // an empty token on update keeps the stored one
+			out["remoteAuth"] = map[string]any{"bearerToken": a.BearerToken, "clearPassword": true}
+		} else {
+			out["remoteAuth"] = map[string]any{"username": a.Username, "password": a.Password, "clearBearerToken": a.Type != ""}
+		}
 	}
 	if b.Replication != nil {
 		out["replication"] = b.Replication
 	}
-	return out
+	return out, formatRequest(ccFormat(format), typ, b, out, cur)
 }
 
 func decodeRepoBody(w http.ResponseWriter, r *http.Request) (repoBody, bool) {
@@ -558,7 +587,12 @@ func (h *Handler) createRepository(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	status, body := h.call(r, http.MethodPost, "/-/api/repositories", uiRepo(r.PathValue("format"), r.PathValue("type"), b))
+	req, errs := uiRepo(r.PathValue("format"), r.PathValue("type"), b, nil)
+	if len(errs) > 0 {
+		writeValidation(w, errs)
+		return
+	}
+	status, body := h.call(r, http.MethodPost, "/-/api/repositories", req)
 	if status != http.StatusCreated {
 		writeUIError(w, status, body)
 		return
@@ -575,8 +609,21 @@ func (h *Handler) updateRepository(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.PathValue("name")
+	var cur *config.Repository // nil: the UI answers 404
+	if rp := h.Repos.Get(name); rp != nil {
+		cur = &rp.Repository
+	}
+	if cur != nil && b.Name != "" && b.Name != name {
+		writeValidation(w, []string{"name: the body names " + strconv.Quote(b.Name) + ", the path " + strconv.Quote(name) + "; a repository cannot be renamed"})
+		return
+	}
 	b.Name = name
-	status, body := h.call(r, http.MethodPut, "/-/api/repositories/"+url.PathEscape(name), uiRepo(r.PathValue("format"), r.PathValue("type"), b))
+	req, errs := uiRepo(r.PathValue("format"), r.PathValue("type"), b, cur)
+	if len(errs) > 0 {
+		writeValidation(w, errs)
+		return
+	}
+	status, body := h.call(r, http.MethodPut, "/-/api/repositories/"+url.PathEscape(name), req)
 	if status != http.StatusOK {
 		writeUIError(w, status, body)
 		return
@@ -712,7 +759,7 @@ func rfc3339(t time.Time) any {
 	if t.IsZero() {
 		return nil
 	}
-	return t.UTC().Format(time.RFC3339)
+	return t.UTC().Format("2006-01-02T15:04:05.000-07:00") // Nexus's ISO form: milliseconds, +00:00
 }
 
 func (h *Handler) assetJSON(rp *repo.Repository, a meta.Asset) map[string]any {
@@ -1320,7 +1367,7 @@ func (h *Handler) users(w http.ResponseWriter, r *http.Request) {
 	want := r.URL.Query().Get("userId")
 	out := []map[string]any{}
 	for _, u := range h.Auth.Snapshot().Users() {
-		if want != "" && u.ID != want {
+		if !strings.HasPrefix(strings.ToLower(u.ID), strings.ToLower(want)) { // Nexus: a case-insensitive prefix
 			continue
 		}
 		source := u.Source
@@ -1393,16 +1440,15 @@ func (h *Handler) blobStores(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// ---- blob store soft quota (Nexus: type spaceUsedQuota | spaceRemainingQuota, limit in MB) ----
+// ---- blob store soft quota (Nexus: type spaceUsedQuota | spaceRemainingQuota, limit in bytes) ----
 
-type uiQuota struct {
-	Type       string `json:"type"`
-	LimitBytes int64  `json:"limitBytes"`
-}
+type uiQuota = meta.Quota
 
+// nexusQuota is Nexus's softQuota. Its REST API stores and returns the limit
+// as given, in bytes (its own UI converts from MB before calling it).
 type nexusQuota struct {
 	Type  string `json:"type"`
-	Limit int64  `json:"limit"` // MB, as Nexus's API
+	Limit int64  `json:"limit"`
 }
 
 var quotaTypes = map[string]string{"spaceUsedQuota": "spaceUsedBytes", "spaceRemainingQuota": "spaceRemainingBytes"}
@@ -1413,7 +1459,7 @@ func softQuota(q *uiQuota) *nexusQuota {
 	}
 	for nx, cc := range quotaTypes {
 		if cc == q.Type {
-			return &nexusQuota{Type: nx, Limit: q.LimitBytes >> 20}
+			return &nexusQuota{Type: nx, Limit: q.LimitBytes}
 		}
 	}
 	return nil
@@ -1427,7 +1473,7 @@ func (q *nexusQuota) ui() any {
 	if !ok {
 		typ = q.Type // the UI's own names are accepted too, and refused there otherwise
 	}
-	return uiQuota{Type: typ, LimitBytes: q.Limit << 20}
+	return uiQuota{Type: typ, LimitBytes: q.Limit}
 }
 
 type blobStoreRow struct {
@@ -1491,6 +1537,14 @@ func (h *Handler) updateFileBlobStore(w http.ResponseWriter, r *http.Request) {
 	}
 	var b fileBlobStoreBody
 	if !decodeSmall(w, r, &b) {
+		return
+	}
+	bs, ok := h.storeOfType(w, r, r.PathValue("name"), meta.BlobStoreFile)
+	if !ok {
+		return
+	}
+	if b.Path != "" && b.Path != filePath(bs) { // all nodes share the path: it cannot move
+		writeValidation(w, []string{"path: the path of blob store " + strconv.Quote(bs.Name) + " cannot be changed"})
 		return
 	}
 	status, body := h.call(r, http.MethodPut, "/-/api/blobstores/"+url.PathEscape(r.PathValue("name")), map[string]any{"quota": b.SoftQuota.ui()})

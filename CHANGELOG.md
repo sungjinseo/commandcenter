@@ -18,11 +18,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `curl -F`, Jenkins `nexusPublisher` and `nexus3-cli`.
 - `GET /service/rest/v1/formats/upload-specs` and `/formats/{format}/upload-specs`: the fields each
   format's component upload takes.
+- Nexus API: S3 blob stores (`POST /v1/blobstores/s3` 201, `GET`/`PUT /v1/blobstores/s3/{name}`, secret
+  masked with Nexus's placeholder), `GET /v1/blobstores/file/{name}` and `DELETE /v1/blobstores/{name}`.
+- Nexus API: `GET`/`PUT`/`DELETE /v1/email` and `POST /v1/email/verify` over the SMTP settings.
+- Nexus metrics paths: `/service/rest/metrics/{ping,prometheus,data,threads}` (`name[]` filter) and
+  301 redirects from `/service/metrics/*` (`healthcheck` to `/v1/status/check`).
+- `/service/rest/beta/*`: Nexus's deprecated Beta paths served by their v1 twins.
+- Repository bodies: format sections `docker`, `dockerProxy`, `yum` (`repodataDepth` = depth),
+  `nugetProxy`, `npm`, `pypi`, `cargo`/`terraform`/`swift` (`requireAuthentication`), and
+  `httpClient.authentication` of type `bearerToken`.
+- System information: `system-environment`, `system-network` and `system-properties` sections.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
   `curl --data-binary` with a bare `multipart/form-data` type); a multipart form without a `file`
   field now uses its first file part.
+- Nexus API `softQuota.limit` is in bytes, as Nexus's REST API carries it (it was read as MB).
+- Repository values Command Center cannot honour (docker connector ports, v1, foreign-layer caching,
+  NuGet V2, quarantine removal, PERMISSIVE yum at depth 1, yum signing) are refused with 400.
+- Routing rule create answers 204; deleting a rule in use answers 400; deleting a blob store in use
+  answers 400; Nexus errors carry `"id":"*"`; dates have milliseconds; `?userId=` is a prefix.
+
+### Fixed
+- A Nexus API repository PUT no longer resets the anonymous-read override, a yum repository's depth,
+  a terraform repository's GPG key or the content disposition when its body has no field for them
+  (the anonymous-read reset could make a private repository readable).
+- `PUT /v1/repositories/…/{name}` with another name in the body is refused instead of ignored.
+
+### Upgrade notes
+- Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by
+  1048576; a GET now returns the stored bytes. Soft quotas never refuse writes. Bodies accepted
+  silently before can now get 400 (docker connector ports, `v1Enabled:true`, `nugetVersion:V2`,
+  `removeQuarantined:true`, ...): remove those values. Clients checking for 201 on routing-rule
+  create, or 409 on deleting a rule or blob store in use, must change those checks.
 
 ## [0.3.0] - 2026-10-30
 
