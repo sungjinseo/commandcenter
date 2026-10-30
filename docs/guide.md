@@ -966,6 +966,7 @@ commandcenter config apply -config /etc/commandcenter/config.yaml -f cc.yaml -pr
 역할은 **권한(privilege)** 목록입니다. 권한 하나는 **대상**과 **동작**의 묶음입니다.
 
 - **대상**: `*`(모든 저장소), `format:<포맷>`(`maven`, `npm`, `pypi`, `go`, `cargo` 등 저장소 포맷 이름), `repo:<저장소 이름>`, `selector:<셀렉터 이름>`(경로 단위 권한. 적용 저장소를 `repos`에 함께 적습니다. "컨텐츠 셀렉터" 참고).
+  - `metrics`: 동작은 `read`만 받습니다. 관리자가 아니어도 저장소 대시보드, 모든 저장소의 평가 결과, 월별 사용량을 볼 수 있습니다(Nexus의 `nexus:metrics:read`). 모든 저장소의 컴포넌트 이름이 보이므로 저장소 단위로 나누어 줄 수는 없습니다.
 - **동작**: `browse`, `read`, `add`, `edit`, `delete`. 여러 권한과 여러 역할은 합쳐지며(어느 하나라도 허용하면 허용) 거부 규칙은 없습니다.
   - **browse**: UI의 저장소 목록, 탐색, 파일 정보, 검색, 컴포넌트 검색. 내용 다운로드(`/repository/`)는 안 되며 파일 화면의 Download 버튼도 나오지 않습니다. `read`가 있으면 browse도 됩니다.
   - **read**: 다운로드(GET/HEAD)와 메타데이터 조회.
@@ -1528,6 +1529,16 @@ Command Center는 OSV(https://osv.dev)의 공개 데이터로 컴포넌트의 �
 ### 취약점 보고
 
 `vulnerability.scan` 작업이 hosted·프록시 저장소의 컴포넌트를 검사해 결과를 저장합니다. 저장소 목록에는 심각도별 개수가, 저장소 요약(`GET /-/api/repositories/{name}/vulnerabilities/summary`)에는 상위 컴포넌트가, 컴포넌트 화면(`GET /-/api/repositories/{name}/components/vulnerabilities?group=&name=&version=`)에는 권고 목록(수정 버전, osv.dev 링크 포함)이 표시됩니다. group 저장소는 자기 컴포넌트가 없으므로 요약이 비어 있습니다.
+
+### 저장소 평가
+
+hosted 저장소(선택하면 group의 멤버 저장소도)에 올라온 컴포넌트를 OSV 데이터로 계속 평가합니다. Nexus의 hosted 저장소 분석에 해당하며 별도 라이선스가 필요 없습니다.
+
+- **대상**: 취약점 데이터 설정(`PUT /-/api/vulnerability/settings`)의 `evaluateHosted: true`는 모든 hosted 저장소를, `evaluateGroupMembers: true`는 어떤 group의 멤버인 저장소(proxy 포함)를 감시합니다. 둘 다 기본값은 꺼짐입니다. 저장소별 `evaluation`(`enabled`, `disabled`, `inherit`. config에서는 `evaluation: enabled`)이 이 설정보다 우선합니다. group 저장소에는 지정할 수 없고, OSV 데이터가 없는 포맷(Docker, conda, apt, yum, Helm, raw, Git LFS, p2, Swift, CocoaPods, Hugging Face, Terraform)에는 `enabled`를 지정할 수 없습니다(400). 취약점 데이터가 꺼져 있으면 아무것도 평가하지 않습니다.
+- **작업**: 예약 작업 `repository.evaluate`(선택 파라미터 `repository`)를 만들고 일정을 정합니다(예: `daily:02:00`). 클러스터에서도 한 노드만 실행합니다. 실행할 때마다 새 컴포넌트, 다른 권고 데이터로 평가된 컴포넌트(그 뒤 가져오기·sync가 있었거나 모드가 바뀐 경우), online 모드에서 마지막 조회가 `cacheHours`보다 오래된 컴포넌트, 지난번 온라인 조회가 실패한 컴포넌트만 다시 조회합니다. 그래서 두 번째 실행부터는 빠릅니다. 지워진 컴포넌트의 결과와, 더 이상 감시하지 않는 저장소의 결과는 지웁니다.
+- **알림**: 컴포넌트에 전에 없던 권고가 생기면 활동 이벤트와 webhook `component.vulnerable`(data: `format`, `group`, `name`, `version`, `label`, `severity`, `ids`)을 남깁니다. `ids`에는 새 권고만 담깁니다. 한 번 실행에 최대 100개까지 보내고 나머지는 작업 로그에 남깁니다. 처음 평가하는 저장소에서는 이미 있던 취약 컴포넌트도 모두 새 권고로 알립니다.
+- **결과**: 저장소 대시보드의 `evaluation`과 `GET /-/api/dashboard/repositories/{name}/vulnerabilities`에서 봅니다(`severity`로 최소 심각도를 거릅니다. 악성 패키지는 항상 들어갑니다). 권고 ID, 심각도, 수정 버전, osv.dev 링크가 들어 있습니다.
+- **주의**: online 모드에서는 hosted 컴포넌트의 이름과 버전이 OSV API(`apiURL`)로 전송됩니다. 내부 패키지 이름이 밖으로 나가면 안 된다면 offline 모드(덤프)를 쓰거나 `apiURL`을 내부 미러로 바꾸세요. 기존 `vulnerability.scan`은 그대로이며, 모든 hosted·proxy 저장소를 매번 전부 검사합니다.
 
 ## 저장소 Online/Offline
 
@@ -2268,6 +2279,21 @@ scrape_configs:
       - targets: ["commandcenter.example.com:443"]
 ```
 
+### 저장소 대시보드와 월별 사용량
+
+`GET /-/api/dashboard/repositories`는 저장소마다 포맷과 종류, 컴포넌트 수와 asset 수, `bytes`(asset 크기의 합)와 `uniqueBytes`(같은 blob을 한 번만 센 크기), 마지막 업로드·다운로드 시각, 최근 24시간·30일 요청 수, 평가 상태(감시 여부, 마지막 평가, 심각도별 취약 컴포넌트 수)를 돌려줍니다. `sort`(`name`, `format`, `type`, `components`, `assets`, `bytes`, `uniqueBytes`, `lastUpload`, `lastDownload`, `requests24h`, `requests30d`, `vulnerable`), `order`(`asc`·`desc`), `limit`(기본 50, 최대 500), `offset`과 필터 `format`, `type`, `q`(이름에 포함, 대소문자 무시), `vulnerable=true`를 받습니다.
+
+- asset 수, 크기, 마지막 업로드 시각은 asset을 쓸 때마다 데이터베이스 트리거가 같은 트랜잭션에서 갱신합니다. 그래서 큰 저장소에서도 테이블을 훑지 않고 정확하며, 어느 노드가 쓰든(이전 버전 노드 포함) 같습니다. 다운로드와 요청 수는 다른 메트릭처럼 `metricsFlushSeconds`(기본 30초)마다 기록됩니다.
+- 컴포넌트 수는 asset이 바뀐 저장소만 다시 셉니다(대시보드 요청 때 최대 2초, 리더 노드에서 1분마다). 아직 다시 세지 못한 저장소는 `componentsCurrent: false`로 표시됩니다. asset 5만 개인 저장소를 세는 데 약 50 ms가 걸립니다.
+
+`GET /-/api/metrics/monthly?from=YYYY-MM&to=YYYY-MM`(기본 최근 12개월, 최대 36개월)는 UTC 달력 월마다 요청 수, 오류(5xx·429), 송신(`egressBytes`)·수신 바이트, 다운로드 수, 업로드 수와 크기(hosted 저장소에 저장된 파일), 저장 용량(`storageBytes`는 마지막 샘플, `peakStorageBytes`는 가장 큰 샘플), asset·컴포넌트 수(최고값 포함), 서로 다른 사용자 수와 클라이언트 주소 수를 돌려줍니다.
+
+- 저장 용량과 컴포넌트 수는 리더가 1분마다(그리고 이 API를 부를 때) 샘플링한 값입니다. 그래서 샘플 사이의 짧은 증가는 최고값에 잡히지 않습니다.
+- 요청 통계는 90일만 보관하지만 월별 합계는 24개월(`retentionMonths`) 보관합니다. 이 기능을 넣기 전의 달에는 요청 수(90일 보관분)만 있습니다.
+- 사용자는 로그인한 계정입니다(익명 제외). 주소는 접속한 IP이며 리버스 프록시 뒤에서는 프록시의 주소입니다. 둘 다 해시로만 저장합니다.
+
+권한은 관리자 또는 대상 `metrics`의 `read` 권한입니다. Nexus REST API의 `GET /service/rest/v1/repositories`와 `/repositories/{name}`에는 Nexus Pro처럼 `size`(asset 크기의 합, 바이트)가 들어갑니다.
+
 ### 지원 번들과 스레드 덤프
 
 문제를 보고할 때 필요한 정보를 한 번에 모읍니다. 관리자 화면의 지원(Support) 페이지에서 내려받거나 API로 호출합니다.
@@ -2343,6 +2369,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 | `repository.import` | 내보낸 디렉터리를 가져옴 | `source`(필수, `<destination>/<내보내기 ID>`), `repositories`(내보낸 이름 → 대상 이름, 비우면 같은 이름), `createMissing`, `overwrite` |
 | `vulnerability.sync` | OSV 덤프(`<dumpURL>/<생태계>/all.zip`)를 내려받아 로컬 취약점 DB에 저장("취약점 데이터와 방화벽(OSV)" 참고) | 없음 |
 | `vulnerability.scan` | hosted·proxy 저장소의 컴포넌트를 검사해 결과를 저장 | `repository`(선택. 비우면 대상 포맷의 모든 hosted·proxy 저장소) |
+| `repository.evaluate` | 감시 대상 저장소(취약점 데이터 설정과 저장소별 `evaluation`)의 새 컴포넌트와 다시 볼 컴포넌트만 OSV로 평가하고 새 권고를 `component.vulnerable`로 알림("저장소 평가" 참고) | `repository`(선택. 비우면 감시 대상 전체) |
 | `security.purge-expired-user-tokens` | 만료된 사용자 토큰을 지움. `expirationDays`가 0이면 아무것도 지우지 않음("사용자 토큰" 참고) | 없음 |
 | `repository.pull-replication` | 복제가 켜진 proxy가 원본 hosted 저장소의 새 파일을 미리 받음("풀 복제" 참고) | `repository`(선택, 비우면 복제가 켜진 모든 proxy), `full`(기본 꺼짐) |
 | `blobstore.reconcile-plan` | 저널과 DB를 비교해 복원 뒤 되살리거나 지울 행의 계획(ADD·DELETE·SKIP·CONFLICT)을 저장. 아무것도 바꾸지 않음("DB 복원 뒤 blob store와 맞추기" 참고) | `blobStore`(선택), `sinceHours`(기본 24), `since`(RFC 3339), `all` |

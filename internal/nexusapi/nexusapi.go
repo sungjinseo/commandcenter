@@ -296,13 +296,21 @@ func publicRemote(rp *repo.Repository) string {
 	return ru.String()
 }
 
-func (h *Handler) repoJSON(rp *repo.Repository) map[string]any {
+// repoJSON is a repository as GET /repositories lists it; size is the
+// sum of its assets' sizes (Nexus Pro's repository size; usage counters).
+func (h *Handler) repoJSON(rp *repo.Repository, usage map[string]meta.RepoUsage) map[string]any {
 	attrs := map[string]any{}
 	if rp.Type == "proxy" {
 		attrs["proxy"] = map[string]any{"remoteUrl": publicRemote(rp)}
 	}
 	return map[string]any{"name": rp.Name, "format": nexusFormat(rp.Format), "type": rp.Type,
-		"url": h.repoURL(rp.Name), "attributes": attrs}
+		"url": h.repoURL(rp.Name), "attributes": attrs, "size": usage[rp.Name].Bytes}
+}
+
+// usage reads the repositories' counters; nil (size 0) when they cannot be read.
+func (h *Handler) usage(ctx context.Context) map[string]meta.RepoUsage {
+	u, _ := h.DB.RepoUsages(ctx)
+	return u
 }
 
 // minutes renders a config duration as Nexus does: minutes, -1 for never.
@@ -377,15 +385,16 @@ func (h *Handler) listRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]map[string]any, 0, len(repos))
+	usage := h.usage(r.Context())
 	for _, rp := range repos {
-		out = append(out, h.repoJSON(rp))
+		out = append(out, h.repoJSON(rp, usage))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) getRepository(w http.ResponseWriter, r *http.Request) {
 	if rp := h.lookupRepo(w, r, r.PathValue("name")); rp != nil {
-		writeJSON(w, http.StatusOK, h.repoJSON(rp))
+		writeJSON(w, http.StatusOK, h.repoJSON(rp, h.usage(r.Context())))
 	}
 }
 

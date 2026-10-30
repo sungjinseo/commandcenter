@@ -72,6 +72,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.replicationRoutes(mux)
 	u.reconcileRoutes(mux)
 	u.configRoutes(mux)
+	u.dashboardRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }

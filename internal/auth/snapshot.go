@@ -36,7 +36,14 @@ type compiledRole struct {
 	formats   map[string]actionSet
 	repos     map[string]actionSet
 	selectors []selectorGrant
+	metrics   actionSet // the MetricsTarget privilege
 }
+
+// MetricsTarget is the privilege target of the instance-wide usage data
+// (Nexus nexus:metrics:read): its read action grants the repository
+// dashboard, every repository's evaluation results and the monthly usage
+// metrics.
+const MetricsTarget = "metrics"
 
 // selectorGrant is a "selector:<name>" privilege: bits on the paths the
 // selector matches, in the repositories named by repos ("*" for any).
@@ -68,6 +75,8 @@ func compileRole(r meta.Role) *compiledRole {
 		case strings.HasPrefix(p.Target, "repo:"):
 			n := strings.TrimPrefix(p.Target, "repo:")
 			c.repos[n] |= bits
+		case p.Target == MetricsTarget:
+			c.metrics |= bits
 		case strings.HasPrefix(p.Target, meta.SelectorPrefix):
 			g := selectorGrant{name: strings.TrimPrefix(p.Target, meta.SelectorPrefix), repos: map[string]bool{}, bits: bits}
 			for _, r := range p.Repos {

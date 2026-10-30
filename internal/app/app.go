@@ -78,6 +78,7 @@ type App struct {
 	Tasks     *tasks.Service      // scheduled tasks; the scheduler runs while Serve does
 	Webhooks  *webhook.Dispatcher // webhook deliveries, sent while Serve runs; Close stops it before the database closes
 	Vuln      *vuln.Service       // vulnerability data and the firewall; Close waits for its index build
+	UI        *ui.UI              // the web UI: RefreshUsage runs on the leader while Serve does (usageLoop); the CLI's configuration export and apply (confcode.go)
 	// Node is this process's id in the nodes table (hostname-xxxx, new for
 	// every start), in every log record ("node") and in the metrics.
 	Node   string
@@ -90,8 +91,6 @@ type App struct {
 	syncWait    map[string]chan string
 	syncAnswers sync.Once
 	syncing     sync.Map
-
-	ui *ui.UI // the web UI's handlers: the CLI's configuration export and apply (confcode.go)
 }
 
 // Version is reported by the UI; cmd/commandcenter sets it before New.
@@ -650,7 +649,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Webhooks:   hooks,
 		Vuln:       vulnSvc,
 	}
-	a.ui = webUI
+	a.UI = webUI
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
 	nexus := &nexusapi.Handler{Repos: registry, Auth: authn, DB: db, BaseURL: baseURL, UI: webUI}
@@ -660,7 +659,8 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	webUI.Importers = map[string]repo.ComponentImporter{"maven": mavenH, "npm": npmH, "raw": rawH, "pypi": pypiH, "nuget": nugetH, "helm": helmH, "yum": yumH}
 	srv := &server.Server{Registry: registry, Handlers: handlers, Auth: authn, Log: log,
 		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Nexus: nexus, Requests: recorder.Request, Docker: dockerH,
-		ReadOnly: func() string { return recoveryRefusal(db.Recovery()) }}
+		ReadOnly: func() string { return recoveryRefusal(db.Recovery()) },
+		Seen:     recorder.Seen}
 	srv.TerraformDiscovery = func() []byte {
 		return terraform.RootDiscovery(registry.Snapshot().Sorted, authn.Snapshot().Settings().TerraformDefaultRepository, baseURL())
 	}
@@ -900,6 +900,17 @@ func (a *App) Serve(ctx context.Context) error {
 			a.log.Warn("could not flush metrics on shutdown", "err", logsafe.Err(err))
 		}
 	}()
+	// The usage counters' components and monthly samples, on the leader.
+	uctx, stopUsage := context.WithCancel(ctx)
+	usageDone := make(chan struct{})
+	go func() {
+		defer close(usageDone)
+		a.usageLoop(uctx)
+	}()
+	defer func() {
+		stopUsage()
+		<-usageDone
+	}()
 	// What another process or node changed applies at once or within
 	// accessReloadEvery; the loop ends before Close closes the database.
 	rctx, stopReload := context.WithCancel(ctx)
@@ -980,6 +991,28 @@ var followTopics = []string{"access", "registry", "routing", "blobstores", "move
 // and is logged once per run of failures. It answers the other nodes'
 // Store.Sync too (answerSync). (The log level, cleanup policy, flush and
 // task stop notifications have their own subscribers.)
+// usageEvery is how often the leader counts the changed repositories'
+// components and samples the month's usage (ui.UI.RefreshUsage).
+const usageEvery = time.Minute
+
+func (a *App) usageLoop(ctx context.Context) {
+	tick := time.NewTicker(usageEvery)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		if !a.DB.Leader() {
+			continue
+		}
+		if err := a.UI.RefreshUsage(ctx, time.Now()); err != nil && ctx.Err() == nil {
+			a.log.Warn("could not refresh the usage counters", "err", logsafe.Err(err))
+		}
+	}
+}
+
 func (a *App) follow(ctx context.Context) {
 	var mu sync.Mutex
 	pending := map[string]bool{}

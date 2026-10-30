@@ -44,14 +44,32 @@ type RequestBucket struct {
 
 // FlushDownloads adds the deltas to the assets' counters in one transaction.
 // last_downloaded only moves forward; assets that no longer exist are skipped.
+// The repositories' last download and the months' downloads (usage.go,
+// dated by each delta's Last) follow.
 func (d *DB) FlushDownloads(ctx context.Context, batch []DownloadDelta) error {
 	if len(batch) == 0 {
 		return nil
 	}
 	return d.Tx(ctx, func(tx *Tx) error {
+		last := map[string]int64{}
+		months := map[int64]int64{}
 		for _, b := range batch {
 			if _, err := tx.q.ExecContext(ctx, `UPDATE assets SET downloads = downloads + ?, last_downloaded = GREATEST(last_downloaded, ?)
 WHERE repo = ? AND path = ?`, b.N, toMs(b.Last), b.Repo, b.Path); err != nil {
+				return err
+			}
+			// The download happened, even if the asset is gone by now.
+			last[b.Repo] = max(last[b.Repo], toMs(b.Last))
+			months[MonthStart(b.Last).Unix()] += b.N
+		}
+		for repo, ms := range last {
+			if _, err := tx.q.ExecContext(ctx, `UPDATE repo_usage SET last_download = GREATEST(last_download, ?) WHERE repo = ?`, ms, repo); err != nil {
+				return err
+			}
+		}
+		for month, n := range months {
+			if _, err := tx.q.ExecContext(ctx, `INSERT INTO usage_months AS m(month, downloads) VALUES(?, ?)
+ON CONFLICT(month) DO UPDATE SET downloads = m.downloads + excluded.downloads`, month, n); err != nil {
 				return err
 			}
 		}

@@ -80,6 +80,7 @@ repositories:
   - name: npm-hosted
     format: npm
     type: hosted
+    # evaluation: enabled             # repository.evaluate가 OSV로 평가: enabled | disabled. 비우면 취약점 데이터 설정을 따름
   - name: npm-all
     format: npm
     type: group

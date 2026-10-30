@@ -259,6 +259,10 @@ func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta
 		targets[key] = true
 		switch {
 		case strings.HasPrefix(p.Target, meta.SelectorPrefix):
+		case p.Target == auth.MetricsTarget:
+			if len(p.Actions) != 1 || p.Actions[0] != meta.ActionRead {
+				v.add(`%s: the %q target takes the action "read" only`, at, auth.MetricsTarget)
+			}
 		case p.Target == "*":
 		case strings.HasPrefix(p.Target, "format:"):
 			if f := strings.TrimPrefix(p.Target, "format:"); !contains(accessFormats, f) {
@@ -272,7 +276,7 @@ func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta
 				v.add("%s: unknown repository %q", at, name)
 			}
 		default:
-			v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>" or "selector:<name>"`, at, p.Target)
+			v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>", "selector:<name>" or "metrics"`, at, p.Target)
 		}
 		if len(p.Actions) == 0 {
 			v.add("%s: at least one action is required", at)

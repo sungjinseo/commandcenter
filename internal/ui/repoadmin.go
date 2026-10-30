@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
 	"net/url"
@@ -89,6 +90,10 @@ type repoRequest struct {
 	// Replication (proxy only): pull replication; absent (null) keeps the
 	// stored one on update and means none on create.
 	Replication *config.Replication `json:"replication"`
+	// Evaluation (hosted and proxy): "enabled", "disabled", or "inherit"
+	// (or "") to follow the vulnerability settings; absent (null) keeps the
+	// stored value on update and means inherit on create.
+	Evaluation *string `json:"evaluation"`
 }
 
 // repoAuthResponse never carries a secret.
@@ -132,6 +137,7 @@ type repoConfigResponse struct {
 	// source the remote names (null when it names no hosted repository).
 	Replication       *config.Replication `json:"replication,omitempty"`
 	ReplicationSource *replicationSource  `json:"replicationSource,omitempty"`
+	Evaluation        string              `json:"evaluation"` // inherit, enabled or disabled
 }
 
 // replicationSource is the instance and hosted repository a proxy's remote
@@ -206,6 +212,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		Blocked:                     d.Blocked,
 		AutoBlock:                   d.Type == "proxy" && d.AutoBlocks(),
 		Firewall:                    firewallOf(d),
+		Evaluation:                  cmp.Or(d.Evaluation, "inherit"),
 	}
 	if d.Type == "proxy" && config.ReplicationFormats[d.Format] {
 		out.Replication = &config.Replication{}
@@ -240,7 +247,11 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		Blocked: b.Blocked, AutoBlock: b.AutoBlock,
 		Firewall: b.Firewall, Replication: b.Replication,
 	}
-	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey, KeepFirewall: b.Firewall == nil, KeepReplication: b.Replication == nil}
+	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey, KeepFirewall: b.Firewall == nil, KeepReplication: b.Replication == nil,
+		KeepEvaluation: b.Evaluation == nil}
+	if b.Evaluation != nil && *b.Evaluation != "inherit" {
+		d.Evaluation = *b.Evaluation
+	}
 	if b.CleanupPolicy != nil {
 		d.CleanupPolicy = *b.CleanupPolicy
 	} else {

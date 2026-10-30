@@ -151,7 +151,7 @@ func populate(t *testing.T, n *ccNode, s3 *s3test.Server) {
 	n.must(t, "POST", "/-/api/routing-rules", `{"name":"no-snapshots","description":"d","mode":"BLOCK","matchers":[".*-SNAPSHOT.*"]}`, 201)
 	n.must(t, "POST", "/-/api/content-selectors", `{"name":"acme","expression":"path =^ \"/org/acme/\""}`, 201)
 	n.must(t, "POST", "/-/api/cleanup/policies", `{"name":"old","format":"maven","componentAgeDays":30}`, 201)
-	n.must(t, "POST", "/-/api/repositories", `{"name":"rel","format":"maven","type":"hosted","blobStore":"fast","cleanupPolicy":"old"}`, 201)
+	n.must(t, "POST", "/-/api/repositories", `{"name":"rel","format":"maven","type":"hosted","blobStore":"fast","cleanupPolicy":"old","evaluation":"enabled"}`, 201)
 	n.must(t, "POST", "/-/api/repositories", `{"name":"central","format":"maven","type":"proxy",`+
 		`"remote":"https://bot:s3cr3t-url-pw@repo.example.com/maven2/","contentMaxAge":"1h","routingRule":"no-snapshots",`+
 		`"remoteAuth":{"username":"ru","password":"s3cr3t-remote-pw"},"firewall":{"enabled":true,"blockSeverityAtLeast":"high"}}`, 201)
@@ -182,7 +182,7 @@ func populate(t *testing.T, n *ccNode, s3 *s3test.Server) {
 	n.must(t, "POST", "/-/api/tasks", `{"name":"purge tokens","type":"security.purge-expired-user-tokens","schedule":"manual","enabled":false}`, 201)
 	n.must(t, "PUT", "/-/api/tasks/compact-blobstore", `{"schedule":"daily:04:30"}`, 200)
 	n.must(t, "POST", "/-/api/webhooks", `{"name":"hook","url":"https://hooks.example.com/cc","secret":"s3cr3t-webhook","events":["repository.created"],"repo":"rel"}`, 201)
-	n.must(t, "PUT", "/-/api/vulnerability/settings", `{"cacheHours":12}`, 200)
+	n.must(t, "PUT", "/-/api/vulnerability/settings", `{"cacheHours":12,"evaluateHosted":true}`, 200)
 	n.must(t, "PUT", "/-/api/logging", `{"level":"debug"}`, 200)
 }
 
@@ -277,6 +277,12 @@ func TestConfigurationAsCode(t *testing.T) {
 	if central.Remote != "https://bot:s3cr3t-url-pw@repo.example.com/maven2/" || central.RemoteAuth.Password != "s3cr3t-remote-pw" ||
 		dst.a.Registry.Get("hub").RemoteAuth.BearerToken != "s3cr3t-bearer" {
 		t.Fatalf("repository secrets not restored: %+v %+v", central.Remote, central.RemoteAuth)
+	}
+	if vs := dst.a.Vuln.Settings(context.Background()); !vs.EvaluateHosted || vs.CacheHours != 12 {
+		t.Fatalf("the vulnerability settings were not carried over: %+v", vs)
+	}
+	if ev := dst.a.Registry.Get("rel").Evaluation; ev != "enabled" {
+		t.Fatalf("rel's evaluation override was not carried over: %q", ev)
 	}
 	if r := dst.a.Registry.Get("site-a").Replication; r == nil || !r.PreemptivePullEnabled || r.AssetPathRegex != "^com/acme/" || !r.VerifyChecksums {
 		t.Fatalf("site-a's pull replication was not carried over: %+v", r)

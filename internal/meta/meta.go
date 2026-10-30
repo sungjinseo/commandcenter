@@ -106,6 +106,11 @@ type querier interface {
 //	   reconcile journal and its compaction does not keep the blobs a
 //	   pending plan adds, so plans are made and run once every node runs
 //	   this version.
+//	7: repo_usage, usage_months, usage_seen and eval_components, and the
+//	   triggers on assets and request_stats that keep the usage counters
+//	   (usage.go): expand-only, an older build ignores the tables, and its
+//	   asset and request writes still update the counters (the triggers run
+//	   in the database).
 const schemaVersion = 7
 
 // schemaCompat is the oldest schemaVersion that may run on a database this

@@ -399,3 +399,48 @@ func TestRequestErrorsUpstreamAndCacheCounters(t *testing.T) {
 		t.Fatalf("got %+v\nwant %+v", db.rq, want)
 	}
 }
+
+type seenDB struct {
+	fakeDB
+	fail bool
+	keys []meta.SeenKey
+}
+
+func (f *seenDB) FlushSeen(_ context.Context, keys []meta.SeenKey) error {
+	if f.fail {
+		return errors.New("down")
+	}
+	f.keys = append(f.keys, keys...)
+	return nil
+}
+
+// Seen sends each user and address once a month, hashed; a failed flush
+// keeps them pending; anonymous callers are no user.
+func TestSeenOncePerMonth(t *testing.T) {
+	db := &seenDB{}
+	r := New(db)
+	now := time.Date(2030, 1, 31, 23, 0, 0, 0, time.UTC)
+	r.Now = func() time.Time { return now }
+	r.Seen("alice", "10.0.0.1:5000")
+	r.Seen("alice", "10.0.0.1:6000")
+	r.Seen("", "10.0.0.2:1")
+	db.fail = true
+	if err := r.Flush(context.Background()); err == nil {
+		t.Fatal("want the failure")
+	}
+	db.fail = false
+	if err := r.Flush(context.Background()); err != nil || len(db.keys) != 3 {
+		t.Fatalf("%v %+v", err, db.keys)
+	}
+	r.Seen("alice", "10.0.0.1:7000") // stored already this month
+	r.Flush(context.Background())
+	if len(db.keys) != 3 {
+		t.Fatalf("sent again: %+v", db.keys)
+	}
+	now = now.Add(2 * time.Hour) // February
+	r.Seen("alice", "10.0.0.1:7000")
+	r.Flush(context.Background())
+	if len(db.keys) != 5 || db.keys[3].Month != meta.MonthStart(now).Unix() || db.keys[3].Hash == "alice" || len(db.keys[3].Hash) != 32 {
+		t.Fatalf("february: %+v", db.keys)
+	}
+}

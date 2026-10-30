@@ -65,6 +65,10 @@ type Server struct {
 	// ReadOnly, if set, returns why uploads and deletes are refused now
 	// (recovery mode), "" while they are not (recovery.go).
 	ReadOnly func() string
+	// Seen, if set, is told the principal (Owner, "" for anonymous) and the
+	// client address (host:port) of each request Requests is told about
+	// (metrics.Recorder.Seen: the monthly distinct users and addresses).
+	Seen func(user, addr string)
 }
 
 const realm = `Basic realm="commandcenter"`
@@ -279,6 +283,9 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 					if s.Registry.Get(name) != nil {
 						// ponytail: Content-Length only; a chunked upload counts 0 bytes in.
 						s.Requests(name, status, max(r.ContentLength, 0), rec.bytes, time.Since(start))
+						if s.Seen != nil {
+							s.Seen(p.Owner(), r.RemoteAddr)
+						}
 					}
 				}
 			}

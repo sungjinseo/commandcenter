@@ -50,6 +50,12 @@ type Settings struct {
 	CacheHours   int      `json:"cacheHours"`
 	Ecosystems   []string `json:"ecosystems"`
 	MaxImportMiB int      `json:"maxImportMiB"`
+	// Repository evaluation (repository.evaluate, evaluate.go) monitors the
+	// hosted repositories when EvaluateHosted is set and every member of a
+	// group (proxies included) when EvaluateGroupMembers is; a repository's
+	// evaluation setting overrides both.
+	EvaluateHosted       bool `json:"evaluateHosted"`
+	EvaluateGroupMembers bool `json:"evaluateGroupMembers"`
 }
 
 // DefaultSettings are the values of an unset key: disabled.

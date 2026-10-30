@@ -782,6 +782,24 @@ func (a *Authenticator) can(p Principal, repo string, acc Access, path string, e
 	return s.hasPath(p.roles, repo, format, accessBits[acc], path, exact)
 }
 
+// CanReadMetrics reports whether p may read the usage data: an admin, or a
+// signed-in principal with read on MetricsTarget.
+func (a *Authenticator) CanReadMetrics(p Principal) bool {
+	if p.Admin {
+		return true
+	}
+	if p.Anonymous() {
+		return false
+	}
+	s := a.snap.Load()
+	for _, id := range p.roles {
+		if r := s.roles[id]; r != nil && r.metrics&actRead != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Authenticator) anonymousRead(s *Snapshot, repo string) bool {
 	if a.AnonymousRead != nil {
 		if v := a.AnonymousRead(repo); v != nil {

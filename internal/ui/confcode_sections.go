@@ -472,6 +472,11 @@ func repoRequestOf(d config.Repository) repoRequest {
 		v := *r
 		b.Replication = &v
 	}
+	ev := d.Evaluation // always given, so an apply also resets an override to inherit
+	if ev == "" {
+		ev = "inherit"
+	}
+	b.Evaluation = &ev
 	return b
 }
 

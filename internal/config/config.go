@@ -270,6 +270,10 @@ type Repository struct {
 	Blocked   bool  `yaml:"blocked,omitempty" json:"blocked,omitempty"`
 	// Replication (proxy; nil is none) is pull replication (replication.go).
 	Replication *Replication `yaml:"replication,omitempty" json:"replication,omitempty"`
+	// Evaluation (hosted and proxy of a format with OSV data) overrides the
+	// vulnerability settings' choice of the repositories repository.evaluate
+	// monitors: "enabled", "disabled", or "" to follow them.
+	Evaluation string `yaml:"evaluation,omitempty" json:"evaluation,omitempty"`
 }
 
 // AutoBlocks reports whether a proxy auto-blocks; unset means yes.
@@ -611,6 +615,14 @@ func ValidateDefinition(r Repository) error {
 	}
 	if err := validateFirewall(r); err != nil {
 		errs = append(errs, err)
+	}
+	switch {
+	case r.Evaluation != "" && r.Evaluation != "enabled" && r.Evaluation != "disabled":
+		errs = append(errs, fmt.Errorf("repository %q: evaluation must be \"enabled\", \"disabled\" or empty (the vulnerability settings decide)", r.Name))
+	case r.Evaluation != "" && r.Type == "group":
+		errs = append(errs, fmt.Errorf("repository %q: evaluation is not valid for group repositories: set it on their members", r.Name))
+	case r.Evaluation == "enabled" && !FirewallFormats[r.Format]:
+		errs = append(errs, fmt.Errorf("repository %q: evaluation: %s repositories have no vulnerability data (OSV)", r.Name, r.Format))
 	}
 	if (r.Distribution != "" || r.Component != "" || r.SigningKey != "") && (r.Format != "apt" || r.Type != "hosted") {
 		errs = append(errs, fmt.Errorf("repository %q: distribution, component and signingKey are only valid for apt hosted repositories", r.Name))

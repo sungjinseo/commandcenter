@@ -4,7 +4,10 @@ package metrics
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log/slog"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,6 +88,24 @@ type Recorder struct {
 	flushMu sync.Mutex // one flush at a time
 
 	totals map[string]rqVal // per repository since the process started; never flushed (Totals)
+
+	// The month's distinct users and client addresses (Seen): pending, and
+	// stored already this month (not sent again).
+	seen      map[seenKey]bool
+	seenMonth int64
+	seenDone  map[seenKey]bool
+}
+
+// seenKey is one distinct user or client address of a month, before hashing.
+type seenKey struct {
+	month       int64
+	kind, value string
+}
+
+// SeenFlusher stores the distinct users and addresses (meta.DB.FlushSeen);
+// a Flusher without it records none.
+type SeenFlusher interface {
+	FlushSeen(ctx context.Context, keys []meta.SeenKey) error
 }
 
 // Totals is a repository's traffic since the process started, for the
@@ -111,7 +132,67 @@ func (r *Recorder) Totals() map[string]Totals {
 func New(db Flusher) *Recorder {
 	return &Recorder{db: db, MaxKeys: DefaultMaxKeys, MaxPending: DefaultMaxPending, Now: time.Now,
 		dl: map[dlKey]dlVal{}, rq: map[rqKey]rqVal{}, kick: make(chan struct{}, 1),
-		lastWarn: map[string]time.Time{}, totals: map[string]rqVal{}}
+		lastWarn: map[string]time.Time{}, totals: map[string]rqVal{}, seen: map[seenKey]bool{}, seenDone: map[seenKey]bool{}}
+}
+
+// Seen counts user (an Owner, "" for anonymous: not counted) and the host
+// of addr (host:port) among the distinct users and client addresses of the
+// current UTC month. Behind a reverse proxy the address is the proxy's.
+func (r *Recorder) Seen(user, addr string) {
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		addr = host
+	}
+	month := meta.MonthStart(r.Now()).Unix()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if month != r.seenMonth {
+		r.seenMonth, r.seenDone = month, map[seenKey]bool{}
+	}
+	for _, k := range []seenKey{{month, "user", user}, {month, "addr", addr}} {
+		if k.value == "" || r.seenDone[k] || r.seen[k] {
+			continue
+		}
+		if len(r.seen) >= r.MaxPending {
+			r.dropped.Add(1)
+			continue
+		}
+		r.seen[k] = true
+	}
+}
+
+// seenHash is what usage_seen stores of a user or address.
+func seenHash(k seenKey) string {
+	h := sha256.Sum256([]byte(k.kind + "\x00" + k.value))
+	return hex.EncodeToString(h[:16])
+}
+
+// flushSeen stores the pending distinct users and addresses; on failure
+// they stay pending.
+func (r *Recorder) flushSeen(ctx context.Context) error {
+	f, ok := r.db.(SeenFlusher)
+	r.mu.Lock()
+	pending := r.seen
+	r.seen = map[seenKey]bool{}
+	r.mu.Unlock()
+	if !ok || len(pending) == 0 {
+		return nil
+	}
+	keys := make([]meta.SeenKey, 0, len(pending))
+	for k := range pending {
+		keys = append(keys, meta.SeenKey{Month: k.month, Kind: k.kind, Hash: seenHash(k)})
+	}
+	err := f.FlushSeen(ctx, keys)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k := range pending {
+		switch {
+		case err != nil && len(r.seen) < r.MaxPending:
+			r.seen[k] = true
+		case err == nil && k.month == r.seenMonth:
+			r.seenDone[k] = true
+		}
+	}
+	return err
 }
 
 // Dropped is the number of counts lost because MaxPending keys were pending.
@@ -263,6 +344,9 @@ func (r *Recorder) Flush(ctx context.Context) error {
 			}
 			r.restoreRequests(rq)
 		}
+	}
+	if err := r.flushSeen(ctx); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	r.mu.Lock()
 	if firstErr != nil {

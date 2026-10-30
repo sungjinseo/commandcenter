@@ -57,6 +57,7 @@ var Kinds = []Kind{
 	{"firewall.blocked", "A proxy's firewall quarantined a component (data.ids: the advisories)"},
 	{"firewall.released", "A quarantined component was released to the proxy's allow list"},
 	{"vulnerability.updated", "Vulnerability data (OSV) was imported or downloaded, or its settings changed"},
+	{"component.vulnerable", "repository.evaluate found advisories a monitored repository's component did not have before (data.ids: the new ones, data.severity: the component's highest)"},
 }
 
 var known = func() map[string]bool {
@@ -198,6 +199,11 @@ func (d *Dispatcher) data(ctx context.Context, e event) map[string]any {
 		if e.kind == "firewall.blocked" {
 			out["ids"] = strings.Split(e.detail, ",")
 		}
+		return out
+	case "component.vulnerable": // subject the component label, detail <severity>:<id>,<id>,...
+		out := component(e.format, e.subject)
+		sev, ids, _ := strings.Cut(e.detail, ":")
+		out["severity"], out["ids"], out["detail"] = sev, strings.Split(ids, ","), e.detail
 		return out
 	}
 	return map[string]any{"subject": e.subject, "detail": e.detail}

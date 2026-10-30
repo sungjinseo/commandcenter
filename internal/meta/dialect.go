@@ -393,4 +393,4 @@ CREATE TABLE IF NOT EXISTS reconcile_items(
   journal_key TEXT COLLATE "C" NOT NULL DEFAULT '', at BIGINT NOT NULL DEFAULT 0, change TEXT COLLATE "C" NOT NULL DEFAULT '{}',
   PRIMARY KEY(plan_id, seq));
 CREATE INDEX IF NOT EXISTS reconcile_items_pending ON reconcile_items(blob_sha256) WHERE state IN ('PLANNED', 'FAILED');
-`
+` + usageSchema

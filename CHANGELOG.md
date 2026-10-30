@@ -425,6 +425,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Nexus's configuration API: `GET /service/rest/v1/configuration` (with
   `X-Nexus-Migration-Protocol-Version: 1`) exports the document; `PUT` uploads one without overwriting
   what exists.
+- Repository evaluation: the `repository.evaluate` task monitors hosted repositories (`evaluateHosted`)
+  and group members (`evaluateGroupMembers`) of the vulnerability settings, with a per-repository
+  `evaluation` override (`enabled`, `disabled`, `inherit`). A run looks up only new components, those
+  evaluated against older advisory data, stale online answers and failed lookups, stores the findings
+  per component, and announces new advisories as the activity event and webhook `component.vulnerable`.
+- Repository dashboard (`GET /-/api/dashboard/repositories`, `.../{name}/vulnerabilities`): components,
+  assets, size (summed and per distinct blob), last upload and download, requests and evaluation status
+  per repository, sorted, filtered and paged, with the vulnerable components' advisories, severities,
+  fixed versions and links. Database triggers keep the counters exact without scanning; the Nexus API's
+  `GET /service/rest/v1/repositories` now reports `size`.
+- Monthly usage metrics (`GET /-/api/metrics/monthly`): per UTC month requests, errors, egress and
+  ingress bytes, downloads, uploads, storage and component counts (latest and peak) and distinct users
+  and client addresses, kept for 24 months.
+- Privilege target `metrics` (action `read`): the dashboard, the evaluation results and the monthly
+  metrics without the admin role.
 
 ### Changed
 
@@ -481,6 +496,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reconciled. Blob stores gain a `meta/` directory (file) or `<prefix>/meta/` keys (S3, Azure, GCS):
   back them up with the blobs. Each upload commit now writes one extra small object (one S3 PUT),
   proxy cache fills included.
+- Schema 7 also creates the usage tables and triggers on `assets` (expand-only) and fills the counters
+  from the existing assets (about 2 s per million assets). An asset write costs about 0.1 ms more. The
+  database role must be able to create functions and triggers (PL/pgSQL), as the owner of the tables.
+  Downloads served by nodes still on the previous release during a rolling upgrade are missing from the
+  monthly downloads.
 - Older builds refuse to start beside a running node, but this one starts beside an older one. Upgrade
   every node and do not mix versions except during a rolling upgrade. Blob store moves and group member
   removals wait until every node answers, which an older node never does.

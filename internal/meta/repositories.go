@@ -267,7 +267,7 @@ func dropRepoPrivileges(ctx context.Context, q querier, name string) ([]string, 
 }
 
 func purgeRepository(ctx context.Context, q querier, name string) error {
-	for _, table := range []string{"assets", "packages", "dist_tags", "negative_cache", "component_tags", "blob_store_moves", "vuln_findings", "firewall_quarantine"} {
+	for _, table := range []string{"assets", "packages", "dist_tags", "negative_cache", "component_tags", "blob_store_moves", "vuln_findings", "firewall_quarantine", "repo_usage", "eval_components"} {
 		if _, err := q.ExecContext(ctx, `DELETE FROM `+table+` WHERE repo = ?`, name); err != nil {
 			return fmt.Errorf("purge %s of %q: %w", table, name, err)
 		}
