@@ -2419,31 +2419,31 @@ curl -s http://localhost:8081/-/api/openapi.json | jq '.paths | keys | length'
 
 ### Cleanup 정책
 
-오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs`, `p2`, `swift`, `cocoapods`, `huggingface`, `terraform` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
+오래되었거나 더 이상 내려받지 않는 컴포넌트를 자동으로 지우는 규칙입니다. 메뉴는 OPERATIONS → Cleanup 정책입니다. 정책은 이름, 대상 포맷과 아래 기준으로 이루어지며(정책의 `format`은 `all`, `maven`, `npm`, `go`, `pypi`, `cargo`, `raw`, `helm`, `yum`, `nuget`, `apt`, `rubygems`, `composer`, `conda`, `conan`, `r`, `gitlfs`, `p2`, `swift`, `cocoapods`, `huggingface`, `terraform` 중 하나. docker 저장소에는 Cleanup 정책을 쓸 수 없습니다), 저장소 폼의 **Cleanup policy** 선택(저장소 정의의 `cleanupPolicies`, 정책이 하나면 `cleanupPolicy`)으로 hosted·proxy 저장소에 연결합니다. 한 저장소에 정책을 20개까지 연결할 수 있고, 정리 작업은 정책마다 따로 평가해 각 정책이 고른 컴포넌트를 지웁니다(Nexus와 같음). 저장소 API 응답에는 `cleanupPolicies`(순서대로 모든 정책)와 `cleanupPolicy`(첫 정책)가 함께 옵니다. 요청에 `cleanupPolicies`를 보내면 그 목록으로 바꾸고 `[]`는 모두 해제합니다. `cleanupPolicy`만 보내면 그 정책 하나로 바꿉니다. 둘 다 보냈는데 `cleanupPolicy`가 목록의 첫 정책과 다르면 `cleanupPolicy` 하나만 적용합니다(목록을 모르는 클라이언트가 바꾼 값으로 봅니다). 정책의 포맷은 `all`이거나 저장소의 포맷과 같아야 하고, 저장소가 쓰는 정책은 지울 수 없습니다(409, 저장소 이름을 알려 줌).
 
 | 기준 | 의미 |
 |---|---|
-| `componentAgeDays` | 컴포넌트의 **가장 새로운 에셋**이 N일보다 오래전에 만들어졌다. 0이면 사용 안 함. |
-| `lastDownloadedDays` | 컴포넌트의 가장 최근 다운로드가 N일보다 오래되었다. 한 번도 받지 않았으면 생성 시각을 씁니다. 0이면 사용 안 함. |
+| `componentAgeDays` | 컴포넌트 내용이 마지막으로 쓰인 시각(에셋마다 생성 시각과 수정 시각 중 나중 것, 그중 가장 새로운 것. 다시 배포하거나 proxy가 바뀐 내용을 받아 오면 바뀜)이 N일보다 오래되었다. 0이면 사용 안 함. |
+| `lastDownloadedDays` | 컴포넌트의 가장 최근 다운로드가 N일보다 오래되었다. 한 번도 받지 않았으면 내용이 마지막으로 쓰인 시각을 씁니다. 0이면 사용 안 함. |
 | `releaseType` | `any`, `release`, `prerelease`(SNAPSHOT 또는 semver 프리릴리스). |
 | `namePattern` | `group:name`에 맞추는 RE2 정규식(선택, 200자 이하). |
 
-- 두 기간과 `retain`(아래) 중 **하나 이상**은 정해야 하며, 정한 기준은 모두 **AND**로 결합합니다. 모든 기준을 만족하는 컴포넌트만 후보입니다.
+- 두 기간, `retain`(아래), `pathPattern` 중 **하나 이상**은 정해야 하며(`pathPattern`만 정하면 경로가 맞는 에셋이 있는 컴포넌트를 모두 지웁니다, Nexus와 같음), 정한 기준은 모두 **AND**로 결합합니다. 모든 기준을 만족하는 컴포넌트만 후보입니다.
 - **미리보기**(정책 화면의 "후보 목록 보기")는 후보 개수·용량과 최대 500개의 목록을 보여 줍니다. 저장소마다 에셋을 20 000개까지만 훑으므로 목록이 잘렸거나 저장소가 그보다 크면 `truncated`가 켜지고, 이때 개수와 용량은 **하한**입니다.
 - **Cargo hosted 저장소는 제외**됩니다. `Cargo.lock`에 고정된 crate를 자동으로 지우지 않기 위해서입니다. yank로 숨기거나, 지울 버전은 웹 UI·API로 하나씩 지우세요("컴포넌트 삭제" 참고). 정책은 Cargo hosted를 건너뛰고 UI에도 안내가 나옵니다. Cargo proxy는 대상입니다.
 - hosted의 `writePolicy`는 정리에서 **무시**됩니다. `deny`인 저장소에서도 정리는 지웁니다.
-- 정책은 저장만으로 아무것도 지우지 않습니다. **`repository.cleanup` 예약 작업**이 실행할 때만 지우며(다음 절), 한 번에 컴포넌트 5 000개까지, 개수와 용량을 작업 로그와 활동에 기록합니다. proxy는 캐시된 행만 지우고 다음 요청 때 다시 받아 옵니다.
-- 작업 실행도 저장소마다 **한 번에 에셋 20 000개**까지만 훑습니다. 큰 저장소는 작업·저장소별 **스캔 위치**(settings 테이블)를 기억해 다음 실행이 마지막으로 훑은 컴포넌트 다음부터 이어 가고, 끝에 닿으면 처음으로 돌아갑니다. 그래서 여러 번 실행하면 저장소 전체를 차례로 평가합니다. 작업 로그에 어디서부터 몇 개를 훑었고 다음 실행이 어디서 시작하는지가 나옵니다. 작업을 지우면 그 위치도 지웁니다.
+- 정책은 저장만으로 아무것도 지우지 않습니다. **`repository.cleanup` 예약 작업**이 실행할 때만 지웁니다(다음 절). 새로 만든 DB에는 매일 01:00에 정책이 연결된 모든 저장소를 정리하는 `cleanup-service` 작업이 처음부터 있어, 정책을 연결하면 그날 밤부터 지웁니다. 이전 버전에서 올린 DB에는 이 작업을 만들지 않으므로(업그레이드만으로 삭제가 시작되지 않도록) 필요하면 직접 만드세요. 한 실행은 기본으로 컴포넌트 5 000개까지 지우고(작업 파라미터 `maxComponents`), 개수와 용량을 작업 로그와 활동에 기록합니다. proxy는 캐시된 행만 지우고 다음 요청 때 다시 받아 옵니다.
+- 작업 실행은 저장소·정책마다 기본으로 에셋 20 000개까지 훑습니다. 작업 파라미터 `scanAssets`로 늘리면 한 실행이 20 000개씩 이어서 훑으므로 메모리는 늘지 않습니다. 큰 저장소는 작업·저장소·정책별 **스캔 위치**(settings 테이블)를 기억해 다음 실행이 마지막으로 훑은 컴포넌트 다음부터 이어 가고, 끝에 닿으면 처음으로 돌아갑니다. 그래서 여러 번 실행하면 저장소 전체를 차례로 평가합니다. 작업 로그에 어디서부터 몇 개를 훑었고 다음 실행이 어디서 시작하는지가 나옵니다. 작업을 지우면 그 위치도 지웁니다.
 - 평가 직전에 메모리에 모인 다운로드 수를 먼저 DB에 반영하므로 방금 내려받은 컴포넌트도 보호됩니다.
 - **평가한 것만 지웁니다.** 삭제는 평가 때 본 에셋 목록, 가장 새로운 생성·수정 시각, 마지막 다운로드 시각을 삭제 트랜잭션 안에서 다시 확인하고, 그 뒤로 에셋이 더해졌거나(예: 새 SNAPSHOT 빌드) 다시 올라왔거나 내려받아졌으면 그 컴포넌트는 지우지 않고 "평가 후 변경"으로 로그에 남깁니다(실패로 치지 않음).
 - 실행 중에도 편집을 따릅니다. 컴포넌트마다 저장소 정의를 다시 보고(메모리), 정책은 50개마다 또는 정책이 수정될 때 다시 읽어, 저장소가 바뀌었거나 정책이 해제·변경되었으면 그 저장소의 삭제를 멈춥니다.
 - 지운 에셋의 **blob은 바로 반환되지 않습니다.** 다음 `blobstore.compact` 작업이 회수합니다.
-- 설정 PUT에서 `cleanupPolicy`를 빼면 기존 값이 유지됩니다.
+- 설정 PUT에서 `cleanupPolicy`와 `cleanupPolicies`를 모두 빼면 기존 정책이 유지됩니다.
 
 #### 버전 유지(retain), 제외, 미리보기
 
 - **`retain`**(1–1000, 0이면 사용 안 함)은 컴포넌트(같은 저장소의 같은 group과 name)마다 가장 새로운 N개 버전을 다른 기준과 상관없이 남깁니다. 그보다 오래된 버전만 나머지 기준으로 평가합니다. `retain`만 정한 정책도 만들 수 있습니다(가장 새로운 N개를 빼고 모두 지움).
-- **`retainSortBy`**는 `version`(기본값)이나 `date`입니다. `version`은 포맷의 버전 규칙으로 정렬합니다. Maven은 ComparableVersion 규칙(1.0-rc1 < 1.0-SNAPSHOT < 1.0 < 1.0-sp1), PyPI는 PEP 440(1.0.dev1 < 1.0a1 < 1.0 < 1.0.post1), yum은 rpm 비교(epoch:version-release, 아키텍처 무시), apt는 Debian 규칙(1.0~rc1 < 1.0), RubyGems는 Gem::Version, R은 숫자 비교, Composer는 dev < alpha < beta < RC < 안정판 < patch, conda는 VersionOrder와 빌드 번호, npm·Cargo·Helm·Go·NuGet·Conan은 SemVer입니다. `date`는 컴포넌트의 가장 새로운 에셋이 만들어진 시각입니다. docker·raw·gitlfs는 버전 순서가 없어 날짜로 정렬하며, raw와 gitlfs는 컴포넌트마다 버전이 하나라 retain이 있으면 아무것도 지우지 않습니다.
+- **`retainSortBy`**는 `version`(기본값)이나 `date`입니다. `version`은 포맷의 버전 규칙으로 정렬합니다. Maven은 ComparableVersion 규칙(1.0-rc1 < 1.0-SNAPSHOT < 1.0 < 1.0-sp1), PyPI는 PEP 440(1.0.dev1 < 1.0a1 < 1.0 < 1.0.post1), yum은 rpm 비교(epoch:version-release, 아키텍처 무시), apt는 Debian 규칙(1.0~rc1 < 1.0), RubyGems는 Gem::Version, R은 숫자 비교, Composer는 dev < alpha < beta < RC < 안정판 < patch, conda는 VersionOrder와 빌드 번호, npm·Cargo·Helm·Go·NuGet·Conan은 SemVer입니다. `date`는 컴포넌트 내용이 마지막으로 쓰인 시각입니다. docker·raw·gitlfs는 버전 순서가 없어 날짜로 정렬하며, raw와 gitlfs는 컴포넌트마다 버전이 하나라 retain이 있으면 아무것도 지우지 않습니다.
 - 순위는 제외된 버전과 다른 기준에 맞지 않는 버전까지 모든 버전으로 매깁니다. 같다고 비교되는 버전(같은 EVR의 여러 아키텍처, 같은 gem의 플랫폼별 파일)은 같은 순위로 함께 남습니다.
 - 한 컴포넌트의 버전은 한 번의 스캔에서 모두 보아야 순위를 매깁니다. 스캔 예산에 잘린 컴포넌트는 그 실행에서 건너뛰고, 다음 실행이 그 컴포넌트 처음부터 다시 훑습니다. 한 컴포넌트의 에셋이 스캔 예산(20 000개)보다 많으면 retain으로는 정리되지 않습니다. apt는 패키지가 pool의 여러 곳에 있을 수 있어 pool 전체가 한 번의 스캔에 들어올 때만 retain을 적용합니다.
 - **`exclude`**의 `namePattern`(`group:name`)과 `versionPattern`(버전)은 문자열 전체에 맞추는 RE2 정규식(각 200자 이하)이며, 맞는 컴포넌트는 절대 지우지 않습니다.
@@ -2458,12 +2458,13 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 | 종류 | 설명 | 파라미터 |
 |---|---|---|
 | `blobstore.compact` | 쓰이지 않는 blob과 1시간 넘은 임시 파일 정리(`commandcenter gc`와 같음) | `blobStore`(선택, 한 store만. 비우면 모든 store. 없는 이름은 만들 때 400) |
-| `repository.cleanup` | 정책이 연결된 저장소를 정리 | `repos`(비우면 정책이 있는 모든 저장소) |
-| `repository.rebuild-metadata` | Maven hosted: 모든 GA와 SNAPSHOT 버전의 `maven-metadata.xml`을 에셋에서 다시 만들고 아티팩트가 없는 GA의 문서에서 버전을 지움(`<plugins>`는 남김). Maven proxy: 이전 버전이 캐시한, Maven 파일이 아닌 경로의 캐시(디렉터리 목록, `.index/`)를 지움. apt·yum·helm·conda hosted: 패키지 행에서 `dists/`, `repodata/`(depth 1은 디렉터리마다), `index.yaml`, `repodata.json`·`channeldata.json`을 업로드 때와 같은 방식으로 다시 씀 | `repo`(비우면 다시 만들 수 있는 모든 저장소), `format`(비운 `repo`와 함께 한 형식만, 예: `helm`) |
+| `repository.cleanup` | 정책이 연결된 저장소를 정리 | `repos`(비우면 정책이 있는 모든 저장소), `maxComponents`(한 실행이 지우는 컴포넌트 수, 기본 5 000), `scanAssets`(한 실행이 저장소·정책마다 훑는 에셋 수, 기본 20 000) |
+| `repository.purge-unused` | proxy 저장소에서 최근 `lastUsed`일 동안 아무도 내려받지 않은 컴포넌트를 지움(한 번도 받지 않은 컴포넌트는 남김). Nexus의 "Delete unused components"와 같고 정리 작업과 같은 평가·삭제 경로를 지남 | `repos`(proxy, 비우면 모든 proxy), `lastUsed`(일, 필수, 1 이상), `maxComponents`, `scanAssets` |
+| `repository.rebuild-metadata` | Maven hosted: 모든 GA와 SNAPSHOT 버전의 `maven-metadata.xml`을 에셋에서 다시 만들고 아티팩트가 없는 GA의 문서에서 버전을 지움(`<plugins>`는 남김). Maven proxy: 이전 버전이 캐시한, Maven 파일이 아닌 경로의 캐시(디렉터리 목록, `.index/`)를 지움. apt·yum·helm·conda hosted: 패키지 행에서 `dists/`, `repodata/`(depth 1은 디렉터리마다), `index.yaml`, `repodata.json`·`channeldata.json`을 업로드 때와 같은 방식으로 다시 씀. apt proxy(`resetProxyMetadata`): 캐시한 `dists/` 파일(Release, InRelease, Packages)을 지워 다음 요청 때 원격에서 다시 받게 함(원격 URL을 바꾼 뒤). `pool/`의 패키지는 남김 | `repo`(비우면 다시 만들 수 있는 모든 저장소), `format`(비운 `repo`와 함께 한 형식만, 예: `helm`), `resetProxyMetadata`(apt proxy도 대상. 꺼져 있으면 apt proxy는 빠지고, 이름으로 지정하면 400) |
 | `repository.verify-blobs` | 저장소의 모든 에셋에 대해 blob이 blob store에 있는지(크기 포함) 확인하고, `checksum`이면 blob을 다시 읽어 SHA-256을 비교. 빠지거나 다른 blob이 하나라도 있으면 결과가 **Failed**이며 로그에 경로를 100개까지 남김. 아무것도 지우지 않음 | `repository`(비우면 모든 저장소), `checksum`(기본 꺼짐), `maxBytes`(checksum 때 한 번에 읽는 바이트, 기본 10 GiB. 넘치면 멈추고 다음 실행이 저장소별 커서에서 이어 감) |
 | `maven.purge-snapshots` | Maven hosted 저장소의 SNAPSHOT 버전을 GA마다 최신 `minimumRetained`개만 남기고, 나머지 중 `snapshotRetentionDays`보다 오래된(0이면 나이 무관) 버전을 디렉터리째 지움. `lastDownloadedDays`를 주면 그 기간 동안 내려받지 않은(한 번도 없으면 저장된 지 그만큼 지난) 버전만 지움. `removeIfReleased`면 같은 GA에 정식 `X`가 있는 `X-SNAPSHOT`은 남길 개수와 무관하게, 정식 버전이 `gracePeriodDays`보다 오래됐을 때 지움. 삭제는 컴포넌트 삭제 경로를 지나므로 `maven-metadata.xml`이 다시 만들어지고 `delete` 활동이 남으며, 평가 뒤 바뀐 버전은 건너뜀. `writePolicy: deny` 저장소는 만들 때 400, 실행 때 Failed | `repository`(Maven hosted, 필수), `minimumRetained`(기본 1), `snapshotRetentionDays`(기본 30), `lastDownloadedDays`(기본 0), `removeIfReleased`, `gracePeriodDays`, `preview`(지울 것을 로그에만 남김) |
 | `blobstore.recalculate-size` | blob store의 blob 수를 세어 에셋이 참조하는 수·바이트와 비교해 로그에 남김. 화면의 용량은 에셋 행에서 실시간으로 계산하므로 저장할 값은 없고, 다음 compaction이 지울 blob 수를 미리 봄 | `blobStore`(선택) |
-| `blobstore.delete-temp-files` | 각 store `tmp/`의 1시간 넘은 임시 파일(`up-*`)과 24시간 넘게 쓰지 않은 Docker 업로드 세션(`ses-*`)을 지움(compact가 시작할 때 하는 정리와 같음). S3 store의 multipart 잔여물은 다루지 않음 | `blobStore`(선택) |
+| `blobstore.delete-temp-files` | 각 store `tmp/`의 1시간 넘은 임시 파일(`up-*`)과 24시간 넘게 쓰지 않은 Docker 업로드 세션(`ses-*`)을 지움(compact가 시작할 때 하는 정리와 같음). S3 store의 multipart 잔여물은 다루지 않음 | `blobStore`(선택), `olderThanDays`(최근 N일 안에 바뀐 임시 파일은 남김. 0이면 1시간·24시간 기준) |
 | `blobstore.group-remove-member` | 그룹 멤버를 읽기 전용으로 바꾸고 그 멤버에만 있는 blob을 다른 쓰기 가능한 멤버로 복사(SHA-256 확인)한 뒤 그룹에서 뺌. 그동안 읽기는 계속되고, 실패하면 멤버는 읽기 전용으로 남아 다시 실행하면 이어 감("Blob store 그룹과 S3 장애 조치" 참고) | `group`, `member`(필수. 다른 쓰기 가능한 멤버가 있어야 함) |
 | `repository.change-blobstore` | 저장소의 blob을 다른 blob store로 옮기고 설정을 바꿈("저장소의 blob store 바꾸기" 참고). 보통 `POST /-/api/repositories/<이름>/blobstore`가 만들고 실행함 | `repo`, `target`(필수) |
 | `repository.export` | 저장소를 `exportRoot` 아래로 내보냄("저장소 내보내기와 가져오기" 참고) | `repositories`(목록 또는 `*`), `destination`(필수), `includeProxies`(기본 꺼짐), `since`(RFC 3339, 증분), `hardLinks`(기본 켬) |
@@ -2476,13 +2477,13 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 | `blobstore.reconcile-plan` | 저널과 DB를 비교해 복원 뒤 되살리거나 지울 행의 계획(ADD·DELETE·SKIP·CONFLICT)을 저장. 아무것도 바꾸지 않음("DB 복원 뒤 blob store와 맞추기" 참고) | `blobStore`(선택), `sinceHours`(기본 24), `since`(RFC 3339), `all` |
 | `blobstore.reconcile-execute` | 계획의 ADD·DELETE를 적용하고 바뀐 hosted 저장소의 인덱스 문서를 다시 만듦. 다시 실행하면 FAILED만 재시도 | `planId`(필수) |
 
-복구 모드에서는 `blobstore.compact`, `repository.cleanup`, `maven.purge-snapshots`, `repository.change-blobstore`, `blobstore.group-remove-member`, `repository.import`가 실행되지 않고 "skipped"로 끝납니다.
+복구 모드에서는 `blobstore.compact`, `repository.cleanup`, `maven.purge-snapshots`, `repository.change-blobstore`, `blobstore.group-remove-member`, `repository.import`, `repository.purge-unused`가 실행되지 않고 "skipped"로 끝납니다.
 
-작업 목록 API(`GET /-/api/tasks`)의 `types[]`에는 종류마다 `params`(이름·형식·기본값)가 함께 옵니다. Nexus 호환 API(`GET /service/rest/v1/tasks`)는 `type`을 Nexus 이름으로 바꿔 줍니다(`repository.maven.rebuild-metadata`, `repository.maven.remove-snapshots`, `blobstore.delete-temp-files`). 같은 API로 작업을 만들고 고치고 실행·중지할 수도 있습니다("Nexus REST API 호환" 참고).
+작업 목록 API(`GET /-/api/tasks`)의 `types[]`에는 종류마다 `params`(이름·형식·기본값)가 함께 옵니다. Nexus 호환 API(`GET /service/rest/v1/tasks`)는 `type`을 Nexus 이름으로 바꿔 줍니다(`repository.maven.rebuild-metadata`, `repository.maven.remove-snapshots`, `blobstore.delete-temp-files`, `blobstore.metrics.reconcile`(= `blobstore.recalculate-size`), 형식을 apt로 정한 rebuild는 `repository.apt.rebuild.metadata`). 만들 때는 두 이름을 모두 받습니다. `repository.apt.rebuild.metadata`의 `rebuildAptMetadataFullRebuild`는 무시하고(언제나 행에서 다시 만듦) `resetProxyMetadata`는 그대로 받습니다. `blobstoreName`의 `(All Blob Stores)`는 모든 store이고, `blobstore.compact`의 `blobsOlderThan`은 0만 받습니다(지운 blob을 보관하지 않고, 참조가 없어진 지 1시간이 지난 blob을 compaction이 지움). Command Center에 없는 종류는 이유와 함께 400으로 거절합니다: `repository.maven.publish-dotindex`·`unpublish-dotindex`(Maven 인덱스 파일을 만들지 않음. `GET /service/rest/v1/search?maven.groupId=…` 검색 API를 쓰세요), `create.browse.nodes`·`repository.trim-browse-tree`·`repository.rebuild-index`(필요 없음), `repository.maven.repair-base-version`, `h2.backup.task`(PostgreSQL은 `pg_dump`로 백업), `script`. 같은 API로 작업을 만들고 고치고 실행·중지할 수도 있습니다("Nexus REST API 호환" 참고).
 
-첫 시작 때 작업이 하나도 없으면 `compact-blobstore`(`blobstore.compact`, `daily:03:00`, 사용)를 만듭니다. 이 기본 작업은 지울 수 없습니다(`DELETE`는 409). 지우면 재시작해도 다시 생기지 않아 compaction이 조용히 멈추기 때문이며, 끄고 싶으면 "사용"을 끄세요.
+새 DB의 첫 시작 때(작업이 하나도 없고 기본 작업을 만든 적이 없을 때) `compact-blobstore`(`blobstore.compact`, `daily:03:00`, 사용)와 `cleanup-service`("Cleanup service", `repository.cleanup`, `daily:01:00`, 사용, 정책이 연결된 모든 저장소)를 만듭니다. `compact-blobstore`는 지울 수 없습니다(`DELETE`는 409). 지우면 재시작해도 다시 생기지 않아 compaction이 조용히 멈추기 때문이며, 끄고 싶으면 "사용"을 끄세요. `cleanup-service`는 끄거나 지울 수 있고 지우면 다시 생기지 않습니다. 업그레이드한 DB에는 만들지 않습니다.
 
-**실패 알림**: 작업의 `notifyEmail`에 주소를 넣으면 실행이 Failed로 끝날 때 메일을 보냅니다("이메일 알림" 참고). 실행 결과는 성공·실패 모두 `task.finished` 이벤트로 webhook에도 나갑니다("Webhook" 참고). 편집 화면의 "실패 알림 이메일" 입력란에 쉼표나 줄바꿈으로 구분해 적습니다.
+**알림 메일**: 작업의 `notifyEmail`에 주소를 넣으면 실행이 Failed로 끝날 때 메일을 보냅니다("이메일 알림" 참고). `notifyOn`을 `success_failure`로 바꾸면 성공한 실행도 "작업 완료" 메일을 보내고, 기본값 `failure`는 실패만 알립니다. 중지(Stopped)한 실행과 서버 종료로 끊긴 실행은 알리지 않습니다. Nexus API의 `notificationCondition`(`FAILURE`, `SUCCESS_FAILURE`)이 이 값입니다. 실행 결과는 성공·실패 모두 `task.finished` 이벤트로 webhook에도 나갑니다("Webhook" 참고). 편집 화면의 "실패 알림 이메일" 입력란에 쉼표나 줄바꿈으로 구분해 적습니다.
 **일정 문법**
 
 | 일정 | 뜻 |
@@ -2491,13 +2492,15 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 | `once:<RFC3339>` | 한 번, 예: `once:2026-11-01T02:00:00+09:00`. 오프셋이 없으면(`once:2026-11-01T02:00`) 서버 시간대의 시각입니다. 화면은 오프셋 없이 서버 시간대로 보내고, 시각을 바꾸지 않고 저장하면 원래 값을 그대로 둡니다. |
 | `hourly:<MM>` | 매시 MM분 |
 | `daily:<HH:MM>` | 매일 |
-| `weekly:<mon..sun>:<HH:MM>` | 매주 해당 요일 |
-| `monthly:<1-28>:<HH:MM>` | 매월 해당 일(29일 이후는 쓸 수 없음) |
+| `weekly:<요일들>:<HH:MM>` | 매주 해당 요일. 쉼표로 여러 요일, 예: `weekly:mon,wed,fri:03:00` |
+| `monthly:<일들>:<HH:MM>` | 매월 해당 일. 1–31과 `last`(말일)를 쉼표로, 예: `monthly:1,15,last:03:00`. 그 달에 없는 날(4월 31일)은 그 달에 건너뜁니다 |
+| `cron:<식>` | Quartz cron 식(초 분 시 일 월 요일 [연도]), 예: `cron:0 0/15 * * * ?`(15분마다), `cron:0 0 2 ? * MON-FRI`(평일 02:00). 일과 요일 중 하나는 `?`이고 `L`·`W`·`#`·이름(`JAN`, `MON`)을 씁니다. 2100년 전까지 실행할 시각이 없으면 거절합니다 |
 
 - 시각은 서버의 시간대 기준이며 환경변수 `TZ`로 정합니다(기본 UTC). 예: compose의 `environment`에 `TZ: Asia/Seoul`. 서머타임으로 존재하지 않는 시각은 그 직후 첫 유효한 시각에 실행합니다.
-- **지금 실행**은 비동기입니다. 요청은 바로 202를 돌려주고 작업은 뒤에서 돌며, 화면(또는 `GET /-/api/tasks/{id}`)의 상태가 Running에서 바뀌면 끝난 것입니다. 다른 작업이 실행 중이면 409("a task is already running", `POST /-/api/gc`도 같음)이고 응답의 `running`·`runningName`이 그 작업을 알려 줍니다. 수동 실행은 다음 예정 시각(`next_run`)을 바꾸지 않습니다.
+- cron도 서버 시간대의 벽시계로 계산하며, 서머타임으로 없는 시각은 전환 시각에 한 번, 두 번 오는 시각은 처음 한 번만 실행합니다. 서버가 모두 꺼져 있는 동안 예정 시각이 지난 작업은 다시 켠 뒤 리더의 첫 확인 때 **한 번** 실행하고(놓친 횟수만큼 실행하지 않음) 다음 예정 시각은 그때부터 계산합니다. Nexus(Quartz)는 hourly·daily의 놓친 실행을 건너뜁니다.
+- **지금 실행**은 비동기입니다. 요청은 바로 202를 돌려주고 작업은 뒤에서 돌며, 화면(또는 `GET /-/api/tasks/{id}`)의 상태가 Running에서 바뀌면 끝난 것입니다. 다른 작업이 실행 중이면 **대기열**에 넣고 202(`{"started": false, "queued": true}`)를 돌려줍니다. 화면에는 대기 중으로 보이며, 실행 중인 작업이 끝나면 리더 노드가 다음 확인(30초 이내) 때 요청한 사람 이름으로 실행합니다. 같은 작업을 여러 번 눌러도 한 번만 실행하고, 그 사이 다른 방법(예정 시각, 지금 실행)으로 실행되면 대기열에서 빠집니다. 그 작업 자신이 실행 중이면 409이고, `POST /-/api/gc`와 내보내기·가져오기는 대기열 없이 409입니다(응답의 `running`·`runningName`이 실행 중인 작업을 알려 줌). 작업은 노드를 통틀어 한 번에 하나만 실행합니다(compaction, blob store 이동, reconcile이 겹치지 않아야 하므로). 수동 실행은 다음 예정 시각(`next_run`)을 바꾸지 않습니다.
 - **중지**: 실행 중인 작업은 상세 화면의 "중지"(또는 `POST /-/api/tasks/{id}/stop`, 관리자)로 멈춥니다. 실행 중이면 202, 아니면 409이며, 작업은 진행 중인 단계(cleanup은 지우던 컴포넌트)를 마치고 멈춰 결과가 **Stopped**로 남습니다.
-- 실행 하나는 최대 6시간이며 넘으면 취소됩니다. 실행 기록을 저장하지 못하면(DB 오류) 다음 예정 시각을 메모리에서 넘겨 틱마다 다시 실행하지 않습니다.
+- 실행 하나는 기본 최대 6시간이며 넘으면 취소됩니다. 설정 파일의 `taskRunTimeoutHours`(1–720, 모든 노드에 같은 값)로 바꿉니다. 실행 기록을 저장하지 못하면(DB 오류) 다음 예정 시각을 메모리에서 넘겨 틱마다 다시 실행하지 않습니다.
 - 실행 로그는 최대 200줄·64 KiB이고 넘치면 **앞부분과 뒷부분**만 남기고 가운데를 생략했다는 줄을 넣습니다. 그래서 마지막 줄(성공·실패)은 항상 보입니다. 로그는 시스템 로그에도 함께 기록됩니다.
 - 기존 `POST /-/api/gc`는 compact 실행의 별칭으로 남아 있습니다. "지금 실행"과 달리 실행이 끝난 뒤 200으로 응답하며(실패하면 500), `removed`와 `bytes`는 지운 blob의 수와 바이트 수입니다(작업의 `lastRemoved`·`lastBytes`와 같음).
 
