@@ -318,6 +318,28 @@ func TestRoleCRUD(t *testing.T) {
 	}
 }
 
+// A role PUT without "nexus" (the web UI's) keeps the Nexus API's stored
+// form, and "" drops it.
+func TestRoleUpdateKeepsNexusForm(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	wantStatus(t, e.admin(t, "POST", "/-/api/roles", `{"id":"r1","privileges":[],"nexus":"{\"privileges\":[\"nx-x\"]}"}`), http.StatusCreated)
+	form := func() string {
+		x, err := e.db.GetRole(context.Background(), "r1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return x.Nexus
+	}
+	wantStatus(t, e.admin(t, "PUT", "/-/api/roles/r1", `{"description":"d","privileges":[]}`), http.StatusOK)
+	if got := form(); got != `{"privileges":["nx-x"]}` {
+		t.Fatalf("kept form %q", got)
+	}
+	wantStatus(t, e.admin(t, "PUT", "/-/api/roles/r1", `{"privileges":[],"nexus":""}`), http.StatusOK)
+	if got := form(); got != "" {
+		t.Fatalf("dropped form %q", got)
+	}
+}
+
 func TestRoleValidationAndAdminImmutable(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	cases := []struct {

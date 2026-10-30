@@ -1046,7 +1046,7 @@ func (u *UI) updateRole(w http.ResponseWriter, r *http.Request) {
 		Description string         `json:"description"`
 		Privileges  []privilegeDTO `json:"privileges"`
 		Roles       []string       `json:"roles"` // the contained roles (absent: none)
-		Nexus       string         `json:"nexus"` // the Nexus API's form; "" drops it
+		Nexus       *string        `json:"nexus"` // the Nexus API's form; "" drops it, absent (the web UI) keeps it
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -1065,8 +1065,13 @@ func (u *UI) updateRole(w http.ResponseWriter, r *http.Request) {
 	if body.Description != cur.Description { // a stored value is not re-checked
 		checkText(&v, "description", body.Description)
 	}
+	// A kept form that no longer matches the privileges is ignored where
+	// it is read (nexusapi toNxRole, toNxPriv).
 	nr := meta.Role{ID: id, Name: body.Name, Description: body.Description, Privileges: toPrivileges(body.Privileges),
-		Roles: append([]string{}, body.Roles...), Nexus: body.Nexus}
+		Roles: append([]string{}, body.Roles...), Nexus: cur.Nexus}
+	if body.Nexus != nil {
+		nr.Nexus = *body.Nexus
+	}
 	if nr.Name != cur.Name {
 		checkText(&v, "name", nr.Name)
 	}
