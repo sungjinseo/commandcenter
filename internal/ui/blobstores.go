@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -54,6 +55,9 @@ type blobStoreRequest struct {
 	S3   *blob.S3Config `json:"s3"`
 
 	Quota *meta.Quota `json:"quota"` // soft quota; null or absent is none
+	// An azure store's container and credentials (Type "azure"); on PUT its
+	// credentials alone, see setAzureAuth.
+	Azure *blob.AzureConfig `json:"azure"`
 	// A group's (Type "group"), see blobgroups.go.
 	Members    []blob.GroupMember `json:"members"`
 	FillPolicy string             `json:"fillPolicy"`
@@ -83,6 +87,24 @@ type blobStoreJSON struct {
 	Members    []blob.GroupMember `json:"members,omitempty"`
 	FillPolicy string             `json:"fillPolicy,omitempty"`
 	MemberOf   string             `json:"memberOf,omitempty"`
+	// An azure store's container and credentials, without the secrets.
+	Azure *azureJSON `json:"azure,omitempty"`
+}
+
+// azureJSON is blob.AzureConfig without its secrets: what GET shows.
+type azureJSON struct {
+	AccountName     string `json:"accountName"`
+	ContainerName   string `json:"containerName"`
+	Prefix          string `json:"prefix"`
+	Endpoint        string `json:"endpoint"`
+	Auth            string `json:"authenticationMethod"`
+	TenantID        string `json:"tenantId"`
+	ClientID        string `json:"clientId"`
+	AuthorityHost   string `json:"authorityHost"`
+	IMDSEndpoint    string `json:"imdsEndpoint"`
+	AccountKeySet   bool   `json:"accountKeySet"` // the secrets themselves are never shown
+	SASTokenSet     bool   `json:"sasTokenSet"`
+	ClientSecretSet bool   `json:"clientSecretSet"`
 }
 
 // s3JSON is blob.S3Config without its secret: what GET shows.
@@ -131,6 +153,14 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 		out.S3 = &s3JSON{Bucket: c.Bucket, Prefix: c.Prefix, Region: c.Region, Endpoint: c.Endpoint,
 			PathStyle: c.PathStyle, AccessKey: c.AccessKey, SecretSet: c.SecretKey != "", SSE: c.SSE,
 			Encryption: c.Encryption, Failover: append([]blob.S3Failover{}, c.Failover...)}
+		out.QuotaViolated, _ = quotaState(out)
+		return out, nil
+	}
+	if bs.Type == meta.BlobStoreAzure && bs.Azure != nil {
+		c := bs.Azure
+		out.Azure = &azureJSON{AccountName: c.AccountName, ContainerName: c.ContainerName, Prefix: c.Prefix, Endpoint: c.Endpoint,
+			Auth: c.Auth, TenantID: c.TenantID, ClientID: c.ClientID, AuthorityHost: c.AuthorityHost, IMDSEndpoint: c.IMDSEndpoint,
+			AccountKeySet: c.AccountKey != "", SASTokenSet: c.SASToken != "", ClientSecretSet: c.ClientSecret != ""}
 		out.QuotaViolated, _ = quotaState(out)
 		return out, nil
 	}
@@ -238,8 +268,18 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row.S3 = body.S3
+	case meta.BlobStoreAzure:
+		if body.Azure == nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`an azure blob store needs "azure" with its accountName, containerName and credentials`}})
+			return
+		}
+		if err := body.Azure.Validate(); err != nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"azure: " + err.Error()}})
+			return
+		}
+		row.Azure = body.Azure
 	default:
-		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`blob store type must be "file", "s3" or "group"`}})
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`blob store type must be "file", "s3", "group" or "azure"`}})
 		return
 	}
 	if row.Type != meta.BlobStoreGroup && (body.Members != nil || body.FillPolicy != "") {
@@ -262,6 +302,10 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		}
 		if row.Type == meta.BlobStoreS3 {
 			if err := u.checkS3Isolation(ctx, *row.S3); err != nil {
+				return err
+			}
+		} else if row.Type == meta.BlobStoreAzure {
+			if err := u.checkAzureIsolation(ctx, *row.Azure); err != nil {
 				return err
 			}
 		} else {
@@ -290,6 +334,11 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 				return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: bucket %s is not usable: %v", body.Name, row.S3.Bucket, err)}}
 			}
 		}
+		if row.Type == meta.BlobStoreAzure {
+			if err := bs.Check(); err != nil {
+				return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: container %s is not usable: %v", body.Name, row.Azure.ContainerName, err)}}
+			}
+		}
 		if err := u.DB.CreateBlobStore(ctx, row); err != nil {
 			return err
 		}
@@ -312,6 +361,9 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 	if stored.Group != nil {
 		detail = groupDetail(*stored.Group)
 	}
+	if stored.Azure != nil {
+		detail = azureDetail(*stored.Azure)
+	}
 	u.notify(r.Context(), "blobstores")
 	u.emit(r, "blobstore.create", "", body.Name, detail)
 	v, err := u.blobStoreView(r.Context(), stored)
@@ -322,8 +374,9 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, v)
 }
 
-// updateBlobStore changes the soft quota, the one mutable field: {"quota":
-// {type, limitBytes}} sets it, {"quota": null} removes it.
+// updateBlobStore changes the soft quota: {"quota": {type, limitBytes}} sets
+// it, {"quota": null} removes it; a group's members and fill policy; and an
+// azure store's credentials ({"azure": {...}}, setAzureAuth).
 func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
 		return
@@ -343,10 +396,11 @@ func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 	_, setQuota := raw["quota"]
 	_, members := raw["members"]
 	_, fill := raw["fillPolicy"]
+	_, setAzure := raw["azure"]
 	setGroup := members || fill
 	name := r.PathValue("name")
-	if !setQuota && !setGroup {
-		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"nothing to change: send quota, or a group's members and fillPolicy"}})
+	if !setQuota && !setGroup && !setAzure {
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"nothing to change: send quota, a group's members and fillPolicy, or an azure store's credentials"}})
 		return
 	}
 	if setQuota {
@@ -368,6 +422,19 @@ func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.notify(r.Context(), "blobstores")
 		u.syncNodes(r.Context(), name)
 		u.emit(r, "blobstore.update", "", name, groupDetail(cfg))
+	}
+	if setAzure {
+		if u.Store == nil {
+			writeError(w, http.StatusNotImplemented, "blob stores are not available")
+			return
+		}
+		cfg, err := u.setAzureAuth(r.Context(), name, body.Azure)
+		if err != nil {
+			u.writeBlobStoreError(w, r, err)
+			return
+		}
+		u.notify(r.Context(), "blobstores")
+		u.emit(r, "blobstore.update", "", name, "credentials: "+azureDetail(cfg))
 	}
 	if setQuota {
 		if err := u.DB.SetBlobStoreQuota(r.Context(), name, body.Quota); err != nil {
@@ -650,4 +717,72 @@ func (u *UI) writeBlobStoreError(w http.ResponseWriter, r *http.Request, err err
 	default:
 		u.fail(w, r, err)
 	}
+}
+
+// checkAzureIsolation rejects a new azure store on the same container and
+// prefix (at the same endpoint) as an existing one: their GCs would delete
+// each other's blobs.
+func (u *UI) checkAzureIsolation(ctx context.Context, c blob.AzureConfig) error {
+	rows, err := u.DB.ListBlobStores(ctx)
+	if err != nil {
+		return err
+	}
+	for _, bs := range rows {
+		if o := bs.Azure; bs.Type == meta.BlobStoreAzure && o != nil && o.Location() == c.Location() {
+			return &repo.ValidationError{Errors: []string{
+				fmt.Sprintf("azure container %s prefix %q is already the %q store's", c.ContainerName, c.Prefix, bs.Name)}}
+		}
+	}
+	return nil
+}
+
+// azureDetail names an azure store's container and method for the activity log.
+func azureDetail(c blob.AzureConfig) string {
+	return "azure://" + c.AccountName + "/" + c.ContainerName + "/" + c.Prefix + " (" + c.Auth + ")"
+}
+
+// setAzureAuth replaces the credentials of the azure store name with those
+// of n under the registry lock: its account, container, prefix and endpoint
+// cannot change (send them empty or unchanged), the method defaults to the
+// stored one, a secret left empty under the same method keeps the stored one,
+// and tenantId, clientId, authorityHost and imdsEndpoint are taken as sent.
+// The credentials must list the container before they are stored and used.
+func (u *UI) setAzureAuth(ctx context.Context, name string, n *blob.AzureConfig) (blob.AzureConfig, error) {
+	var c blob.AzureConfig
+	err := u.Repos.WithWriteLock(ctx, func(*repo.Snapshot) error {
+		row, err := u.DB.GetBlobStore(ctx, name)
+		if err != nil {
+			return err
+		}
+		if row.Type != meta.BlobStoreAzure || row.Azure == nil || n == nil {
+			return &repo.ValidationError{Errors: []string{`"azure" is an azure store's ("type": "azure")`}}
+		}
+		cur := *row.Azure
+		c = *n
+		for _, f := range [][3]string{{"accountName", c.AccountName, cur.AccountName}, {"containerName", c.ContainerName, cur.ContainerName},
+			{"prefix", strings.Trim(c.Prefix, "/"), cur.Prefix}, {"endpoint", c.Endpoint, cur.Endpoint}} {
+			if f[1] != "" && f[1] != f[2] {
+				return &repo.ValidationError{Errors: []string{"azure: " + f[0] + " cannot change; create another store and move the repositories"}}
+			}
+		}
+		c.AccountName, c.ContainerName, c.Prefix, c.Endpoint = cur.AccountName, cur.ContainerName, cur.Prefix, cur.Endpoint
+		c.Auth = cmp.Or(c.Auth, cur.Auth)
+		if c.Auth == cur.Auth {
+			c.AccountKey, c.SASToken, c.ClientSecret = cmp.Or(c.AccountKey, cur.AccountKey), cmp.Or(c.SASToken, cur.SASToken), cmp.Or(c.ClientSecret, cur.ClientSecret)
+		}
+		if err := c.Validate(); err != nil {
+			return &repo.ValidationError{Errors: []string{"azure: " + err.Error()}}
+		}
+		if err := blob.CheckAzure(c); err != nil {
+			return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: container %s is not usable with these credentials: %v", name, c.ContainerName, err)}}
+		}
+		if err := u.DB.UpdateBlobStoreAzure(ctx, name, c); err != nil {
+			return err
+		}
+		if bs := u.Store.StoreByName(name); bs != nil {
+			return bs.SetAzure(c)
+		}
+		return nil
+	})
+	return c, err
 }

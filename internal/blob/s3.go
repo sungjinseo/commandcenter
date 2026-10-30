@@ -592,7 +592,7 @@ func (s *Store) Check() error { return s.be.check() }
 // a Seek elsewhere closes it and the next Read opens a Range GET from there,
 // and ReadAt is a Range GET of its own.
 type s3File struct {
-	s         *s3
+	s         ranger // the S3 or Azure backend
 	key       string
 	size, off int64
 	body      io.ReadCloser // positioned at off, or nil

@@ -88,7 +88,11 @@ type querier interface {
 //	   and seal with another secret key unchecked.
 //	6: repositories.gen, the incarnation (repositories.go): expand-only, an
 //	   older build ignores it and keeps its in-process incarnations.
-const schemaVersion = 6
+//	7: blob_stores rows of type "azure": an older build would open one as an
+//	   empty directory (404s, uploads left on its disk), but no DDL: the
+//	   first azure store's CreateBlobStore raises compat to 7 (raiseCompat),
+//	   so the upgrade itself is expand-only and stays rolling.
+const schemaVersion = 7
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
 // build upgraded, stamped in schema_version.compat. A change older builds

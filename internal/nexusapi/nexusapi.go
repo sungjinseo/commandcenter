@@ -102,6 +102,7 @@ func (h *Handler) init() {
 	h.stagingRoutes(m, p)
 	m.HandleFunc(p+"/", func(w http.ResponseWriter, r *http.Request) { writeMessage(w, http.StatusNotFound, "not found") })
 	h.proRoutes(m, p)
+	h.azureBlobRoutes(m, p)
 	h.mux = m
 }
 
@@ -1354,6 +1355,9 @@ func (h *Handler) blobStores(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.Type == meta.BlobStoreGroup {
 			typ = "Group"
+		}
+		if s.Type == meta.BlobStoreAzure {
+			typ = "Azure Cloud Storage"
 		}
 		var free int64
 		if s.FsFree != nil {

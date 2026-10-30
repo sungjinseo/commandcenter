@@ -17,7 +17,7 @@ import (
 
 // The stored secrets are the SMTP password, the LDAP bind password, the
 // OIDC client secret, a proxy's remoteAuth password and bearer token, an S3 blob store's
-// secret key, a webhook's signing secret, the Crowd application password, the
+// secret key, an Azure blob store's account key, SAS token or client secret, a webhook's signing secret, the Crowd application password, the
 // SAML service provider key and the key that signs the Docker and Conan
 // tokens (TokenKey).
 // They must be sent as they are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
@@ -438,6 +438,11 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 			}
 			n++
 		}
+		k, err := rewriteAzureSecrets(ctx, tx.q, rewrite)
+		if err != nil {
+			return err
+		}
+		n += k
 		rows, err = tx.q.QueryContext(ctx, `SELECT id, secret FROM webhooks WHERE secret <> ''`)
 		if err != nil {
 			return err

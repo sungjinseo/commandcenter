@@ -381,6 +381,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `full` option; progress is kept in the database. `POST /-/api/repositories/{name}/replication/test`
   checks the source. 17 formats are supported; docker, p2, cocoapods and huggingface are refused (400).
   `GET /service/rest/v1/assets` now pages by key and lists `blobStoreName`, `uploader` and `uploaderIp`.
+- Azure Blob Storage blob stores (`type: "azure"`): blobs live in a container at `<prefix>/<sha256>`.
+  Writes use Put Blob up to 64 MiB and Put Block/Put Block List above, MD5-checked; reads use ranged
+  Get Blob; GC lists with prefix and marker paging. Authentication is by account key (Shared Key), SAS
+  token, Microsoft Entra ID client secret, managed identity (IMDS) or Kubernetes workload identity
+  (`AZURE_FEDERATED_TOKEN_FILE`), with tokens refreshed before they expire. An endpoint override serves
+  Azurite, sovereign clouds and private endpoints. Secrets are sealed and never returned. Credentials
+  can be replaced in place on every node (`PUT /-/api/blobstores/{name}` with `azure`), and requests are
+  retried on 429/5xx. Nexus-compatible `POST /service/rest/v1/blobstores/azure` and
+  `GET`/`PUT /service/rest/v1/blobstores/azure/{name}`. Azure stores take soft quotas and can be blob
+  store group members.
 
 ### Changed
 
@@ -427,7 +437,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sessions stayed valid.
 
 ### Upgrade notes
-- No schema change: the database stays at schema 6, compat 6.
+- Database schema 7 (compat 6). The upgrade runs no DDL for Azure stores and can be rolling. Creating
+  the first Azure blob store raises compat to 7: it is refused while a node of an older build is live,
+  and from then on older builds refuse to start, because they would open the store as an empty
+  directory. A rollback after that needs the backup taken before the upgrade.
 - Older builds refuse to start beside a running node, but this one starts beside an older one. Upgrade
   every node and do not mix versions except during a rolling upgrade. Blob store moves and group member
   removals wait until every node answers, which an older node never does.

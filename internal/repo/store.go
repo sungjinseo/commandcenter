@@ -137,7 +137,8 @@ func StoreRoot(dataDir string, bs meta.BlobStore) string {
 }
 
 // OpenStore opens a stored blob store at its StoreRoot: a directory store,
-// or for an S3 row the bucket it names. A group opens with OpenGroup.
+// or for an S3 or azure row the bucket or container it names. A group opens
+// with OpenGroup.
 func OpenStore(dataDir string, bs meta.BlobStore) (*blob.Store, error) {
 	root := StoreRoot(dataDir, bs)
 	if bs.Type == meta.BlobStoreGroup {
@@ -148,6 +149,12 @@ func OpenStore(dataDir string, bs meta.BlobStore) (*blob.Store, error) {
 			return nil, fmt.Errorf("blob store %q has no s3 configuration", bs.Name)
 		}
 		return blob.OpenS3(root, *bs.S3)
+	}
+	if bs.Type == meta.BlobStoreAzure {
+		if bs.Azure == nil {
+			return nil, fmt.Errorf("blob store %q has no azure configuration", bs.Name)
+		}
+		return blob.OpenAzure(root, *bs.Azure)
 	}
 	return blob.Open(root)
 }
@@ -283,7 +290,13 @@ func (s *Store) SyncStores(ctx context.Context, dataDir string) error {
 			continue
 		}
 		if cur := s.StoreByName(row.Name); cur != nil {
-			if _, isGroup := cur.Group(); !isGroup { // a file or S3 store never changes
+			if az, ok := cur.Azure(); ok && row.Azure != nil && az != *row.Azure { // new credentials, in place
+				if err := cur.SetAzure(*row.Azure); err != nil {
+					errs = append(errs, fmt.Errorf("blob store %q: %w", row.Name, err))
+				}
+				continue
+			}
+			if _, isGroup := cur.Group(); !isGroup { // a file, S3 or azure store's location never changes
 				continue
 			}
 		}

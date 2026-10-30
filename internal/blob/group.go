@@ -330,6 +330,8 @@ func (s *Store) Health() []Probe {
 			}
 		}
 		return out
+	case *azure:
+		return []Probe{probe("container "+be.cfg.Location(), be.check())}
 	}
 	f, err := os.CreateTemp(filepath.Join(s.root, "tmp"), "probe-*")
 	if err == nil {
