@@ -1,6 +1,6 @@
 // The Command Center console shell (plan 10 Decisions 3, 4, 6 and 7): the
 // sidebar, the topbar, menus and dialogs, the theme and the language.
-import { state, ANON, h, put, api, icon, s, loadRepos, hideBanner, showError, canUpload, isBusy, kv, SEARCH_FORMATS } from "./util.js";
+import { state, ANON, h, put, api, icon, s, loadRepos, hideBanner, showError, canUpload, isBusy, kv, mayOpen, SEARCH_FORMATS } from "./util.js";
 import { t, getLang, setLang, onLangChange, applyServerDefault } from "./i18n.js";
 
 const hooks = { rerender: () => {} };
@@ -286,14 +286,14 @@ function applyTexts() {
 // every route.
 function renderWho() {
   const me = state.me;
-  const key = getLang() + (me.anonymous ? ":-" : ":u:" + me.user + ":" + me.admin + ":" + !!me.metrics);
+  const key = getLang() + (me.anonymous ? ":-" : ":u:" + me.user + ":" + me.admin + ":" + !!me.metrics + ":" + !!me.repositoryAdmin + ":" + JSON.stringify(me.permissions || {}));
   if (els.whoKey === key) return;
   els.whoKey = key;
   if (me.anonymous) {
     put(els.who, h("button", { type: "button", class: "btn small primary login-btn", onclick: openLogin }, icon("user"), h("span", null, t("nav.login"))));
     return;
   }
-  const role = me.admin ? t("user.admin") : t("user.user");
+  const role = me.admin ? t("user.admin") : adminHome() ? t("user.delegated") : t("user.user");
   const initials = (me.user.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2) || "?").toUpperCase();
   const btn = h("button", { type: "button", class: "avatar", title: me.user, "aria-label": t("user.menu", { user: me.user }) }, initials);
   put(els.who, dropdown(btn, () => [
@@ -381,6 +381,7 @@ const ADMIN = () => [
   ]],
   [t("nav.g.support"), [
     ["#admin/support/logs", t("nav.logs"), "file"],
+    ["#admin/support/activity", t("nav.activity"), "list"],
     ["#admin/support/logging", t("nav.logging"), "settings"],
     ["#admin/support/metrics", t("nav.metrics"), "health"],
     ["#admin/support/usage", t("nav.usage"), "chart"],
@@ -433,7 +434,8 @@ function renderCrumb(route) {
     id = kind === "custom" ? t("nav.searchCustom") : SEARCH_FORMATS[kind] || null;
   } else if (id === "create") {
     id = { "admin/repository/repositories": t("rf.createTitle"), "admin/repository/cleanuppolicies": t("pol.createTitle"), "admin/repository/blobstores": t("blob.createTitle"),
-      "browse/tags": t("tag.createTitle"), "admin/system/tasks": t("task.createTitle"), "admin/security/users": t("access.createCrumb"), "admin/security/roles": t("access.createCrumb") }[key] || id;
+      "browse/tags": t("tag.createTitle"), "admin/system/tasks": t("task.createTitle"), "admin/security/users": t("access.createCrumb"), "admin/security/roles": t("access.createCrumb"),
+      "admin/system/webhooks": t("wh.createTitle"), "admin/repository/selectors": t("cs.createTitle"), "admin/repository/routingrules": t("rr.createTitle") }[key] || id;
   } else if (key === "admin/system/tasks" && id === "compact-blobstore") {
     id = t("task.compact");
   }
@@ -469,15 +471,20 @@ function brandMark() {
   return svg;
 }
 
-// treeOf picks the tree the sidebar shows: a non-admin on an admin route,
-// or a visitor on a user route, sees the browse tree.
+// adminTree is the administration tree with only the screens the user may
+// open (an admin: all of them; a delegated user: those its privileges open).
+const adminTree = () => ADMIN().map(([g, items]) => [g, items.filter(([href]) => mayOpen(href.slice(1)))]).filter(([, items]) => items.length);
+// adminHome is the first administration screen the user may open, or null.
+function adminHome() {
+  const tree = state.me.anonymous ? [] : adminTree();
+  return tree.length ? tree[0][1][0][0] : null;
+}
+
+// treeOf picks the tree the sidebar shows: a user without any admin screen on
+// an admin route, or a visitor on a user route, sees the browse tree.
 function treeOf(mode) {
   const me = state.me;
-  if (mode === "admin" && me.admin) return ADMIN();
-  // The metrics privilege alone opens the dashboard and the monthly usage.
-  if (mode === "admin" && me.metrics) return [
-    [t("nav.g.repository"), [["#admin/repository/dashboard", t("nav.repoDashboard"), "dashboard"]]],
-    [t("nav.g.support"), [["#admin/support/usage", t("nav.usage"), "chart"]]]];
+  if (mode === "admin" && adminHome()) return adminTree();
   if (mode === "user" && !me.anonymous) return USER();
   const hide = new Set();
   if (!(state.repos || []).some(canUpload)) hide.add("#browse/upload");
@@ -502,13 +509,13 @@ function searchChildren(key) {
   }));
 }
 
-// modeSwitch: Browse and, for admins, Administration. A non-admin sees it
-// only on a user screen, as the way back to browsing.
+// modeSwitch: Browse and, for whoever may open an admin screen, Administration.
+// Anyone else sees it only on a user screen, as the way back to browsing.
 function modeSwitch(mode) {
   const me = state.me;
-  if (!me.admin && !me.metrics && mode !== "user") return null;
+  const admin = adminHome();
+  if (!admin && mode !== "user") return null;
   const btn = (m, href, ico) => h("a", { href, class: "mode-btn" + (mode === m ? " active" : ""), "aria-current": mode === m ? "true" : null }, icon(ico), h("span", null, modeLabel(m)));
-  const admin = me.admin ? "#admin/repository/repositories" : me.metrics ? "#admin/repository/dashboard" : null;
   return h("nav", { class: "mode-switch", "aria-label": t("mode.aria") }, btn("browse", "#browse/welcome", "repos"),
     admin ? btn("admin", admin, "settings") : null);
 }

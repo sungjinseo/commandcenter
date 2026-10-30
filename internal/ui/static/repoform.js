@@ -109,7 +109,7 @@ function strong(key, name) {
 // memberPicker is a two-list member editor. candidates are the
 // repositories that may join (same format, not the group itself); members
 // keeps its order. onChange runs after every change.
-function memberPicker(candidates, initial, onChange) {
+function memberPicker(candidates, initial, onChange, labels) {
   let members = initial.slice();
   const availId = uid("avail"), memId = uid("mem");
   const avail = h("select", { id: availId, multiple: true, size: 8, class: "rf-list" });
@@ -176,9 +176,9 @@ function memberPicker(candidates, initial, onChange) {
   });
   render();
   const el = h("div", { class: "rf-members" },
-    h("div", { class: "rf-col" }, h("label", { for: availId }, t("rf.available")), avail),
+    h("div", { class: "rf-col" }, h("label", { for: availId }, labels ? labels[0] : t("rf.available")), avail),
     h("div", { class: "rf-btns" }, add, rm),
-    h("div", { class: "rf-col" }, h("label", { for: memId }, t("rf.members")), mem),
+    h("div", { class: "rf-col" }, h("label", { for: memId }, labels ? labels[1] : t("rf.members")), mem),
     h("div", { class: "rf-btns" }, up, down));
   return { el, get: () => members.slice() };
 }
@@ -322,7 +322,7 @@ async function moveStoreDialog(name, current, isLive) {
 // viewRepoForm shows the create form (o.recipe) or the edit form (o.name).
 export async function viewRepoForm(view, o) {
   const title = t("nav.repositories");
-  if (!state.me.admin) return needAdmin(view, title);
+  if (!state.me.admin && !state.me.repositoryAdmin) return needAdmin(view, title); // a delegated repository admin: the server checks each repository
   const isLive = alive();
   const editing = o.name !== undefined;
   const eyebrow = { eyebrow: t("rf.eyebrow") };
@@ -393,7 +393,8 @@ export async function viewRepoForm(view, o) {
   // Maven
   const versionOpts = isHosted ? VERSION : [["", t("rf.notSet")]].concat(VERSION);
   const version = cfg.format === "maven" && !isGroup ? select(versionOpts, cfg.versionPolicy || (isHosted ? "release" : "")) : null; // groups have none
-  const layout = cfg.format === "maven" ? textInput("Strict", { readonly: true }) : null;
+  const isMaven = cfg.format === "maven" && !isGroup;
+  const layout = isMaven ? select([["strict", t("rf.layoutStrict")], ["permissive", t("rf.layoutPermissive")]], cfg.layoutPolicy || "strict") : null;
 
   // Hosted
   const deploy = isHosted ? select(isDocker
@@ -407,7 +408,13 @@ export async function viewRepoForm(view, o) {
   const signingKey = isApt ? h("textarea", { id: uid("sk"), class: "mono", rows: 5, spellcheck: "false", autocomplete: "off",
     placeholder: cfg.signingKeySet ? t("rf.unchanged") : "-----BEGIN PGP PRIVATE KEY BLOCK-----" }) : null;
   const clrKey = isApt && cfg.signingKeySet ? checkbox(t("rf.clearSigningKey"), false) : null;
-  if (clrKey) clrKey.box.addEventListener("change", () => { signingKey.disabled = clrKey.box.checked; if (clrKey.box.checked) signingKey.value = ""; });
+  const passphrase = isApt ? h("input", { id: uid("pp"), type: "password", autocomplete: "new-password" }) : null;
+  // APT proxy: the remote's distribution, a flat remote, and refusing other distributions.
+  const isAptProxy = cfg.format === "apt" && isProxy;
+  const pDist = isAptProxy ? textInput(cfg.distribution || "", { placeholder: "bookworm", maxlength: 100 }) : null;
+  const pFlat = isAptProxy ? checkbox(t("rf.flat"), cfg.flat) : null;
+  const pEnforce = isAptProxy ? checkbox(t("rf.enforce"), cfg.enforceDistribution) : null;
+  if (clrKey) clrKey.box.addEventListener("change", () => { signingKey.disabled = passphrase.disabled = clrKey.box.checked; if (clrKey.box.checked) signingKey.value = passphrase.value = ""; });
   // Terraform hosted: the provider signing public key (not a secret: shown, and sent back as is; "" clears it)
   const gpgKey = cfg.format === "terraform" && isHosted ? h("textarea", { id: uid("gk"), class: "mono", rows: 5, spellcheck: "false", autocomplete: "off",
     placeholder: "-----BEGIN PGP PUBLIC KEY BLOCK-----" }, cfg.gpgPublicKey || "") : null;
@@ -431,6 +438,16 @@ export async function viewRepoForm(view, o) {
       if (c) c.box.addEventListener("change", () => { inp.disabled = c.box.checked; if (c.box.checked) inp.value = ""; });
     }
   }
+  // Proxy: whether misses are remembered, and the outbound connection overrides (empty follows the HTTP settings).
+  const negOn = isProxy ? checkbox(t("rf.negOn"), cfg.negativeCacheEnabled !== false) : null;
+  const cn = cfg.connection || {};
+  const numIn = (v, min, max) => h("input", { id: uid("n"), type: "number", inputmode: "numeric", min, max, step: 1, value: v === undefined || v === null ? "" : String(v), placeholder: t("rf.cnGlobal") });
+  const cTimeout = isProxy ? numIn(cn.timeout || null, 1, 3600) : null;
+  const cRetries = isProxy ? numIn(cn.retries, 0, 10) : null;
+  const cUA = isProxy ? textInput(cn.userAgentSuffix, { maxlength: 100, placeholder: "(acme-ci)" }) : null;
+  const cCookies = isProxy ? checkbox(t("rf.cnCookies"), cn.enableCookies) : null;
+  const cCircular = isProxy ? checkbox(t("rf.cnCircular"), cn.enableCircularRedirects) : null;
+  const cTrust = isProxy ? checkbox(t("rf.cnTrust"), cn.useTrustStore) : null;
   // Proxy: a manual block, and the auto-block after repeated remote failures (on by default).
   const blocked = isProxy ? checkbox(t("rf.blocked"), cfg.blocked) : null;
   const autoBlock = isProxy ? checkbox(t("rf.autoBlock"), cfg.autoBlock !== false) : null;
@@ -472,7 +489,7 @@ export async function viewRepoForm(view, o) {
     ? select([["inherit", t("rf.evInherit")], ["enabled", t("rf.evOn")], ["disabled", t("rf.evOff")]], cfg.evaluation || "inherit") : null;
   // Content: strict content type validation (hosted) and Content-Disposition (raw, gitlfs).
   const strict = isHosted ? checkbox(t("rf.strict"), cfg.strictContentTypeValidation) : null;
-  const disposition = DISPOSITION.includes(cfg.format) ? select([["inline", t("rf.dispInline")], ["attachment", t("rf.dispAttachment")]], cfg.contentDisposition || "inline") : null;
+  const disposition = DISPOSITION.includes(cfg.format) || isMaven ? select([["inline", t("rf.dispInline")], ["attachment", t("rf.dispAttachment")]], cfg.contentDisposition || "inline") : null;
   const storedRule = cfg.routingRule || "";
   let rule = null, ruleHint = null;
   if (isProxy && rules) {
@@ -499,18 +516,19 @@ export async function viewRepoForm(view, o) {
 
   // Cleanup policy (plan 11 Decision 5): hosted and proxy repositories, never
   // Cargo hosted; only the policies for all formats or this one.
-  const storedPolicy = cfg.cleanupPolicy || "";
+  // Several policies, in order (wave 6); without the list the stored ones are kept.
+  const storedPolicies = cfg.cleanupPolicies || (cfg.cleanupPolicy ? [cfg.cleanupPolicy] : []);
   const cargoHosted = isHosted && cfg.format === "cargo";
-  let policy = null;
+  let polPick = null;
   if ((isHosted || isProxy) && !cargoHosted && pols) {
     const fit = (pols.policies || []).filter((p) => p.format === "all" || p.format === cfg.format)
-      .map((p) => [p.name, p.name + " (" + (p.format === "all" ? t("pol.allFormats") : FORMAT_NAMES[p.format] || p.format) + ")"]);
-    if (storedPolicy && !fit.some(([n]) => n === storedPolicy)) fit.unshift([storedPolicy, storedPolicy]);
-    policy = select([["", t("rf.noPolicy")]].concat(fit), storedPolicy);
+      .map((p) => ({ name: p.name, type: p.format === "all" ? t("pol.allFormats") : FORMAT_NAMES[p.format] || p.format }));
+    for (const n of storedPolicies) if (!fit.some((x) => x.name === n)) fit.push({ name: n, type: "?" });
+    polPick = memberPicker(fit, storedPolicies, () => {}, [t("rf.polAvail"), t("rf.polPicked")]);
   }
   const cleanupCard = isGroup ? null : card(t("rf.cleanup"), t("rf.cleanupSub"), cargoHosted
     ? h("div", { class: "notice" }, t("pol.cargoNote"))
-    : policy ? fields(field(t("rf.policy"), policy, [t("rf.policyHelp"), " ", h("a", { href: "#admin/repository/cleanuppolicies" }, t("rf.policyLink"))], { full: true }))
+    : polPick ? fields(field(t("rf.policies"), polPick.el, [t("rf.policiesHelp"), " ", h("a", { href: "#admin/repository/cleanuppolicies" }, t("rf.policyLink"))], { group: true, full: true }))
       : h("div", { class: "notice amber" }, t("rf.policyFailed")));
 
   const anon = select(ANON.map(([v, k]) => [v, t(k)]), cfg.anonymousRead === true ? "true" : cfg.anonymousRead === false ? "false" : "");
@@ -575,14 +593,15 @@ export async function viewRepoForm(view, o) {
           editing && !isGroup ? field(t("rf.blobStore"), moveRow, t("rf.blobStoreMoveHelp"), { group: true }) : null,
           disposition ? field(t("rf.disposition"), disposition, t("rf.dispositionHelp")) : null,
           info ? field(t("rf.url"), copyLine(info.url, t("rf.copyUrl")), null, { group: true, full: true }) : null)),
-        cfg.format === "maven" ? card(t("rf.maven"), t("rf.mavenSub"), fields(
+        isMaven ? card(t("rf.maven"), t("rf.mavenSub"), fields(
           version ? field(t("rf.version"), version, t("rf.versionHelp")) : null,
-          field(t("rf.layout"), layout))) : null,
+          field(t("rf.layout"), layout, t("rf.layoutHelp")))) : null,
         isHosted ? card(t("rf.hosted"), t("rf.hostedSub"), fields(
           field(isDocker ? t("docker.writePolicy") : t("rf.deploy"), deploy, isDocker ? t("docker.writePolicyHelp") : t("rf.deployHelp"), { full: true }),
           distribution ? field(t("rf.distribution"), distribution, t("rf.distributionHelp")) : null,
           component ? field(t("rf.component"), component, t("rf.componentHelp")) : null,
-          signingKey ? field(t("rf.signingKey"), signingKey, cfg.signingKeySet ? [h("span", { class: "rf-set" }, t("rf.signingKeySet")), " — ", t("rf.keepEmpty")] : t("rf.signingKeyHelp"), { full: true }) : null,
+          signingKey ? field(t("rf.signingKey"), signingKey, [cfg.signingKeySet ? [h("span", { class: "rf-set" }, t("rf.signingKeySet")), " — ", t("rf.keepEmpty"), ". "] : null, t("rf.signingKeyHelp")], { full: true }) : null,
+          passphrase ? field(t("rf.passphrase"), passphrase, t("rf.passphraseHelp"), { full: true }) : null,
           clrKey ? h("div", { class: "field full" }, clrKey.el) : null,
           depth ? field(t("rf.depth"), depth, t("rf.depthHelp")) : null,
           h("div", { class: "field full" }, strict.el, h("small", null, t("rf.strictHelp"))),
@@ -590,12 +609,23 @@ export async function viewRepoForm(view, o) {
         isProxy ? card(t("rf.proxy"), t("rf.proxySub"), fields(
           field(t("rf.remote"), remote, cfg.format === "swift" ? t("rf.remoteSwift") : t("rf.remoteHelp"), { req: true, full: true }),
           hidden ? h("div", { class: "field full" }, hidden.el, h("small", null, t("rf.hiddenHelp"))) : null,
+          pDist ? field(t("rf.distribution"), pDist, t("rf.pDistHelp")) : null,
+          pFlat ? h("div", { class: "field" }, pFlat.el, h("small", null, t("rf.flatHelp"))) : null,
+          pEnforce ? h("div", { class: "field full" }, pEnforce.el, h("small", null, t("rf.enforceHelp"))) : null,
           field(t("rf.ctAge"), ctAge, t("rf.ageHelp")),
           field(t("rf.mdAge"), mdAge, t("rf.ageHelp")),
+          h("div", { class: "field full" }, negOn.el, h("small", null, t("rf.negOnHelp"))),
           field(t("rf.negTTL"), negTTL, t("rf.negHelp")),
           rule ? field(t("rf.rule"), rule, t("rf.ruleHelp"), { full: true }) : ruleHint,
           h("div", { class: "field full" }, autoBlock.el, h("small", null, t("rf.autoBlockHelp"))),
           h("div", { class: "field full" }, blocked.el, h("small", null, t("rf.blockedHelp"))))) : null,
+        isProxy ? card(t("rf.cn"), t("rf.cnSub"), fields(
+          field(t("rf.cnTimeout"), cTimeout, t("rf.cnTimeoutHelp")),
+          field(t("rf.cnRetries"), cRetries, t("rf.cnRetriesHelp")),
+          field(t("rf.cnUA"), cUA, t("rf.cnUAHelp"), { full: true }),
+          h("div", { class: "field full" }, cCookies.el, h("small", null, t("rf.cnCookiesHelp"))),
+          h("div", { class: "field" }, cCircular.el, h("small", null, t("rf.cnNexusOnly"))),
+          h("div", { class: "field" }, cTrust.el, h("small", null, t("rf.cnNexusOnly"))))) : null,
         hasFw ? card(t("rf.fw"), t("rf.fwSub"), fields(
           h("div", { class: "field full" }, fwOn.el, h("small", null, t("rf.fwEnabledHelp"), " ", h("a", { href: "#admin/firewall/settings" }, t("nav.vulnerability")))),
           h("div", { class: "field full" }, fwMal.el, h("small", null, t("rf.fwMaliciousHelp"))),
@@ -648,8 +678,6 @@ export async function viewRepoForm(view, o) {
       negativeCacheTTL: cfg.negativeCacheTTL || "", members: cfg.members || [], writeMember: cfg.writeMember || "",
       versionPolicy: cfg.versionPolicy || "", writePolicy: cfg.writePolicy || "",
       anonymousRead: anon.value === "" ? null : anon.value === "true",
-      // Always sent, so an edit keeps the stored policy when no select is shown.
-      cleanupPolicy: policy ? policy.value : storedPolicy,
       online: online.box.checked,
       // A PUT replaces the definition: every stored setting goes back, also those without a control here.
       strictContentTypeValidation: strict ? strict.box.checked : !!cfg.strictContentTypeValidation,
@@ -657,6 +685,8 @@ export async function viewRepoForm(view, o) {
       blocked: false,
     };
     if (bstore) b.blobStore = bstore.value;
+    if (polPick) b.cleanupPolicies = polPick.get(); // absent keeps the stored ones (the list did not load)
+    if (layout) b.layoutPolicy = layout.value;
     if (evalSel) b.evaluation = evalSel.value;
     if (version) b.versionPolicy = version.value;
     if (deploy) b.writePolicy = deploy.value;
@@ -665,6 +695,20 @@ export async function viewRepoForm(view, o) {
       b.metadataMaxAge = mdAge.value.trim();
       b.contentMaxAge = ctAge.value.trim();
       b.negativeCacheTTL = negTTL.value.trim();
+      b.negativeCacheEnabled = negOn.box.checked;
+      const c = {}; // {} clears the overrides
+      if (cTimeout.value.trim()) c.timeout = Number(cTimeout.value);
+      if (cRetries.value.trim()) c.retries = Number(cRetries.value);
+      if (cUA.value.trim()) c.userAgentSuffix = cUA.value.trim();
+      if (cCookies.box.checked) c.enableCookies = true;
+      if (cCircular.box.checked) c.enableCircularRedirects = true;
+      if (cTrust.box.checked) c.useTrustStore = true;
+      b.connection = c;
+      if (pDist) {
+        b.distribution = pDist.value.trim();
+        b.flat = pFlat.box.checked;
+        b.enforceDistribution = pEnforce.box.checked;
+      }
       if (hidden && hidden.box.checked) b.clearRemoteHiddenParts = true;
       b.routingRule = rule ? rule.value : storedRule;
       b.blocked = blocked.box.checked;
@@ -685,7 +729,8 @@ export async function viewRepoForm(view, o) {
       b.distribution = distribution.value.trim();
       b.component = component.value.trim();
       b.signingKey = signingKey.value;
-      signingKey.value = ""; // the secret never stays in the page
+      if (passphrase.value) b.signingKeyPassphrase = passphrase.value; // it unlocks the new key only
+      signingKey.value = passphrase.value = ""; // the secrets never stay in the page
       if (clrKey && clrKey.box.checked) b.clearSigningKey = true;
     }
     if (depth) b.depth = Number(depth.value);
@@ -702,6 +747,11 @@ export async function viewRepoForm(view, o) {
     if (isProxy && !b.remote) errs.push(t("rf.e.remote"));
     if (isGroup && !b.members.length) errs.push(t("rf.e.members"));
     if (b.firewall && b.firewall.allowList.some((x) => x.length > 512)) errs.push(t("rf.e.fwLong"));
+    if (b.signingKeyPassphrase && !b.signingKey) errs.push(t("rf.e.passphrase"));
+    if (b.enforceDistribution && !b.distribution) errs.push(t("rf.e.enforce"));
+    const cx = b.connection || {};
+    if (cx.timeout !== undefined && !(Number.isInteger(cx.timeout) && cx.timeout >= 1 && cx.timeout <= 3600)) errs.push(t("rf.e.cnTimeout"));
+    if (cx.retries !== undefined && !(Number.isInteger(cx.retries) && cx.retries >= 0 && cx.retries <= 10)) errs.push(t("rf.e.cnRetries"));
     return errs;
   }
 
@@ -730,6 +780,8 @@ export async function viewRepoForm(view, o) {
     } catch (e) {
       save.disabled = false;
       if (!isLive()) return;
+      const member = e.status === 403 && /^you may not administer group member (.+)$/.exec(e.message);
+      if (member) { showErrors([t("rf.e.notYours", { name: member[1] })]); return; }
       if (e.status === 401 || e.status === 403) { handleError(e); return; }
       const list = (e.errors && e.errors.length) ? e.errors : [e.message];
       showErrors(list, list.some((x) => /remote host changed/i.test(x)));
@@ -756,7 +808,24 @@ export async function viewRepoForm(view, o) {
   if (editing) {
     const del = h("button", { type: "button", class: "btn danger" }, t("rf.delete"));
     del.addEventListener("click", () => deleteDialog(cfg.name, isLive));
-    acts = [back, h("a", { class: "btn", href: browseLink(cfg.name) }, icon("browse"), t("repos.browse")), del];
+    // Invalidate cache (admins): a proxy's cached content goes stale and its misses are
+    // forgotten; a group does it for every proxy it reaches.
+    let inv = null;
+    if ((isProxy || isGroup) && state.me.admin) {
+      inv = h("button", { type: "button", class: "btn" }, icon("refresh"), t("rf.invalidate"));
+      inv.addEventListener("click", async () => {
+        inv.disabled = true;
+        try {
+          const d = await api(apiRepo(cfg.name, "/invalidate-cache"), { method: "POST" });
+          if (!isLive()) return;
+          put(okBox, t("rf.invalidated", { list: (d.invalidated || []).join(", ") || "—" }));
+          okBox.hidden = false;
+        } catch (e) {
+          if (isLive()) handleError(e);
+        } finally { inv.disabled = false; }
+      });
+    }
+    acts = [back, h("a", { class: "btn", href: browseLink(cfg.name) }, icon("browse"), t("repos.browse")), inv, del];
   }
 
   put(view,

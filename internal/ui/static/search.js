@@ -6,7 +6,7 @@ import {
   tbl, pageHead, loading, truncNote, debounce, handleError, icon, loadRepos, state,
 } from "./util.js";
 import { t } from "./i18n.js";
-import { componentView, assetView, deriveComp, dockerTagView } from "./browse.js";
+import { componentView, assetView, deriveComp, dockerTagView, mavenBaseVersion } from "./browse.js";
 
 // kinds holds the per-format criteria (Decision 4): [hash key, label, API
 // parameter]. Coordinates keep their technical names in both languages; a
@@ -274,8 +274,9 @@ export async function viewComponent(view, name, criteria) {
   // folderOf maps a component to the folder that holds all of its files, or
   // "" when the format has no such folder. Maven deletes file by file, and a
   // Maven component lives in group/artifact/version/.
+  // A SNAPSHOT build (1.0-20261014.120000-3) lives in its base version's folder.
   const folderOf = (comp) => (comp.format === "maven" && comp.name && comp.version
-    ? (comp.group ? comp.group.split(".").join("/") + "/" : "") + comp.name + "/" + comp.version : "");
+    ? (comp.group ? comp.group.split(".").join("/") + "/" : "") + comp.name + "/" + mavenBaseVersion(comp.version) : "");
 
   // freshAssets lists the component's version folder again and returns exactly
   // the files that derive to the same component. The search result may hold a

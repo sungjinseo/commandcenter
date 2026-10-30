@@ -6,7 +6,7 @@
 //   #admin/system/tasks[:create|:<id>]
 import {
   state, h, put, api, enc, encSeg, alive, adminRepoLink, componentLink, safeURL, fmtBytes, fmtNum, fmtDate, FORMATS, FORMAT_NAMES,
-  fmtBadge, nameCell, pageHead, loading, card, kv, tbl, handleError, showError, icon, s, markBusy, taskName, loadRepos, debounce, saveBlob, OSV_FORMATS, NO_REPLICATION,
+  fmtBadge, nameCell, pageHead, loading, card, kv, tbl, handleError, showError, icon, s, markBusy, taskName, loadRepos, debounce, saveBlob, OSV_FORMATS, NO_REPLICATION, can, needAdmin,
 } from "./util.js";
 import { t, locale } from "./i18n.js";
 import { confirmDelete } from "./browse.js";
@@ -41,7 +41,7 @@ export function sel(options, value, attrs) {
 }
 export const textIn = (value, attrs) => h("input", Object.assign({ type: "text", value: value || "", autocomplete: "off", spellcheck: "false" }, attrs || {}));
 const numIn = (value, min, max) => h("input", { type: "number", inputmode: "numeric", min, max, step: 1, value: String(value) });
-const intOf = (el) => (/^\s*\d+\s*$/.test(el.value) ? Number(el.value) : NaN);
+const intOf = (el) => (/^\s*-?\d+\s*$/.test(el.value) ? Number(el.value) : NaN);
 export const button = (label, cls) => h("button", { type: "button", class: "btn" + (cls ? " " + cls : "") }, label);
 
 // formState wires an error box, a success box and the dirty mark of a form.
@@ -637,26 +637,37 @@ const CLEANUP = "repository.cleanup", REBUILD = "repository.rebuild-metadata", C
 const VERIFY = "repository.verify-blobs", PURGE = "maven.purge-snapshots", RECALC = "blobstore.recalculate-size", TEMP = "blobstore.delete-temp-files";
 const EXPORT = "repository.export", IMPORT = "repository.import", MOVE = "repository.change-blobstore", RMMEMBER = "blobstore.group-remove-member";
 const VSYNC = "vulnerability.sync", VSCAN = "vulnerability.scan";
+const PUNUSED = "repository.purge-unused", MPURGE = "maven.purge-unused-snapshots", PKEYS = "security.purge-api-keys", PUTOKENS = "security.purge-expired-user-tokens";
 const REPL = "repository.pull-replication", EVAL = "repository.evaluate";
 export const RPLAN = "blobstore.reconcile-plan", REXEC = "blobstore.reconcile-execute";
 const TASK_STATUS = { Running: ["task.running", "blue"], Waiting: ["task.waiting"], Disabled: ["task.disabled"] };
 const taskStatus = (x) => (TASK_STATUS[x.status] ? badge(t(TASK_STATUS[x.status][0]), TASK_STATUS[x.status][1]) : badge(x.status));
+const queuedBadge = () => badge(t("task.queued"), "amber");
 const RESULTS = { OK: ["task.ok", "green"], Failed: ["task.failed", "red"], Stopped: ["task.stopped", "amber"] };
 const resultText = (x) => (RESULTS[x.lastResult] ? t(RESULTS[x.lastResult][0]) : x.lastResult || dash);
 const resultBadge = (x) => (x.lastResult ? badge(resultText(x), (RESULTS[x.lastResult] || [])[1]) : badge(t("task.never")));
 const taskEyebrow = () => ({ eyebrow: t("task.eyebrow") });
+const NOTIFY_ON = () => [["failure", t("task.notifyFailure")], ["success_failure", t("task.notifySuccess")]];
 const typeLabel = (type, fallback) => ({ [COMPACT]: t("task.tCompact"), [CLEANUP]: t("task.tCleanup"), [REBUILD]: t("task.tRebuild"),
   [VERIFY]: t("task.tVerify"), [PURGE]: t("task.tPurge"), [RECALC]: t("task.tRecalc"), [TEMP]: t("task.tTemp"),
   [EXPORT]: t("task.tExport"), [IMPORT]: t("task.tImport"), [MOVE]: t("task.tMove"), [RMMEMBER]: t("task.tRmMember"),
   [VSYNC]: t("task.tVulnSync"), [VSCAN]: t("task.tVulnScan"), [REPL]: t("task.tRepl"), [EVAL]: t("task.tEval"),
-  [RPLAN]: t("task.tRPlan"), [REXEC]: t("task.tRExec") }[type] || fallback || type);
+  [RPLAN]: t("task.tRPlan"), [REXEC]: t("task.tRExec"), [PUNUSED]: t("task.tPurgeUnused"), [MPURGE]: t("task.tMPurge"), [PKEYS]: t("task.tPurgeKeys"),
+  [PUTOKENS]: t("task.tPurgeTokens") }[type] || fallback || type);
 // Parameter names the dictionaries label; any other name is shown as is.
 const PARAM_KEY = "task.p.", PARAM_HELP = "task.ph."; // + the parameter name
 const PARAM_KEYS = ["repos", "repo", "repository", "format", "blobStore", "checksum", "maxBytes", "minimumRetained", "snapshotRetentionDays", "lastDownloadedDays", "removeIfReleased", "gracePeriodDays", "preview",
-  "repositories", "destination", "includeProxies", "since", "hardLinks", "source", "createMissing", "overwrite", "target", "group", "member", "full", "sinceHours", "all", "planId"];
+  "repositories", "destination", "includeProxies", "since", "hardLinks", "source", "createMissing", "overwrite", "target", "group", "member", "full", "sinceHours", "all", "planId",
+  "maxComponents", "scanAssets", "lastUsed", "scope", "groupId", "artifactId", "baseVersion", "cascadeRebuild", "rebuildChecksums", "resetProxyMetadata", "olderThanDays"];
 // A parameter whose help depends on its task type: "<type>:<name>" → the help key suffix.
 const HELP_ALIAS = { [PURGE + ":repository"]: "purgeRepository", [IMPORT + ":repositories"]: "importRepositories", [VSCAN + ":repository"]: "vulnRepository", [MOVE + ":repo"]: "moveRepo",
-  [REPL + ":repository"]: "replRepository", [EVAL + ":repository"]: "evalRepository", [RPLAN + ":since"]: "reconcileSince" };
+  [REPL + ":repository"]: "replRepository", [EVAL + ":repository"]: "evalRepository", [RPLAN + ":since"]: "reconcileSince",
+  [MPURGE + ":repository"]: "mpurgeRepository", [MPURGE + ":lastUsed"]: "mpurgeLastUsed", [PUNUSED + ":repos"]: "punusedRepos" };
+// A string parameter with fixed values: "<type>:<name>" → the values (labels "task.v.<value>").
+const PARAM_ENUM = { [PURGE + ":scope"]: ["build", "version"] };
+const ENUM_KEYS = { build: "task.v.build", version: "task.v.version" };
+// The smallest value of an int parameter, 0 unless listed (-1: remove none by age).
+const INT_MIN = { minimumRetained: -1 };
 const paramLabel = (name) => (PARAM_KEYS.includes(name) ? t(PARAM_KEY + name) : name);
 // paramParts lists a task's stored parameters as "name: value", by their API
 // names (short and the same in both languages); empty and false values are left out.
@@ -674,26 +685,42 @@ function paramParts(params) {
   return parts;
 }
 // Repositories a "repository" parameter may name, per task type (the server checks too).
-const REBUILDABLE = (r) => (r.format === "maven" && r.type !== "group") || (["apt", "yum", "helm", "conda"].includes(r.format) && r.type === "hosted");
-const repoChoices = (type, repos) => (type === REBUILD ? repos.filter(REBUILDABLE) : type === PURGE ? repos.filter((r) => r.format === "maven" && r.type === "hosted")
+const REBUILDABLE = (r) => (r.format === "maven" && r.type !== "group") || (["apt", "yum", "helm", "conda"].includes(r.format) && r.type === "hosted") || (r.format === "apt" && r.type === "proxy");
+const repoChoices = (type, repos) => (type === REBUILD ? repos.filter(REBUILDABLE) : type === PURGE ? repos.filter((r) => r.format === "maven")
+  : type === MPURGE ? repos.filter((r) => r.format === "maven" && r.type !== "proxy")
   : type === MOVE ? repos.filter((r) => r.type !== "group") : type === VSCAN || type === EVAL ? repos.filter((r) => r.type !== "group" && OSV_FORMATS.includes(r.format))
     : type === REPL ? repos.filter((r) => r.type === "proxy" && !NO_REPLICATION.includes(r.format)) : repos);
 
-// Schedules (plan 11 Decision 7), in server time.
+// Schedules (plan 11 Decision 7), in server time: several weekdays, month
+// days with "last", and Quartz cron. A string this editor cannot read is kept
+// as it is (kind "raw"), so saving a task never replaces its schedule.
 const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
-const wdName = (i) => new Date(Date.UTC(2024, 0, 7 + i)).toLocaleDateString(locale(), { weekday: "long", timeZone: "UTC" });
-function parseSchedule(sch) {
-  const p = String(sch || "manual").split(":");
-  const k = p[0].toLowerCase();
-  const hm = (i) => (p[i] !== undefined && p[i + 1] !== undefined ? pad2(p[i]) + ":" + pad2(p[i + 1]) : "");
+const WEEK = [1, 2, 3, 4, 5, 6, 0]; // Monday first, as the server writes them
+const wdName = (i, style) => new Date(Date.UTC(2024, 0, 7 + i)).toLocaleDateString(locale(), { weekday: style || "long", timeZone: "UTC" });
+const dayText = (d) => (d === "last" ? t("sch.last") : t("sch.dayN", { n: d }));
+const HM = /^([01]?[0-9]|2[0-3]):([0-5][0-9])$/;
+export function parseSchedule(sch) {
+  const s = String(sch || "manual").trim();
+  const i = s.indexOf(":");
+  const k = i < 0 ? s : s.slice(0, i), rest = i < 0 ? "" : s.slice(i + 1);
+  const time = (x) => { const m = HM.exec(x); return m ? pad2(m[1]) + ":" + m[2] : null; };
   switch (k) {
-    case "once": return { kind: k, at: String(sch).slice(5, 21) };
-    case "hourly": return { kind: k, minute: Number(p[1]) || 0 };
-    case "daily": return { kind: k, time: hm(1) };
-    case "weekly": return { kind: k, wd: WEEKDAYS.indexOf(p[1]), time: hm(2) };
-    case "monthly": return { kind: k, day: Number(p[1]) || 1, time: hm(2) };
+    case "manual": if (s === k) return { kind: k }; break;
+    case "once": if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(rest)) return { kind: k, at: rest.slice(0, 16) }; break;
+    case "hourly": if (/^[0-5]?[0-9]$/.test(rest)) return { kind: k, minute: Number(rest) }; break;
+    case "daily": if (time(rest)) return { kind: k, time: time(rest) }; break;
+    case "weekly":
+    case "monthly": {
+      const j = rest.indexOf(":"), tm = j < 0 ? null : time(rest.slice(j + 1));
+      const list = rest.slice(0, Math.max(0, j)).toLowerCase().split(",").map((x) => x.trim());
+      const ok = k === "weekly" ? (d) => WEEKDAYS.includes(d) : (d) => d === "last" || (/^[0-9]{1,2}$/.test(d) && Number(d) >= 1 && Number(d) <= 31);
+      if (!tm || !list.every(ok)) break;
+      if (k === "weekly") return { kind: k, wds: list.map((d) => WEEKDAYS.indexOf(d)), time: tm };
+      return { kind: k, days: list.map((d) => (d === "last" ? d : Number(d))).sort((a, b) => (a === "last" ? 32 : a) - (b === "last" ? 32 : b)), time: tm };
+    }
+    case "cron": if (rest.trim()) return { kind: k, cron: rest.trim() }; break;
   }
-  return { kind: "manual" };
+  return { kind: "raw", raw: s };
 }
 export function scheduleText(sch) {
   const p = parseSchedule(sch);
@@ -702,56 +729,78 @@ export function scheduleText(sch) {
     case "once": return t("sch.singleText", { at: p.at.replace("T", " ") });
     case "hourly": return t("sch.hourlyText", { m: pad2(p.minute) });
     case "daily": return t("sch.dailyText", { time: p.time });
-    case "weekly": return t("sch.weeklyText", { day: p.wd >= 0 ? wdName(p.wd) : "?", time: p.time });
-    case "monthly": return t("sch.monthlyText", { d: p.day, time: p.time });
+    case "weekly": return t("sch.weeklyText", { day: p.wds.length === 1 ? wdName(p.wds[0]) : WEEK.filter((d) => p.wds.includes(d)).map((d) => wdName(d, "short")).join(", "), time: p.time });
+    case "monthly": return t("sch.monthlyText", { d: p.days.map(dayText).join(", "), time: p.time });
+    case "cron": return t("sch.cronText", { expr: p.cron });
   }
   return String(sch);
 }
 
+// groupOf labels a group of checkboxes (a field of several controls).
+function groupOf(label, el, help) {
+  const id = uid("g");
+  return h("div", { class: "field full", role: "group", "aria-labelledby": id }, h("span", { class: "flabel", id }, label), el, help ? h("small", null, help) : null);
+}
+
 // scheduleEditor is a kind select plus the inputs that kind uses; value()
-// builds the schedule string.
+// builds the schedule string and errs() lists what is missing.
 function scheduleEditor(sch) {
   const p = parseSchedule(sch);
-  const kind = sel([["manual", t("task.manual")], ["once", t("sch.single")], ["hourly", t("sch.hourly")], ["daily", t("sch.daily")],
-    ["weekly", t("sch.weekly")], ["monthly", t("sch.monthly")]], p.kind);
+  const kinds = [["manual", t("task.manual")], ["once", t("sch.single")], ["hourly", t("sch.hourly")], ["daily", t("sch.daily")],
+    ["weekly", t("sch.weekly")], ["monthly", t("sch.monthly")], ["cron", t("sch.cron")]];
+  if (p.kind === "raw") kinds.push(["raw", t("sch.raw")]);
+  const kind = sel(kinds, p.kind);
   const time = h("input", { type: "time", value: p.time || "03:00" });
   const minute = numIn(p.minute || 0, 0, 59);
-  const wd = sel(WEEKDAYS.map((w, i) => [w, wdName(i)]), WEEKDAYS[p.wd >= 0 ? p.wd : 0]);
-  const day = numIn(p.day || 1, 1, 28);
+  const wds = checks(WEEK.map((d) => [WEEKDAYS[d], wdName(d, "short")]), (p.wds || [1]).map((d) => WEEKDAYS[d]));
+  const days = checks(Array.from({ length: 31 }, (_, i) => [String(i + 1), String(i + 1)]).concat([["last", t("sch.last")]]), (p.days || [1]).map(String));
+  days.el.classList.add("days");
   const at = h("input", { type: "datetime-local", value: p.at || "" });
+  const cron = textIn(p.cron || "", { class: "mono", maxlength: 200, placeholder: "0 0 1 * * ?" });
+  const raw = textIn(p.raw || "", { class: "mono", maxlength: 300 });
   // An untouched once time keeps the stored string (with its offset);
   // a new one is sent offset-less, which the server reads as its local time.
   const origOnce = p.kind === "once" ? String(sch) : "";
   const code = h("code", null);
   const f = {
     time: field(t("sch.time"), time), minute: field(t("sch.minute"), minute, t("sch.minuteHelp")),
-    wd: field(t("sch.weekday"), wd), day: field(t("sch.day"), day, t("sch.dayHelp")), at: field(t("sch.at"), at, t("sch.atHelp")),
+    wd: groupOf(t("sch.weekday"), wds.el), day: groupOf(t("sch.day"), days.el, t("sch.dayHelp")), at: field(t("sch.at"), at, t("sch.atHelp")),
+    cron: field(t("sch.cronField"), cron, t("sch.cronHelp"), { full: true }), raw: field(t("sch.rawField"), raw, t("sch.rawHelp"), { full: true }),
   };
-  const uses = { manual: [], once: ["at"], hourly: ["minute"], daily: ["time"], weekly: ["wd", "time"], monthly: ["day", "time"] };
+  const uses = { manual: [], once: ["at"], hourly: ["minute"], daily: ["time"], weekly: ["wd", "time"], monthly: ["day", "time"], cron: ["cron"], raw: ["raw"] };
   const value = () => {
     const tm = time.value.slice(0, 5);
     switch (kind.value) {
       case "once": return origOnce && at.value === p.at ? origOnce : `once:${at.value.slice(0, 16)}`;
       case "hourly": return "hourly:" + pad2(minute.value.trim());
       case "daily": return "daily:" + tm;
-      case "weekly": return "weekly:" + wd.value + ":" + tm;
-      case "monthly": return "monthly:" + String(day.value).trim() + ":" + tm;
+      case "weekly": return "weekly:" + wds.values().join(",") + ":" + tm;
+      case "monthly": return "monthly:" + days.values().join(",") + ":" + tm;
+      case "cron": return "cron:" + cron.value.trim();
+      case "raw": return raw.value === p.raw ? String(sch) : raw.value.trim();
     }
     return "manual";
+  };
+  const errs = () => {
+    const k = kind.value;
+    return [k === "once" && !at.value ? t("task.e.when") : null, k === "weekly" && !wds.values().length ? t("task.e.weekdays") : null,
+      k === "monthly" && !days.values().length ? t("task.e.days") : null, k === "cron" && !cron.value.trim() ? t("task.e.cron") : null,
+      k === "raw" && !raw.value.trim() ? t("task.e.raw") : null].filter(Boolean);
   };
   const sync = () => {
     for (const [k, el] of Object.entries(f)) el.hidden = !uses[kind.value].includes(k);
     code.textContent = value();
   };
-  const el = h("div", { class: "sched" }, fields(field(t("sch.kind"), kind, t("sch.tzHelp")), f.at, f.minute, f.wd, f.day, f.time),
+  const el = h("div", { class: "sched" }, fields(field(t("sch.kind"), kind, t("sch.tzHelp")), f.at, f.minute, f.wd, f.day, f.time, f.cron, f.raw),
     h("p", { class: "hint" }, t("sch.string"), " ", code));
   el.addEventListener("input", sync);
   el.addEventListener("change", sync);
   sync();
-  return { el, value };
+  return { el, value, errs };
 }
 
 export async function viewTasks(view, id) {
+  if (id === "create" && !state.me.admin) return needAdmin(view, t("nav.tasks"));
   if (id !== undefined) return taskForm(view, id === "create" ? null : id);
   const isLive = alive();
   const all = await api("tasks");
@@ -760,16 +809,16 @@ export async function viewTasks(view, id) {
   const xfer = (kind) => {
     const b = button(kind === "export" ? t("task.exportBtn") : t("task.importBtn"));
     b.addEventListener("click", () => transferDialog(kind, all.types));
-    return all.types && all.types.some((x) => x.type === (kind === "export" ? EXPORT : IMPORT)) ? b : null;
+    return state.me.admin && all.types && all.types.some((x) => x.type === (kind === "export" ? EXPORT : IMPORT)) ? b : null;
   };
   put(view,
-    pageHead(t("nav.tasks"), sub(t("task.sub")), acts(xfer("export"), xfer("import"), h("a", { class: "btn primary", href: taskLink("create") }, t("task.create"))), taskEyebrow()),
+    pageHead(t("nav.tasks"), sub(t("task.sub")), acts(xfer("export"), xfer("import"), state.me.admin ? h("a", { class: "btn primary", href: taskLink("create") }, t("task.create")) : null), taskEyebrow()),
     h("section", { class: "card" }, tbl(
       [t("task.task"), t("col.status"), t("task.schedule"), t("task.next"), t("task.lastResult"), actHead()],
       tasks.map((x) => h("tr", null,
         h("td", { class: "name" }, h("a", { href: taskLink(x.id) }, h("strong", null, taskName(x))), h("div", { class: "tiny muted" }, typeLabel(x.type, x.typeName)),
           paramParts(x.params).length ? h("div", { class: "tiny muted mono params" }, paramParts(x.params).join(" · ")) : null),
-        h("td", null, taskStatus(x)),
+        h("td", null, taskStatus(x), x.queued ? [" ", queuedBadge()] : null),
         h("td", null, scheduleText(x.schedule)),
         h("td", { class: "nowrap" }, x.nextRun ? fmtDate(x.nextRun) : dash),
         h("td", null, resultBadge(x), x.lastRun ? h("div", { class: "tiny muted" }, fmtDate(x.lastRun)) : null),
@@ -792,7 +841,7 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
     let el, get;
     switch (p.type) {
       case "repositories": {
-        const list = type === CLEANUP ? repos.filter(cleanable) : type === EXPORT ? repos.filter((r) => r.type !== "group") : repos;
+        const list = type === CLEANUP ? repos.filter(cleanable) : type === EXPORT ? repos.filter((r) => r.type !== "group") : type === PUNUSED ? repos.filter((r) => r.type === "proxy") : repos;
         const picked = new Set(Array.isArray(cur) ? cur : []);
         const m = h("select", { multiple: true, size: Math.min(8, Math.max(3, list.length)), class: "rf-list" },
           list.map((r) => {
@@ -806,6 +855,7 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
       }
       case "repository": {
         const list = repoChoices(type, repos).map((r) => [r.name, r.name + " · " + r.format + " · " + r.type]);
+        if (type === PURGE || type === MPURGE) list.unshift(["*", t("task.everyMaven")]);
         const v = typeof cur === "string" ? cur : "";
         if (v && !list.some(([n]) => n === v)) list.unshift([v, v]);
         const one = sel([["", p.required ? t("task.pickRepo") : t("task.allRepos")]].concat(list), v);
@@ -859,7 +909,7 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
       }
       case "int":
       case "bytes": {
-        const num = numIn(cur === undefined || cur === null ? "" : cur, 0, undefined);
+        const num = numIn(cur === undefined || cur === null ? "" : cur, INT_MIN[p.name] || 0, undefined);
         const size = p.type === "bytes" ? h("span", { class: "rf-set muted" }) : null;
         const sync = () => { if (size) size.textContent = intOf(num) >= 0 ? fmtBytes(intOf(num)) : ""; };
         num.addEventListener("input", sync);
@@ -869,6 +919,13 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
         break;
       }
       default: {
+        const vals = PARAM_ENUM[type + ":" + p.name];
+        if (vals) {
+          const one = sel(vals.map((v) => [v, t(ENUM_KEYS[v])]), vals.includes(cur) ? cur : vals[0]);
+          el = field(paramLabel(p.name), one, help, { req: !!p.required, full: true });
+          get = () => one.value;
+          break;
+        }
         const inp = textIn(cur === undefined || cur === null ? "" : String(cur), { maxlength: 500 });
         el = field(paramLabel(p.name), inp, help, { req: !!p.required, full: true });
         get = () => inp.value.trim();
@@ -883,7 +940,7 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
       const v = g();
       const empty = v === undefined || v === "" || (Array.isArray(v) && !v.length);
       if (p.required && empty) errs.push(t("task.e.param", { name: paramLabel(p.name) }));
-      if ((p.type === "int" || p.type === "bytes") && v !== undefined && !(v >= 0)) errs.push(t("task.e.int", { name: paramLabel(p.name) }));
+      if ((p.type === "int" || p.type === "bytes") && v !== undefined && !(v >= (INT_MIN[p.name] || 0))) errs.push(t("task.e.int", { name: paramLabel(p.name), min: INT_MIN[p.name] || 0 }));
       if (!empty) out[p.name] = v;
     }
     return { params: out, errs };
@@ -954,7 +1011,7 @@ async function taskForm(view, id) {
   }
   let task = got;
   const policyOf = {};
-  for (const p of (pols && pols.policies) || []) for (const r of p.repositories || []) policyOf[r] = p.name;
+  for (const p of (pols && pols.policies) || []) for (const r of p.repositories || []) policyOf[r] = (policyOf[r] ? policyOf[r] + ", " : "") + p.name;
   const types = (list.types || []).map((x) => [x.type, typeLabel(x.type, x.name)]);
   const specOf = (ty) => ((list.types || []).find((x) => x.type === ty) || {}).params || [];
   const stores = ((bs && bs.blobstores) || []).map((x) => x.name);
@@ -964,6 +1021,7 @@ async function taskForm(view, id) {
   const sched = scheduleEditor(task ? task.schedule : "daily:02:00");
   const enabled = h("input", { type: "checkbox", checked: task ? !!task.enabled : true });
   const notify = h("textarea", { rows: 3, spellcheck: "false", autocomplete: "off", placeholder: "ops@example.com", maxlength: 2000 }, task && task.notifyEmail ? task.notifyEmail.join("\n") : "");
+  const notifyOn = sel(NOTIFY_ON(), task && task.notifyOn === "success_failure" ? "success_failure" : "failure");
   const paramsBox = h("div", { class: "task-params" });
   let params = null;
   const setParams = () => {
@@ -981,7 +1039,7 @@ async function taskForm(view, id) {
     h("h3", { class: "sub-title" }, t("task.schedule")), sched.el,
     h("h3", { class: "sub-title" }, t("task.params")), paramsBox,
     h("div", { class: "field" }, h("label", { class: "check" }, enabled, t("task.enabled")), h("small", null, t("task.enabledHelp"))),
-    fields(field(t("task.notify"), notify, t("task.notifyHelp"), { full: true })),
+    fields(field(t("task.notify"), notify, t("task.notifyHelp"), { full: true }), field(t("task.notifyOn"), notifyOn, t("task.notifyOnHelp"))),
     h("div", { class: "actions end" }, save));
 
   form.addEventListener("submit", async (ev) => {
@@ -989,11 +1047,10 @@ async function taskForm(view, id) {
     fs.clear();
     const pv = params.get();
     const b = { name: nameIn.value.trim(), schedule: sched.value(), params: pv.params, enabled: enabled.checked,
-      notifyEmail: notify.value.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean) };
+      notifyEmail: notify.value.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean), notifyOn: notifyOn.value };
     if (creating) b.type = typeSel.value;
-    const errs = pv.errs.slice();
+    const errs = pv.errs.concat(sched.errs());
     if (!b.name) errs.unshift(t("task.e.name"));
-    if (/^once:$/.test(b.schedule)) errs.push(t("task.e.when"));
     if (errs.length) { fs.show(errs); return; }
     save.disabled = true;
     try {
@@ -1033,14 +1090,15 @@ async function taskForm(view, id) {
       kv(t("task.next"), task.nextRun ? fmtDate(task.nextRun) : dash),
       kv(t("task.schedule"), scheduleText(task.schedule)),
       kv(t("task.params"), paramParts(task.params).length ? h("span", { class: "params mono" }, paramParts(task.params).map((x) => h("span", null, x))) : dash),
-      kv(t("task.notify"), (task.notifyEmail || []).length ? task.notifyEmail.join(", ") : dash),
+      kv(t("task.notify"), (task.notifyEmail || []).length ? [task.notifyEmail.join(", "), h("div", { class: "tiny muted" }, (NOTIFY_ON().find(([v]) => v === task.notifyOn) || NOTIFY_ON()[0])[1])] : dash),
+      task.queued ? kv(t("task.queuedTitle"), [queuedBadge(), " ", t("task.queuedMsg")]) : null,
       kv(t("task.lastRun"), task.lastRun ? fmtDate(task.lastRun) : dash),
       task.lastRun ? kv(t("task.duration"), fmtNum(task.lastDurationMs) + " ms") : null,
       task.lastRun ? kv(t(removedKey), fmtNum(task.lastRemoved)) : null,
       task.lastRun && withBytes ? kv(t("task.bytes"), fmtBytes(task.lastBytes)) : null,
       task.lastMessage ? kv(t("task.message"), task.lastMessage) : null);
-    run.disabled = task.status === "Running";
-    stop.hidden = task.status !== "Running";
+    run.disabled = task.status === "Running" || !!task.queued;
+    stop.hidden = task.status !== "Running" || !can("tasks", "run");
   };
   const showLog = () => put(logBox, logLines(task.lastLog));
   let timer = 0;
@@ -1057,9 +1115,9 @@ async function taskForm(view, id) {
   async function track(started) {
     run.disabled = true;
     msg.textContent = t("task.runningMsg");
-    let settled = !started, failed = null;
+    let settled = !started, failed = null, reply = null;
     if (started) {
-      started.catch((e) => { failed = e; }).finally(() => { settled = true; });
+      started.then((d) => { reply = d; }, (e) => { failed = e; }).finally(() => { settled = true; });
     }
     const until = Date.now() + 600000;
     for (;;) {
@@ -1074,6 +1132,12 @@ async function taskForm(view, id) {
         msg.textContent = t("task.runFailed", { msg: failed.message });
         handleError(failed);
         break;
+      }
+      if (reply && reply.queued) { // another task runs: the scheduler starts this one after it
+        task = Object.assign({}, task, { queued: true });
+        show();
+        msg.textContent = t("task.queuedMsg");
+        return;
       }
       try {
         const x = ((await api("tasks")).tasks || []).find((y) => y.id === task.id);
@@ -1137,6 +1201,12 @@ async function taskForm(view, id) {
 
   show();
   showLog();
+  // A delegated user reads the task (and with "run" runs it); the rest is for admins.
+  if (!state.me.admin) {
+    for (const el of form.querySelectorAll("input, select, textarea")) el.disabled = true;
+    save.hidden = del.hidden = true;
+    if (!can("tasks", "run")) run.hidden = true;
+  }
   put(view,
     pageHead(taskName(task), sub(typeLabel(task.type, task.typeName)), acts(back, del, stop, run), taskEyebrow()),
     fs.ok,
@@ -1297,7 +1367,7 @@ export async function viewSelectors(view, name) {
   const eb = { eyebrow: t("users.eyebrow") };
   const back = h("a", { class: "btn", href: csLink() }, t("cs.back"));
   if (name === undefined) {
-    put(view, pageHead(t("nav.selectors"), sub(t("cs.sub")), acts(h("a", { class: "btn primary", href: csLink("create") }, t("cs.create"))), eb),
+    put(view, pageHead(t("nav.selectors"), sub(t("cs.sub")), can("selectors", "add") ? acts(h("a", { class: "btn primary", href: csLink("create") }, t("cs.create"))) : null, eb),
       h("section", { class: "card" }, tbl([t("col.name"), t("cs.expr"), t("cs.roles"), actHead()],
         list.map((x) => h("tr", null,
           h("td", { class: "name" }, h("a", { href: csLink(x.name) }, h("strong", null, x.name)), x.description ? h("div", { class: "tiny muted" }, x.description) : null),
@@ -1306,8 +1376,10 @@ export async function viewSelectors(view, name) {
           h("td", { class: "act" }, h("a", { class: "btn small", href: csLink(x.name) }, t("col.open"))))), t("cs.none"))));
     return;
   }
+  if (creating && !can("selectors", "add")) { needAdmin(view, t("nav.selectors")); return; }
   const cur = creating ? { name: "", description: "", expression: "", roles: [] } : list.find((x) => x.name === name);
   if (!cur) { put(view, pageHead(t("nav.selectors"), null, acts(back), eb), notFound(t("cs.notFound", { name }))); return; }
+  const editable = creating || can("selectors", "edit");
   const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 64, class: "mono" });
   const descIn = textIn(cur.description, { maxlength: 200 });
   const expr = h("textarea", { class: "mono", rows: 4, spellcheck: "false", placeholder: CS_EXAMPLES[0] }, cur.expression);
@@ -1338,10 +1410,14 @@ export async function viewSelectors(view, name) {
       d.truncated ? amber(t("cs.previewTrunc")) : null,
       paths.length ? h("pre", { class: "code" }, paths.join("\n")) : h("div", { class: "empty" }, t("cs.previewNone"))];
   });
-  const preview = card(t("cs.preview"), t("cs.previewSub"), [field(t("col.repo"), repoSel), h("div", { class: "actions" }, run), tb.result]);
+  const preview = state.me.admin ? card(t("cs.preview"), t("cs.previewSub"), [field(t("col.repo"), repoSel), h("div", { class: "actions" }, run), tb.result]) : null; // the preview API is for admins
+  if (!editable) {
+    for (const el of form.querySelectorAll("input, textarea")) el.disabled = true;
+    save.hidden = true;
+  }
   const used = creating ? null : card(t("cs.roles"), t("cs.rolesSub"),
     listOf((cur.roles || []).map((r) => h("a", { href: "#admin/security/roles:" + enc(r) }, r))) || h("div", { class: "empty" }, t("cs.noRoles")));
-  const del = creating ? null : deleter(isLive, "content-selectors", cur.name, t("cs.delText", { name: cur.name }), t("cs.delTitle"), csLink(),
+  const del = creating || !can("selectors", "delete") ? null : deleter(isLive, "content-selectors", cur.name, t("cs.delText", { name: cur.name }), t("cs.delTitle"), csLink(),
     (d) => (Array.isArray(d.roles) ? t("cs.inUse", { roles: d.roles.join(", ") }) : ""));
   put(view, pageHead(creating ? t("cs.createTitle") : cur.name, sub(creating ? t("cs.createSub") : t("cs.detailSub")), acts(back, del), eb),
     fs.ok, h("div", { class: "two" }, h("div", { class: "stack" }, card(t("cs.selector"), t("cs.selectorSub"), form), used), preview));
@@ -1350,7 +1426,11 @@ export async function viewSelectors(view, name) {
 
 const DLV = { pending: ["wh.pending", "amber"], ok: ["wh.ok", "green"], failed: ["wh.failed", "red"] };
 const dlvBadge = (st) => (DLV[st] ? badge(t(DLV[st][0]), DLV[st][1]) : badge(st));
-const hookBody = (w) => ({ name: w.name, url: w.url, events: w.events || [], repo: w.repo || "", enabled: !!w.enabled });
+const hookBody = (w) => ({ name: w.name, url: w.url, events: w.events || [], repo: w.repo || "", enabled: !!w.enabled, payloadFormat: w.payloadFormat || "" });
+// The payload formats: Nexus Repository 3's (its four event names) or Command Center's.
+const PAYLOADS = () => [["nexus", t("wh.fmtNexus")], ["commandcenter", t("wh.fmtCC")]];
+const NX_KEYS = { audit: "wh.nx.audit", repository: "wh.nx.repository", component: "wh.nx.component", asset: "wh.nx.asset" };
+const payloadText = (f) => (PAYLOADS().find(([v]) => v === (f || "commandcenter")) || [0, f])[1];
 const whPath = (id, rest) => "webhooks/" + encSeg(id) + (rest || "");
 
 export async function viewWebhooks(view, id) {
@@ -1378,21 +1458,24 @@ export async function viewWebhooks(view, id) {
       return h("tr", null,
         h("td", { class: "name" }, h("a", { href: whLink(w.id) }, h("strong", null, w.name)), h("div", { class: "tiny muted mono" }, w.url)),
         h("td", null, w.repo ? h("a", { href: adminRepoLink(w.repo) }, w.repo) : badge(t("wh.global"))),
+        h("td", null, w.payloadFormat === "nexus" ? badge("Nexus", "blue") : badge("Command Center")),
         h("td", { class: "num" }, events.includes("*") ? t("wh.allEvents") : fmtNum(events.length)),
         h("td", null, toggle), last,
         h("td", { class: "act" }, h("a", { class: "btn small", href: whLink(w.id) }, t("col.open"))));
     });
     put(view, pageHead(t("nav.webhooks"), sub(t("wh.sub")), acts(h("a", { class: "btn primary", href: whLink("create") }, t("wh.create"))), eb),
-      h("section", { class: "card" }, tbl([t("col.name"), t("wh.scope"), { t: t("wh.events"), cls: "num" }, t("col.status"), t("wh.last"), actHead()], rows, t("wh.none"))));
+      h("section", { class: "card" }, tbl([t("col.name"), t("wh.scope"), t("wh.payload"), { t: t("wh.events"), cls: "num" }, t("col.status"), t("wh.last"), actHead()], rows, t("wh.none"))));
     return;
   }
   const [evd, repos, cur] = await Promise.all([api("webhooks/events").catch(() => ({})), loadRepos(true),
-    creating ? { name: "", url: "", secretSet: false, events: [], repo: "", enabled: true } : api(whPath(id))]);
+    creating ? { name: "", url: "", secretSet: false, events: [], repo: "", enabled: true, payloadFormat: "nexus" } : api(whPath(id))]);
   if (!isLive()) return;
   const back = h("a", { class: "btn", href: whLink() }, t("wh.back"));
   const stored = cur.events || [];
+  const nexus0 = cur.payloadFormat === "nexus";
   const kinds = [["*", t("wh.allEvents")]].concat((evd.events || []).map((e) => [e.kind, h("span", { title: e.description }, e.kind)]));
-  for (const k of stored) if (!kinds.some(([v]) => v === k)) kinds.push([k, k]);
+  const nkinds = (evd.nexusEvents || []).map((e) => [e.kind, h("span", { title: e.description }, e.kind, " ", NX_KEYS[e.kind] ? h("small", { class: "muted" }, t(NX_KEYS[e.kind])) : null)]);
+  for (const k of stored) if (!(nexus0 ? nkinds : kinds).some(([v]) => v === k)) (nexus0 ? nkinds : kinds).push([k, k]);
   const names = repos.map((r) => r.name);
   if (cur.repo && !names.includes(cur.repo)) names.push(cur.repo);
   const nameIn = textIn(cur.name, { required: true, maxlength: 64 });
@@ -1401,7 +1484,18 @@ export async function viewWebhooks(view, id) {
   const clearSecret = cur.secretSet ? h("input", { type: "checkbox" }) : null;
   if (clearSecret) clearSecret.addEventListener("change", () => { secret.disabled = clearSecret.checked; if (clearSecret.checked) secret.value = ""; });
   const repoSel = sel([["", t("wh.global")]].concat(names.map((n) => [n, n])), cur.repo || "");
-  const ev = checks(kinds, stored);
+  const ev = checks(kinds, nexus0 ? [] : stored), nev = checks(nkinds, nexus0 ? stored : []);
+  const payload = sel(PAYLOADS(), nexus0 ? "nexus" : "commandcenter");
+  const evField = h("div", { class: "field full" }, h("span", { class: "flabel" }, t("wh.events")), ev.el, h("small", null, t("wh.eventsHelp")));
+  const nevField = h("div", { class: "field full" }, h("span", { class: "flabel" }, t("wh.events")), nev.el, h("small", null, t("wh.nexusEventsHelp")));
+  const secretHelp = h("span");
+  const syncPayload = () => {
+    evField.hidden = payload.value === "nexus";
+    nevField.hidden = payload.value !== "nexus";
+    secretHelp.textContent = payload.value === "nexus" ? t("wh.secretHelpNexus") : t("wh.secretHelp");
+  };
+  payload.addEventListener("change", syncPayload);
+  syncPayload();
   const enabled = h("input", { type: "checkbox", checked: cur.enabled !== false });
   const save = h("button", { type: "submit", class: "btn primary" }, creating ? t("wh.createBtn") : t("roles.save"));
   const form = h("form", { novalidate: true });
@@ -1410,13 +1504,14 @@ export async function viewWebhooks(view, id) {
     field(t("col.name"), nameIn, null, { req: true }),
     field(t("wh.repo"), repoSel, t("wh.repoHelp")),
     field(t("wh.url"), urlIn, t("wh.urlHelp"), { full: true, req: true }),
-    field(t("wh.secret"), secret, cur.secretSet ? [h("span", { class: "rf-set" }, t("wh.secretSet")), " — ", t("rf.keepEmpty")] : t("wh.secretHelp")),
+    field(t("wh.secret"), secret, cur.secretSet ? [h("span", { class: "rf-set" }, t("wh.secretSet")), " — ", t("rf.keepEmpty")] : secretHelp),
     clearSecret ? h("div", { class: "field" }, h("label", { class: "check" }, clearSecret, t("wh.clearSecret"))) : null,
-    h("div", { class: "field full" }, h("span", { class: "flabel" }, t("wh.events")), ev.el, h("small", null, t("wh.eventsHelp"))),
+    field(t("wh.payload"), payload, t("wh.payloadHelp"), { full: true }), evField, nevField,
     h("div", { class: "field" }, h("label", { class: "check" }, enabled, t("wh.enabled")))),
     h("div", { class: "actions end" }, save));
   form.addEventListener("submit", saver(fs, isLive, save, creating, "webhooks", cur.id, () => {
-    const b = { name: nameIn.value.trim(), url: urlIn.value.trim(), events: ev.values(), repo: repoSel.value, enabled: enabled.checked };
+    const nx = payload.value === "nexus";
+    const b = { name: nameIn.value.trim(), url: urlIn.value.trim(), events: (nx ? nev : ev).values(), repo: repoSel.value, enabled: enabled.checked, payloadFormat: payload.value };
     if (clearSecret && clearSecret.checked) b.secret = ""; // "" clears; absent keeps
     else if (secret.value) b.secret = secret.value;
     secret.value = ""; // the secret never stays in the page
@@ -1472,7 +1567,7 @@ export async function viewWebhooks(view, id) {
   const dcard = card(t("wh.deliveries"), t("wh.deliveriesSub"), null, refresh);
   dcard.appendChild(dbox);
   const del = deleter(isLive, "webhooks", cur.id, t("wh.delText", { name: cur.name }), t("wh.delTitle"), whLink(), () => "");
-  put(view, pageHead(cur.name, h("p", null, cur.repo ? badge(cur.repo, "blue") : badge(t("wh.global")), " ", cur.enabled ? badge(t("wh.on"), "green") : badge(t("wh.off"), "red"), " ", t("wh.detailSub")), acts(back, del), eb),
+  put(view, pageHead(cur.name, h("p", null, cur.repo ? badge(cur.repo, "blue") : badge(t("wh.global")), " ", cur.enabled ? badge(t("wh.on"), "green") : badge(t("wh.off"), "red"), " ", badge(payloadText(cur.payloadFormat)), " ", t("wh.detailSub")), acts(back, del), eb),
     fs.ok, h("div", { class: "two" }, formCard, h("div", { class: "stack" }, card(t("wh.testTitle"), t("wh.testSub"), [h("div", { class: "actions" }, run), tb.result]), about)), dcard);
 }
 

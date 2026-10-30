@@ -11,7 +11,7 @@
 //   #user/account
 import {
   state, h, put, api, enc, encSeg, alive, filterBar, row, pageHead, loading, card, kv, tbl, handleError, needLogin, icon,
-  loadRepos, FORMATS, FORMAT_NAMES, fmtDate, fmtNum, copyLine, copyButton, markBusy,
+  loadRepos, FORMATS, FORMAT_NAMES, fmtDate, fmtNum, copyLine, copyButton, markBusy, can, needAdmin,
 } from "./util.js";
 import { t } from "./i18n.js";
 import { confirmDelete } from "./browse.js";
@@ -37,6 +37,10 @@ const REENTER = /re-enter the bind password/;
 const REENTER_OIDC = /re-enter the client secret/;
 const REENTER_CROWD = /re-enter the application password/;
 const ACTIONS = ["browse", "read", "add", "edit", "delete"];
+// Refusals of a delegated administrator, shown in the page's language.
+const ADMIN_ONLY = /only an admin can change an administrator/; // pinned to the server text by TestAccessMessagesPinned
+const SELF_DELETE = /you cannot delete the user you are signed in as/;
+const DIR_ONLY = /only an admin can manage the records of/;
 
 const userLink = (id) => "#admin/security/users" + (id ? ":" + enc(id) : "");
 const roleLink = (id) => "#admin/security/roles" + (id ? ":" + enc(id) : "");
@@ -59,6 +63,8 @@ const actHead = () => ({ t: h("span", { class: "sr-only" }, t("col.actions")), c
 // failWith shows an API failure in the page's error box: a lockout gets its
 // own text, sign-in and permission problems the generic banner.
 function failWith(fs, e, head) {
+  const own = [[ADMIN_ONLY, "access.e.adminOnly"], [SELF_DELETE, "access.e.self"], [DIR_ONLY, "access.e.dirOnly"]].find(([re]) => re.test(e.message || ""));
+  if (own && (e.status === 403 || e.status === 409)) { fs.show([t(own[1])], head); return; }
   if (e.status === 401 || e.status === 403) { handleError(e); return; }
   fs.show(e.status === 409 && LOCKOUT.test(e.message) ? [t("access.lockout")] : errList(e), head);
 }
@@ -97,7 +103,7 @@ function mergeUsers(list) {
 const realmBadge = (u) => (isDir(u.source) ? badge(realmName(u.source), "purple") : badge(realmName("local")));
 
 export function viewUsers(view, id) {
-  if (id === "create") return userCreate(view);
+  if (id === "create") return can("users", "add") ? userCreate(view) : needAdmin(view, t("nav.users"));
   return id === undefined ? userList(view) : userDetail(view, id);
 }
 
@@ -115,14 +121,14 @@ async function userList(view) {
   ], [u.id, u.name, u.email].join(" ")));
   const f = filterBar(rows, t("users.filter"), "users.count");
   put(view,
-    pageHead(t("nav.users"), sub(t("users.sub")), acts(h("a", { class: "btn primary", href: userLink("create") }, t("users.create"))), eyebrow()),
+    pageHead(t("nav.users"), sub(t("users.sub")), can("users", "add") ? acts(h("a", { class: "btn primary", href: userLink("create") }, t("users.create"))) : null, eyebrow()),
     h("section", { class: "card" }, f.bar,
       tbl([t("users.user"), t("users.email"), t("users.realm"), t("users.roles"), t("col.status"), actHead()], rows, t("users.none")), f.none));
 }
 
 async function userCreate(view) {
   const isLive = alive();
-  const roles = (await api("roles")).roles || [];
+  const roles = (await api("roles").catch(() => ({}))).roles || []; // a users-only delegate may not read the roles
   if (!isLive()) return;
   const idIn = textIn("", { required: true, maxlength: 64 });
   const nameIn = textIn("", { maxlength: 200 });
@@ -215,7 +221,7 @@ function passwordModal(title, onSave) {
 
 async function userDetail(view, id) {
   const isLive = alive();
-  const [ul, rl] = await Promise.all([api("users"), api("roles")]);
+  const [ul, rl] = await Promise.all([api("users"), api("roles").catch(() => ({}))]);
   if (!isLive()) return;
   const u = mergeUsers(ul.users || []).find((x) => x.key === id);
   const back = h("a", { class: "btn", href: userLink() }, t("users.back"));
@@ -253,12 +259,14 @@ async function userDetail(view, id) {
   if (!stored) {
     put(form, kv(t("users.id"), u.id), kv(t("users.name"), u.name), kv(t("users.email"), u.email), kv(t("users.realm"), realmBadge(u)),
       kv(t("users.roles"), h("span", null, roleBadges(u.eff))), notice(t("users.dirNote")));
-    head = acts(back, revoke);
+    head = acts(back, state.me.admin ? revoke : null); // only an admin revokes the tokens of a user without a local record
   } else {
     const nameIn = textIn(u.name, { disabled: ldap, maxlength: 200 });
     const emailIn = textIn(u.email, { disabled: ldap, maxlength: 200 });
     const status = sel([["active", t("users.active")], ["disabled", t("users.disabled")]], u.status || "active");
-    const rg = checkGroup(roleItems(rl.roles || []), u.roles || []);
+    // The role list may be unreadable (a users-only delegate): the user's own roles stay offered, so a save keeps them.
+    const ids = (rl.roles || []).map((r) => r.id);
+    const rg = checkGroup(ids.concat((u.roles || []).filter((r) => !ids.includes(r))).map((id) => [id, id]), u.roles || []);
     const save = h("button", { type: "submit", class: "btn primary" }, t("users.save"));
     const idIn = textIn(u.id, { disabled: true });
     const srcIn = textIn(realmName(ldap ? u.source : "local"), { disabled: true });
@@ -317,7 +325,12 @@ async function userDetail(view, id) {
       }
       if (isLive()) location.hash = userLink();
     });
-    head = acts(back, reset, revoke, toggle, del);
+    const edit = can("users", "edit");
+    if (!edit) {
+      for (const el of form.querySelectorAll("input, select")) el.disabled = true;
+      save.hidden = true;
+    }
+    head = acts(back, edit ? reset : null, edit ? revoke : null, edit ? toggle : null, can("users", "delete") ? del : null);
   }
   put(view, pageHead(u.id, sub(t("users.realmSub", { realm: realmName(ldap ? u.source : "local") })), head, eyebrow()),
     fs.ok, h("div", { class: "two" }, card(t("users.info"), t("users.infoSub"), form), access));
@@ -326,12 +339,35 @@ async function userDetail(view, id) {
 // ---- roles -----------------------------------------------------------------------
 
 const METRICS = "metrics"; // the usage data's target: action "read" only
-const targetKind = (tg) => (tg === "*" ? "all" : tg === METRICS ? METRICS : tg.startsWith("format:") ? "format" : tg.startsWith("selector:") ? "selector" : "repo");
-const targetValue = (tg) => (tg === "*" || tg === METRICS ? "" : tg.slice(tg.indexOf(":") + 1));
+// APP_DOMAINS: the delegated administration ("app:<domain>", Nexus nx-<domain>-*)
+// and the actions each delegates (auth.AppDomains); the rest stays with admins.
+const APP_DOMAINS = { users: ["read", "add", "edit", "delete"], roles: ["read", "add", "edit", "delete"], selectors: ["read", "add", "edit", "delete"],
+  settings: ["read"], tasks: ["read", "run"], blobstores: ["read"] };
+const APP_KEYS = { users: "roles.app.users", roles: "roles.app.roles", selectors: "roles.app.selectors", settings: "roles.app.settings", tasks: "roles.app.tasks", blobstores: "roles.app.blobstores" };
+const appName = (d) => (APP_KEYS[d] ? t(APP_KEYS[d]) : d);
+// A target's kind: "*", format:, repo:, selector:, metrics, app:<domain>, and the
+// repository administration admin:* | admin:format:<f> | admin:repo:<n>.
+const targetKind = (tg) => (tg === "*" ? "all" : tg === METRICS ? METRICS : tg === "admin:*" ? "adminAll" : tg.startsWith("admin:format:") ? "adminFormat"
+  : tg.startsWith("admin:repo:") ? "adminRepo" : tg.startsWith("app:") ? "app" : tg.startsWith("format:") ? "format" : tg.startsWith("selector:") ? "selector" : "repo");
+const PREFIX = { format: "format:", repo: "repo:", selector: "selector:", app: "app:", adminFormat: "admin:format:", adminRepo: "admin:repo:" };
+const targetValue = (tg) => { const p = PREFIX[targetKind(tg)]; return !p ? "" : tg.startsWith(p) ? tg.slice(p.length) : tg.slice(tg.indexOf(":") + 1); };
+// actionsOf: the actions a target takes (a single repository's administration has no "add").
+const actionsOf = (kind, v) => (kind === METRICS ? ["read"] : kind === "app" ? APP_DOMAINS[v] || ACTIONS : kind === "adminRepo" ? ["browse", "read", "edit", "delete"] : ACTIONS);
 const scopeText = (tg) => {
   const k = targetKind(tg), v = targetValue(tg);
-  return k === "all" ? t("roles.scopeAll") : k === METRICS ? t("roles.kMetrics") : k === "format" ? t("roles.scopeFormat", { v: FORMAT_NAMES[v] || v }) : k === "selector" ? t("roles.scopeSelector", { v }) : t("roles.scopeRepo", { v });
+  switch (k) {
+    case "all": return t("roles.scopeAll");
+    case METRICS: return t("roles.kMetrics");
+    case "format": return t("roles.scopeFormat", { v: FORMAT_NAMES[v] || v });
+    case "selector": return t("roles.scopeSelector", { v });
+    case "app": return t("roles.scopeApp", { v: appName(v) });
+    case "adminAll": return t("roles.scopeAdminAll");
+    case "adminFormat": return t("roles.scopeAdminFormat", { v: FORMAT_NAMES[v] || v });
+    case "adminRepo": return t("roles.scopeAdminRepo", { v });
+  }
+  return t("roles.scopeRepo", { v });
 };
+const nexusFormat = (f) => (f === "maven" ? "maven2" : f); // auth.NexusFormat: selector repositories "*-maven2"
 
 export async function viewRoles(view, id) {
   const isLive = alive();
@@ -341,14 +377,16 @@ export async function viewRoles(view, id) {
   const roles = rd.roles || [];
   const selNames = ((sd && sd.contentSelectors) || []).map((x) => x.name);
   const creating = id === "create";
-  let cur = creating ? { id: "", description: "", privileges: [] } : roles.find((r) => r.id === id) || (id === undefined ? roles[0] : null);
-  const add = h("a", { class: "btn primary", href: roleLink("create") }, t("roles.create"));
+  if (creating && !can("roles", "add")) return needAdmin(view, t("nav.roles"));
+  let cur = creating ? { id: "", name: "", description: "", privileges: [], roles: [] } : roles.find((r) => r.id === id) || (id === undefined ? roles[0] : null);
+  const add = can("roles", "add") ? h("a", { class: "btn primary", href: roleLink("create") }, t("roles.create")) : null;
   const eb = eyebrow();
+  const contained = (r) => (r.roles || []).length ? h("span", null, (r.roles || []).map((x, i) => [i ? ", " : "", h("a", { href: roleLink(x) }, x)])) : dash;
   if (id === undefined) {
     const panel = card(t("nav.roles"), null, null);
-    panel.appendChild(tbl([t("roles.id"), t("roles.desc"), t("roles.privs")], roles.map((r) => row([
-      [h("a", { href: roleLink(r.id) }, h("strong", null, r.id))],
-      [r.description || dash], [(r.privileges || []).length, "num"],
+    panel.appendChild(tbl([t("roles.id"), t("roles.desc"), t("roles.contained"), t("roles.privs")], roles.map((r) => row([
+      [[h("a", { href: roleLink(r.id) }, h("strong", null, r.id)), r.name && r.name !== r.id ? h("div", { class: "tiny muted" }, r.name) : null]],
+      [r.description || dash], [contained(r)], [(r.privileges || []).length, "num"],
     ])), t("roles.none")));
     put(view, pageHead(t("nav.roles"), sub(t("roles.sub")), acts(add), eb), panel);
     return;
@@ -360,7 +398,7 @@ export async function viewRoles(view, id) {
   const aside = h("nav", { class: "role-list card", "aria-label": t("nav.roles") }, roles.map((r) => {
     const on = !creating && r.id === cur.id;
     return h("a", { class: "role-item" + (on ? " active" : ""), href: roleLink(r.id), "aria-current": on ? "page" : null },
-      h("strong", null, r.id, r.id === "admin" ? badge(t("roles.builtin"), "amber") : null), h("small", null, r.description || dash));
+      h("strong", null, r.id, r.id === "admin" ? badge(t("roles.builtin"), "amber") : null), h("small", null, r.name && r.name !== r.id ? r.name : r.description || dash));
   }));
   const main = h("form", { class: "stack", novalidate: true });
   const fs = formState(main);
@@ -371,35 +409,45 @@ export async function viewRoles(view, id) {
   const rowsBox = h("div");
   const privs = [];
   const addPriv = (p) => {
-    const kind = sel([["all", t("roles.scopeAll")], ["format", t("roles.kFormat")], ["repo", t("roles.kRepo")], ["selector", t("roles.kSelector")], [METRICS, t("roles.kMetrics")]], targetKind(p.target));
+    const kind = sel([["all", t("roles.scopeAll")], ["format", t("roles.kFormat")], ["repo", t("roles.kRepo")], ["selector", t("roles.kSelector")], [METRICS, t("roles.kMetrics")],
+      ["app", t("roles.kApp")], ["adminAll", t("roles.kAdminAll")], ["adminFormat", t("roles.kAdminFormat")], ["adminRepo", t("roles.kAdminRepo")]], targetKind(p.target));
     const val = h("select", { "aria-label": t("roles.target") });
     // withKept lists names plus a stored one the list no longer has (the "kept" rule).
     const withKept = (names, keep) => (names.includes(keep) || !keep ? names : names.concat(keep)).map((n) => [n, n]);
-    // A selector privilege also names the repositories it applies to ("*" = any).
+    // A selector privilege also names the repositories it applies to: "*" any, "*-<format>" every one of a format.
     const stored = p.repos || [];
-    const reposSel = h("select", { multiple: true, size: 4, "aria-label": t("roles.repos") },
-      [["*", t("roles.anyRepo")]].concat(withKept(repoNames.filter((n) => n !== "*"), stored.find((n) => n !== "*" && !repoNames.includes(n))))
+    const wild = FORMATS.map((f) => ["*-" + nexusFormat(f), t("roles.anyOfFormat", { f: FORMAT_NAMES[f] }) + " (*-" + nexusFormat(f) + ")"]);
+    const extra = stored.filter((n) => n !== "*" && !repoNames.includes(n) && !wild.some(([v]) => v === n)).map((n) => [n, n]);
+    const reposSel = h("select", { multiple: true, size: 6, "aria-label": t("roles.repos") },
+      [["*", t("roles.anyRepo")]].concat(wild, repoNames.filter((n) => n !== "*").map((n) => [n, n]), extra)
         .map(([v, l]) => h("option", { value: v, selected: stored.includes(v) }, l)));
-    const reposF = h("div", { class: "field" }, h("span", { class: "flabel" }, t("roles.repos")), reposSel);
+    const reposF = h("div", { class: "field" }, h("span", { class: "flabel" }, t("roles.repos")), reposSel, h("small", null, t("roles.reposHelp")));
     const valF = h("div", { class: "field grow" }, h("span", { class: "flabel" }, t("roles.target")), val);
+    const ag = checkGroup(ACTIONS.concat(["run"]).map((a) => [a, a]), p.actions || []);
+    const syncActs = () => {
+      const ok = actionsOf(kind.value, val.value);
+      for (const b of ag.el.querySelectorAll("input")) b.closest("label").hidden = !ok.includes(b.value);
+    };
     const fill = () => {
       const k = kind.value, keep = val.value || targetValue(p.target);
-      const opts = k === "format" ? FORMATS.map((f) => [f, FORMAT_NAMES[f]]) : k === "repo" ? withKept(repoNames, keep) : k === "selector" ? withKept(selNames, keep) : [];
+      const opts = k === "format" || k === "adminFormat" ? FORMATS.map((f) => [f, FORMAT_NAMES[f]]) : k === "repo" || k === "adminRepo" ? withKept(repoNames, keep)
+        : k === "selector" ? withKept(selNames, keep)
+          : k === "app" ? Object.keys(APP_DOMAINS).concat(keep && !APP_DOMAINS[keep] ? [keep] : []).map((d) => [d, appName(d)]) : [];
       put(val, opts.map(([v, l]) => h("option", { value: v }, l)));
       if (opts.some(([v]) => v === keep)) val.value = keep;
-      valF.hidden = k === "all" || k === METRICS;
+      valF.hidden = !opts.length;
       reposF.hidden = k !== "selector";
-      for (const b of ag.el.querySelectorAll("input")) b.closest("label").hidden = k === METRICS && b.value !== "read";
+      syncActs();
     };
     kind.id = uid("k");
-    const ag = checkGroup(ACTIONS.map((a) => [a, a]), p.actions || []);
     fill();
     kind.addEventListener("change", () => { val.value = ""; fill(); });
+    val.addEventListener("change", syncActs);
     const rm = button(t("roles.removePriv"), "small danger");
     const el = h("div", { class: "edit-row" }, h("div", { class: "row" },
       h("div", { class: "field" }, h("label", { for: kind.id }, t("roles.scope")), kind), valF, rm), reposF, ag.el);
-    const item = { el, target: () => (kind.value === "all" ? "*" : kind.value === METRICS ? METRICS : kind.value + ":" + val.value),
-      actions: () => (kind.value === METRICS ? ag.values().filter((a) => a === "read") : ag.values()), kind,
+    const item = { el, target: () => (kind.value === "all" ? "*" : kind.value === METRICS ? METRICS : kind.value === "adminAll" ? "admin:*" : PREFIX[kind.value] + val.value),
+      actions: () => { const ok = actionsOf(kind.value, val.value); return ag.values().filter((a) => ok.includes(a)); }, kind,
       repos: () => (kind.value === "selector" ? [...reposSel.selectedOptions].map((o) => o.value) : undefined) };
     rm.addEventListener("click", () => { privs.splice(privs.indexOf(item), 1); el.remove(); fs.dirty(); });
     privs.push(item);
@@ -409,8 +457,8 @@ export async function viewRoles(view, id) {
   const render = () => {
     if (!editing) {
       const admin = cur.id === "admin";
-      const edit = admin ? null : button(t("roles.edit"));
-      const del = admin ? null : button(t("common.delete"), "danger");
+      const edit = admin || !can("roles", "edit") ? null : button(t("roles.edit"));
+      const del = admin || !can("roles", "delete") ? null : button(t("common.delete"), "danger");
       if (edit) edit.addEventListener("click", () => { editing = true; render(); });
       if (del) {
         del.addEventListener("click", async () => {
@@ -435,7 +483,8 @@ export async function viewRoles(view, id) {
           h("td", null, (p.actions || []).join(" · ")))), t("roles.noPrivs")));
       put(main, fs.err, fs.ok,
         card(cur.id, admin ? t("roles.adminSub") : t("roles.infoSub"), [
-          kv(t("roles.id"), cur.id), kv(t("roles.desc"), cur.description || dash)], edit || del ? acts(edit, del) : null),
+          kv(t("roles.id"), cur.id), kv(t("roles.name"), cur.name || dash), kv(t("roles.desc"), cur.description || dash),
+          kv(t("roles.contained"), contained(cur))], edit || del ? acts(edit, del) : null),
         pc,
         admin ? notice(t("roles.adminNote")) : null);
       return;
@@ -445,7 +494,12 @@ export async function viewRoles(view, id) {
     put(rowsBox);
     for (const p of cur.privileges || []) addPriv(p);
     const idIn = textIn(cur.id, { disabled: !creating, required: true, maxlength: 64 });
+    const nameIn = textIn(cur.name, { maxlength: 200, placeholder: cur.id || "" });
     const descIn = textIn(cur.description, { maxlength: 200 });
+    // Contained roles: their privileges are granted too (transitively); a stored one the list lacks is kept.
+    const others = roles.map((r) => r.id).filter((x) => x !== cur.id);
+    const sub0 = cur.roles || [];
+    const rg = checkGroup(others.concat(sub0.filter((x) => !others.includes(x))).map((x) => [x, x]), sub0);
     const addBtn = button(t("roles.addPriv"));
     addBtn.addEventListener("click", () => { addPriv({ target: "*", actions: [] }); fs.dirty(); });
     const save = h("button", { type: "submit", class: "btn primary" }, creating ? t("roles.createBtn") : t("roles.save"));
@@ -453,14 +507,17 @@ export async function viewRoles(view, id) {
     cancel.addEventListener("click", () => { fs.clean(); if (creating) location.hash = roleLink(); else { editing = false; render(); } });
     put(main, fs.err, fs.ok,
       card(creating ? t("roles.createTitle") : cur.id, t("roles.infoSub"), fields(
-        field(t("roles.id"), idIn, creating ? t("roles.idHelp") : null, { req: creating }), field(t("roles.desc"), descIn))),
+        field(t("roles.id"), idIn, creating ? t("roles.idHelp") : null, { req: creating }), field(t("roles.name"), nameIn, t("roles.nameHelp")),
+        field(t("roles.desc"), descIn, null, { full: true }),
+        groupField(t("roles.contained"), others.length || sub0.length ? rg.el : h("p", { class: "hint" }, t("roles.noOthers")), t("roles.containedHelp")))),
       card(t("roles.privs"), t("roles.privsEditSub"), [rowsBox, h("div", { class: "actions" }, addBtn), notice(t("roles.overwriteNote"))]),
       h("div", { class: "savebar" }, cancel, save));
     main.onsubmit = async (ev) => {
       ev.preventDefault();
       fs.clear();
       const rid = creating ? idIn.value.trim() : cur.id;
-      const body = { description: descIn.value.trim(), privileges: privs.map((p) => {
+      // A PUT replaces the role: name, contained roles and privileges are always sent.
+      const body = { name: nameIn.value.trim(), description: descIn.value.trim(), roles: rg.values(), privileges: privs.map((p) => {
         const o = { target: p.target(), actions: p.actions() };
         if (p.repos()) o.repos = p.repos();
         return o;
@@ -469,7 +526,7 @@ export async function viewRoles(view, id) {
       if (!rid) errs.push(t("roles.e.id"));
       const seen = new Set();
       body.privileges.forEach((p, i) => {
-        if (/^(format|repo|selector):$/.test(p.target)) errs.push(t("roles.e.target", { n: i + 1 }));
+        if (/^(format|repo|selector|app|admin:format|admin:repo):$/.test(p.target)) errs.push(t("roles.e.target", { n: i + 1 }));
         if (!p.actions.length) errs.push(t("roles.e.actions", { n: i + 1 }));
         if (p.repos && !p.repos.length) errs.push(t("roles.e.repos", { n: i + 1 }));
         const key = p.target + (p.repos ? "|" + p.repos.join(",") : ""); // the same selector may apply to other repositories
@@ -509,7 +566,7 @@ export async function viewPrivileges(view) {
   }
   const targetLink = (tg) => {
     const k = targetKind(tg), v = targetValue(tg);
-    const href = k === "repo" ? "#admin/repository/repositories:" + enc(v) : k === "selector" ? "#admin/repository/selectors:" + enc(v) : null;
+    const href = k === "repo" || k === "adminRepo" ? "#admin/repository/repositories:" + enc(v) : k === "selector" ? "#admin/repository/selectors:" + enc(v) : null;
     return href ? h("a", { href }, h("code", null, tg)) : h("code", null, tg);
   };
   const rows = [...byKey.values()].sort((a, b) => a.p.target.localeCompare(b.p.target)).map(({ p, roles }) => row([
@@ -602,7 +659,7 @@ const EDITORS = {
 // an inactive realm gets a note pointing at the realm list.
 export async function viewRealmConfig(view, id) {
   const isLive = alive();
-  const [rl, rd] = await Promise.all([api("roles"), api("realms")]);
+  const [rl, rd] = await Promise.all([api("roles").catch(() => ({ roles: [] })), api("realms")]); // a settings-only delegate may not read the roles
   if (!isLive()) return;
   const nodes = await EDITORS[id](rl, isLive);
   if (!isLive()) return;

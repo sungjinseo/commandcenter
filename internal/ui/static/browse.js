@@ -105,15 +105,25 @@ const pyExt = (f) => PY_EXTS.find((e) => f.endsWith(e) && f.length > e.length);
 // legacy layout leave out, so those files belong to the same component.
 const SBT_PLUGIN_DIR = /^(.+)_\d+(?:\.\d+)*_\d+(?:\.\d+)*$/;
 
-function mavenFileMatches(file, name, version) {
+// mavenFileVersion is component.mavenFileVersion: the version of file in the
+// directory dirVersion, or null. As in Nexus, each timestamped build of a
+// SNAPSHOT is a component of its own (1.0-20261014.120000-3); non-unique
+// X-SNAPSHOT files form X-SNAPSHOT.
+function mavenFileVersion(file, name, dirVersion) {
   const boundary = (rest) => rest === "" || rest[0] === "-" || rest[0] === ".";
-  let pre = name + "-" + version;
-  if (file.startsWith(pre) && boundary(file.slice(pre.length))) return true;
-  if (!version.endsWith("-SNAPSHOT")) return false;
-  pre = name + "-" + version.slice(0, -9) + "-";
-  if (!file.startsWith(pre)) return false;
+  let pre = name + "-" + dirVersion;
+  if (file.startsWith(pre) && boundary(file.slice(pre.length))) return dirVersion;
+  if (!dirVersion.endsWith("-SNAPSHOT")) return null;
+  const base = dirVersion.slice(0, -9);
+  pre = name + "-" + base + "-";
+  if (!file.startsWith(pre)) return null;
   const m = /^[0-9]{8}[.][0-9]+-[0-9]+/.exec(file.slice(pre.length));
-  return !!m && boundary(file.slice(pre.length + m[0].length));
+  return m && boundary(file.slice(pre.length + m[0].length)) ? base + "-" + m[0] : null;
+}
+// mavenBaseVersion is component.MavenBaseVersion: X-SNAPSHOT for a build, else the version.
+export function mavenBaseVersion(v) {
+  const m = /-[0-9]{8}[.][0-9]+-[0-9]+$/.exec(v);
+  return m && m.index > 0 ? v.slice(0, m.index) + "-SNAPSHOT" : v;
 }
 
 function pyVersion(project, file) {
@@ -146,9 +156,10 @@ export function deriveComp(format, p) {
   switch (format) {
     case "maven": {
       if (n < 4 || file.startsWith("maven-metadata.xml")) return null;
-      const name = segs[n - 3], version = segs[n - 2], g = segs.slice(0, n - 3);
+      const name = segs[n - 3], dirVersion = segs[n - 2], g = segs.slice(0, n - 3);
       const sbt = SBT_PLUGIN_DIR.exec(name);
-      if (!name || !version || g.some((x) => !x) || !(mavenFileMatches(file, name, version) || (sbt && mavenFileMatches(file, sbt[1], version)))) return null;
+      const version = name && dirVersion ? mavenFileVersion(file, name, dirVersion) || (sbt && mavenFileVersion(file, sbt[1], dirVersion)) : null;
+      if (!version || g.some((x) => !x)) return null;
       return c(g.join("."), name, version);
     }
     case "npm": {
@@ -432,7 +443,7 @@ function versionsBox(r, c, opts) {
   versionList(r, c).then((d) => {
     put(box, tbl([t("col.version"), t("col.updated"), { t: h("span", { class: "sr-only" }, t("col.open")), cls: "act" }],
       d.list.map((v) => h("tr", null,
-        h("td", null, v.version === c.version ? [blue(v.version), " ", h("small", { class: "muted" }, t("comp.current"))] : v.version,
+        h("td", null, v.version === c.version || (r.format === "maven" && v.version === mavenBaseVersion(c.version)) ? [blue(v.version), " ", h("small", { class: "muted" }, t("comp.current"))] : v.version,
           v.yanked ? [" ", h("span", { class: "badge amber" }, t("comp.yanked"))] : null),
         h("td", { class: "nowrap" }, v.created ? fmtDate(v.created) : "—"),
         h("td", { class: "act" }, pathLink(browseLink(r.name, v.path), t("comp.view"), opts.onPath ? () => opts.onPath(v.path) : null)))),
@@ -919,7 +930,7 @@ export async function viewTree(view, name, path) {
       h("a", { class: "btn", href: browseLink() }, "← " + t("tree.back")),
       full(copyButton(r.url, null, t("repos.copyUrlFor", { name: r.name }), t("repos.copyUrl"))),
       h("a", { class: "btn", href: searchLink("generic", { repo: name }) }, icon("search"), t("tree.search")),
-      state.me.admin ? h("a", { class: "btn", href: adminRepoLink(r.name) }, t("tree.settings")) : null,
+      state.me.admin || state.me.repositoryAdmin ? h("a", { class: "btn", href: adminRepoLink(r.name) }, t("tree.settings")) : null,
       canUpload(r) ? h("a", { class: "btn primary", href: uploadLink(r.name) }, icon("upload"), t("tree.upload")) : null),
     { eyebrow: t("tree.eyebrow") });
   if (fmt === "docker") {
@@ -993,12 +1004,15 @@ export async function viewTree(view, name, path) {
     }
     // A Maven folder is a version folder when one of its files derives to a
     // component; the metadata guess above is corrected once it is listed.
+    // A SNAPSHOT folder of timestamped builds holds one component per build.
+    let builds = false;
     if (fmt === "maven" && node !== root && !node.synthetic) {
-      const c = files.map((e) => deriveComp(fmt, base + e.name)).find(Boolean);
-      if (c) setKind(node, "comp", c);
+      const cs = files.map((e) => deriveComp(fmt, base + e.name)).filter(Boolean);
+      builds = cs.some((c) => c.version !== node.label);
+      if (cs.length && !builds) setKind(node, "comp", cs[0]);
       else if (node.kind === "comp") setKind(node, "dir", null);
     }
-    const grouping = (fmt === "npm" && base.endsWith("/-/")) || (fmt === "go" && base.endsWith("/@v/"));
+    const grouping = builds || (fmt === "npm" && base.endsWith("/-/")) || (fmt === "go" && base.endsWith("/@v/"));
     const comps = new Map();
     for (const e of files) {
       const p = base + e.name;
@@ -1131,12 +1145,27 @@ export async function viewTree(view, name, path) {
       folderFiles(root), setupCard(r));
   }
 
+  // folderDelete (raw hosted, delete privilege) deletes every file under a folder
+  // stored before the request; files the user may not delete stay.
+  const folderDelete = (node) => deleteButton(t("del.folder"), async () => ({
+    text: t("del.folderText", { path: node.path + "/" }),
+    del: async () => {
+      const d = await api(apiRepo(name, "/folder?path=" + enc(node.path + "/")), { method: "DELETE" });
+      const close = h("button", { type: "button", class: "btn primary" }, t("common.close"));
+      const m = modal(t("del.folderDone"), [kv(t("del.fAssets"), fmtNum(d.assets)), kv(t("del.fBytes"), fmtBytes(d.bytes)),
+        kv(t("del.fDenied"), fmtNum(d.denied)), kv(t("del.fChanged"), fmtNum(d.changed)),
+        d.denied || d.changed ? h("div", { class: "notice amber" }, t("del.fKept")) : null], [close], { cls: "modal-small" });
+      close.addEventListener("click", m.close);
+    },
+  }), () => afterDelete(node.parent));
+
   function folderDetail(node) {
     const n = node.children.filter((k) => k.kind !== "more").length;
     return h("div", { class: "stack" },
       card(node.label, t("tree.folder"), [
         kv(t("col.repo"), repoLink(r.name)), kv(t("asset.path"), copyLine(node.path + "/", t("asset.copyPath"))),
-        kv(t("tree.children"), node.truncated ? n + "+" : String(n))]),
+        kv(t("tree.children"), node.truncated ? n + "+" : String(n)),
+        fmt === "raw" && canDelete(r) ? h("div", { class: "actions" }, folderDelete(node)) : null]),
       folderFiles(node), node.truncated ? truncNote(t("tree.moreText")) : null);
   }
 

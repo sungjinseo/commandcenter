@@ -98,6 +98,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Raw: a directory answers its `index.html`/`index.htm` in hosted, proxy and group repositories; folder
   delete for hosted repositories (`DELETE /-/api/repositories/{name}/folder?path=`).
 - `GET /service/rest/repository/browse/<repo>/<dir>/`: Nexus's HTML directory listing.
+- Web UI for the wave 6 server features: a schedule editor that reads and keeps cron, multi-day weekly and monthly (`last`) schedules (one it cannot read is kept verbatim), task notification condition and queued run-now, the new task types and their parameters, ordered cleanup policies on a repository, Maven layout policy, proxy connection settings, negative cache toggle and "Invalidate cache", apt signing key passphrase and apt proxy `distribution`/`flat`/`enforceDistribution`, Raw folder delete, SNAPSHOT builds as separate components in browse and search, the password policy, unavailable blob stores, role display name, contained roles and the `app:`/`admin:` targets, Nexus-format webhooks, and an Activity screen (Admin → Support → Activity). Delegated administrators see only the screens their privileges reach, read-only where they may not edit.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented

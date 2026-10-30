@@ -69,7 +69,7 @@ func TestStaticJSListed(t *testing.T) {
 }
 
 func TestStaticSizeBudget(t *testing.T) {
-	const budget = 896 << 10 // 917504 bytes (190 KiB, raised to 320 KiB in plan 10, 400 KiB in plan 11, 512 KiB in plan 12, 640 KiB for the wave-1 screens, 768 KiB for the wave-4 screens and 896 KiB for the wave-5 screens, by ruling)
+	const budget = 1024 << 10 // 1048576 bytes (190 KiB, raised to 320 KiB in plan 10, 400 KiB in plan 11, 512 KiB in plan 12, 640 KiB for the wave-1 screens, 768 KiB for the wave-4 screens, 896 KiB for the wave-5 screens and 1024 KiB for the wave-6 screens, by ruling)
 	// The IBM Plex web fonts (static/fonts, OFL) have their own budget: three
 	// Korean weights subset to KS X 1001 plus two mono weights, cached by ETag.
 	const fontBudget = 768 << 10
@@ -330,7 +330,7 @@ func TestOpsWired(t *testing.T) {
 		"admin.js":    {`viewPolicies(view, p0)`, `logsCard(isLive, criteria)`, `trendCard(isLive, "24h"`},
 		"dash.js":     {`trendCard(isLive, "7d"`, `api("events?limit=6")`},
 		"ops.js":      {`"cleanup/policies"`, `"/preview"`, `"/run"`, `"/-/api/logs/download"`, `api("stats/requests?range="`},
-		"repoform.js": {`cleanupPolicy: policy ? policy.value : storedPolicy`},
+		"repoform.js": {`if (polPick) b.cleanupPolicies = polPick.get();`},
 		"browse.js":   {`t("comp.downloads")`, `t("comp.lastDownloaded")`},
 	} {
 		js := readStatic(t, file)
@@ -368,8 +368,13 @@ func TestComponentKeepsSbtLegacyFiles(t *testing.T) {
 	if !strings.Contains(js, want) {
 		t.Errorf("browse.js does not mirror component.SbtPluginDir: want %s", want)
 	}
-	if !strings.Contains(js, "(sbt && mavenFileMatches(file, sbt[1], version))") {
+	if !strings.Contains(js, "(sbt && mavenFileVersion(file, sbt[1], dirVersion))") {
 		t.Error("deriveComp does not match sbt legacy-layout files")
+	}
+	// As component.DeriveMaven, a timestamped file is the component of its build
+	// (1.0-20261014.120000-3), not of the SNAPSHOT directory.
+	if !strings.Contains(js, `? base + "-" + m[0] : null;`) {
+		t.Error("deriveComp does not give a SNAPSHOT build's file its build version")
 	}
 }
 
@@ -492,6 +497,8 @@ func TestAccessMessagesPinned(t *testing.T) {
 		{"IN_USE", roleInUseMessage, "in use"},
 		{"WRONG_PW", wrongPasswordMessage, "the current password is incorrect"},
 		{"REENTER", bindReenterMessage, "re-enter the bind password"},
+		{"ADMIN_ONLY", errAdminOnly.Error(), "only an admin can change an administrator"},
+		{"SELF_DELETE", selfDeleteMessage, "you cannot delete the user you are signed in as"},
 	} {
 		if !strings.Contains(js, "const "+c.name+" = /"+c.re+"/;") {
 			t.Errorf("access.js does not define %s as /%s/", c.name, c.re)

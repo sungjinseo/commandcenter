@@ -2,6 +2,7 @@
 // Center design (plan 10), with "#browse/..." and "#admin/..." hash routes.
 import {
   state, h, put, badSeg, browseLink, searchLink, loading, pageHead, needAdmin, needLogin, hideBanner, handleError, setAuthLostHook, SEARCH_FORMATS,
+  mayOpen, readOnlyFor, readOnly,
 } from "./util.js";
 import { initShell, renderChrome, openLogin, refreshMe, screenTitle } from "./shell.js";
 import { t } from "./i18n.js";
@@ -39,6 +40,7 @@ const ADMIN_SCREENS = {
   "admin/firewall/settings": false,
   "admin/firewall/quarantine": false,
   "admin/support/logs": false,
+  "admin/support/activity": false,
   "admin/support/logging": false,
   "admin/support/metrics": false,
   "admin/support/usage": false,
@@ -55,8 +57,6 @@ const ADMIN_SCREENS = {
   "admin/system/webhooks": true,
   "admin/system/general": false,
 };
-
-const METRICS_SCREENS = ["admin/repository/dashboard", "admin/support/usage"];
 
 // MOVED maps the route heads of the earlier layout to their homes now; the
 // rest of the hash (":<id>", "=<criteria>", "?<query>") is kept.
@@ -218,10 +218,15 @@ async function show(view, r) {
     case "user/apitokens": return viewTokens(view, false);
   }
   if (r.key.startsWith("browse/search/")) return viewSearch(view, r.key.slice("browse/search/".length), r.criteria);
-  // The usage screens also open for the read privilege on "metrics" (the server decides).
-  if (!state.me.admin && (state.me.anonymous || !METRICS_SCREENS.includes(r.key))) return needAdmin(view, screenTitle(r.key));
+  // Delegated privileges open some screens to non-admins (the server decides).
+  if (!mayOpen(r.key)) return needAdmin(view, screenTitle(r.key));
   const out = showSettings(view, r.key, p0, p1, r.criteria);
-  if (out) return out;
+  if (out) {
+    if (!readOnlyFor(r.key)) return out;
+    await out;
+    if (view.isConnected) readOnly(view);
+    return;
+  }
   return viewNotFound(view);
 }
 

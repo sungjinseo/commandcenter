@@ -899,3 +899,7 @@ th.num .sort { text-align: right; }
 .cc-changes .warn { color: var(--warn); }
 .cc-changes .err { color: var(--err); }
 .toolbar .check input { min-width: 0; height: auto; }
+/* wave 6: month days of a schedule in a grid */
+.checks.days { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px 10px; }
+.checks.days .check { font-family: var(--mono); font-size: 12px; }
+@media (max-width: 600px) { .checks.days { grid-template-columns: repeat(5, minmax(0, 1fr)); } }

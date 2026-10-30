@@ -71,7 +71,8 @@ const mask = (list, secrets) => list.map((m) => secrets.filter(Boolean).reduce((
 const MiB = 1048576, GiB = 1073741824;
 const quotaText = (q) => (q ? (q.type === "spaceRemainingBytes" ? t("blob.qRemainingText", { n: fmtBytes(q.limitBytes) }) : t("blob.qUsedText", { n: fmtBytes(q.limitBytes) })) : t("blob.qNone"));
 // storeFlags: a violated quota and the group a store belongs to.
-const storeFlags = (s) => [s.quotaViolated ? badge(t("blob.qViolated"), "red") : null, s.memberOf ? badge(t("blob.memberOf", { g: s.memberOf }), "blue") : null].filter(Boolean);
+const storeFlags = (s) => [s.unavailable ? h("span", { class: "badge red", title: s.unavailable }, t("blob.unavailable")) : null,
+  s.quotaViolated ? badge(t("blob.qViolated"), "red") : null, s.memberOf ? badge(t("blob.memberOf", { g: s.memberOf }), "blue") : null].filter(Boolean);
 const FILL = () => [["roundRobin", t("blob.fillRR")], ["writeToFirst", t("blob.fillFirst")]];
 
 // quotaEditor edits a soft quota: a type (none removes it), a limit and its
@@ -357,6 +358,7 @@ async function storeDetail(view, name) {
   const p = pctOf(s.usedBytes, s.fsTotal);
   const settings = card(t("blob.settings"), t("blob.settingsSub"), [
     err,
+    s.unavailable ? notice([h("strong", null, t("blob.unavailableTitle")), " ", t("blob.unavailableText"), h("div", { class: "mono tiny" }, s.unavailable)], "amber") : null,
     kv(t("blob.name"), s.name),
     kv(t("blob.type"), storeType(s)),
     isGroup ? null : kv(t("blob.path"), h("span", { class: "mono" }, storeLocation(s))),
@@ -571,6 +573,12 @@ export async function viewGeneral(view, part) {
   const utBody = () => ({ enabled: utOn.checked, required: utReq.checked, expirationDays: intOf(utDays) });
   const utDirty = () => { const a = utBody(), b = ut0(); return a.enabled !== !!b.enabled || a.required !== !!b.required || a.expirationDays !== (b.expirationDays || 0); };
   const rolesDirty = () => !!defRoles && defRoles.values().join(",") !== (g.defaultRoles || []).join(",");
+  // the password policy: an RE2 pattern new local passwords must match, and the refusal text
+  const pp0 = () => Object.assign({ pattern: "", message: "" }, g.passwordPolicy || {});
+  const ppPattern = textIn(pp0().pattern, { class: "mono", maxlength: 512, placeholder: "[[:graph:]]{12,}" });
+  const ppMessage = textIn(pp0().message, { maxlength: 200 });
+  const ppBody = () => ({ pattern: ppPattern.value.trim(), message: ppMessage.value.trim() });
+  const ppDirty = () => ppBody().pattern !== pp0().pattern || ppBody().message !== pp0().message;
 
   // e-mail
   const enabled = h("input", { type: "checkbox", checked: !!sm.enabled });
@@ -622,8 +630,8 @@ export async function viewGeneral(view, part) {
   // outbound HTTP (plan: proxy, timeouts, retries, user agent); the whole object is sent when any of it changed
   const hc = g.http || {};
   const ua = textIn(hc.userAgentSuffix, { maxlength: 100, placeholder: "(acme-ci)" });
-  const connT = numIn(hc.connectTimeoutSeconds ?? 10, 1, 600);
-  const respT = numIn(hc.timeoutSeconds ?? 30, 1, 600);
+  const connT = numIn(hc.connectTimeoutSeconds ?? 10, 1, 3600);
+  const respT = numIn(hc.timeoutSeconds ?? 30, 1, 3600);
   const retries = numIn(hc.retries ?? 0, 0, 10);
   const pxHost = textIn(hp().host, { maxlength: 253, placeholder: "proxy.corp.local" });
   const pxPort = h("input", { type: "number", inputmode: "numeric", min: 1, max: 65535, step: 1, value: hp().port ? String(hp().port) : "" });
@@ -685,7 +693,7 @@ export async function viewGeneral(view, part) {
     if (on("usertoken") && !(ut.expirationDays >= 0 && ut.expirationDays <= 3650)) errs.push(t("gen.e.utDays"));
     const hb = httpBody(), httpChanged = on("http") && httpDirty();
     if (httpChanged) {
-      if (!(hb.connectTimeoutSeconds >= 1 && hb.connectTimeoutSeconds <= 600) || !(hb.timeoutSeconds >= 1 && hb.timeoutSeconds <= 600)) errs.push(t("http.e.timeout"));
+      if (!(hb.connectTimeoutSeconds >= 1 && hb.connectTimeoutSeconds <= 3600) || !(hb.timeoutSeconds >= 1 && hb.timeoutSeconds <= 3600)) errs.push(t("http.e.timeout"));
       if (!(hb.retries >= 0 && hb.retries <= 10)) errs.push(t("http.e.retries"));
       if (hb.proxy.host && !(hb.proxy.port >= 1 && hb.proxy.port <= 65535)) errs.push(t("http.e.port"));
     }
@@ -698,6 +706,7 @@ export async function viewGeneral(view, part) {
       if (upN !== g.maxUploadMiB) body.maxUploadMiB = upN;
       if (tfRepo && tfRepo.value !== (g.terraformDefaultRepository || "")) body.terraformDefaultRepository = tfRepo.value;
       if (rolesDirty()) body.defaultRoles = defRoles.values();
+      if (ppDirty()) body.passwordPolicy = ppBody();
     }
     if (!errs.length && on("anonymous")) {
       if (anon.checked !== !!g.anonymousRead) body.anonymousRead = anon.checked;
@@ -772,6 +781,8 @@ export async function viewGeneral(view, part) {
       card(t("gen.session"), t("gen.sessionSub"), fields(field(t("gen.idle"), idle, t("gen.idleHelp")))),
       card(t("gen.upload"), t("gen.uploadSub"), fields(field(t("gen.maxUpload"), maxUp, t("gen.maxUploadHelp")))),
       defRoles ? card(t("gen.defRoles"), t("gen.defRolesSub"), fields(h("div", { class: "field full" }, roleIds.length ? defRoles.el : h("p", { class: "hint" }, t("gen.defRolesNone")), h("small", null, t("gen.defRolesHelp"))))) : null,
+      card(t("gen.pwPolicy"), t("gen.pwPolicySub"), fields(field(t("gen.pwPattern"), ppPattern, t("gen.pwPatternHelp"), { full: true }),
+        field(t("gen.pwMessage"), ppMessage, t("gen.pwMessageHelp"), { full: true }))),
       tfRepo ? card("Terraform", t("gen.tfSub"), fields(field(t("gen.tfRepo"), tfRepo, t("gen.tfRepoHelp"), { full: true }))) : null],
     anonymous: [card(t("anon.title"), null, fields(
       checkRow(anon, t("gen.anon"), t("gen.anonHelp")),

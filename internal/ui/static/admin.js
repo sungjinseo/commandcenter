@@ -343,6 +343,56 @@ async function viewLogs(view, criteria) {
   put(view, pageHead(t("nav.logs")), logsCard(isLive, criteria));
 }
 
+// ---- activity: the recorded events, newest first (GET /-/api/events) ---------------------
+//   #admin/support/activity
+
+async function viewActivity(view) {
+  const isLive = alive();
+  const evd = await api("webhooks/events").catch(() => ({})); // the kinds to filter by
+  if (!isLive()) return;
+  const kind = sel([["", t("act.allKinds")]].concat((evd.events || []).map((e) => [e.kind, e.kind])), "", { "aria-label": t("act.kind") });
+  const refresh = button([icon("refresh"), t("logs.refresh")], "small");
+  const more = button(t("search.loadMore"));
+  const body = h("tbody"), box = h("div", null, loading());
+  const head = h("thead", null, h("tr", null, [t("act.at"), t("act.kind"), t("act.actor"), t("col.repo"), t("act.subject"), "IP", t("act.node")].map((x) => h("th", { scope: "col" }, x))));
+  const rowOf = (e) => h("tr", null,
+    h("td", { class: "nowrap" }, fmtDate(e.at)), h("td", { class: "nowrap" }, h("code", null, e.kind)), h("td", null, e.actor || dash),
+    h("td", { class: "nowrap" }, e.repo ? h("a", { href: browseLink(e.repo) }, e.repo) : dash),
+    h("td", { class: "wrap" }, e.subject || dash, e.detail ? h("div", { class: "tiny muted" }, e.detail) : null),
+    h("td", { class: "mono nowrap" }, e.ip || dash), h("td", { class: "mono nowrap" }, e.node || dash));
+  let next = 0, seq = 0;
+  more.hidden = true;
+  const load = async (append) => {
+    const n = ++seq;
+    const q = new URLSearchParams({ limit: "100" });
+    if (kind.value) q.set("kind", kind.value);
+    if (append) q.set("before", String(next));
+    more.disabled = refresh.disabled = true;
+    try {
+      const d = await api("events?" + q);
+      if (!isLive() || n !== seq) return;
+      if (!append) put(body);
+      body.append(...(d.events || []).map(rowOf));
+      next = d.next || 0;
+      more.hidden = !next;
+      put(box, body.children.length ? h("div", { class: "tablewrap" }, h("table", null, head, body)) : h("div", { class: "empty" }, t("act.none")));
+    } catch (e) {
+      if (!isLive() || n !== seq) return;
+      put(box, h("div", { class: "empty" }, t("act.failed")));
+      handleError(e);
+    } finally {
+      if (n === seq) more.disabled = refresh.disabled = false;
+    }
+  };
+  kind.addEventListener("change", () => load(false));
+  refresh.addEventListener("click", () => load(false));
+  more.addEventListener("click", () => load(true));
+  const c = card(t("act.title"), t("act.cardSub"), null);
+  c.append(h("div", { class: "toolbar" }, kind, refresh), box);
+  put(view, pageHead(t("nav.activity"), sub(t("act.sub"))), c, h("div", { class: "toolbar end" }, more));
+  await load(false);
+}
+
 const LOG_LEVELS = ["debug", "info", "warn", "error"]; // what PUT /-/api/logging accepts
 
 async function viewLogging(view) {
@@ -1289,6 +1339,7 @@ export function showSettings(view, key, p0, p1, criteria) {
     case "admin/firewall/settings": return viewVulnerability(view);
     case "admin/firewall/quarantine": return viewQuarantine(view);
     case "admin/support/logs": return viewLogs(view, criteria);
+    case "admin/support/activity": return viewActivity(view);
     case "admin/support/logging": return viewLogging(view);
     case "admin/support/metrics": return viewMetrics(view);
     case "admin/support/usage": return viewUsage(view);

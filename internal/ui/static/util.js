@@ -127,6 +127,7 @@ const ICONS = {
   lock: ["M5 11h14v10H5z", "M8 11V8a4 4 0 0 1 8 0v3"],
   mail: ["M3 6h18v12H3z", "M3 7l9 6l9-6"],
   globe: ["M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", "M3 12h18", "M12 3c3 3.5 3 14.5 0 18", "M12 3c-3 3.5-3 14.5 0 18"],
+  list: ["M9 6h11", "M9 12h11", "M9 18h11", "M4.5 6h.1", "M4.5 12h.1", "M4.5 18h.1"],
   lifebuoy: ["M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z", "M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8z", "M5.6 5.6l3.6 3.6", "M14.8 14.8l3.6 3.6", "M18.4 5.6l-3.6 3.6", "M9.2 14.8l-3.6 3.6"],
 };
 
@@ -452,6 +453,38 @@ export function markBusy(reason) {
   };
   state.leaving.push(unmark);
   return unmark;
+}
+
+// ---- delegated administration (wave 6) ---------------------------------------
+
+// can reports whether the signed-in user holds action of an application domain
+// (/-/api/me permissions; an admin holds them all). The server checks again.
+export const can = (domain, action) => !!state.me.admin || (!state.me.anonymous && ((state.me.permissions || {})[domain] || []).includes(action || "read"));
+// DELEGATED: the admin screens a non-admin may open and what opens them: the
+// read action of a domain, "metrics" (me.metrics) or "repos" (me.repositoryAdmin).
+const DELEGATED = {
+  "admin/repository/repositories": "repos", "admin/repository/dashboard": "metrics", "admin/support/usage": "metrics",
+  "admin/repository/blobstores": "blobstores", "admin/repository/selectors": "selectors", "admin/security/roles": "roles", "admin/security/users": "users",
+  "admin/security/anonymous": "settings", "admin/security/ldap": "settings", "admin/security/realms": "settings", "admin/security/oidc": "settings",
+  "admin/security/atlassiancrowd": "settings", "admin/security/saml": "settings", "admin/security/rutauth": "settings",
+  "admin/system/emailserver": "settings", "admin/system/http": "settings", "admin/system/general": "settings", "admin/system/tasks": "tasks",
+};
+export function mayOpen(key) {
+  const me = state.me, d = DELEGATED[key];
+  if (me.admin) return true;
+  if (me.anonymous || !d) return false;
+  return d === "metrics" ? !!me.metrics : d === "repos" ? !!me.repositoryAdmin : can(d, "read");
+}
+// readOnlyFor: a delegated user only reads these screens (their domains delegate "read" alone).
+export const readOnlyFor = (key) => !state.me.admin && ["settings", "blobstores"].includes(DELEGATED[key]);
+// readOnly turns a rendered screen into a view: controls disabled, buttons and
+// save bars hidden, and a note under the page head.
+export function readOnly(view) {
+  for (const el of view.querySelectorAll("input, select, textarea")) el.disabled = true;
+  for (const el of view.querySelectorAll("button, .savebar, a.btn.primary")) el.hidden = true;
+  const note = h("div", { class: "notice", role: "status" }, t("ro.note"));
+  const head = view.querySelector(".page-head");
+  if (head) head.after(note); else view.prepend(note);
 }
 
 // taskName is the task's display name (the built-in compaction is translated).
