@@ -9,7 +9,7 @@
 # before they stop an old one), one shared ReadWriteMany claim, a PodDisruptionBudget of one pod
 # and, unless affinity is set, pods preferably on different nodes. Every pod needs the same config
 # and secret key; the nodes' clocks must be in sync (NTP). Going from 1 to more is a maintenance
-# window: README.md, "High availability".
+# window: docs/guide.md, "고가용성(여러 노드)" (한 대에서 여러 대로).
 replicaCount: 1
 
 image:

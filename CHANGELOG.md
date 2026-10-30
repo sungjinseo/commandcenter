@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-30
+
 ### Added
 - High availability (active-active): any number of `serve` processes on one PostgreSQL
   database and one shared `dataDir` (ReadWriteMany: NFS, CephFS, EFS) serve every request together behind
@@ -494,60 +496,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sessions stayed valid.
 
 ### Upgrade notes
-- Database schema 7 (compat 6). The upgrade runs no DDL for Azure and Google Cloud Storage stores and
-  can be rolling. Creating the first Azure or google blob store raises compat to 7: it is refused while
-  a node of an older build is live, and from then on older builds refuse to start, because they would
-  open the store as an empty directory. A rollback after that needs the backup taken before the upgrade.
-- Schema 7 also adds `reconcile_plans` and `reconcile_items` (expand-only). A schema-6 node next to a
-  schema-7 node writes no journal and its compaction does not keep a pending plan's blobs: finish the
-  rollout before relying on reconcile. The journal starts with the upgrade; earlier uploads cannot be
-  reconciled. Blob stores gain a `meta/` directory (file) or `<prefix>/meta/` keys (S3, Azure, GCS):
-  back them up with the blobs. Each upload commit now writes one extra small object (one S3 PUT),
-  proxy cache fills included.
-- Schema 7 also creates the usage tables and triggers on `assets` (expand-only) and fills the counters
-  from the existing assets (about 2 s per million assets). An asset write costs about 0.1 ms more. The
-  database role must be able to create functions and triggers (PL/pgSQL), as the owner of the tables.
-  Downloads served by nodes still on the previous release during a rolling upgrade are missing from the
-  monthly downloads.
-- Older builds refuse to start beside a running node, but this one starts beside an older one. Upgrade
-  every node and do not mix versions except during a rolling upgrade. Blob store moves and group member
-  removals wait until every node answers, which an older node never does.
-- From one instance to several: back up, stop, copy `blobs/` and `blobstores/` to a ReadWriteMany volume,
-  then start every node with the same config, database and secret key. For the chart: `replicaCount` and
-  `persistence.existingClaim`.
-- The chart's `persistence.accessModes` now accepts `ReadWriteMany`.
-- The database schema version is now 6: the columns `tasks.running_node`, `tasks.running_since`,
-  `webhook_deliveries.claimed_by`, `webhook_deliveries.claim_until` and the index
-  `webhook_deliveries_due`, the column `repositories.gen` (existing repositories keep 0 until re-created or
-  their remote changes), and the tables `sessions`, `login_states`, `saml_replay`, `auth_failures`
-  and `sso_identities` plus the settings rows `registry.tokenKey` and `secretKey.check`, created on the
-  first start of this version. Compat is 6: a full stop, older versions refuse the upgraded database,
-  so stop every older instance first and take a backup if you may need to go back.
-- UI sessions now survive restarts, and so do SSO identities, for up to 7 days after the login.
-- A start with a different secret key, or with none after one was used, is refused;
-  `secret-key rotate` needs every node stopped. Without a secret key the token signing key is stored
-  in plain text.
-- Pull replication progress is kept in settings rows `replication/<proxy>`. During a rolling upgrade,
-  edit replicating proxies on upgraded nodes only: an older node's edit drops `replication`, as with any
-  repository field it does not know, and an older scheduler leader fails a `repository.pull-replication`
-  run as an unknown type.
-- The database schema version is now 5: new tables `nodes` and `leases`, and the column
-  `schema_version.compat`, created on the first start of this version. From now on the stamp also says
-  which older builds may still run on the database: a build starts on a database of a newer schema only
-  when that database's compat is at or below the build's own schema (an expand-only change keeps compat
-  one below, so the previous release can run beside it or be rolled back to). Schema 5 sets compat 5, so
-  older versions refuse the upgraded database as before: back up before upgrading. Nodes
-  that start at once upgrade one after the other with no lock timeout (the startup probe bounds the wait),
-  and an upgrade is refused while a live node of a build older than compat is registered.
+From 0.2.0:
+- **A full stop.** The first start of 0.3.0 takes the database from schema 3 to schema 7 (compat 6), and
+  0.2.0 refuses the upgraded database. Back up the database (`pg_dump`) and the blob stores, stop every
+  0.2.0 instance, then start 0.3.0. The only way back is that backup.
+- The database role must be able to create functions and triggers (PL/pgSQL), as the owner of the
+  tables: schema 7 keeps the repository usage counters with triggers on `assets` and fills them from the
+  existing assets on that first start (about 2 s per million assets). An asset write costs about 0.1 ms
+  more.
+- New tables arrive on that start (webhooks, routing rules, content selectors, user tokens, tags, blob
+  store moves, vulnerability data and quarantine, nodes and leases, sessions and other shared auth state,
+  reconcile plans, usage counters), and existing rows gain meanings 0.2.0 would misread (blob store
+  groups, the cleanup criteria `retain`, `exclude` and `pathPattern`).
+- Blob stores gain a `meta/` directory (file stores) or `<prefix>/meta/` keys (S3, Azure, Google Cloud
+  Storage) holding the reconcile journal: back it up with the blobs. Each upload commit writes one extra
+  small object there (one more PUT on object storage), proxy cache fills included. The journal starts with
+  the upgrade; uploads made before it cannot be reconciled.
+- UI sessions and SSO identities now live in the database and survive restarts for up to 7 days after the
+  login. A start with a different secret key, or with none after one was used, is refused, and
+  `secret-key rotate` needs every node stopped. Without a secret key the token signing key is stored in
+  plain text.
 - The Helm chart's readinessProbe asks `GET /service/rest/v1/status/writable`, and a stopping server stays
-  unready for 5 s before it stops taking connections.
-- The database schema version is now 4 (new tables `webhooks`, `webhook_deliveries`, `routing_rules`,
-  `content_selectors`, `user_tokens`, `tags`, `component_tags`, `blob_store_moves`, `vuln_advisories`,
-  `vuln_queries`, `vuln_findings` and `firewall_quarantine`, created on the first start of this version;
-  blob store groups and the `retain`, `exclude` and `pathPattern` cleanup
-  criteria are stored in existing rows an older build would misread). An older version refuses to start
-  on the upgraded database, so back up before upgrading; downgrades are not supported ("업그레이드" in the
-  operations guide).
+  unready for 5 s before it stops taking connections. `persistence.accessModes` accepts `ReadWriteMany`.
+- From one instance to several (active-active): back up, stop, copy the whole data directory (`blobs/`,
+  `blobstores/` and the journal's `meta/`) to a ReadWriteMany volume, then start every node with the same
+  config, database and secret key. For the chart: `replicaCount` and `persistence.existingClaim`.
+
+From 0.3.0 on:
+- Upgrades follow the N/N-1 rule: an expand-only schema change keeps compat one version below, so the
+  previous release can run beside the new one (a rolling upgrade) or be rolled back to. The release notes
+  say when an upgrade needs a full stop. A node of a build older than compat is refused, and an upgrade is
+  refused while such a node is live.
+- Creating the first Azure or Google Cloud Storage blob store raises compat to 7, so builds before 0.3.0
+  can no longer start on that database (they would open the store as an empty directory).
 
 ## [0.2.0] - 2026-10-27
 
@@ -1302,4 +1283,8 @@ blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
   8 MB zips grew the heap by about 126 MiB. At most two uploads (`.mod`, `.zip` or `.info`) are now
   checked at once; the others wait with their body already stored.
 
-[Unreleased]: https://github.com/sungjinseo/commandcenter/commits/main
+[Unreleased]: https://github.com/sungjinseo/commandcenter/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/sungjinseo/commandcenter/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/sungjinseo/commandcenter/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/sungjinseo/commandcenter/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/sungjinseo/commandcenter/compare/cc41abc35f8ba99d6911d0a8e947767dc79d67b9...v0.1.0

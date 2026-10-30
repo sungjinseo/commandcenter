@@ -495,7 +495,7 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
 **한 대에서 여러 대로**(한 번의 점검 시간이 필요합니다)
 
 1. 백업하고 서버를 멈춥니다(Kubernetes: `kubectl -n commandcenter scale statefulset commandcenter --replicas=0`).
-2. ReadWriteMany 볼륨을 만들고 이전 볼륨의 `/data/blobs`와 `/data/blobstores`(이름 붙은 파일 store)를 `cp -a`로 복사합니다(예: 두 PVC를 함께 마운트한 busybox Pod).
+2. ReadWriteMany 볼륨을 만들고 이전 볼륨의 `/data` 전체(`blobs`, 이름 붙은 파일 store의 `blobstores`, reconcile 저널의 `meta`)를 `cp -a`로 복사합니다(예: 두 PVC를 함께 마운트한 busybox Pod에서 `cp -a /old/. /new/`).
 3. 모든 노드를 같은 설정, 같은 비밀값 키, 같은 DB와 공유 볼륨으로 띄웁니다. Helm이라면 `--set replicaCount=3,persistence.existingClaim=<RWX PVC>`로 `helm upgrade`합니다. Helm이 StatefulSet을 Deployment로 바꾸고, 이전 PVC `data-commandcenter-0`은 직접 지울 때까지 남습니다.
 
 다시 한 대로 돌아가려면 `replicaCount: 1`로 둡니다. 그러면 같은 PostgreSQL DB를 쓰는 StatefulSet이 다시 만들어집니다(볼륨은 새 claim 템플릿, 또는 `persistence.existingClaim`).

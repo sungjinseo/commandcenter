@@ -3,7 +3,7 @@
 <p align="center"><b>한국어</b> · <a href="README.en.md">English</a></p>
 
 <p align="center">
-  Nexus Repository를 대신하는, 작고 단단한 오픈소스 아티팩트 레지스트리.<br>
+  작고 단단한 오픈소스 아티팩트 레지스트리.<br>
   Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace · Terraform을 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
 </p>
 
@@ -28,13 +28,13 @@
 
 ## 왜 Command Center인가
 
-사내 패키지 저장소는 대부분 Nexus Repository OSS로 시작합니다. 그러다 JVM 힙 4 GB, 느린 UI, 그리고 "이 기능은 Pro에서만"을 만납니다. Command Center는 그 자리를 그대로 이어받도록 만들었습니다.
+사내 패키지 저장소에 필요한 것을 에디션 구분 없이 한 바이너리에 담았습니다. Nexus Repository를 쓰던 팀은 같은 URL 규칙과 REST API로 그대로 옮겨 올 수 있습니다.
 
 - **같은 URL 규칙.** `/repository/<이름>/...`과 Docker의 `/v2/`를 그대로 쓰므로 클라이언트 설정은 호스트 이름만 바꾸면 됩니다.
 - **같은 운영 모델.** hosted · proxy · group, 사용자 · 역할 · 권한, Cleanup 정책, 예약 작업, blob store. Nexus를 써 본 사람에게 설명이 필요 없는 구조입니다.
 - **Nexus REST API 호환과 이전 도구.** 기존 스크립트와 Terraform 프로바이더가 `/service/rest/v1`로 그대로 동작하고, `import-nexus`가 hosted 저장소를 통째로 옮겨 줍니다.
 - **작습니다.** CGO 없는 Go 바이너리 하나. 128 MiB 컨테이너에서 돌고, 부하 테스트 최대 RSS는 43 MiB입니다.
-- **에디션이 없습니다.** LDAP, OIDC(SSO), S3 blob store, PostgreSQL은 물론 Nexus Pro 기능(SAML, 사용자 토큰, 스테이징 · 태그, blob store 그룹, retain 정리, 내보내기 · 가져오기, active-active 고가용성)까지 전부 들어 있고, 라이선스는 MIT 또는 Apache-2.0 중 고르면 됩니다.
+- **에디션이 없습니다.** LDAP, OIDC(SSO), SAML, Crowd, 사용자 토큰, S3 · Azure · Google Cloud Storage blob store, 스테이징 · 태그, blob store 그룹, retain 정리, 풀 복제, 내보내기 · 가져오기, DB 복구, 구성 코드화, active-active 고가용성까지 전부 들어 있고, 라이선스는 MIT 또는 Apache-2.0 중 고르면 됩니다.
 
 ## 지원 포맷
 
@@ -91,12 +91,12 @@
 
 ## 빠른 시작
 
-릴리스 이미지는 `ghcr.io/sungjinseo/commandcenter`입니다. 아래의 `0.1.1`은 [최신 릴리스](https://github.com/sungjinseo/commandcenter/releases) 버전으로 바꾸세요.
+릴리스 이미지는 `ghcr.io/sungjinseo/commandcenter`입니다. 아래의 `0.3.0`은 [최신 릴리스](https://github.com/sungjinseo/commandcenter/releases) 버전으로 바꾸세요.
 
 먼저 관리자 비밀번호 해시를 만듭니다(8자 이상).
 
 ```bash
-docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.1.1 hash-password
+docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.3.0 hash-password
 ```
 
 ### Kubernetes (Helm)
@@ -114,7 +114,7 @@ postgresql:
 ```
 
 ```bash
-helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.1.1 \
+helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.3.0 \
   --namespace commandcenter --create-namespace -f my-values.yaml --wait
 helm test commandcenter -n commandcenter
 ```
@@ -123,23 +123,23 @@ Ingress/HTTPRoute, TLS, PostgreSQL, 비밀값 키, 백업과 업그레이드는 
 
 ### Kubernetes (Helm 없이, YAML 하나)
 
-Helm을 쓰지 않는 클러스터에는 릴리스마다 붙는 매니페스트 파일(`commandcenter-v0.1.1.yaml`, 이미지가 그 릴리스로 고정됨)을 씁니다. 저장소의 [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml)과 같은 내용입니다.
+Helm을 쓰지 않는 클러스터에는 릴리스마다 붙는 매니페스트 파일(`commandcenter-v0.3.0.yaml`, 이미지가 그 릴리스로 고정됨)을 씁니다. 저장소의 [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml)과 같은 내용입니다.
 
 ```bash
-curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.1.1/commandcenter-v0.1.1.yaml
+curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.3.0/commandcenter-v0.3.0.yaml
 # 파일 안의 baseURL, passwordHash, PostgreSQL 비밀번호, storageClassName을 채운 뒤
 kubectl create namespace commandcenter
-kubectl apply -n commandcenter -f commandcenter-v0.1.1.yaml
+kubectl apply -n commandcenter -f commandcenter-v0.3.0.yaml
 ```
 
-PostgreSQL StatefulSet과 비밀번호 Secret, 파드 하나짜리 Command Center StatefulSet, ConfigMap의 `config.yaml`, PVC, Service가 들어 있습니다. Ingress나 Gateway는 클러스터 방식대로 붙입니다. 차트 파일(`commandcenter-helm-chart-0.1.1.tgz`)도 릴리스에 있어 OCI 레지스트리를 못 쓰는 곳에서는 `helm install commandcenter ./commandcenter-helm-chart-0.1.1.tgz -f my-values.yaml`로 설치합니다.
+PostgreSQL StatefulSet과 비밀번호 Secret, 파드 하나짜리 Command Center StatefulSet, ConfigMap의 `config.yaml`, PVC, Service가 들어 있습니다. Ingress나 Gateway는 클러스터 방식대로 붙입니다. 차트 파일(`commandcenter-helm-chart-0.3.0.tgz`)도 릴리스에 있어 OCI 레지스트리를 못 쓰는 곳에서는 `helm install commandcenter ./commandcenter-helm-chart-0.3.0.tgz -f my-values.yaml`로 설치합니다.
 
 ### Docker compose
 
 ```bash
-git clone --depth 1 --branch v0.1.1 https://github.com/sungjinseo/commandcenter.git
+git clone --depth 1 --branch v0.3.0 https://github.com/sungjinseo/commandcenter.git
 cd commandcenter
-echo COMMANDCENTER_VERSION=0.1.1 >> .env
+echo COMMANDCENTER_VERSION=0.3.0 >> .env
 echo POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') >> .env
 cp config.example.yaml config.yaml     # passwordHash 자리에 해시를 넣습니다
 docker compose up -d                   # PostgreSQL과 Command Center
@@ -207,3 +207,5 @@ docker compose up -d                   # PostgreSQL과 Command Center
 ## 라이선스
 
 MIT 또는 Apache-2.0 중 원하는 쪽으로 쓰시면 됩니다([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). 웹 UI의 IBM Plex 글꼴은 SIL Open Font License입니다.
+
+Nexus Repository는 Sonatype, Inc.의 상표입니다. Command Center는 Sonatype과 관계가 없으며, 호환성과 이전 방법을 설명하려고 그 이름을 씁니다.

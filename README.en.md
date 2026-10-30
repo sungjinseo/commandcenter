@@ -3,7 +3,7 @@
 <p align="center"><a href="README.md">한국어</a> · <b>English</b></p>
 
 <p align="center">
-  A small, solid open-source artifact registry that takes the place of Nexus Repository.<br>
+  A small, solid open-source artifact registry.<br>
   Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace · Terraform in one binary, running as a single Kubernetes pod.
 </p>
 
@@ -28,13 +28,13 @@
 
 ## Why Command Center
 
-Most in-house package repositories start as Nexus Repository OSS, and then meet a 4 GB JVM heap, a slow UI and "available in Pro". Command Center is built to take over that seat.
+Everything an in-house package repository needs, in one binary, with no editions. Teams coming from Nexus Repository can move over with the same URL scheme and REST API.
 
 - **The same URL layout.** `/repository/<name>/...` and Docker's `/v2/` are unchanged, so clients only need a new host name.
 - **The same operating model.** hosted, proxy and group repositories, users, roles and privileges, cleanup policies, scheduled tasks, blob stores: nothing to relearn.
 - **Nexus REST API compatibility and a migration tool.** Existing scripts and the Terraform provider keep working against `/service/rest/v1`, and `import-nexus` copies hosted repositories wholesale.
 - **Small.** One Go binary without CGO. It runs in a 128 MiB container; the load test peaks at 43 MiB RSS.
-- **No editions.** LDAP, OIDC (SSO), S3 blob stores and PostgreSQL are all included, and so are Nexus Pro features (SAML, user tokens, staging and tags, group blob stores, retain-N cleanup, export and import, active-active high availability), under MIT or Apache-2.0, your choice.
+- **No editions.** LDAP, OIDC (SSO), SAML, Crowd, user tokens, S3, Azure and Google Cloud Storage blob stores, staging and tags, group blob stores, retain-N cleanup, pull replication, export and import, database reconcile, configuration as code and active-active high availability are all included, under MIT or Apache-2.0 at your option.
 
 ## Formats
 
@@ -91,12 +91,12 @@ Known limits per format are listed under [limitations](docs/guide.md#제한-사�
 
 ## Quick start
 
-Release images live at `ghcr.io/sungjinseo/commandcenter`. Replace `0.1.1` below with the [latest release](https://github.com/sungjinseo/commandcenter/releases).
+Release images live at `ghcr.io/sungjinseo/commandcenter`. Replace `0.3.0` below with the [latest release](https://github.com/sungjinseo/commandcenter/releases).
 
 Create the admin password hash first (8 characters or more).
 
 ```bash
-docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.1.1 hash-password
+docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.3.0 hash-password
 ```
 
 ### Kubernetes (Helm)
@@ -114,7 +114,7 @@ postgresql:
 ```
 
 ```bash
-helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.1.1 \
+helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.3.0 \
   --namespace commandcenter --create-namespace -f my-values.yaml --wait
 helm test commandcenter -n commandcenter
 ```
@@ -123,23 +123,23 @@ Ingress/HTTPRoute, TLS, PostgreSQL, the secret key, backups and upgrades are in 
 
 ### Kubernetes without Helm (one YAML file)
 
-Clusters that do not use Helm take the manifest attached to every release (`commandcenter-v0.1.1.yaml`, with the image pinned to that release). It is the same file as [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml) in the repository.
+Clusters that do not use Helm take the manifest attached to every release (`commandcenter-v0.3.0.yaml`, with the image pinned to that release). It is the same file as [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml) in the repository.
 
 ```bash
-curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.1.1/commandcenter-v0.1.1.yaml
+curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.3.0/commandcenter-v0.3.0.yaml
 # fill in baseURL, passwordHash, the PostgreSQL password and storageClassName in the file, then
 kubectl create namespace commandcenter
-kubectl apply -n commandcenter -f commandcenter-v0.1.1.yaml
+kubectl apply -n commandcenter -f commandcenter-v0.3.0.yaml
 ```
 
-It holds a PostgreSQL StatefulSet and its password Secret, a one-pod Command Center StatefulSet, the `config.yaml` ConfigMap, a PVC and a Service; add an Ingress or Gateway the way your cluster does it. The chart is also attached as a file (`commandcenter-helm-chart-0.1.1.tgz`) for places that cannot pull OCI charts: `helm install commandcenter ./commandcenter-helm-chart-0.1.1.tgz -f my-values.yaml`.
+It holds a PostgreSQL StatefulSet and its password Secret, a one-pod Command Center StatefulSet, the `config.yaml` ConfigMap, a PVC and a Service; add an Ingress or Gateway the way your cluster does it. The chart is also attached as a file (`commandcenter-helm-chart-0.3.0.tgz`) for places that cannot pull OCI charts: `helm install commandcenter ./commandcenter-helm-chart-0.3.0.tgz -f my-values.yaml`.
 
 ### Docker compose
 
 ```bash
-git clone --depth 1 --branch v0.1.1 https://github.com/sungjinseo/commandcenter.git
+git clone --depth 1 --branch v0.3.0 https://github.com/sungjinseo/commandcenter.git
 cd commandcenter
-echo COMMANDCENTER_VERSION=0.1.1 >> .env
+echo COMMANDCENTER_VERSION=0.3.0 >> .env
 echo POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') >> .env
 cp config.example.yaml config.yaml     # put the hash in passwordHash
 docker compose up -d                   # PostgreSQL and Command Center
@@ -207,3 +207,5 @@ Issues, documentation fixes, bug fixes and new formats are all welcome. The deve
 ## License
 
 MIT or Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). The IBM Plex fonts in the web UI are under the SIL Open Font License.
+
+Nexus Repository is a trademark of Sonatype, Inc. Command Center is not affiliated with Sonatype and uses the name only to describe compatibility and migration.
