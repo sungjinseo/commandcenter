@@ -35,6 +35,8 @@ type settingsDTO struct {
 	UserTokens                 meta.UserTokens `json:"userTokens"`
 	// DefaultRoles are granted to every signed-in user (Nexus DefaultRoleRealm).
 	DefaultRoles []string `json:"defaultRoles"`
+	// PasswordPolicy is the extra rule for new local passwords.
+	PasswordPolicy meta.PasswordPolicy `json:"passwordPolicy"`
 }
 
 // httpDTO is the outbound HTTP configuration without the proxy password.
@@ -106,26 +108,27 @@ func settingsJSON(s meta.Settings) settingsDTO {
 	return settingsDTO{BaseURL: s.BaseURL, AnonymousRead: s.AnonymousRead, AuthenticatedRead: s.AuthenticatedRead,
 		SessionIdleMinutes: s.SessionIdleMinutes, MaxUploadMiB: s.MaxUploadMiB, DefaultLanguage: s.DefaultLanguage,
 		MetricsAnonymous: s.MetricsAnonymous, HTTP: httpJSON(s.HTTP), TerraformDefaultRepository: s.TerraformDefaultRepository,
-		UserTokens: s.UserTokens, DefaultRoles: nonNil(s.DefaultRoles)}
+		UserTokens: s.UserTokens, DefaultRoles: nonNil(s.DefaultRoles), PasswordPolicy: s.PasswordPolicy}
 }
 
 // settingsRequest holds only the fields the caller wants to change.
 type settingsRequest struct {
-	BaseURL                    *string          `json:"baseURL"`
-	AnonymousRead              *bool            `json:"anonymousRead"`
-	AuthenticatedRead          *bool            `json:"authenticatedRead"`
-	SessionIdleMinutes         *int             `json:"sessionIdleMinutes"`
-	MaxUploadMiB               *int             `json:"maxUploadMiB"`
-	DefaultLanguage            *string          `json:"defaultLanguage"`
-	MetricsAnonymous           *bool            `json:"metricsAnonymous"`
-	HTTP                       *httpRequest     `json:"http"`
-	TerraformDefaultRepository *string          `json:"terraformDefaultRepository"`
-	UserTokens                 *meta.UserTokens `json:"userTokens"`
-	DefaultRoles               *[]string        `json:"defaultRoles"`
+	BaseURL                    *string              `json:"baseURL"`
+	AnonymousRead              *bool                `json:"anonymousRead"`
+	AuthenticatedRead          *bool                `json:"authenticatedRead"`
+	SessionIdleMinutes         *int                 `json:"sessionIdleMinutes"`
+	MaxUploadMiB               *int                 `json:"maxUploadMiB"`
+	DefaultLanguage            *string              `json:"defaultLanguage"`
+	MetricsAnonymous           *bool                `json:"metricsAnonymous"`
+	HTTP                       *httpRequest         `json:"http"`
+	TerraformDefaultRepository *string              `json:"terraformDefaultRepository"`
+	UserTokens                 *meta.UserTokens     `json:"userTokens"`
+	DefaultRoles               *[]string            `json:"defaultRoles"`
+	PasswordPolicy             *meta.PasswordPolicy `json:"passwordPolicy"`
 }
 
 func (u *UI) getSettings(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "settings", meta.ActionRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, settingsJSON(u.Auth.Snapshot().Settings()))
@@ -259,6 +262,15 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if contains(roles, meta.AdminRole) {
 			rv.add("the admin role cannot be a default role")
+		} else if snap, err := u.storedAccess(r.Context()); err != nil {
+			u.fail(w, r, err)
+			return
+		} else {
+			for _, id := range roles {
+				if snap.IsAdmin(id) {
+					rv.add("role %q contains the admin role, so it cannot be a default role", id)
+				}
+			}
 		}
 		for _, msg := range rv {
 			v.add("defaultRoles: %s", msg)
@@ -267,6 +279,13 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 			s.DefaultRoles = roles
 			changed = append(changed, meta.SettingDefaultRoles)
 		}
+	}
+	if p := body.PasswordPolicy; p != nil {
+		err := meta.ValidatePasswordPolicy(*p)
+		if err == nil {
+			s.PasswordPolicy = *p
+		}
+		check(meta.SettingPasswordPolicy, err)
 	}
 	if err := v.err(); err != nil {
 		u.writeAccessError(w, r, err)
@@ -287,6 +306,7 @@ func (u *UI) putSettings(w http.ResponseWriter, r *http.Request) {
 		meta.SettingTerraformDefaultRepository: s.TerraformDefaultRepository,
 		meta.SettingUserTokens:                 s.UserTokens,
 		meta.SettingDefaultRoles:               s.DefaultRoles,
+		meta.SettingPasswordPolicy:             s.PasswordPolicy,
 	}
 	err = u.DB.Tx(r.Context(), func(tx *meta.Tx) error {
 		for _, k := range changed {

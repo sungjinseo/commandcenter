@@ -35,6 +35,16 @@ func TestParseAndMatch(t *testing.T) {
 		{`not not path =^ "/a"`, "raw", "/a", true},
 		{`path =^ '/single/'`, "raw", "/single/x", true},
 		{`path == "quo\"te"`, "raw", `quo"te`, true},
+		// JEXL spellings and the value first (security-13), as Nexus accepts them
+		{`format == "maven2" && path =^ "/org/"`, "maven2", "/org/x", true},
+		{`format == "maven2" && path =^ "/org/"`, "npm", "/org/x", false},
+		{`format == "npm" || format == "maven2"`, "maven2", "/x", true},
+		{`format=="npm"||path=^"/a"`, "raw", "/a/b", true},
+		{`"maven2" == format`, "maven2", "/x", true},
+		{`"maven2" != format`, "maven2", "/x", false},
+		{`path eq "/x" and format ne "npm"`, "raw", "/x", true},
+		{`"/org/acme/lib" =^ path`, "maven2", "/org/acme", true}, // the value starts with the path
+		{`"/org/acme/lib" =^ path`, "maven2", "/com", false},
 		{`AND`, "", "", false}, // error case below
 	} {
 		e, err := Parse(c.expr)
@@ -69,6 +79,10 @@ func TestParseErrors(t *testing.T) {
 		{`size == "3"`, "unknown field"},
 		{`path =~ "("`, "invalid regular expression"},
 		{`coordinate.groupId =~ "org.*"`, "does not support =~"},
+		{`path == "/x" & format == "raw"`, "unexpected character"},
+		{`! path == "/x"`, "unexpected character"},
+		{`"x.*" =~ path`, "field first"},
+		{`"org" == coordinate.groupId`, "unknown field"},
 		{strings.Repeat("path == \"/x\" or ", 100) + `path == "/y"`, "longer than"},
 	} {
 		_, err := Parse(c.expr)

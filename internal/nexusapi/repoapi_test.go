@@ -38,7 +38,7 @@ func subset(want, got any, at string) string {
 	return ""
 }
 
-func decode(t *testing.T, b []byte) map[string]any {
+func decodeMap(t *testing.T, b []byte) map[string]any {
 	t.Helper()
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {
@@ -91,22 +91,22 @@ func TestFormatSectionsRoundTrip(t *testing.T) {
 	}
 	for _, c := range cases {
 		e.want("POST", v1+"/repositories/"+c.path, "admin", c.body, 201)
-		got := decode(t, e.want("GET", v1+"/repositories/"+c.path+"/"+c.name, "admin", "", 200))
-		want := decode(t, []byte(c.body))
+		got := decodeMap(t, e.want("GET", v1+"/repositories/"+c.path+"/"+c.name, "admin", "", 200))
+		want := decodeMap(t, []byte(c.body))
 		delete(want, "proxy") // remoteUrl comes back with a trailing slash
 		if d := subset(want, got, c.name); d != "" {
 			t.Errorf("read back: %s", d)
 		}
 		e.want("PUT", v1+"/repositories/"+c.path+"/"+c.name, "admin", c.body, 204)
-		if again := decode(t, e.want("GET", v1+"/repositories/"+c.path+"/"+c.name, "admin", "", 200)); !reflect.DeepEqual(again, got) {
+		if again := decodeMap(t, e.want("GET", v1+"/repositories/"+c.path+"/"+c.name, "admin", "", 200)); !reflect.DeepEqual(again, got) {
 			t.Errorf("%s changed on a PUT of the same body:\n%v\n%v", c.name, got, again)
 		}
 	}
-	g := decode(t, e.want("GET", v1+"/repositories/maven/group/mvn-g", "admin", "", 200))
+	g := decodeMap(t, e.want("GET", v1+"/repositories/maven/group/mvn-g", "admin", "", 200))
 	if _, ok := g["cleanup"]; ok {
 		t.Errorf("a group has no cleanup: %v", g)
 	}
-	r := decode(t, e.want("GET", v1+"/repositories/docker/proxy/docker-p", "admin", "", 200))
+	r := decodeMap(t, e.want("GET", v1+"/repositories/docker/proxy/docker-p", "admin", "", 200))
 	if r["dockerProxy"].(map[string]any)["indexType"] != "HUB" {
 		t.Errorf("dockerProxy = %v", r["dockerProxy"])
 	}
@@ -157,7 +157,7 @@ func TestRepositoryPutKeepsCommandCenterSettings(t *testing.T) {
 	e.want("GET", v1+"/repositories/raw-private", "", "", 401)
 	e.want("PUT", v1+"/repositories/yum/hosted/yum-deep", "admin",
 		`{"name":"yum-deep","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true,"writePolicy":"ALLOW"}}`, 204)
-	s := decode(t, e.want("GET", v1+"/repositories/yum/hosted/yum-deep", "admin", "", 200))
+	s := decodeMap(t, e.want("GET", v1+"/repositories/yum/hosted/yum-deep", "admin", "", 200))
 	if s["yum"].(map[string]any)["repodataDepth"] != float64(1) {
 		t.Fatalf("depth reset: %v", s["yum"])
 	}
@@ -191,7 +191,7 @@ func TestProxyBearerToken(t *testing.T) {
 	}
 	authOf := func() any {
 		t.Helper()
-		s := decode(t, e.want("GET", v1+"/repositories/raw/proxy/raw-tok", "admin", "", 200))
+		s := decodeMap(t, e.want("GET", v1+"/repositories/raw/proxy/raw-tok", "admin", "", 200))
 		return s["httpClient"].(map[string]any)["authentication"]
 	}
 	e.want("POST", v1+"/repositories/raw/proxy", "admin", body(`{"type":"bearerToken","bearerToken":"tok-1"}`), 201)
@@ -236,7 +236,7 @@ func TestFileBlobStoreLifecycle(t *testing.T) {
 		t.Fatalf("GET = %s", b)
 	}
 	e.wantField("PUT", v1+"/blobstores/file/tf", `{"path":"/elsewhere"}`, "path")
-	if d := decode(t, e.want("GET", v1+"/blobstores/file/default", "admin", "", 200)); !strings.HasPrefix(d["path"].(string), "/") {
+	if d := decodeMap(t, e.want("GET", v1+"/blobstores/file/default", "admin", "", 200)); !strings.HasPrefix(d["path"].(string), "/") {
 		t.Fatalf("default store = %v", d)
 	}
 	if a, b := e.want("GET", "/service/rest/beta/blobstores/file/file/tf", "admin", "", 200), e.want("GET", v1+"/blobstores/file/tf", "admin", "", 200); string(a) != string(b) {
@@ -245,7 +245,7 @@ func TestFileBlobStoreLifecycle(t *testing.T) {
 
 	e.want("POST", v1+"/repositories/raw/hosted", "admin", `{"name":"raw-tf","online":true,"storage":{"blobStoreName":"tf","strictContentTypeValidation":false,"writePolicy":"ALLOW"}}`, 201)
 	e.want("DELETE", v1+"/blobstores/tf", "ci", "", 403)
-	if m := decode(t, e.want("DELETE", v1+"/blobstores/tf", "admin", "", 400)); m["id"] != "*" || !strings.Contains(m["message"].(string), "raw-tf") {
+	if m := decodeMap(t, e.want("DELETE", v1+"/blobstores/tf", "admin", "", 400)); m["id"] != "*" || !strings.Contains(m["message"].(string), "raw-tf") {
 		t.Fatalf("in use: %v", m)
 	}
 	e.want("DELETE", v1+"/repositories/raw-tf", "admin", "", 204)
@@ -282,14 +282,14 @@ func TestS3BlobStoreLifecycle(t *testing.T) {
 			"advancedBucketConnection": map[string]any{"endpoint": c.Endpoint, "forcePathStyle": true},
 			"activeRegion":             c.Region,
 		}}
-	if got := decode(t, b); !reflect.DeepEqual(got, want) {
+	if got := decodeMap(t, b); !reflect.DeepEqual(got, want) {
 		t.Fatalf("GET:\n%v\nwant\n%v", got, want)
 	}
-	if got := decode(t, e.want("GET", v1+"/blobstores/s3/s3b", "admin", "", 200)); got["bucketConfiguration"].(map[string]any)["bucketSecurity"] == nil {
+	if got := decodeMap(t, e.want("GET", v1+"/blobstores/s3/s3b", "admin", "", 200)); got["bucketConfiguration"].(map[string]any)["bucketSecurity"] == nil {
 		t.Fatalf("s3b = %v", got)
 	}
 	e.want("PUT", v1+"/blobstores/s3/s3a", "admin", strings.Replace(string(b), `"limit":5000`, `"limit":7000`, 1), 204) // the placeholder keeps the secret
-	if got := decode(t, e.want("GET", v1+"/blobstores/s3/s3a", "admin", "", 200)); got["softQuota"].(map[string]any)["limit"] != float64(7000) {
+	if got := decodeMap(t, e.want("GET", v1+"/blobstores/s3/s3a", "admin", "", 200)); got["softQuota"].(map[string]any)["limit"] != float64(7000) {
 		t.Fatalf("quota = %v", got["softQuota"])
 	}
 	e.want("PUT", v1+"/blobstores/s3/s3a", "admin", body("s3a", "cc", "bucketSecurity", c.SecretKey), 204)
@@ -330,8 +330,8 @@ func TestEmailCompat(t *testing.T) {
 		`"sslServerIdentityCheckEnabled":false,"nexusTrustStoreEnabled":false}`, port)
 	e.want("PUT", v1+"/email", "ci", plain, 403)
 	e.want("PUT", v1+"/email", "admin", plain, 204)
-	got := decode(t, e.want("GET", v1+"/email", "admin", "", 200))
-	want := decode(t, []byte(plain))
+	got := decodeMap(t, e.want("GET", v1+"/email", "admin", "", 200))
+	want := decodeMap(t, []byte(plain))
 	want["password"] = nil
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("GET:\n%v\nwant\n%v", got, want)
@@ -339,7 +339,7 @@ func TestEmailCompat(t *testing.T) {
 	if st, b := e.ui("GET", "/-/api/settings/smtp", ""); st != 200 || !strings.Contains(string(b), `"passwordSet":true`) {
 		t.Fatalf("smtp: %s", b)
 	}
-	if m := decode(t, e.want("POST", v1+"/email/verify", "admin", "admin@example.com", 400)); m["success"] != false || !strings.Contains(m["reason"].(string), "could not send") {
+	if m := decodeMap(t, e.want("POST", v1+"/email/verify", "admin", "admin@example.com", 400)); m["success"] != false || !strings.Contains(m["reason"].(string), "could not send") {
 		t.Fatalf("verify = %v", m)
 	}
 
@@ -354,7 +354,7 @@ func TestEmailCompat(t *testing.T) {
 	starttls := strings.NewReplacer(`"startTlsEnabled":false`, `"startTlsEnabled":true`, `"startTlsRequired":false`, `"startTlsRequired":true`,
 		`"sslServerIdentityCheckEnabled":false`, `"sslServerIdentityCheckEnabled":true`, `"nexusTrustStoreEnabled":false`, `"nexusTrustStoreEnabled":true`).Replace(plain)
 	e.want("PUT", v1+"/email", "admin", starttls, 204)
-	got = decode(t, e.want("GET", v1+"/email", "admin", "", 200))
+	got = decodeMap(t, e.want("GET", v1+"/email", "admin", "", 200))
 	if d := subset(map[string]any{"startTlsEnabled": true, "startTlsRequired": true, "sslOnConnectEnabled": false, "sslServerIdentityCheckEnabled": true}, got, "email"); d != "" {
 		t.Fatal(d)
 	}
@@ -362,7 +362,7 @@ func TestEmailCompat(t *testing.T) {
 		t.Fatalf("beta %s, v1 %s", a, b)
 	}
 	e.want("DELETE", v1+"/email", "admin", "", 204)
-	if got = decode(t, e.want("GET", v1+"/email", "admin", "", 200)); got["enabled"] != false || got["host"] != "" {
+	if got = decodeMap(t, e.want("GET", v1+"/email", "admin", "", 200)); got["enabled"] != false || got["host"] != "" {
 		t.Fatalf("after DELETE: %v", got)
 	}
 	if _, b := e.ui("GET", "/-/api/settings/smtp", ""); !strings.Contains(string(b), `"passwordSet":false`) {
@@ -400,7 +400,7 @@ func TestMetricsCompat(t *testing.T) {
 		t.Fatalf("filtered = %q", b)
 	}
 	st, b, h := e.do("GET", "/service/rest/metrics/data?pretty=true&download=true", "admin", "")
-	m := decode(t, b)
+	m := decodeMap(t, b)
 	gauges, _ := m["gauges"].(map[string]any)
 	if st != 200 || m["version"] == nil || gauges["jvm.memory.heap.used"].(map[string]any)["value"].(float64) <= 0 ||
 		!strings.Contains(h.Get("Content-Disposition"), "metrics.json") || !strings.Contains(string(b), "\n  ") {
@@ -429,7 +429,7 @@ func TestBetaAliases(t *testing.T) {
 	e.want("POST", "/service/rest/beta/repositories/raw/hosted", "admin", `{"name":"raw-beta","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":false,"writePolicy":"ALLOW"}}`, 201)
 	same("/repositories/raw/hosted/raw-beta", "/repositories/raw/hosted/raw-beta")
 	e.want("DELETE", "/service/rest/beta/repositories/raw-beta", "admin", "", 204)
-	if m := decode(t, e.want("GET", "/service/rest/beta/components?repository=maven-releases", "admin", "", 404)); m["id"] != "*" {
+	if m := decodeMap(t, e.want("GET", "/service/rest/beta/components?repository=maven-releases", "admin", "", 404)); m["id"] != "*" {
 		t.Fatalf("no twin: %v", m)
 	}
 }
@@ -439,7 +439,7 @@ func TestBetaAliases(t *testing.T) {
 // has system-environment, system-network and system-properties.
 func TestNexusFieldShapes(t *testing.T) {
 	e := start(t, false)
-	if m := decode(t, e.want("GET", v1+"/nope", "admin", "", 404)); m["id"] != "*" || m["message"] != "not found" {
+	if m := decodeMap(t, e.want("GET", v1+"/nope", "admin", "", 404)); m["id"] != "*" || m["message"] != "not found" {
 		t.Fatalf("404 body = %v", m)
 	}
 	e.upload("maven-releases/org/x/a/1.0/a-1.0.jar")
@@ -471,7 +471,7 @@ func TestNexusFieldShapes(t *testing.T) {
 	if st, b := e.ui("PUT", "/-/api/recovery", `{"enabled":true,"message":"restoring"}`); st != 200 {
 		t.Fatalf("recovery: %d %s", st, b)
 	}
-	if m := decode(t, e.want("DELETE", v1+"/components/abc", "admin", "", 503)); m["id"] != "*" || !strings.Contains(m["message"].(string), "restoring") {
+	if m := decodeMap(t, e.want("DELETE", v1+"/components/abc", "admin", "", 503)); m["id"] != "*" || !strings.Contains(m["message"].(string), "restoring") {
 		t.Fatalf("recovery refusal = %v", m)
 	}
 }

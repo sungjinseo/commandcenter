@@ -18,8 +18,10 @@ import (
 )
 
 // Users, roles and the self-service password change (plan 12 Task 2). Reads
-// need an admin; every change needs an admin who signed in with a password or
-// session, plus the UI header. The caller's own password change needs only
+// need an admin or the read action of the users or roles domain; every
+// change needs an admin or the domain's action, from a password or session
+// login, plus the UI header. Only an admin may grant, change or remove
+// what makes someone an admin. The caller's own password change needs only
 // an interactive login.
 
 func (u *UI) accessRoutes(mux *http.ServeMux) {
@@ -46,12 +48,17 @@ const (
 const (
 	roleInUseMessage     = "role is in use"
 	wrongPasswordMessage = "the current password is incorrect"
+	selfDeleteMessage    = "you cannot delete the user you are signed in as"
 )
 
 var (
 	userIDRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
 	accessFormats = []string{"maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm", "yum", "nuget", "apt", "composer", "conda", "rubygems", "gitlfs", "r", "conan", "p2", "swift", "cocoapods", "huggingface", "terraform"}
 )
+
+// errAdminOnly refuses a delegated caller a change of what makes someone an
+// admin (403).
+var errAdminOnly = errors.New("only an admin can change an administrator or grant the admin role")
 
 // validation collects messages for the 400 answer.
 type validation []string
@@ -80,10 +87,15 @@ func (u *UI) writeAccessError(w http.ResponseWriter, r *http.Request, err error)
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, meta.ErrExists):
 		writeError(w, http.StatusConflict, err.Error()) // names an id that differs only in case
+	case errors.Is(err, meta.ErrContained):
+		_, by, _ := strings.Cut(err.Error(), ": contained in another role: ")
+		writeError(w, http.StatusConflict, roleInUseMessage+" by role "+by)
 	case errors.Is(err, meta.ErrInUse):
 		writeError(w, http.StatusConflict, roleInUseMessage)
 	case errors.Is(err, auth.ErrLockout):
 		writeError(w, http.StatusConflict, lockoutMessage)
+	case errors.Is(err, errAdminOnly):
+		writeError(w, http.StatusForbidden, errAdminOnly.Error())
 	default:
 		u.fail(w, r, err)
 	}
@@ -122,8 +134,10 @@ type privilegeDTO struct {
 
 type roleDTO struct {
 	ID          string         `json:"id"`
+	Name        string         `json:"name"` // "" shows the id
 	Description string         `json:"description"`
 	Privileges  []privilegeDTO `json:"privileges"`
+	Roles       []string       `json:"roles"` // contained roles, transitively granted
 	CreatedAt   string         `json:"createdAt"`
 	UpdatedAt   string         `json:"updatedAt"`
 }
@@ -137,7 +151,11 @@ func roleJSON(x meta.Role) roleDTO {
 		}
 		privs = append(privs, privilegeDTO{Target: p.Target, Actions: acts, Repos: p.Repos})
 	}
-	return roleDTO{ID: x.ID, Description: x.Description, Privileges: privs,
+	roles := x.Roles
+	if roles == nil {
+		roles = []string{}
+	}
+	return roleDTO{ID: x.ID, Name: x.Name, Description: x.Description, Privileges: privs, Roles: roles,
 		CreatedAt: rfc3339(x.CreatedAt), UpdatedAt: rfc3339(x.UpdatedAt)}
 }
 
@@ -157,8 +175,14 @@ func checkUserID(id string) error {
 	return nil
 }
 
-func checkPassword(pw string) error {
-	if err := auth.CheckNewPassword(pw); err != nil {
+// checkPassword applies the password rules and the password policy
+// setting to a new local password.
+func (u *UI) checkPassword(pw string) error {
+	err := auth.CheckNewPassword(pw)
+	if err == nil {
+		err = u.Auth.Snapshot().Settings().PasswordPolicy.Check(pw)
+	}
+	if err != nil {
 		return &repo.ValidationError{Errors: []string{err.Error()}}
 	}
 	return nil
@@ -245,6 +269,12 @@ func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta
 				return slices.ContainsFunc(kept, func(k meta.Privilege) bool { return k.Target == p.Target && slices.Contains(k.Repos, repo) })
 			}
 			for _, repo := range p.Repos {
+				if f, ok := strings.CutPrefix(repo, "*-"); ok { // every repository of a format (Nexus "*-maven2")
+					if !slices.ContainsFunc(accessFormats, func(x string) bool { return auth.NexusFormat(x) == f }) {
+						v.add("%s: unknown format %q in %q", at, f, repo)
+					}
+					continue
+				}
 				if repo != "*" && u.Repos.Get(repo) == nil && !wasKept(repo) {
 					v.add("%s: unknown repository %q", at, repo)
 				}
@@ -253,30 +283,56 @@ func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta
 		case len(p.Repos) > 0:
 			v.add(`%s: repos is only valid with a "selector:<name>" target`, at)
 		}
+		valid := valid
+		if strings.HasPrefix(p.Target, meta.AppTargetPrefix) {
+			valid = map[string]bool{}
+			for _, a := range appActionNames {
+				valid[a] = true
+			}
+		}
 		if targets[key] {
 			v.add("%s: duplicate target %q", at, p.Target)
 		}
 		targets[key] = true
+		target := p.Target
+		if t, ok := strings.CutPrefix(target, meta.AdminTargetPrefix); ok {
+			target = t
+			if slices.Contains(p.Actions, meta.ActionAdd) && strings.HasPrefix(t, "repo:") {
+				v.add(`%s: "add" creates repositories: grant it on "admin:*" or "admin:format:<format>"`, at)
+			}
+		}
 		switch {
-		case strings.HasPrefix(p.Target, meta.SelectorPrefix):
+		case strings.HasPrefix(target, meta.AppTargetPrefix) && target == p.Target:
+			d := strings.TrimPrefix(target, meta.AppTargetPrefix)
+			if acts, ok := auth.AppDomains[d]; !ok {
+				v.add("%s: unknown application domain %q", at, d)
+			} else {
+				for _, a := range p.Actions {
+					if !slices.Contains(acts, a) && slices.Contains(appActionNames, a) {
+						v.add("%s: the %q domain delegates only %s; the rest stays with administrators", at, d, strings.Join(acts, ", "))
+						break
+					}
+				}
+			}
+		case strings.HasPrefix(target, meta.SelectorPrefix) && target == p.Target:
 		case p.Target == auth.MetricsTarget:
 			if len(p.Actions) != 1 || p.Actions[0] != meta.ActionRead {
 				v.add(`%s: the %q target takes the action "read" only`, at, auth.MetricsTarget)
 			}
-		case p.Target == "*":
-		case strings.HasPrefix(p.Target, "format:"):
-			if f := strings.TrimPrefix(p.Target, "format:"); !contains(accessFormats, f) {
+		case target == "*":
+		case strings.HasPrefix(target, "format:"):
+			if f := strings.TrimPrefix(target, "format:"); !contains(accessFormats, f) {
 				v.add("%s: unknown format %q", at, f)
 			}
-		case strings.HasPrefix(p.Target, "repo:"):
-			name := strings.TrimPrefix(p.Target, "repo:")
+		case strings.HasPrefix(target, "repo:"):
+			name := strings.TrimPrefix(target, "repo:")
 			if err := repo.CheckName("repository", name); err != nil {
 				v.add("%s: invalid repository name in %q", at, p.Target)
 			} else if u.Repos.Get(name) == nil && !slices.ContainsFunc(kept, func(k meta.Privilege) bool { return k.Target == p.Target }) {
 				v.add("%s: unknown repository %q", at, name)
 			}
 		default:
-			v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>", "selector:<name>" or "metrics"`, at, p.Target)
+			v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>", "selector:<name>", "metrics", "app:<domain>" or "admin:" before "*", "format:<format>" or "repo:<name>"`, at, p.Target)
 		}
 		if len(p.Actions) == 0 {
 			v.add("%s: at least one action is required", at)
@@ -293,6 +349,13 @@ func (u *UI) validatePrivileges(v *validation, privs []privilegeDTO, kept []meta
 		}
 	}
 }
+
+// AccessFormats lists the formats a privilege may name ("format:<f>").
+func AccessFormats() []string { return slices.Clone(accessFormats) }
+
+// appActionNames are the actions any application domain may take; one a
+// domain does not delegate is refused with a message saying so.
+var appActionNames = []string{meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete, meta.ActionRun}
 
 func contains(list []string, s string) bool {
 	for _, x := range list {
@@ -320,8 +383,12 @@ func (u *UI) checkLockout(ctx context.Context, change func(users []meta.User) []
 	if err != nil {
 		return err
 	}
-	before := auth.NewSnapshot(data.Users, data.Roles, data.Settings)
-	after := auth.NewSnapshot(change(append([]meta.User(nil), data.Users...)), data.Roles, data.Settings)
+	return u.lockoutBetween(auth.NewSnapshot(data.Users, data.Roles, data.Settings),
+		auth.NewSnapshot(change(append([]meta.User(nil), data.Users...)), data.Roles, data.Settings))
+}
+
+// lockoutBetween is checkLockout's rule for the change from before to after.
+func (u *UI) lockoutBetween(before, after *auth.Snapshot) error {
 	if auth.RestorableAdmins(before) > 0 && auth.RestorableAdmins(after) == 0 {
 		return auth.ErrLockout
 	}
@@ -356,8 +423,58 @@ func (u *UI) applied(w http.ResponseWriter, r *http.Request, invalidate string) 
 // ---- users ----
 // GET /-/api/users is listUsers in info.go; it carries these fields too.
 
+// storedAccess is a snapshot of the stored users, roles and settings: what
+// a check under the access lock must see, even before this node reloads
+// another node's change.
+func (u *UI) storedAccess(ctx context.Context) (*auth.Snapshot, error) {
+	data, err := u.DB.LoadAccess(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return auth.NewSnapshot(data.Users, data.Roles, data.Settings), nil
+}
+
+// adminOnly answers 403 and reports true when a delegated (non-admin)
+// caller would grant, change or remove what makes someone an admin: the
+// stored roles (cur) or the new ones (next) of a user are, or contain, the
+// admin role.
+func (u *UI) adminOnly(w http.ResponseWriter, r *http.Request, p auth.Principal, cur, next []string) bool {
+	if p.Admin {
+		return false
+	}
+	s, err := u.storedAccess(r.Context())
+	if err != nil {
+		u.fail(w, r, err)
+		return true
+	}
+	if s.IsAdmin(cur...) || s.IsAdmin(next...) {
+		writeError(w, http.StatusForbidden, errAdminOnly.Error())
+		return true
+	}
+	return false
+}
+
+// localOnly answers 403 and reports true when a delegated (non-admin)
+// caller would manage a record of source other than local: an override
+// record can disable or empower a directory or SSO user whose roles here
+// (an LDAP group mapped to admin) the caller cannot see.
+func localOnly(w http.ResponseWriter, p auth.Principal, source string) bool {
+	if p.Admin || source == meta.SourceLocal {
+		return false
+	}
+	writeError(w, http.StatusForbidden, "only an admin can manage the records of LDAP, OIDC, Crowd, RUT and SAML users")
+	return true
+}
+
+// checkLastName checks the Nexus API's lastName: the end of name.
+func checkLastName(v *validation, name, last string) {
+	if last != "" && name != last && !strings.HasSuffix(name, " "+last) {
+		v.add("lastName must be the end of name")
+	}
+}
+
 func (u *UI) getUser(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "users", meta.ActionRead); !ok {
 		return
 	}
 	x, err := u.DB.GetUser(r.Context(), r.PathValue("id"))
@@ -369,12 +486,14 @@ func (u *UI) getUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	p, ok := u.requireAppInteractive(w, r, "users", meta.ActionAdd)
+	if !ok {
 		return
 	}
 	var body struct {
 		ID       string   `json:"id"`
 		Name     string   `json:"name"`
+		LastName string   `json:"lastName"` // the end of name that is the family name (the Nexus API's lastName)
 		Email    string   `json:"email"`
 		Password string   `json:"password"`
 		Source   string   `json:"source"`
@@ -406,6 +525,7 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 		v.add("status must be %q or %q", meta.StatusActive, meta.StatusDisabled)
 	}
 	checkText(&v, "name", body.Name)
+	checkLastName(&v, body.Name, body.LastName)
 	checkText(&v, "email", body.Email)
 	checkEmail(&v, body.Email)
 	hash := ""
@@ -413,7 +533,7 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 	case body.Source != meta.SourceLocal && body.Password != "":
 		v.add("an LDAP, OIDC, Crowd, RUT or SAML user has no local password")
 	case body.Source == meta.SourceLocal:
-		if err := checkPassword(body.Password); err != nil {
+		if err := u.checkPassword(body.Password); err != nil {
 			v = append(v, err.(*repo.ValidationError).Errors...)
 		}
 	}
@@ -425,6 +545,9 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, err)
 		return
 	}
+	if localOnly(w, p, body.Source) || u.adminOnly(w, r, p, nil, body.Roles) {
+		return
+	}
 	if body.Source == meta.SourceLocal {
 		var err error
 		if hash, err = auth.HashPassword(body.Password); err != nil {
@@ -433,7 +556,7 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	roles := append([]string{}, body.Roles...)
-	nu := meta.User{ID: body.ID, Name: body.Name, Email: body.Email, PasswordHash: hash,
+	nu := meta.User{ID: body.ID, Name: body.Name, LastName: body.LastName, Email: body.Email, PasswordHash: hash,
 		Source: body.Source, Status: body.Status, Roles: roles}
 	if err := u.DB.CreateUser(r.Context(), nu); err != nil {
 		u.writeAccessError(w, r, err)
@@ -452,15 +575,17 @@ func (u *UI) createUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) updateUser(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	p, ok := u.requireAppInteractive(w, r, "users", meta.ActionEdit)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
 	var body struct {
-		Name   string   `json:"name"`
-		Email  string   `json:"email"`
-		Status string   `json:"status"` // empty keeps the stored status
-		Roles  []string `json:"roles"`
+		Name     string   `json:"name"`
+		LastName *string  `json:"lastName"` // absent keeps the stored one
+		Email    string   `json:"email"`
+		Status   string   `json:"status"` // empty keeps the stored status
+		Roles    []string `json:"roles"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -487,6 +612,11 @@ func (u *UI) updateUser(w http.ResponseWriter, r *http.Request) {
 	if body.Name != cur.Name {
 		checkText(&v, "name", body.Name)
 	}
+	last := cur.LastName
+	if body.LastName != nil {
+		last = *body.LastName
+		checkLastName(&v, body.Name, last)
+	}
 	if body.Email != cur.Email {
 		checkText(&v, "email", body.Email)
 		checkEmail(&v, body.Email)
@@ -499,8 +629,11 @@ func (u *UI) updateUser(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, err)
 		return
 	}
+	if localOnly(w, p, cur.Source) || u.adminOnly(w, r, p, cur.Roles, body.Roles) {
+		return
+	}
 	next := cur
-	next.Name, next.Email, next.Status = body.Name, body.Email, body.Status
+	next.Name, next.LastName, next.Email, next.Status = body.Name, last, body.Email, body.Status
 	next.Roles = append([]string{}, body.Roles...)
 	err = u.checkLockout(r.Context(), func(users []meta.User) []meta.User {
 		for i := range users {
@@ -534,7 +667,8 @@ func (u *UI) updateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) deleteUser(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	p, ok := u.requireAppInteractive(w, r, "users", meta.ActionDelete)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -554,6 +688,9 @@ func (u *UI) deleteUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "this disabled record blocks "+strings.ToUpper(cur.Source)+" user "+cur.ID+"; deleting it lets them sign in again (set it active first)")
 		return
 	}
+	if localOnly(w, p, cur.Source) || u.adminOnly(w, r, p, cur.Roles, nil) {
+		return
+	}
 	err = u.checkLockout(r.Context(), func(users []meta.User) []meta.User {
 		out := users[:0]
 		for _, x := range users {
@@ -563,6 +700,11 @@ func (u *UI) deleteUser(w http.ResponseWriter, r *http.Request) {
 		}
 		return out
 	})
+	if err == nil && id == p.User {
+		// As Nexus: nobody deletes the account they are signed in with.
+		writeError(w, http.StatusConflict, selfDeleteMessage)
+		return
+	}
 	if err == nil {
 		err = u.DB.DeleteUser(r.Context(), id) // its tokens go in the same transaction
 	}
@@ -578,7 +720,8 @@ func (u *UI) deleteUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) resetPassword(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	p, ok := u.requireAppInteractive(w, r, "users", meta.ActionEdit)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -602,7 +745,10 @@ func (u *UI) resetPassword(w http.ResponseWriter, r *http.Request) {
 		u.writeAccessError(w, r, &repo.ValidationError{Errors: []string{"only a local user has a password"}})
 		return
 	}
-	if err := checkPassword(body.Password); err != nil {
+	if u.adminOnly(w, r, p, cur.Roles, nil) {
+		return
+	}
+	if err := u.checkPassword(body.Password); err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
@@ -627,10 +773,17 @@ func (u *UI) resetPassword(w http.ResponseWriter, r *http.Request) {
 // (QA N-16). A password change or reset leaves tokens valid; after a
 // suspected leak this ends them all. It answers how many it deleted.
 func (u *UI) revokeUserTokens(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	p, ok := u.requireAppInteractive(w, r, "users", meta.ActionEdit)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
+	if cur, err := u.DB.GetUser(r.Context(), id); !p.Admin && err != nil {
+		writeError(w, http.StatusForbidden, "only an admin can revoke the tokens of a user without a local record")
+		return
+	} else if err == nil && (localOnly(w, p, cur.Source) || u.adminOnly(w, r, p, cur.Roles, nil)) {
+		return
+	}
 	n, err := u.Auth.RevokeUserTokens(r.Context(), id)
 	if err != nil {
 		u.fail(w, r, err)
@@ -668,7 +821,7 @@ func (u *UI) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, wrongPasswordMessage)
 		return
 	}
-	if err := checkPassword(body.NewPassword); err != nil {
+	if err := u.checkPassword(body.NewPassword); err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
@@ -726,7 +879,7 @@ func checkRoleID(id string) error {
 }
 
 func (u *UI) listRoles(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "roles", meta.ActionRead); !ok {
 		return
 	}
 	list, err := u.DB.ListRoles(r.Context())
@@ -747,7 +900,7 @@ func (u *UI) listRoles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) getRole(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "roles", meta.ActionRead); !ok {
 		return
 	}
 	x, err := u.DB.GetRole(r.Context(), r.PathValue("id"))
@@ -770,14 +923,70 @@ func toPrivileges(in []privilegeDTO) []meta.Privilege {
 	return out
 }
 
+// checkRoleChange applies the stored role cur (nil for a new one) becoming
+// next and refuses it when a contained role is unknown, repeated, the role
+// itself or leads back to it (validation, into v); when a delegated
+// caller p would change what makes someone an admin (errAdminOnly); when a
+// default role would grant admin (validation); or when no admin could sign
+// in after it (auth.ErrLockout).
+func (u *UI) checkRoleChange(ctx context.Context, v *validation, p auth.Principal, cur *meta.Role, next meta.Role) error {
+	data, err := u.DB.LoadAccess(ctx)
+	if err != nil {
+		return err
+	}
+	before := auth.NewSnapshot(data.Users, data.Roles, data.Settings)
+	have := map[string]bool{meta.AdminRole: true}
+	roles := []meta.Role{next}
+	for _, x := range data.Roles {
+		have[x.ID] = true
+		if x.ID != next.ID {
+			roles = append(roles, x)
+		}
+	}
+	seen := map[string]bool{}
+	for _, id := range next.Roles {
+		switch {
+		case seen[id]:
+			v.add("roles: duplicate role %q", id)
+		case id == next.ID:
+			v.add("roles: role %q cannot contain itself", id)
+		case !have[id]:
+			v.add("roles: unknown role %q", id)
+		}
+		seen[id] = true
+	}
+	if len(*v) > 0 {
+		return v.err()
+	}
+	if before.ContainsCycle(next.ID, next.Roles) {
+		v.add("roles: role %q cannot contain itself, directly or through the roles it contains", next.ID)
+		return v.err()
+	}
+	after := auth.NewSnapshot(data.Users, roles, data.Settings)
+	if !p.Admin && (after.IsAdmin(next.ID) || cur != nil && before.IsAdmin(cur.ID)) {
+		return errAdminOnly
+	}
+	for _, d := range data.Settings.DefaultRoles {
+		if after.IsAdmin(d) {
+			v.add("roles: the default role %q would grant the admin role", d)
+			return v.err()
+		}
+	}
+	return u.lockoutBetween(before, after)
+}
+
 func (u *UI) createRole(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	p, ok := u.requireAppInteractive(w, r, "roles", meta.ActionAdd)
+	if !ok {
 		return
 	}
 	var body struct {
 		ID          string         `json:"id"`
+		Name        string         `json:"name"`
 		Description string         `json:"description"`
 		Privileges  []privilegeDTO `json:"privileges"`
+		Roles       []string       `json:"roles"`
+		Nexus       string         `json:"nexus"` // the Nexus API's form, kept for its reads
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -793,14 +1002,20 @@ func (u *UI) createRole(w http.ResponseWriter, r *http.Request) {
 	} else if strings.EqualFold(body.ID, meta.AdminRole) {
 		v.add("role id %q is reserved for the built-in administrator role", body.ID)
 	}
+	checkText(&v, "name", body.Name)
 	checkText(&v, "description", body.Description)
 	u.validatePrivileges(&v, body.Privileges, nil)
 	if err := v.err(); err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	nr := meta.Role{ID: body.ID, Description: body.Description, Privileges: toPrivileges(body.Privileges)}
-	if err := u.DB.CreateRole(r.Context(), nr); err != nil {
+	nr := meta.Role{ID: body.ID, Name: body.Name, Description: body.Description, Privileges: toPrivileges(body.Privileges),
+		Roles: append([]string{}, body.Roles...), Nexus: body.Nexus}
+	err := u.checkRoleChange(r.Context(), &v, p, nil, nr)
+	if err == nil {
+		err = u.DB.CreateRole(r.Context(), nr)
+	}
+	if err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
@@ -817,7 +1032,8 @@ func (u *UI) createRole(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) updateRole(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	p, ok := u.requireAppInteractive(w, r, "roles", meta.ActionEdit)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -826,8 +1042,11 @@ func (u *UI) updateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		Name        string         `json:"name"`
 		Description string         `json:"description"`
 		Privileges  []privilegeDTO `json:"privileges"`
+		Roles       []string       `json:"roles"` // the contained roles (absent: none)
+		Nexus       string         `json:"nexus"` // the Nexus API's form; "" drops it
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -846,13 +1065,21 @@ func (u *UI) updateRole(w http.ResponseWriter, r *http.Request) {
 	if body.Description != cur.Description { // a stored value is not re-checked
 		checkText(&v, "description", body.Description)
 	}
+	nr := meta.Role{ID: id, Name: body.Name, Description: body.Description, Privileges: toPrivileges(body.Privileges),
+		Roles: append([]string{}, body.Roles...), Nexus: body.Nexus}
+	if nr.Name != cur.Name {
+		checkText(&v, "name", nr.Name)
+	}
 	u.validatePrivileges(&v, body.Privileges, cur.Privileges)
 	if err := v.err(); err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
-	nr := meta.Role{ID: id, Description: body.Description, Privileges: toPrivileges(body.Privileges)}
-	if err := u.DB.UpdateRole(r.Context(), nr); err != nil {
+	err = u.checkRoleChange(r.Context(), &v, p, &cur, nr)
+	if err == nil {
+		err = u.DB.UpdateRole(r.Context(), nr)
+	}
+	if err != nil {
 		u.writeAccessError(w, r, err)
 		return
 	}
@@ -869,7 +1096,8 @@ func (u *UI) updateRole(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) deleteRole(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	p, ok := u.requireAppInteractive(w, r, "roles", meta.ActionDelete)
+	if !ok {
 		return
 	}
 	id := r.PathValue("id")
@@ -880,6 +1108,9 @@ func (u *UI) deleteRole(w http.ResponseWriter, r *http.Request) {
 	defer unlock()
 	if id == meta.AdminRole {
 		writeError(w, http.StatusConflict, "the admin role cannot be deleted")
+		return
+	}
+	if u.adminOnly(w, r, p, []string{id}, nil) {
 		return
 	}
 	// A role named by the LDAP settings would leave a dangling mapping
@@ -913,8 +1144,8 @@ func (u *UI) deleteRole(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, roleInUseMessage+" by the "+strings.Replace(ref, "LDAP", "SAML", 1))
 		return
 	}
-	// A role held by a user is refused by the store (ErrInUse), so deleting
-	// one never changes who is an admin.
+	// A role held by a user or contained in another role is refused by the
+	// store (ErrInUse), so deleting one never changes who is an admin.
 	if err := u.DB.DeleteRole(r.Context(), id); err != nil {
 		u.writeAccessError(w, r, err)
 		return

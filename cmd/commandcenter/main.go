@@ -295,6 +295,13 @@ func resetPassword(ctx context.Context, cfg *config.Config, name, pw string, adm
 		}
 		fmt.Fprintln(stdout, "imported users, roles and settings from the config file")
 	}
+	var policy meta.PasswordPolicy
+	if _, err := db.GetSettingJSON(ctx, meta.SettingPasswordPolicy, &policy); err != nil {
+		return err
+	}
+	if err := policy.Check(pw); err != nil {
+		return err
+	}
 	changes, err := db.ResetLocalPassword(ctx, name, hash, admin)
 	if err != nil {
 		return err

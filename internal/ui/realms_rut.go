@@ -28,7 +28,7 @@ func rutJSON(c meta.RUT) meta.RUT {
 }
 
 func (u *UI) getRUT(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "settings", meta.ActionRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, rutJSON(u.Auth.Snapshot().Settings().RUT))

@@ -41,8 +41,21 @@ const (
 	ActionDelete = "delete"
 )
 
-// Actions lists every privilege action in canonical order.
+// ActionRun is the action of an "app:" privilege that starts and stops
+// (tasks); repository privileges never take it.
+const ActionRun = "run"
+
+// Actions lists every repository privilege action in canonical order.
 var Actions = []string{ActionBrowse, ActionRead, ActionAdd, ActionEdit, ActionDelete}
+
+// Privilege target prefixes beside "*", "format:", "repo:" and "selector:":
+// "app:<domain>" is an application privilege (Nexus nx-<domain>-*), and
+// "admin:" before "*", "format:<f>" or "repo:<name>" administers those
+// repositories (Nexus repository-admin).
+const (
+	AppTargetPrefix   = "app:"
+	AdminTargetPrefix = "admin:"
+)
 
 // ErrInUse reports that a record is still referenced (a role held by a user).
 var ErrInUse = errors.New("in use")
@@ -56,8 +69,12 @@ type User struct {
 	Source       string // SourceLocal, SourceLDAP or SourceOIDC
 	Status       string // StatusActive or StatusDisabled
 	Roles        []string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// LastName is the trailing part of Name that the Nexus API's lastName
+	// set ("" when it never did), so firstName and lastName read back as
+	// written; Name is always the whole display name.
+	LastName  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // Privilege grants actions on a target: "*", "format:<fmt>", "repo:<name>"
@@ -69,16 +86,24 @@ type Privilege struct {
 	Repos   []string `json:"repos,omitempty"`
 }
 
-// Role is a stored role. Privileges is never nil when read back.
+// Role is a stored role. Privileges and Roles are never nil when read
+// back. Roles are the ids of contained roles, whose privileges the role
+// grants too, transitively (Nexus nested roles); a missing contained role
+// grants nothing.
 type Role struct {
 	ID          string
+	Name        string // display name; "" shows the id
 	Description string
 	Privileges  []Privilege
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	Roles       []string
+	// Nexus is the role's last write through the Nexus API (JSON, opaque
+	// here), so it reads back there as written; "" when there was none.
+	Nexus     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
-const userCols = `id, name, email, password_hash, source, status, roles, created_at, updated_at`
+const userCols = `id, name, email, password_hash, source, status, roles, created_at, updated_at, last_name`
 
 // ListUsers returns every stored user, ordered by id.
 func (d *DB) ListUsers(ctx context.Context) ([]User, error) { return listUsers(ctx, d.sql) }
@@ -121,7 +146,7 @@ func (d *DB) UpdateUser(ctx context.Context, u User) error {
 		return err
 	}
 	res, err := d.sql.ExecContext(ctx, `UPDATE users SET name = ?, email = ?, password_hash = ?, source = ?, status = ?,
-roles = ?, updated_at = ? WHERE id = ?`, u.Name, u.Email, u.PasswordHash, u.Source, u.Status, string(roles), toMs(time.Now()), u.ID)
+roles = ?, updated_at = ?, last_name = ? WHERE id = ?`, u.Name, u.Email, u.PasswordHash, u.Source, u.Status, string(roles), toMs(time.Now()), u.LastName, u.ID)
 	if err != nil {
 		return err
 	}
@@ -179,8 +204,8 @@ func insertUser(ctx context.Context, q querier, u User) error {
 	if u.UpdatedAt.IsZero() {
 		u.UpdatedAt = now
 	}
-	_, err = q.ExecContext(ctx, `INSERT INTO users(`+userCols+`) VALUES(?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Name, u.Email, u.PasswordHash, u.Source, u.Status, string(roles), toMs(u.CreatedAt), toMs(u.UpdatedAt))
+	_, err = q.ExecContext(ctx, `INSERT INTO users(`+userCols+`) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Email, u.PasswordHash, u.Source, u.Status, string(roles), toMs(u.CreatedAt), toMs(u.UpdatedAt), u.LastName)
 	return err
 }
 
@@ -206,7 +231,7 @@ func scanUser(row scanner) (User, error) {
 	var u User
 	var roles string
 	var created, updated int64
-	err := row.Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Source, &u.Status, &roles, &created, &updated)
+	err := row.Scan(&u.ID, &u.Name, &u.Email, &u.PasswordHash, &u.Source, &u.Status, &roles, &created, &updated, &u.LastName)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -223,7 +248,7 @@ func scanUser(row scanner) (User, error) {
 	return u, nil
 }
 
-const roleCols = `id, description, privileges, created_at, updated_at`
+const roleCols = `id, description, privileges, created_at, updated_at, name, roles, nexus`
 
 // ListRoles returns every stored role, ordered by id.
 func (d *DB) ListRoles(ctx context.Context) ([]Role, error) { return listRoles(ctx, d.sql) }
@@ -256,18 +281,15 @@ func (d *DB) CreateRole(ctx context.Context, r Role) error {
 	return d.Tx(ctx, func(tx *Tx) error { return insertRole(ctx, tx.q, r) })
 }
 
-// UpdateRole replaces the description and privileges of role r.ID;
-// ErrNotFound if there is none.
+// UpdateRole replaces the name, description, privileges, contained roles
+// and Nexus form of role r.ID; ErrNotFound if there is none.
 func (d *DB) UpdateRole(ctx context.Context, r Role) error {
-	if r.Privileges == nil {
-		r.Privileges = []Privilege{}
-	}
-	privs, err := json.Marshal(r.Privileges)
+	privs, roles, err := roleJSON(r)
 	if err != nil {
 		return err
 	}
-	res, err := d.sql.ExecContext(ctx, `UPDATE roles SET description = ?, privileges = ?, updated_at = ? WHERE id = ?`,
-		r.Description, string(privs), toMs(time.Now()), r.ID)
+	res, err := d.sql.ExecContext(ctx, `UPDATE roles SET description = ?, privileges = ?, updated_at = ?, name = ?, roles = ?, nexus = ? WHERE id = ?`,
+		r.Description, privs, toMs(time.Now()), r.Name, roles, r.Nexus, r.ID)
 	if err != nil {
 		return err
 	}
@@ -277,14 +299,27 @@ func (d *DB) UpdateRole(ctx context.Context, r Role) error {
 	return nil
 }
 
+// ErrContained reports a role that another role contains (wrapped with
+// its id); errors.Is(err, ErrInUse) holds too.
+var ErrContained = fmt.Errorf("%w: contained in another role", ErrInUse)
+
 // DeleteRole removes a role. It refuses with ErrInUse while a user holds the
-// role (Decision 2); ErrNotFound if there is no such role.
+// role (Decision 2), and with ErrContained while another role contains it;
+// ErrNotFound if there is no such role.
 func (d *DB) DeleteRole(ctx context.Context, id string) error {
 	return d.Tx(ctx, func(tx *Tx) error {
 		var one int
 		err := tx.q.QueryRowContext(ctx, `SELECT 1 FROM users, json_array_elements_text(users.roles::json) AS r(value) WHERE r.value = ? LIMIT 1`, id).Scan(&one)
 		if err == nil {
 			return ErrInUse
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		var by string
+		err = tx.q.QueryRowContext(ctx, `SELECT roles.id FROM roles, json_array_elements_text(roles.roles::json) AS r(value) WHERE r.value = ? ORDER BY roles.id LIMIT 1`, id).Scan(&by)
+		if err == nil {
+			return fmt.Errorf("%w: %q", ErrContained, by)
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -300,11 +335,24 @@ func (d *DB) DeleteRole(ctx context.Context, id string) error {
 	})
 }
 
-func insertRole(ctx context.Context, q querier, r Role) error {
+// roleJSON encodes the privileges and contained roles of r, nil as [].
+func roleJSON(r Role) (privs, roles string, err error) {
 	if r.Privileges == nil {
 		r.Privileges = []Privilege{}
 	}
-	privs, err := json.Marshal(r.Privileges)
+	if r.Roles == nil {
+		r.Roles = []string{}
+	}
+	p, err := json.Marshal(r.Privileges)
+	if err != nil {
+		return "", "", err
+	}
+	c, err := json.Marshal(r.Roles)
+	return string(p), string(c), err
+}
+
+func insertRole(ctx context.Context, q querier, r Role) error {
+	privs, roles, err := roleJSON(r)
 	if err != nil {
 		return err
 	}
@@ -318,16 +366,16 @@ func insertRole(ctx context.Context, q querier, r Role) error {
 	if r.UpdatedAt.IsZero() {
 		r.UpdatedAt = now
 	}
-	_, err = q.ExecContext(ctx, `INSERT INTO roles(`+roleCols+`) VALUES(?,?,?,?,?)`,
-		r.ID, r.Description, string(privs), toMs(r.CreatedAt), toMs(r.UpdatedAt))
+	_, err = q.ExecContext(ctx, `INSERT INTO roles(`+roleCols+`) VALUES(?,?,?,?,?,?,?,?)`,
+		r.ID, r.Description, privs, toMs(r.CreatedAt), toMs(r.UpdatedAt), r.Name, roles, r.Nexus)
 	return err
 }
 
 func scanRole(row scanner) (Role, error) {
 	var r Role
-	var privs string
+	var privs, roles string
 	var created, updated int64
-	err := row.Scan(&r.ID, &r.Description, &privs, &created, &updated)
+	err := row.Scan(&r.ID, &r.Description, &privs, &created, &updated, &r.Name, &roles, &r.Nexus)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Role{}, ErrNotFound
 	}
@@ -339,6 +387,12 @@ func scanRole(row scanner) (Role, error) {
 	}
 	if r.Privileges == nil {
 		r.Privileges = []Privilege{}
+	}
+	if err := json.Unmarshal([]byte(roles), &r.Roles); err != nil {
+		return Role{}, fmt.Errorf("role %q: decode contained roles: %w", r.ID, err)
+	}
+	if r.Roles == nil {
+		r.Roles = []string{}
 	}
 	r.CreatedAt, r.UpdatedAt = fromMs(created), fromMs(updated)
 	return r, nil

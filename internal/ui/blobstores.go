@@ -202,7 +202,7 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 }
 
 func (u *UI) listBlobStores(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if !u.requirePicker(w, r, "blobstores") {
 		return
 	}
 	rows, err := u.DB.ListBlobStores(r.Context())
@@ -223,7 +223,7 @@ func (u *UI) listBlobStores(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) getBlobStore(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "blobstores", meta.ActionRead); !ok {
 		return
 	}
 	bs, err := u.DB.GetBlobStore(r.Context(), r.PathValue("name"))

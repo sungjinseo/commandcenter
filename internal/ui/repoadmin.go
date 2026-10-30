@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/config"
 	"commandcenter/internal/repo"
 )
@@ -354,11 +355,35 @@ func (u *UI) writeRepoError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
+// repoFormat is the format of the named repository, "" when there is none.
+func (u *UI) repoFormat(name string) string {
+	if rp := u.Repos.Get(name); rp != nil {
+		return rp.Format
+	}
+	return ""
+}
+
+// membersAdministered answers 403 and reports false when a delegated
+// (non-admin) repository administrator lists a group member it may not
+// administer: a group would otherwise open that repository's content to
+// whoever may read the group.
+func (u *UI) membersAdministered(w http.ResponseWriter, r *http.Request, members []string) bool {
+	p := principal(r)
+	for _, m := range members {
+		if !u.Auth.CanAdminRepo(p, m, u.repoFormat(m), auth.Read) {
+			writeError(w, http.StatusForbidden, "you may not administer group member "+m)
+			return false
+		}
+	}
+	return true
+}
+
 func (u *UI) getRepoConfig(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	name := r.PathValue("name")
+	if !u.requireRepoAdmin(w, r, name, u.repoFormat(name), auth.Read, false) {
 		return
 	}
-	rp := u.Repos.Get(r.PathValue("name"))
+	rp := u.Repos.Get(name)
 	if rp == nil {
 		writeError(w, http.StatusNotFound, "repository not found")
 		return
@@ -367,11 +392,14 @@ func (u *UI) getRepoConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) createRepo(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	if _, ok := requireInteractive(w, r); !ok || !requireUIHeader(w, r) {
 		return
 	}
 	var body repoRequest
 	if !decodeBody(w, r, &body) {
+		return
+	}
+	if !u.requireRepoAdmin(w, r, "", body.Format, auth.Add, true) || !u.membersAdministered(w, r, body.Members) {
 		return
 	}
 	def, _, err := body.definition()
@@ -390,12 +418,12 @@ func (u *UI) createRepo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) updateRepo(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	name := r.PathValue("name")
+	if !u.requireRepoAdmin(w, r, name, u.repoFormat(name), auth.Edit, true) {
 		return
 	}
-	name := r.PathValue("name")
 	var body repoRequest
-	if !decodeBody(w, r, &body) {
+	if !decodeBody(w, r, &body) || !u.membersAdministered(w, r, body.Members) {
 		return
 	}
 	def, clear, err := body.definition()
@@ -419,10 +447,10 @@ func (u *UI) updateRepo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) deleteRepo(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	name := r.PathValue("name")
+	if !u.requireRepoAdmin(w, r, name, u.repoFormat(name), auth.Delete, true) {
 		return
 	}
-	name := r.PathValue("name")
 	// The delete removes the roles' privileges on the repository (QA N-25):
 	// a role edit read before it must not write one back (final review I3).
 	unlock, ok := u.lockAccess(w, r)

@@ -53,7 +53,7 @@ func realmEnabled(realms []meta.Realm, id string) bool {
 }
 
 func (u *UI) getRealms(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "settings", meta.ActionRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, realmsJSON(u.Auth.Snapshot().Settings().Realms))
@@ -198,7 +198,7 @@ type ldapRequest struct {
 }
 
 func (u *UI) getLDAP(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "settings", meta.ActionRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, ldapJSON(u.Auth.Snapshot().Settings().LDAP))

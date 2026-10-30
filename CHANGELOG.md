@@ -72,6 +72,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Tasks: `maven.purge-unused-snapshots` (Nexus `repository.maven.purge-unused-snapshots`, `lastUsed`).
 - Tasks: `repository.rebuild-metadata` takes Nexus's `groupId`, `artifactId`, `baseVersion`,
   `cascadeRebuild` and `rebuildChecksums`, and rebuilds plugin-group `<plugins>` from plugin jars.
+- Nexus security REST API: users (create, update, delete, change-password, user-sources, `?source=`),
+  roles (CRUD with nested roles), privileges (list, get, delete; create/update for application,
+  wildcard, repository-view, repository-admin and repository-content-selector), realms and anonymous.
+- Nested roles: a role may contain roles, granted transitively; cycles, unknown and self references are
+  refused, and a contained role cannot be deleted. Roles have a display `name`.
+- Repository administration privileges (`admin:*`, `admin:format:<f>`, `admin:repo:<name>`) and
+  application privileges (`app:users|roles|selectors|settings|tasks|blobstores`) delegate parts of the
+  admin API; granting or changing administrators stays with admins.
+- Content selectors accept JEXL `&&`, `||`, `eq`, `ne` and value-first comparisons; selector privileges
+  accept the `*-<format>` repository scope.
+- `passwordPolicy` setting: an RE2 pattern new local passwords must match, with its own message.
+- Task `security.purge-api-keys` deletes API and user tokens whose owner no longer resolves.
+- Content selectors in the Nexus API carry `"type": "csel"`; `GET /-/api/me` has `permissions` and
+  `repositoryAdmin`.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -115,6 +129,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and is served as application/pgp-signature; downloads carry `Content-Disposition`.
 - Nexus API: `sort=version` uses Maven order (builds by timestamp too); a component lists its main file
   first; `maven.layoutPolicy`/`contentDisposition` are reported as stored; groups have no `maven` object.
+- The Nexus API shows the admin role as `nx-admin` and role privileges as Nexus privilege names
+  (`nx-repository-view-maven2-maven-releases-read`), not `target:action` strings; users list `source`
+  in Nexus spelling (`LDAP`, `OAuth2`, ...), `readOnly` for directory users and `userId` as a prefix.
+- Nexus-API privileges translate `edit` to `add`+`edit`, so CI roles copied from Nexus keep deploying.
+- A duplicate privilege or role name in the Nexus API answers 400 (was 409), as Nexus does.
+- Deleting the user you are signed in as is refused (409).
+- `PUT /-/api/roles/{id}` replaces `name` and `roles` too: send them, or they are cleared.
 
 ### Fixed
 - A Nexus API repository PUT no longer resets the anonymous-read override, a yum repository's depth,
@@ -170,6 +191,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   protects them, and `retain` counts base versions. Run a cleanup preview after upgrading. Component
   counts, delete events and webhooks are per build. Proxies and groups with a version policy no longer
   serve, or ask upstream for, the other kind.
+- Schema 8 also adds the columns `roles.name`, `roles.roles`, `roles.nexus` and
+  `users.last_name`. A rolling upgrade from 0.3.0 works; an older node beside a new one ignores nested
+  roles and the new `app:`/`admin:` targets, so its users get less access, never more, until every node
+  runs the new version. Create nested roles and delegated privileges after the rollout.
+- Scripts that read `GET /service/rest/v1/security/roles` for `admin` or `target:action` privilege
+  strings must use `nx-admin` and privilege names.
 
 ## [0.3.0] - 2026-10-30
 

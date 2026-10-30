@@ -116,7 +116,7 @@ func (u *UI) reloadRoutes(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (u *UI) listRoutingRules(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if !u.requirePicker(w, r, "") {
 		return
 	}
 	list, err := u.DB.ListRoutingRules(r.Context())
@@ -307,7 +307,7 @@ func (b selectorBody) selector() (meta.ContentSelector, error) {
 }
 
 func (u *UI) listSelectors(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "selectors", meta.ActionRead); !ok {
 		return
 	}
 	list, err := u.DB.ListContentSelectors(r.Context())
@@ -323,7 +323,7 @@ func (u *UI) listSelectors(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) getSelector(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "selectors", meta.ActionRead); !ok {
 		return
 	}
 	x, err := u.DB.GetContentSelector(r.Context(), r.PathValue("name"))
@@ -335,7 +335,7 @@ func (u *UI) getSelector(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) createSelector(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	if _, ok := u.requireAppInteractive(w, r, "selectors", meta.ActionAdd); !ok {
 		return
 	}
 	var body selectorBody
@@ -363,7 +363,7 @@ func (u *UI) createSelector(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) updateSelector(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	if _, ok := u.requireAppInteractive(w, r, "selectors", meta.ActionEdit); !ok {
 		return
 	}
 	name := r.PathValue("name")
@@ -399,7 +399,7 @@ func (u *UI) updateSelector(w http.ResponseWriter, r *http.Request) {
 // deleteSelector removes a selector no role names (409 naming the roles
 // otherwise), under the access lock so no role edit adds one meanwhile.
 func (u *UI) deleteSelector(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	if _, ok := u.requireAppInteractive(w, r, "selectors", meta.ActionDelete); !ok {
 		return
 	}
 	name := r.PathValue("name")

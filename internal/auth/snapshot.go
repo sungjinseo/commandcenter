@@ -18,6 +18,7 @@ const (
 	actAdd
 	actEdit
 	actDelete
+	actRun // application privileges only: start and stop (tasks)
 
 	actAll = actBrowse | actRead | actAdd | actEdit | actDelete
 )
@@ -28,15 +29,44 @@ var actionBits = map[string]actionSet{
 	meta.ActionAdd:    actAdd,
 	meta.ActionEdit:   actEdit,
 	meta.ActionDelete: actDelete,
+	meta.ActionRun:    actRun,
 }
 
-// compiledRole is a role's privileges as bit sets per target kind.
+// scope is bit sets on all repositories, per format and per repository.
+type scope struct {
+	all     actionSet
+	formats map[string]actionSet
+	repos   map[string]actionSet
+}
+
+func newScope() scope { return scope{formats: map[string]actionSet{}, repos: map[string]actionSet{}} }
+
+// grants reports whether s grants one of want on the repository repo of
+// format format ("" if unknown); repo "" asks for the format or all only.
+func (s scope) grants(repo, format string, want actionSet) bool {
+	return s.all&want != 0 || (repo != "" && s.repos[repo]&want != 0) || (format != "" && s.formats[format]&want != 0)
+}
+
+func (s *scope) merge(o scope) {
+	s.all |= o.all
+	for k, v := range o.formats {
+		s.formats[k] |= v
+	}
+	for k, v := range o.repos {
+		s.repos[k] |= v
+	}
+}
+
+// compiledRole is a role's privileges as bit sets per target kind, with
+// those of the roles it contains (flatten) merged in.
 type compiledRole struct {
-	all       actionSet
-	formats   map[string]actionSet
-	repos     map[string]actionSet
+	scope                          // repository content ("*", "format:", "repo:")
+	repoAdmin scope                // repository administration ("admin:*", "admin:format:", "admin:repo:")
+	apps      map[string]actionSet // application privileges by domain ("app:<domain>")
 	selectors []selectorGrant
 	metrics   actionSet // the MetricsTarget privilege
+	admin     bool      // the built-in admin role, or one containing it
+	contains  []string  // the ids of the contained roles, as stored
 }
 
 // MetricsTarget is the privilege target of the instance-wide usage data
@@ -53,12 +83,19 @@ type selectorGrant struct {
 	bits  actionSet
 }
 
-func (g selectorGrant) inScope(repo string) bool { return g.repos["*"] || g.repos[repo] }
+// inScope reports whether the grant applies to the repository repo of
+// format format: "*" is any repository, "*-<nexus format>" (Nexus's "all
+// of a format" scope) any of that format.
+func (g selectorGrant) inScope(repo, format string) bool {
+	return g.repos["*"] || g.repos[repo] || (format != "" && g.repos["*-"+NexusFormat(format)])
+}
 
 func compileRole(r meta.Role) *compiledRole {
-	c := &compiledRole{formats: map[string]actionSet{}, repos: map[string]actionSet{}}
+	c := &compiledRole{scope: newScope(), repoAdmin: newScope(), apps: map[string]actionSet{}, contains: r.Roles}
 	if r.ID == meta.AdminRole {
 		c.all = actAll // built in: grants everything whatever is stored
+		c.admin = true
+		c.contains = nil
 		return c
 	}
 	for _, p := range r.Privileges {
@@ -66,15 +103,14 @@ func compileRole(r meta.Role) *compiledRole {
 		for _, a := range p.Actions {
 			bits |= actionBits[a]
 		}
+		if t, ok := strings.CutPrefix(p.Target, meta.AdminTargetPrefix); ok {
+			addScope(&c.repoAdmin, t, bits)
+			continue
+		}
 		switch {
-		case p.Target == "*":
-			c.all |= bits
-		case strings.HasPrefix(p.Target, "format:"):
-			f := strings.TrimPrefix(p.Target, "format:")
-			c.formats[f] |= bits
-		case strings.HasPrefix(p.Target, "repo:"):
-			n := strings.TrimPrefix(p.Target, "repo:")
-			c.repos[n] |= bits
+		case addScope(&c.scope, p.Target, bits):
+		case strings.HasPrefix(p.Target, meta.AppTargetPrefix):
+			c.apps[strings.TrimPrefix(p.Target, meta.AppTargetPrefix)] |= bits
 		case p.Target == MetricsTarget:
 			c.metrics |= bits
 		case strings.HasPrefix(p.Target, meta.SelectorPrefix):
@@ -86,6 +122,59 @@ func compileRole(r meta.Role) *compiledRole {
 		}
 	}
 	return c
+}
+
+// addScope adds bits to s for target "*", "format:<f>" or "repo:<name>"
+// and reports whether target was one of them.
+func addScope(s *scope, target string, bits actionSet) bool {
+	switch {
+	case target == "*":
+		s.all |= bits
+	case strings.HasPrefix(target, "format:"):
+		s.formats[strings.TrimPrefix(target, "format:")] |= bits
+	case strings.HasPrefix(target, "repo:"):
+		s.repos[strings.TrimPrefix(target, "repo:")] |= bits
+	default:
+		return false
+	}
+	return true
+}
+
+// flatten merges into every role the privileges of the roles it contains,
+// transitively; a cycle stops where it closes, and a missing role adds
+// nothing. A role containing the admin role is an admin role.
+// ponytail: a walk per role, O(roles x edges); roles are few.
+func flatten(own map[string]*compiledRole) map[string]*compiledRole {
+	out := make(map[string]*compiledRole, len(own))
+	for id, r := range own {
+		m := &compiledRole{scope: newScope(), repoAdmin: newScope(), apps: map[string]actionSet{}, contains: r.contains}
+		seen := map[string]bool{}
+		stack := []string{id}
+		for len(stack) > 0 {
+			cur := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			c := own[cur]
+			if seen[cur] || c == nil {
+				continue
+			}
+			seen[cur] = true
+			m.mergeFrom(c)
+			stack = append(stack, c.contains...)
+		}
+		out[id] = m
+	}
+	return out
+}
+
+func (m *compiledRole) mergeFrom(c *compiledRole) {
+	m.scope.merge(c.scope)
+	m.repoAdmin.merge(c.repoAdmin)
+	for k, v := range c.apps {
+		m.apps[k] |= v
+	}
+	m.selectors = append(m.selectors, c.selectors...)
+	m.metrics |= c.metrics
+	m.admin = m.admin || c.admin
 }
 
 // Snapshot is an immutable view of users, roles, settings and realms. The
@@ -144,6 +233,7 @@ func NewSnapshotWith(users []meta.User, roles []meta.Role, settings meta.Setting
 		s.roles[r.ID] = compileRole(r)
 		s.roleList = append(s.roleList, r)
 	}
+	s.roles = flatten(s.roles)
 	sort.Slice(s.roleList, func(i, j int) bool { return s.roleList[i].ID < s.roleList[j].ID })
 	settings.Realms = append([]meta.Realm{}, settings.Realms...)
 	settings.LDAP = settings.LDAP.Copy()
@@ -162,6 +252,7 @@ func NewSnapshotWith(users []meta.User, roles []meta.Role, settings meta.Setting
 }
 
 func copyRole(r meta.Role) meta.Role {
+	r.Roles = append([]string{}, r.Roles...)
 	privs := make([]meta.Privilege, len(r.Privileges))
 	for i, p := range r.Privileges {
 		privs[i] = meta.Privilege{Target: p.Target, Actions: append([]string{}, p.Actions...)}
@@ -258,11 +349,11 @@ func (s *Snapshot) hasPath(roles []string, repo, format string, want actionSet, 
 		if r == nil {
 			continue
 		}
-		if r.all&want != 0 || r.repos[repo]&want != 0 || (format != "" && r.formats[format]&want != 0) {
+		if r.grants(repo, format, want) {
 			return true
 		}
 		for _, g := range r.selectors {
-			if g.bits&want == 0 || !g.inScope(repo) {
+			if g.bits&want == 0 || !g.inScope(repo, format) {
 				continue
 			}
 			e := s.selectors[g.name]
@@ -301,15 +392,15 @@ func CheckLockout(s *Snapshot) error {
 	if s.realms[meta.RealmLocal] {
 		for _, id := range s.userIDs {
 			u := s.users[id]
-			if hasRole(u.Roles, meta.AdminRole) && s.canPasswordLogin(u) {
+			if s.isAdmin(u.Roles) && s.canPasswordLogin(u) {
 				return nil
 			}
 		}
 	}
-	if s.realms[meta.RealmLDAP] && s.settings.LDAP.Complete() && s.settings.LDAP.GrantsAdmin() {
+	if s.realms[meta.RealmLDAP] && s.settings.LDAP.Complete() && s.mappingGrantsAdmin(s.settings.LDAP) {
 		return nil
 	}
-	if crowdUsable(s) && s.settings.Crowd.GrantsAdmin() {
+	if crowdUsable(s) && s.mappingGrantsAdmin(s.settings.Crowd.Mapping()) {
 		return nil
 	}
 	return ErrLockout
@@ -322,11 +413,61 @@ func RestorableAdmins(s *Snapshot) int {
 	n := 0
 	for _, id := range s.userIDs {
 		u := s.users[id]
-		if u.Status == meta.StatusActive && u.Source == meta.SourceLocal && HashUsable(u.PasswordHash) && hasRole(u.Roles, meta.AdminRole) {
+		if u.Status == meta.StatusActive && u.Source == meta.SourceLocal && HashUsable(u.PasswordHash) && s.isAdmin(u.Roles) {
 			n++
 		}
 	}
 	return n
+}
+
+// isAdmin reports whether one of roles is the admin role or contains it,
+// directly or through other roles.
+func (s *Snapshot) isAdmin(roles []string) bool {
+	for _, id := range roles {
+		if r := s.roles[id]; r != nil && r.admin {
+			return true
+		}
+	}
+	return false
+}
+
+// mappingGrantsAdmin reports whether a group mapping or the default roles
+// of a directory grant the admin role, directly or through a contained role.
+func (s *Snapshot) mappingGrantsAdmin(m meta.LDAP) bool {
+	if s.isAdmin(m.DefaultRoles) {
+		return true
+	}
+	for _, g := range m.GroupMappings {
+		if s.isAdmin(g.Roles) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAdmin reports whether one of roles is or contains the admin role.
+func (s *Snapshot) IsAdmin(roles ...string) bool { return s.isAdmin(roles) }
+
+// ContainsCycle reports whether role id, with contained as its contained
+// roles, would reach itself through them (the other roles as in s).
+func (s *Snapshot) ContainsCycle(id string, contained []string) bool {
+	seen := map[string]bool{}
+	stack := append([]string{}, contained...)
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if cur == id {
+			return true
+		}
+		if seen[cur] {
+			continue
+		}
+		seen[cur] = true
+		if r := s.roles[cur]; r != nil {
+			stack = append(stack, r.contains...)
+		}
+	}
+	return false
 }
 
 func hasRole(roles []string, id string) bool {

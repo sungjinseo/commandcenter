@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"commandcenter/internal/meta"
 	"commandcenter/internal/tasks"
 )
 
@@ -353,7 +354,7 @@ func (h *Handler) storedTask(w http.ResponseWriter, r *http.Request, id string) 
 }
 
 func (h *Handler) getTask(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "tasks", meta.ActionRead); !ok {
 		return
 	}
 	if t, ok := h.storedTask(w, r, r.PathValue("id")); ok {
@@ -796,7 +797,7 @@ func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request) {
 // noContent forwards method path to the UI and answers 204 when it
 // answered want.
 func (h *Handler) noContent(w http.ResponseWriter, r *http.Request, method, path string, want int) {
-	if _, ok := h.admin(w, r); !ok {
+	if !h.signedIn(w, r) { // the UI checks the caller
 		return
 	}
 	status, body := h.call(r, method, path, nil)

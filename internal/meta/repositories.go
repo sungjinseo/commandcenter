@@ -280,8 +280,9 @@ func (d *DB) DeleteRepository(ctx context.Context, name string) ([]string, error
 	return roles, nil
 }
 
-// dropRepoPrivileges removes the privileges on exactly "repo:<name>" from
-// every stored role and returns the ids of the roles it changed.
+// dropRepoPrivileges removes the privileges on exactly "repo:<name>" and
+// "admin:repo:<name>" from every stored role and returns the ids of the
+// roles it changed.
 func dropRepoPrivileges(ctx context.Context, q querier, name string) ([]string, error) {
 	list, err := listRoles(ctx, q)
 	if err != nil {
@@ -290,7 +291,7 @@ func dropRepoPrivileges(ctx context.Context, q querier, name string) ([]string, 
 	var changed []string
 	for _, r := range list {
 		n := len(r.Privileges)
-		kept := slices.DeleteFunc(r.Privileges, func(p Privilege) bool { return p.Target == "repo:"+name })
+		kept := slices.DeleteFunc(r.Privileges, func(p Privilege) bool { return p.Target == "repo:"+name || p.Target == "admin:repo:"+name })
 		if len(kept) == n {
 			continue
 		}

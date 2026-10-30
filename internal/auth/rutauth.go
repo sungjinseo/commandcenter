@@ -98,7 +98,7 @@ func (a *Authenticator) rutBuild(s *Snapshot, id string, groups []string) (Princ
 		}
 	}
 	roles = s.grant(roles)
-	return Principal{User: id, Admin: hasRole(roles, meta.AdminRole), roles: roles, source: sourceRUT, Via: ViaRUT}, true
+	return Principal{User: id, Admin: s.isAdmin(roles), roles: roles, source: sourceRUT, Via: ViaRUT}, true
 }
 
 // rutLookup resolves a token owner "rutauth:<id>" from its recorded

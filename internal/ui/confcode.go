@@ -1205,7 +1205,7 @@ func (c *confRun) checkLockout() {
 	}
 	for _, o := range c.desired("roles") {
 		x := asConf[confRole](o)
-		roles = append(roles, meta.Role{ID: x.ID, Description: x.Description, Privileges: toPrivileges(x.Privileges)})
+		roles = append(roles, meta.Role{ID: x.ID, Description: x.Description, Privileges: toPrivileges(x.Privileges), Roles: x.Roles})
 	}
 	set := data.Settings
 	if o := c.desired("realms")[""]; o != nil && c.want["realms"] != nil {

@@ -115,7 +115,7 @@ func (u *UI) writeTaskError(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 func (u *UI) listTasks(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok || !u.tasksAvailable(w) {
+	if _, ok := u.requireApp(w, r, "tasks", meta.ActionRead); !ok || !u.tasksAvailable(w) {
 		return
 	}
 	list, err := u.Tasks.List(r.Context())
@@ -141,7 +141,7 @@ func (u *UI) listTasks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (u *UI) getTask(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok || !u.tasksAvailable(w) {
+	if _, ok := u.requireApp(w, r, "tasks", meta.ActionRead); !ok || !u.tasksAvailable(w) {
 		return
 	}
 	t, err := u.Tasks.Get(r.Context(), r.PathValue("id"))
@@ -212,7 +212,7 @@ func (u *UI) deleteTask(w http.ResponseWriter, r *http.Request) {
 // instead (202 with queued true): the scheduler starts it when that run
 // ends. 409 while the task itself runs.
 func (u *UI) runTask(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) || !u.tasksAvailable(w) {
+	if _, ok := u.requireAppInteractive(w, r, "tasks", meta.ActionRun); !ok || !u.tasksAvailable(w) {
 		return
 	}
 	queued, err := u.Tasks.RunOrQueue(r.PathValue("id"), principal(r).Owner())
@@ -261,7 +261,7 @@ func (u *UI) writeRun(w http.ResponseWriter, r *http.Request, out tasks.Outcome,
 // stopTask stops the running task: 202 when it was running (its run then
 // records Stopped), 409 when it is not, 404 for an unknown task.
 func (u *UI) stopTask(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) || !u.tasksAvailable(w) {
+	if _, ok := u.requireAppInteractive(w, r, "tasks", meta.ActionRun); !ok || !u.tasksAvailable(w) {
 		return
 	}
 	id := r.PathValue("id")

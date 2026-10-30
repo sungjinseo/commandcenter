@@ -159,7 +159,7 @@ func (u *UI) writePolicyError(w http.ResponseWriter, r *http.Request, err error)
 }
 
 func (u *UI) listPolicies(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if !u.requirePicker(w, r, "") {
 		return
 	}
 	list, err := cleanup.ListPolicies(r.Context(), u.DB)

@@ -240,7 +240,7 @@ func (a *Authenticator) ldapPrincipal(s *Snapshot, u ldap.User) (Principal, bool
 		}
 	}
 	roles = s.grant(roles)
-	return Principal{User: u.ID, Admin: hasRole(roles, meta.AdminRole), roles: roles, source: sourceLDAP}, true
+	return Principal{User: u.ID, Admin: s.isAdmin(roles), roles: roles, source: sourceLDAP}, true
 }
 
 // ldapLookup returns the principal of LDAP user id, re-checking it against

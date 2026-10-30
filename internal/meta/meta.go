@@ -135,6 +135,11 @@ type querier interface {
 //	   the X-SNAPSHOT rows stay, which an older build keeps reading, and it
 //	   ignores the rows of builds and runs the tasks as before (editing one
 //	   there refuses the new parameter).
+//	8: roles.name, roles.roles (nested roles), roles.nexus and
+//	   users.last_name: expand-only, new columns with defaults. An older
+//	   build ignores them: it grants a nested role's privileges to nobody
+//	   and skips the new "app:" and "admin:" privilege targets, so beside
+//	   this one a user can only have less access, never more.
 const schemaVersion = 8
 
 // schemaCompat is the oldest schemaVersion that may run on a database this

@@ -62,6 +62,74 @@ func requireAdminInteractive(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// requireApp answers 401 to anonymous callers and 403 unless the caller is
+// an admin or holds action of the application domain (auth.AppDomains):
+// the delegated part of the admin API.
+func (u *UI) requireApp(w http.ResponseWriter, r *http.Request, domain, action string) (auth.Principal, bool) {
+	p, ok := requireUser(w, r)
+	if !ok {
+		return p, false
+	}
+	if !u.Auth.CanApp(p, domain, action) {
+		writeError(w, http.StatusForbidden, "admin only")
+		return p, false
+	}
+	return p, true
+}
+
+// requireAppInteractive is requireApp for a change: the caller also signed
+// in with a password or session (never a token), and sent the UI header.
+func (u *UI) requireAppInteractive(w http.ResponseWriter, r *http.Request, domain, action string) (auth.Principal, bool) {
+	p, ok := requireInteractive(w, r)
+	if !ok || !requireUIHeader(w, r) {
+		return p, false
+	}
+	if !u.Auth.CanApp(p, domain, action) {
+		writeError(w, http.StatusForbidden, "admin only")
+		return p, false
+	}
+	return p, true
+}
+
+// requirePicker is the check of the lists a repository form picks from
+// (blob stores, cleanup policies, routing rules): an admin, the read action
+// of domain ("" for none), or a repository administrator (as Nexus lets
+// repository-admin holders read them).
+func (u *UI) requirePicker(w http.ResponseWriter, r *http.Request, domain string) bool {
+	p, ok := requireUser(w, r)
+	if !ok {
+		return false
+	}
+	if !u.Auth.AdminsSomeRepo(p) && (domain == "" || !u.Auth.CanApp(p, domain, meta.ActionRead)) {
+		writeError(w, http.StatusForbidden, "admin only")
+		return false
+	}
+	return true
+}
+
+// requireRepoAdmin answers 401 to anonymous callers and 403 unless the
+// caller may administer the repository name of format format with acc
+// (auth.CanAdminRepo; name "" for creating one). With interactive, a
+// change, it also needs a password or session login and the UI header.
+func (u *UI) requireRepoAdmin(w http.ResponseWriter, r *http.Request, name, format string, acc auth.Access, interactive bool) bool {
+	var p auth.Principal
+	var ok bool
+	if interactive {
+		p, ok = requireInteractive(w, r)
+		ok = ok && requireUIHeader(w, r)
+	} else {
+		p, ok = requireUser(w, r)
+	}
+	if !ok {
+		return false
+	}
+	if !u.Auth.CanAdminRepo(p, name, format, acc) {
+		writeError(w, http.StatusForbidden, "admin only")
+		return false
+	}
+	return true
+}
+
 // requireAdmin answers 401 to anonymous callers and 403 to non-admins.
 func requireAdmin(w http.ResponseWriter, r *http.Request) (auth.Principal, bool) {
 	p, ok := requireUser(w, r)

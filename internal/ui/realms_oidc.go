@@ -113,7 +113,7 @@ func (body oidcRequest) merged(cur meta.OIDC) meta.OIDC {
 }
 
 func (u *UI) getOIDC(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "settings", meta.ActionRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, oidcJSON(u.Auth.Snapshot().Settings().OIDC))

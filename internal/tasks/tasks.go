@@ -114,6 +114,10 @@ type Service struct {
 
 	Replication *replication.Service // repository.pull-replication; nil: not available
 
+	// OwnerGone reports whether a token owner key no longer resolves
+	// (security.purge-api-keys); nil: not available.
+	OwnerGone func(ctx context.Context, owner string) (bool, error)
+
 	// Test hooks and limits; zero values mean the defaults.
 	Now           func() time.Time
 	Loc           *time.Location   // schedule zone; nil is time.Local

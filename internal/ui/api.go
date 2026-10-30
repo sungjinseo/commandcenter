@@ -110,6 +110,11 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 		// Whether the dashboard and the monthly usage are open to it (an
 		// admin, or the read privilege on "metrics"): the nav shows them.
 		out["metrics"] = u.Auth.CanReadMetrics(p)
+		// The delegated admin screens it may open: the actions it holds per
+		// application domain ({} for an admin, who holds them all), and
+		// whether it administers some repositories.
+		out["permissions"] = u.Auth.AppActions(p)
+		out["repositoryAdmin"] = u.Auth.AdminsSomeRepo(p)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

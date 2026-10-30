@@ -34,8 +34,10 @@ type (
 	}
 	confRole struct {
 		ID          string         `json:"id"`
+		Name        string         `json:"name,omitempty"`
 		Description string         `json:"description"`
 		Privileges  []privilegeDTO `json:"privileges"`
+		Roles       []string       `json:"roles,omitempty"` // contained roles
 	}
 	confUser struct {
 		ID     string   `json:"id"`
@@ -104,7 +106,7 @@ func init() {
 			},
 			order: repoOrder, read: readRepositories, check: checkRepositories},
 		{name: "roles", key: "id", base: "/-/api/roles", proto: func() any { return new(confRole) }, noUpdateKey: true,
-			read: readRoles, check: checkRoles},
+			order: roleOrder, read: readRoles, check: checkRoles},
 		{name: "users", key: "id", base: "/-/api/users", proto: func() any { return new(confUser) },
 			secrets: []confSecret{{path: "passwordHash", noClear: true, own: true}},
 			read:    readUsers, check: checkUsers, write: writeUser},
@@ -504,6 +506,34 @@ func readRepositories(c *confRun) ([]any, error) {
 }
 
 // repoOrder puts every group after its members.
+// roleOrder puts contained roles before the roles that contain them.
+func roleOrder(objs []confObj) []confObj {
+	by := map[string]confObj{}
+	for _, o := range objs {
+		by[o["id"].(string)] = o
+	}
+	done := map[string]bool{}
+	var out []confObj
+	var visit func(o confObj)
+	visit = func(o confObj) {
+		id := o["id"].(string)
+		if done[id] {
+			return
+		}
+		done[id] = true
+		for _, c := range asConf[confRole](o).Roles {
+			if co := by[c]; co != nil {
+				visit(co)
+			}
+		}
+		out = append(out, o)
+	}
+	for _, o := range objs {
+		visit(o)
+	}
+	return out
+}
+
 func repoOrder(objs []confObj) []confObj {
 	by := map[string]confObj{}
 	for _, o := range objs {
@@ -580,13 +610,13 @@ func readRoles(c *confRun) ([]any, error) {
 			continue
 		}
 		d := roleJSON(x)
-		out = append(out, confRole{ID: d.ID, Description: d.Description, Privileges: d.Privileges})
+		out = append(out, confRole{ID: d.ID, Name: d.Name, Description: d.Description, Privileges: d.Privileges, Roles: x.Roles})
 	}
 	return out, err
 }
 
 func checkRoles(c *confRun, objs []confObj) {
-	valid := map[string]bool{}
+	valid := map[string]bool{meta.ActionRun: true} // "app:" targets; the role API checks the rest
 	for _, a := range meta.Actions {
 		valid[a] = true
 	}
@@ -608,13 +638,14 @@ func checkRoles(c *confRun, objs []confObj) {
 				if !contains(accessFormats, strings.TrimPrefix(p.Target, "format:")) {
 					v.add("%s: unknown format in %q", pat, p.Target)
 				}
-			case strings.HasPrefix(p.Target, "repo:"), strings.HasPrefix(p.Target, meta.SelectorPrefix):
+			case strings.HasPrefix(p.Target, "repo:"), strings.HasPrefix(p.Target, meta.SelectorPrefix),
+				strings.HasPrefix(p.Target, meta.AppTargetPrefix), strings.HasPrefix(p.Target, meta.AdminTargetPrefix): // as the role API checks them
 			case p.Target == auth.MetricsTarget: // as the role API checks it (access.go)
 				if len(p.Actions) != 1 || p.Actions[0] != meta.ActionRead {
 					v.add(`%s: the %q target takes the action "read" only`, pat, auth.MetricsTarget)
 				}
 			default:
-				v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>", "selector:<name>" or %q`, pat, p.Target, auth.MetricsTarget)
+				v.add(`%s: target %q must be "*", "format:<format>", "repo:<name>", "selector:<name>", %q, "app:<domain>" or "admin:<target>"`, pat, p.Target, auth.MetricsTarget)
 			}
 			for _, a := range p.Actions {
 				if !valid[a] {
@@ -767,7 +798,7 @@ func readSettings(c *confRun) ([]any, error) {
 		return confObj{"baseURL": s.BaseURL, "anonymousRead": s.AnonymousRead, "authenticatedRead": s.AuthenticatedRead,
 			"sessionIdleMinutes": s.SessionIdleMinutes, "maxUploadMiB": s.MaxUploadMiB, "defaultLanguage": s.DefaultLanguage,
 			"metricsAnonymous": s.MetricsAnonymous, "terraformDefaultRepository": s.TerraformDefaultRepository,
-			"userTokens": s.UserTokens, "defaultRoles": nonNil(s.DefaultRoles),
+			"userTokens": s.UserTokens, "defaultRoles": nonNil(s.DefaultRoles), "passwordPolicy": s.PasswordPolicy,
 			"http": confObj{"userAgentSuffix": h.UserAgentSuffix, "connectTimeoutSeconds": h.ConnectTimeoutSeconds,
 				"timeoutSeconds": h.TimeoutSeconds, "retries": h.Retries,
 				"proxy": confObj{"host": h.Proxy.Host, "port": h.Proxy.Port, "username": h.Proxy.Username, "password": h.Proxy.Password,
@@ -1116,8 +1147,9 @@ func (c *confRun) checkRefs() {
 		}
 	}
 	for k, o := range c.desired("roles") {
+		roleList("roles "+k+" roles", "roles", k, asConf[confRole](o).Roles)
 		for _, p := range asConf[confRole](o).Privileges {
-			if name, ok := strings.CutPrefix(p.Target, "repo:"); ok {
+			if name, ok := strings.CutPrefix(strings.TrimPrefix(p.Target, meta.AdminTargetPrefix), "repo:"); ok {
 				ref("roles "+k, "roles", k, "repositories", name)
 			}
 			if name, ok := strings.CutPrefix(p.Target, meta.SelectorPrefix); ok {

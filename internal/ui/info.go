@@ -111,7 +111,7 @@ func addPolicy(out *repoJSON, rp *repo.Repository) {
 }
 
 func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "users", meta.ActionRead); !ok {
 		return
 	}
 	users := []map[string]any{}
@@ -130,16 +130,22 @@ func (u *UI) listUsers(w http.ResponseWriter, r *http.Request) {
 	// summarize lists the privileges of roles. writeRepositories keeps its
 	// plan 10 meaning: repository names the user may upload to, or "*" for
 	// all. format: targets are not repositories; privileges lists every
-	// target as it is.
+	// target as it is, the contained roles' too (each once).
 	summarize := func(roles []string) (bool, []string, []map[string]any) {
-		isAdmin := false
+		isAdmin := s.IsAdmin(roles...)
 		writes := map[string]bool{}
 		privs := []map[string]any{}
-		for _, id := range roles {
-			if id == meta.AdminRole {
-				isAdmin = true
+		seen := map[string]bool{}
+		roles = append([]string{}, roles...) // a queue: never the caller's array
+		for len(roles) > 0 {
+			id := roles[0]
+			roles = roles[1:]
+			if seen[id] {
+				continue
 			}
+			seen[id] = true
 			role, _ := s.Role(id)
+			roles = append(roles, role.Roles...)
 			for _, p := range role.Privileges {
 				privs = append(privs, map[string]any{"role": role.ID, "target": p.Target, "actions": p.Actions})
 				if !hasAction(p.Actions, meta.ActionAdd) {

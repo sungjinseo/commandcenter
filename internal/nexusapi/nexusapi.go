@@ -89,8 +89,6 @@ func (h *Handler) init() {
 	m.HandleFunc("GET "+p+"/search", h.search)
 	m.HandleFunc("GET "+p+"/search/assets", h.searchAssets)
 	m.HandleFunc("GET "+p+"/search/assets/download", h.searchDownload)
-	m.HandleFunc("GET "+p+"/security/users", h.users)
-	m.HandleFunc("GET "+p+"/security/roles", h.roles)
 	m.HandleFunc("GET "+p+"/blobstores", h.blobStores)
 	// {name}/{sub}, not {name}/quota-status: the literal form would conflict
 	// with GET /blobstores/group/{name} in the mux (neither is more specific).
@@ -443,18 +441,24 @@ func (h *Handler) getRepository(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listSettings(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	p := principal(r)
+	if !h.Auth.AdminsSomeRepo(p) {
+		deny(w, p)
 		return
 	}
 	out := []map[string]any{}
 	for _, rp := range h.Repos.Snapshot().Sorted {
-		out = append(out, h.settingsJSON(rp))
+		if h.Auth.CanAdminRepo(p, rp.Name, rp.Format, auth.Read) { // repository-admin read
+			out = append(out, h.settingsJSON(rp))
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	p := principal(r)
+	if !h.Auth.CanAdminRepo(p, r.PathValue("name"), h.repoFormatOf(r.PathValue("name")), auth.Read) {
+		deny(w, p)
 		return
 	}
 	rp := h.Repos.Get(r.PathValue("name"))
@@ -626,7 +630,7 @@ func decodeRepoBody(w http.ResponseWriter, r *http.Request) (repoBody, bool) {
 }
 
 func (h *Handler) createRepository(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if !h.signedIn(w, r) { // the UI checks repository-admin add
 		return
 	}
 	b, ok := decodeRepoBody(w, r)
@@ -647,7 +651,7 @@ func (h *Handler) createRepository(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateRepository(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if !h.signedIn(w, r) { // the UI checks repository-admin edit
 		return
 	}
 	b, ok := decodeRepoBody(w, r)
@@ -678,7 +682,7 @@ func (h *Handler) updateRepository(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deleteRepository(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if !h.signedIn(w, r) { // the UI checks repository-admin delete
 		return
 	}
 	status, body := h.call(r, http.MethodDelete, "/-/api/repositories/"+url.PathEscape(r.PathValue("name")), nil)
@@ -1316,50 +1320,8 @@ func (h *Handler) statusCheck(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (h *Handler) users(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
-		return
-	}
-	want := r.URL.Query().Get("userId")
-	out := []map[string]any{}
-	for _, u := range h.Auth.Snapshot().Users() {
-		if !strings.HasPrefix(strings.ToLower(u.ID), strings.ToLower(want)) { // Nexus: a case-insensitive prefix
-			continue
-		}
-		source := u.Source
-		if source == "" || source == meta.SourceLocal {
-			source = "default"
-		}
-		roles := u.Roles
-		if roles == nil {
-			roles = []string{}
-		}
-		out = append(out, map[string]any{"userId": u.ID, "firstName": u.Name, "lastName": "", "emailAddress": u.Email,
-			"source": source, "status": u.Status, "readOnly": false, "roles": roles, "externalRoles": []string{}})
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (h *Handler) roles(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
-		return
-	}
-	out := []map[string]any{}
-	for _, role := range h.Auth.Snapshot().Roles() {
-		privs := []string{}
-		for _, p := range role.Privileges {
-			for _, a := range p.Actions {
-				privs = append(privs, p.Target+":"+a)
-			}
-		}
-		out = append(out, map[string]any{"id": role.ID, "source": "default", "name": role.ID, "description": role.Description,
-			"readOnly": role.ID == meta.AdminRole, "privileges": privs, "roles": []string{}})
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
 func (h *Handler) blobStores(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "blobstores", meta.ActionRead); !ok {
 		return
 	}
 	status, body := h.call(r, http.MethodGet, "/-/api/blobstores", nil)
@@ -1446,7 +1408,7 @@ type blobStoreRow struct {
 
 // quotaStatus: GET /blobstores/{name}/quota-status.
 func (h *Handler) quotaStatus(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "blobstores", meta.ActionRead); !ok {
 		return
 	}
 	name := r.PathValue("name")
@@ -1514,7 +1476,7 @@ func (h *Handler) updateFileBlobStore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) tasks(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "tasks", meta.ActionRead); !ok {
 		return
 	}
 	status, body := h.call(r, http.MethodGet, "/-/api/tasks", nil)

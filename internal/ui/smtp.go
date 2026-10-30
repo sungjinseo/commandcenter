@@ -67,7 +67,7 @@ type smtpRequest struct {
 }
 
 func (u *UI) getSMTP(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "settings", meta.ActionRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, smtpJSON(u.Auth.Snapshot().Settings().SMTP))

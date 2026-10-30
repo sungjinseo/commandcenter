@@ -77,7 +77,7 @@ func (a *Authenticator) samlPrincipal(s *Snapshot, u SAMLUser) (Principal, bool)
 		}
 	}
 	roles = s.grant(roles)
-	return Principal{User: u.ID, Admin: hasRole(roles, meta.AdminRole), roles: roles, source: sourceSAML}, true
+	return Principal{User: u.ID, Admin: s.isAdmin(roles), roles: roles, source: sourceSAML}, true
 }
 
 // samlLookup returns the principal of SAML user id from its recorded identity.

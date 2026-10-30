@@ -529,8 +529,9 @@ func TestSecurityBlobstoresTasksAndNotFound(t *testing.T) {
 		Privileges []string
 	}
 	e.get(v1+"/security/roles", "admin", &roles)
-	if len(roles) != 2 || roles[0].ID != "admin" || !roles[0].ReadOnly || roles[1].ID != "deployer" || roles[1].ReadOnly ||
-		len(roles[1].Privileges) == 0 || !strings.HasPrefix(roles[1].Privileges[0], "repo:maven-releases:") {
+	// By id; the admin role is nx-admin (nx-all), and privileges are names.
+	if len(roles) != 2 || roles[1].ID != "nx-admin" || !roles[1].ReadOnly || roles[1].Privileges[0] != "nx-all" || roles[0].ID != "deployer" || roles[0].ReadOnly ||
+		strings.Join(roles[0].Privileges, " ") != "nx-repository-view-maven2-maven-releases-* nx-repository-view-raw-raw-files-*" {
 		t.Fatalf("roles = %+v", roles)
 	}
 	var stores []struct {

@@ -398,3 +398,41 @@ AND `+contains(pathExpr)+` ORDER BY repo, path LIMIT ?`, args...)
 	}
 	return hits, truncated, nil
 }
+
+// TokenOwners lists the distinct owner keys of the API tokens and user
+// tokens (security.purge-api-keys).
+func (d *DB) TokenOwners(ctx context.Context) ([]string, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT "user" FROM tokens UNION SELECT owner FROM user_tokens ORDER BY 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var o string
+		if err := rows.Scan(&o); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// DeleteOwnerTokensBefore removes owner's API tokens and user token created
+// before cutoff, in one transaction, and returns how many it removed.
+func (d *DB) DeleteOwnerTokensBefore(ctx context.Context, owner string, cutoff time.Time) (int64, error) {
+	var n int64
+	err := d.Tx(ctx, func(tx *Tx) error {
+		n = 0
+		for _, q := range []string{`DELETE FROM tokens WHERE "user" = ? AND created_at < ?`, `DELETE FROM user_tokens WHERE owner = ? AND created_at < ?`} {
+			res, err := tx.q.ExecContext(ctx, q, owner, toMs(cutoff))
+			if err != nil {
+				return err
+			}
+			c, _ := res.RowsAffected()
+			n += c
+		}
+		return nil
+	})
+	return n, err
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -29,7 +30,54 @@ const (
 	// terraform repository by name).
 	SettingTerraformDefaultRepository = "terraformDefaultRepository"
 	SettingDefaultRoles               = "defaultRoles" // roles every signed-in user holds (Nexus DefaultRoleRealm)
+	SettingPasswordPolicy             = "passwordPolicy"
 )
+
+// PasswordPolicy is an extra rule for new local passwords (Nexus
+// nexus.password.validator): Pattern, an RE2 expression the whole password
+// must match ("" for none), and Message, what a refusal says.
+type PasswordPolicy struct {
+	Pattern string `json:"pattern"`
+	Message string `json:"message"`
+}
+
+// Limits of the password policy.
+const (
+	MaxPolicyPattern = 512
+	MaxPolicyMessage = 200
+)
+
+// ValidatePasswordPolicy checks a policy: a pattern that compiles, within
+// the limits, and a message without control characters.
+func ValidatePasswordPolicy(p PasswordPolicy) error {
+	switch {
+	case len(p.Pattern) > MaxPolicyPattern:
+		return fmt.Errorf("passwordPolicy.pattern is longer than %d bytes", MaxPolicyPattern)
+	case len(p.Message) > MaxPolicyMessage || strings.ContainsFunc(p.Message, unicode.IsControl):
+		return fmt.Errorf("passwordPolicy.message must be at most %d bytes without control characters", MaxPolicyMessage)
+	case p.Pattern != "":
+		if _, err := regexp.Compile(p.Pattern); err != nil {
+			return fmt.Errorf("passwordPolicy.pattern: %v", err)
+		}
+	}
+	return nil
+}
+
+// Check refuses pw unless it matches the whole pattern; the error is the
+// message (or a default one).
+func (p PasswordPolicy) Check(pw string) error {
+	if p.Pattern == "" {
+		return nil
+	}
+	re, err := regexp.Compile("^(?:" + p.Pattern + ")$")
+	if err == nil && re.MatchString(pw) {
+		return nil
+	}
+	if p.Message != "" {
+		return errors.New(p.Message)
+	}
+	return errors.New("the password does not meet the password policy")
+}
 
 // Realm ids (Decision 3).
 const (
@@ -131,6 +179,7 @@ type Settings struct {
 	RUT                        RUT
 	DefaultRoles               []string // granted to every signed-in principal in addition to its own roles
 	SAML                       SAML
+	PasswordPolicy             PasswordPolicy
 }
 
 // DefaultSettings returns the values used for missing keys: today's behaviour.
@@ -270,6 +319,7 @@ func loadSettings(ctx context.Context, q querier) (Settings, error) {
 		{SettingCrowd, &s.Crowd},
 		{SettingDefaultRoles, &s.DefaultRoles},
 		{SettingSAML, &s.SAML},
+		{SettingPasswordPolicy, &s.PasswordPolicy},
 	} {
 		if _, err := getSettingJSON(ctx, q, f.key, f.v); err != nil {
 			return Settings{}, err

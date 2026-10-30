@@ -106,7 +106,7 @@ func TestContentSelectorsCompat(t *testing.T) {
 	e := startSecurity(t)
 	var sels []map[string]any
 	e.get(v1+"/security/content-selectors", "admin", &sels)
-	if len(sels) != 1 || sels[0]["name"] != "acme" || sels[0]["expression"] != `path =^ "/org/acme/"` {
+	if len(sels) != 1 || sels[0]["name"] != "acme" || sels[0]["type"] != "csel" || sels[0]["expression"] != `path =^ "/org/acme/"` {
 		t.Fatalf("selectors = %v", sels)
 	}
 	e.want("POST", v1+"/security/content-selectors", "admin", `{"name":"bad","expression":"path = x"}`, 400)
@@ -125,22 +125,14 @@ func TestContentSelectorsCompat(t *testing.T) {
 	e.want("POST", v1+"/security/privileges/repository-content-selector", "admin",
 		`{"name":"acme-read","description":"read acme","actions":["BROWSE","READ"],"format":"maven2","repository":"maven-releases","contentSelector":"acme"}`, 201)
 	e.want("POST", v1+"/security/privileges/repository-content-selector", "admin",
-		`{"name":"acme-read","actions":["READ"],"format":"maven2","repository":"maven-releases","contentSelector":"acme"}`, 409)
+		`{"name":"acme-read","actions":["READ"],"format":"maven2","repository":"maven-releases","contentSelector":"acme"}`, 400) // Nexus: a taken name is 400
 	e.want("POST", v1+"/security/privileges/repository-content-selector", "admin",
 		`{"name":"bad","actions":["READ"],"format":"maven2","repository":"nope","contentSelector":"acme"}`, 400)
-	var roles []struct {
-		ID         string   `json:"id"`
-		Privileges []string `json:"privileges"`
-	}
-	e.get(v1+"/security/roles", "admin", &roles)
-	found := false
-	for _, r := range roles {
-		if r.ID == "priv:acme-read" {
-			found = strings.Join(r.Privileges, ",") == "selector:acme:browse,selector:acme:read"
-		}
-	}
-	if !found {
-		t.Fatalf("roles = %+v", roles)
+	var priv map[string]any
+	e.get(v1+"/security/privileges/acme-read", "admin", &priv)
+	if priv["type"] != "repository-content-selector" || priv["contentSelector"] != "acme" || priv["repository"] != "maven-releases" ||
+		fmt.Sprint(priv["actions"]) != "[BROWSE READ]" || priv["description"] != "read acme" || priv["readOnly"] != false {
+		t.Fatalf("privilege = %v", priv)
 	}
 	e.want("POST", "/-/api/users", "admin", "", 403) // not through the Nexus API: no UI header
 	e.upload("maven-releases/org/acme/lib/1.0/lib-1.0.jar", "maven-releases/org/other/lib/1.0/lib-1.0.jar")

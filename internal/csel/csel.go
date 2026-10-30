@@ -7,6 +7,8 @@
 //	path =~ "/org/acme/.*-SNAPSHOT/.*"      (RE2, whole path)
 //	coordinate.groupId =^ "org.acme"        (maven: path prefix /org/acme)
 //	... and ... / ... or ... / not ... / ( ... )
+//	... && ... / ... || ... / eq / ne       (JEXL spellings, as Nexus accepts)
+//	"maven2" == format                      (the value first)
 //
 // An expression is evaluated against a Nexus-spelled format ("maven2") and
 // a path that starts with "/".
@@ -91,6 +93,8 @@ func (t term) eval(format, path string) bool {
 		return v != t.value
 	case "=^":
 		return strings.HasPrefix(v, t.value)
+	case "^=": // "value" =^ field: the value starts with the field's
+		return strings.HasPrefix(t.value, v)
 	case "=~":
 		return t.re.MatchString(v)
 	}
@@ -118,6 +122,10 @@ func (p *parser) lex() error {
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
 			i++
+		case i+1 < len(s) && (s[i:i+2] == "&&" || s[i:i+2] == "||"):
+			kind := map[string]string{"&&": "and", "||": "or"}[s[i:i+2]]
+			p.toks = append(p.toks, token{kind, s[i : i+2], i})
+			i += 2
 		case c == '(' || c == ')':
 			p.toks = append(p.toks, token{string(c), string(c), i})
 			i++
@@ -148,6 +156,8 @@ func (p *parser) lex() error {
 			switch strings.ToLower(w) {
 			case "and", "or", "not":
 				kind = strings.ToLower(w)
+			case "eq", "ne": // JEXL's words for == and !=
+				kind, w = "op", map[string]string{"eq": "==", "ne": "!="}[strings.ToLower(w)]
 			}
 			p.toks = append(p.toks, token{kind, w, i})
 			i = j
@@ -221,6 +231,9 @@ func (p *parser) primary() (node, error) {
 		p.pos++
 		return n, nil
 	}
+	if t.kind == "str" && p.pos+2 < len(p.toks) && p.toks[p.pos+1].kind == "op" && p.toks[p.pos+2].kind == "ident" {
+		return p.valueFirst()
+	}
 	if t.kind != "ident" {
 		return nil, fmt.Errorf("expected a field name at %d, got %q", t.at+1, t.text)
 	}
@@ -252,6 +265,26 @@ func (p *parser) primary() (node, error) {
 			return nil, fmt.Errorf("invalid regular expression at %d: %v", val.at+1, err)
 		}
 		tm.re = re
+	}
+	return tm, nil
+}
+
+// valueFirst parses `"value" op field` (Nexus allows either order): == and
+// != mean the same as field first, =^ that the value starts with the
+// field's. A regular expression and coordinate.groupId need the field
+// first.
+func (p *parser) valueFirst() (node, error) {
+	val, op, f := p.toks[p.pos], p.toks[p.pos+1], p.toks[p.pos+2]
+	if f.text != "format" && f.text != "path" {
+		return nil, fmt.Errorf("unknown field %q at %d (a value first takes format or path)", f.text, f.at+1)
+	}
+	if op.text == "=~" {
+		return nil, fmt.Errorf("put the field first for =~ at %d", op.at+1)
+	}
+	p.pos += 3
+	tm := term{field: f.text, op: op.text, value: val.text}
+	if op.text == "=^" {
+		tm.op = "^="
 	}
 	return tm, nil
 }

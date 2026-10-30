@@ -89,7 +89,7 @@ func (a *Authenticator) oidcPrincipal(s *Snapshot, u OIDCUser) (Principal, bool)
 		}
 	}
 	roles = s.grant(roles)
-	return Principal{User: u.ID, Admin: hasRole(roles, meta.AdminRole), roles: roles, source: sourceOIDC}, true
+	return Principal{User: u.ID, Admin: s.isAdmin(roles), roles: roles, source: sourceOIDC}, true
 }
 
 // oidcLookup returns the principal of OIDC user id from its recorded

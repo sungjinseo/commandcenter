@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/ldap"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 )
@@ -710,19 +711,21 @@ func (a *Authenticator) checkToken(ctx context.Context, tok, owner string) (Prin
 // belongs to the immutable snapshot and is never modified.
 func (s *Snapshot) principal(u meta.User) Principal {
 	roles := s.grant(u.Roles)
-	return Principal{User: u.ID, Admin: hasRole(roles, meta.AdminRole), roles: roles}
+	return Principal{User: u.ID, Admin: s.isAdmin(roles), roles: roles}
 }
 
 // grant returns roles plus the default roles setting (Nexus
 // DefaultRoleRealm): every signed-in principal holds them. Without default
-// roles it returns roles itself.
+// roles it returns roles itself. A default role that is or contains the
+// admin role is skipped: the API refuses one, and nesting must not let
+// every signed-in user become an administrator.
 func (s *Snapshot) grant(roles []string) []string {
 	if len(s.settings.DefaultRoles) == 0 {
 		return roles
 	}
 	out := append(make([]string, 0, len(roles)+len(s.settings.DefaultRoles)), roles...)
 	for _, r := range s.settings.DefaultRoles {
-		if !hasRole(out, r) {
+		if !hasRole(out, r) && !s.isAdmin([]string{r}) {
 			out = append(out, r)
 		}
 	}
@@ -794,6 +797,99 @@ func (a *Authenticator) CanReadMetrics(p Principal) bool {
 	s := a.snap.Load()
 	for _, id := range p.roles {
 		if r := s.roles[id]; r != nil && r.metrics&actRead != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// CanApp reports whether p holds action ("read", "add", "edit", "delete"
+// or "run") of the application domain (meta.AppTargetPrefix): an admin
+// always, else a signed-in principal whose roles grant it.
+func (a *Authenticator) CanApp(p Principal, domain, action string) bool {
+	if p.Admin {
+		return true
+	}
+	if p.Anonymous() {
+		return false
+	}
+	want := actionBits[action]
+	s := a.snap.Load()
+	for _, id := range p.roles {
+		if r := s.roles[id]; r != nil && r.apps[domain]&want != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// AppDomains are the application privilege domains ("app:<domain>",
+// Nexus nx-<domain>-*) and the actions each delegates. The last five are
+// open to every signed-in user here; they are accepted, so Nexus roles
+// that hold them migrate, and grant nothing more.
+var AppDomains = map[string][]string{
+	"users":      {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
+	"roles":      {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
+	"selectors":  {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
+	"settings":   {meta.ActionRead},
+	"tasks":      {meta.ActionRead, meta.ActionRun},
+	"blobstores": {meta.ActionRead},
+
+	"search":        {meta.ActionRead},
+	"healthcheck":   {meta.ActionRead},
+	"userschangepw": {meta.ActionRead, meta.ActionAdd},
+	"component":     {meta.ActionAdd},
+	"apikey":        {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
+}
+
+// AppActions lists the delegated actions p holds per domain (only domains
+// with one); an admin's is empty, as an admin holds every action.
+func (a *Authenticator) AppActions(p Principal) map[string][]string {
+	out := map[string][]string{}
+	if p.Admin || p.Anonymous() {
+		return out
+	}
+	for d, acts := range AppDomains {
+		for _, act := range acts {
+			if a.CanApp(p, d, act) {
+				out[d] = append(out[d], act)
+			}
+		}
+	}
+	return out
+}
+
+// CanAdminRepo reports whether p may administer the repository repo of
+// format format with acc (Nexus repository-admin privileges): Browse lists
+// it, Read shows its settings, Edit changes them, Delete removes it, and
+// Add on a format (repo "") creates one. An admin always may; anonymous
+// never.
+func (a *Authenticator) CanAdminRepo(p Principal, repo, format string, acc Access) bool {
+	if p.Admin {
+		return true
+	}
+	if p.Anonymous() {
+		return false
+	}
+	want := accessBits[acc]
+	s := a.snap.Load()
+	for _, id := range p.roles {
+		if r := s.roles[id]; r != nil && r.repoAdmin.grants(repo, format, want) {
+			return true
+		}
+	}
+	return false
+}
+
+// AdminsSomeRepo reports whether p holds any repository-admin privilege
+// (the repository administration screens are then shown).
+func (a *Authenticator) AdminsSomeRepo(p Principal) bool {
+	if p.Admin {
+		return true
+	}
+	s := a.snap.Load()
+	for _, id := range p.roles {
+		if r := s.roles[id]; r != nil && (r.repoAdmin.all != 0 || len(r.repoAdmin.formats) > 0 || len(r.repoAdmin.repos) > 0) {
 			return true
 		}
 	}
@@ -973,4 +1069,43 @@ func (a *Authenticator) Permits(ctx context.Context, repo string, acc Access) bo
 		return a.CanPath(FromContext(ctx), repo, acc, path)
 	}
 	return a.Can(FromContext(ctx), repo, acc)
+}
+
+// TokenOwnerGone reports whether the owner key of an API or user token
+// (Principal.Owner) no longer resolves in any realm: a plain id with no
+// stored local user, or an LDAP or Crowd user its configured directory says
+// does not exist. An owner it cannot settle (the SSO realms, which cannot
+// be asked about a user; a directory that is off, unconfigured or failing:
+// the error) is not gone, so security.purge-api-keys never deletes a token
+// it cannot prove orphaned.
+func (a *Authenticator) TokenOwnerGone(ctx context.Context, owner string) (bool, error) {
+	s := a.snap.Load()
+	if id, ok := strings.CutPrefix(owner, ldapOwnerPrefix); ok {
+		if !s.settings.LDAP.Complete() {
+			return false, nil
+		}
+		_, err := a.findLDAP(ctx, s.settings.LDAP, id)
+		if errors.Is(err, ldap.ErrNoSuchUser) {
+			return true, nil
+		}
+		return false, err
+	}
+	if id, ok := strings.CutPrefix(owner, crowdOwnerPrefix); ok {
+		if !s.settings.Crowd.Complete() {
+			return false, nil
+		}
+		_, err := a.CrowdFind(ctx, s.settings.Crowd, id)
+		var ce *CrowdError
+		if errors.As(err, &ce) && ce.Status == http.StatusNotFound {
+			return true, nil
+		}
+		return false, err
+	}
+	for _, p := range []string{oidcOwnerPrefix, samlOwnerPrefix, rutOwnerPrefix} {
+		if strings.HasPrefix(owner, p) {
+			return false, nil
+		}
+	}
+	u, ok := s.users[owner]
+	return !ok || u.Source != meta.SourceLocal, nil
 }

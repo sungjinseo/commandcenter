@@ -546,7 +546,7 @@ func (body samlRequest) merged(cur meta.SAML) meta.SAML {
 }
 
 func (u *UI) getSAML(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	if _, ok := u.requireApp(w, r, "settings", meta.ActionRead); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, u.samlJSON(r.Context(), u.Auth.Snapshot().Settings().SAML))

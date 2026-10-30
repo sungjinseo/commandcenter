@@ -8,11 +8,12 @@ import (
 	"regexp"
 	"strings"
 
-	"commandcenter/internal/ui"
+	"commandcenter/internal/meta"
 )
 
-// Routing rules, content selectors and content-selector privileges of the
-// Nexus security API, as in-process calls of the UI's JSON API.
+// Routing rules and content selectors of the Nexus security API, as
+// in-process calls of the UI's JSON API (users, roles, privileges, realms
+// and anonymous access: nxsecurity.go).
 
 func (h *Handler) securityRoutes(m *http.ServeMux, p string) {
 	m.HandleFunc("GET "+p+"/routing-rules", h.listRoutingRules)
@@ -25,8 +26,7 @@ func (h *Handler) securityRoutes(m *http.ServeMux, p string) {
 	m.HandleFunc("GET "+p+"/security/content-selectors/{name}", h.getSelector)
 	m.HandleFunc("PUT "+p+"/security/content-selectors/{name}", h.updateSelector)
 	m.HandleFunc("DELETE "+p+"/security/content-selectors/{name}", h.deleteSelector)
-	m.HandleFunc("POST "+p+"/security/privileges/repository-content-selector", h.createSelectorPrivilege)
-	m.HandleFunc("PUT "+p+"/security/privileges/repository-content-selector/{name}", h.updateSelectorPrivilege)
+	h.nxSecurityRoutes(m, p)
 }
 
 // decodeSmall reads a small JSON body into v.
@@ -184,11 +184,11 @@ type selectorBody struct {
 }
 
 func selectorOut(s selectorBody) map[string]any {
-	return map[string]any{"name": s.Name, "description": s.Description, "expression": s.Expression}
+	return map[string]any{"name": s.Name, "type": "csel", "description": s.Description, "expression": s.Expression}
 }
 
 func (h *Handler) listSelectors(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "selectors", meta.ActionRead); !ok {
 		return
 	}
 	status, body := h.call(r, http.MethodGet, "/-/api/content-selectors", nil)
@@ -208,7 +208,7 @@ func (h *Handler) listSelectors(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getSelector(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "selectors", meta.ActionRead); !ok {
 		return
 	}
 	status, body := h.call(r, http.MethodGet, "/-/api/content-selectors/"+url.PathEscape(r.PathValue("name")), nil)
@@ -222,7 +222,7 @@ func (h *Handler) getSelector(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) createSelector(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "selectors", meta.ActionAdd); !ok {
 		return
 	}
 	var b selectorBody
@@ -238,7 +238,7 @@ func (h *Handler) createSelector(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateSelector(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "selectors", meta.ActionEdit); !ok {
 		return
 	}
 	var b struct {
@@ -259,76 +259,12 @@ func (h *Handler) updateSelector(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deleteSelector(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if _, ok := h.app(w, r, "selectors", meta.ActionDelete); !ok {
 		return
 	}
 	status, body := h.call(r, http.MethodDelete, "/-/api/content-selectors/"+url.PathEscape(r.PathValue("name")), nil)
 	if status != http.StatusNoContent {
 		writeUIError(w, status, body)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// ---- repository-content-selector privileges ----
-
-// selectorPrivilege is Nexus's body: a privilege is a standalone object in
-// Nexus, while privileges live in roles here. It is mapped onto the role
-// "priv:<name>" holding that single privilege, so `security/roles`
-// assignment works; format is implied by the selector's own expression and
-// not stored.
-type selectorPrivilege struct {
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	Actions         []string `json:"actions"` // BROWSE, READ, EDIT, ADD, DELETE (or lowercase)
-	Format          string   `json:"format"`
-	Repository      string   `json:"repository"`
-	ContentSelector string   `json:"contentSelector"`
-}
-
-func (p selectorPrivilege) role() map[string]any {
-	actions := make([]string, 0, len(p.Actions))
-	for _, a := range p.Actions {
-		actions = append(actions, strings.ToLower(a))
-	}
-	repos := []string{"*"}
-	if p.Repository != "" && p.Repository != "*" {
-		repos = []string{p.Repository}
-	}
-	return map[string]any{"id": ui.NexusPrivRolePrefix + p.Name, "description": p.Description,
-		"privileges": []map[string]any{{"target": "selector:" + p.ContentSelector, "actions": actions, "repos": repos}}}
-}
-
-func (h *Handler) createSelectorPrivilege(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
-		return
-	}
-	var p selectorPrivilege
-	if !decodeSmall(w, r, &p) {
-		return
-	}
-	status, body := h.call(r, http.MethodPost, "/-/api/roles", p.role())
-	if status != http.StatusCreated {
-		writeUIError(w, status, body)
-		return
-	}
-	w.WriteHeader(http.StatusCreated)
-}
-
-func (h *Handler) updateSelectorPrivilege(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
-		return
-	}
-	var p selectorPrivilege
-	if !decodeSmall(w, r, &p) {
-		return
-	}
-	p.Name = r.PathValue("name")
-	body := p.role()
-	delete(body, "id")
-	status, res := h.call(r, http.MethodPut, "/-/api/roles/"+url.PathEscape(ui.NexusPrivRolePrefix+p.Name), body)
-	if status != http.StatusOK {
-		writeUIError(w, status, res)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
