@@ -103,6 +103,7 @@ func (h *Handler) init() {
 	m.HandleFunc(p+"/", func(w http.ResponseWriter, r *http.Request) { writeMessage(w, http.StatusNotFound, "not found") })
 	h.proRoutes(m, p)
 	h.azureBlobRoutes(m, p)
+	h.configRoutes(m, p)
 	h.mux = m
 }
 

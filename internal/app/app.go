@@ -90,6 +90,8 @@ type App struct {
 	syncWait    map[string]chan string
 	syncAnswers sync.Once
 	syncing     sync.Map
+
+	ui *ui.UI // the web UI's handlers: the CLI's configuration export and apply (confcode.go)
 }
 
 // Version is reported by the UI; cmd/commandcenter sets it before New.
@@ -648,6 +650,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Webhooks:   hooks,
 		Vuln:       vulnSvc,
 	}
+	a.ui = webUI
 	// MaxUpload is only the fallback for a Server without Auth; the live
 	// maxUploadMiB setting is what is enforced.
 	nexus := &nexusapi.Handler{Repos: registry, Auth: authn, DB: db, BaseURL: baseURL, UI: webUI}

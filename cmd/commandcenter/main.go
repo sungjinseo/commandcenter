@@ -66,8 +66,10 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 	case "version":
 		fmt.Fprintln(stdout, version)
 		return nil
+	case "config":
+		return configCmd(args[1:], stdin, stdout)
 	}
-	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, import-nexus, healthcheck, version)", args[0])
+	return fmt.Errorf("unknown command %q (commands: serve, hash-password, token create, user reset-password, secret-key rotate, gc, import-nexus, healthcheck, version, config export|apply)", args[0])
 }
 
 // pickConfigPath returns the config file to load. A -config given explicitly

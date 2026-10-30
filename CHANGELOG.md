@@ -409,6 +409,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uploads and deletes with 503 and stops compaction, cleanup and the other content-moving tasks.
   Compaction keeps the blobs a pending plan adds or the last day's journal puts, and prunes the
   journal after `journalRetentionDays` (default 30).
+- Configuration as code: `GET /-/api/configuration` exports every admin setting and object (trust store,
+  blob stores and groups with quotas, routing rules, content selectors, cleanup policies, repositories,
+  roles, users, general and outbound HTTP settings, SMTP, LDAP, OIDC, SAML, Crowd, RUT, realms, tasks,
+  webhooks, vulnerability settings, log level) as one YAML or JSON document, and
+  `POST /-/api/configuration` applies one. An apply checks the whole document first (fields, each
+  object's rules, references, the admin lockout), then goes through the admin API's own handlers in
+  dependency order, so events, sealing and the other nodes' updates are those of the UI; a step that
+  fails undoes the steps before it. `dryRun=true` returns the plan with field-level changes, and
+  `prune=true` deletes what a listed section leaves out. Secrets are left out (an apply keeps the
+  stored ones) or exported encrypted with a passphrase (AES-256-GCM, scrypt), so another instance
+  restores them; `passwords=true` adds the local users' password hashes.
+- `commandcenter config export` and `commandcenter config apply -f FILE [-dry-run] [-prune]`: the same
+  on the metadata database directly, beside running servers or without one.
+- Nexus's configuration API: `GET /service/rest/v1/configuration` (with
+  `X-Nexus-Migration-Protocol-Version: 1`) exports the document; `PUT` uploads one without overwriting
+  what exists.
 
 ### Changed
 

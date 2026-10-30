@@ -603,6 +603,8 @@ Nexus와 다른 점:
 - 컴포넌트 목록과 검색은 요청마다 저장소의 자산 경로를 모두 읽어 파생하므로 자산이 수십만 개인 저장소에서는 한 페이지에 수 초가 걸릴 수 있습니다. 전체 목록에 `continuationToken`으로 이어 받습니다.
 - `security/users`, `security/roles`는 읽기 전용이고 역할의 `privileges`는 `"<대상>:<동작>"` 문자열입니다(컨텐츠 셀렉터 권한은 `selector:<이름>:<동작>`). 스크립트 API는 없습니다. 모르는 경로는 JSON `404`입니다.
 
+구성 API도 지원합니다. `GET /service/rest/v1/configuration`(헤더 `X-Nexus-Migration-Protocol-Version: 1` 필요)은 구성 문서를 비밀값 없이 JSON으로 내보냅니다. `PUT /service/rest/v1/configuration`은 Nexus처럼 기존 설정을 덮어쓰지 않고 없는 객체만 만듭니다. Nexus는 문서 모양을 공개하지 않으므로 문서는 Command Center의 구성 문서입니다("구성 코드화" 참고).
+
 ## 웹 UI
 
 브라우저에서 `http://localhost:8081/`(또는 `baseURL`)에 접속하면 `/ui/`로 이동합니다. 별도 설치나 외부 리소스 없이 서버에 내장되어 있어 폐쇄망에서도 동작합니다. 정적 파일 합계는 512 KiB 이하이며 바이너리에 포함됩니다. 화면 구조(사이드바, 상단 막대, 카드와 표)는 직접 디자인한 것이고 다른 제품의 로고, 아이콘, CSS 같은 자산은 쓰지 않습니다. 해시 경로는 `#browse/...`, `#admin/...` 형태입니다.
@@ -804,6 +806,66 @@ repositories:
 성공하면 "Upload successful"과 Browse 링크가 나옵니다. 이미 있는 파일을 다시 올리면 포맷별 규칙대로 오류가 인라인으로 표시됩니다(Maven `allow_once` 400, npm 403, PyPI 400). 파일은 순서대로 하나씩 올리며, 서버는 기존 스트리밍 경로를 그대로 쓰므로 큰 파일도 메모리에 통째로 올리지 않습니다(npm publish 문서만 10 MiB까지 읽고, 동시 처리는 2개로 제한됩니다). npm publish 슬롯이 모두 사용 중이면 30초까지 기다리다가 `503 too many concurrent publishes, retry`로 거절하므로 잠시 후 다시 시도하세요. 슬롯을 잡은 채 본문 전송이 5분 넘게 멈추면 연결이 끊깁니다. 다른 포맷의 업로드도 마찬가지로 본문을 읽는 중에 60초 동안 한 바이트도 오지 않으면(느려도 계속 오는 전송은 끊지 않습니다) **408**로 답하고(Cargo publish의 메타데이터 부분은 400입니다. Maven `maven-metadata.xml`은 계속 조금씩 오더라도 10초 안에 다 오지 않으면 408입니다) 연결을 끊어, 멈춘 업로드가 같은 경로의 잠금을 붙들고 있지 못하게 합니다. 서버가 본문을 읽기 전에 잠금을 기다리는 시간이나 본문이 없는 요청(DELETE, Cargo yank)은 이 제한에 들어가지 않습니다. 이 제한은 인증보다 먼저 본문이 있는 모든 요청(웹 UI의 `/-/api/…` 포함)에 걸리므로, 401·403·404·503으로 거절된 요청도 본문을 멈춘 채 연결을 붙들 수 없습니다. 서버가 끝까지 읽지 않은 본문은 연결을 다시 쓰려고 남은 부분(최대 256 KiB)을 최대 5초만 기다리고, 그 안에 다 오지 않으면 응답 뒤 연결을 닫습니다. 로그인하지 않은 요청의 본문(웹 UI 로그인, `npm login`)은 바이트가 계속 오더라도 요청 헤더를 받은 뒤 5초 안에 모두 와야 하며, 넘으면 요청을 거절하고 연결을 닫습니다. 익명으로는 업로드할 수 없으므로 인증된 요청인 업로드에는 이 제한이 없습니다.
 
 **업로드가 401로 실패할 때**: 브라우저가 `/repository` 경로에 대해 Basic 인증 정보를 캐시해 두었다면(예: 그 주소를 직접 열어 로그인한 경우) 그 값이 UI 세션보다 우선하므로 업로드가 401로 실패할 수 있습니다. 브라우저에 저장된 해당 사이트의 인증 정보를 지우고 다시 시도하세요.
+
+## 구성 코드화(내보내기와 적용)
+
+관리자가 설정할 수 있는 모든 것을 하나의 YAML(또는 JSON) 문서로 내보내고, 그 문서를 같은 인스턴스나 다른 인스턴스에 적용할 수 있습니다. 문서를 Git에 두고 검토한 뒤 적용하거나(GitOps), 새 인스턴스에 구성을 복제하거나, 드리프트를 확인하는 데 씁니다.
+
+### 문서에 들어가는 것
+
+섹션은 적용 순서대로 trustStore, blobStores, routingRules, contentSelectors, cleanupPolicies, repositories, roles, users, settings, smtp, ldap, oidc, saml, crowd, rutauth, realms, tasks, webhooks, vulnerability, logging입니다. 객체의 모양은 해당 관리 API의 요청 본문과 같습니다. settings에는 일반 설정(baseURL, 익명·인증 읽기, 세션, 업로드 한도, 기본 언어, metricsAnonymous, terraformDefaultRepository)과 외부 HTTP·프록시(http), 사용자 토큰 설정(userTokens), 기본 역할(defaultRoles)이 함께 들어갑니다. 저장소에는 풀 복제 설정(replication)도 들어갑니다. 권한은 역할의 privileges 안에 있으며 따로 된 객체가 없습니다(Nexus API로 만든 셀렉터 권한은 priv:<이름> 역할입니다). 기본 제공 admin 역할은 바꿀 수 없어 문서에 넣지 않습니다. 작업과 웹훅은 이름으로 맞추므로 이름이 겹치지 않아야 하며, 기본 압축 작업은 builtin: true로 표시됩니다.
+
+API 토큰과 사용자 토큰, 세션과 로그인 상태, 태그와 컴포넌트·자산(내용은 repository.export/import 작업을 쓰세요), 취약점 데이터와 격리 목록, 웹훅 전달 기록, 작업 실행 기록, 진행 중인 blob store 이동, 복구 모드, 노드 목록, Docker/Conan 토큰 서명 키, config.yaml의 프로세스 설정(database, listen, dataDir, secretKeyFile 등)은 들어가지 않습니다.
+
+### 비밀값
+
+기본으로 비밀값(SMTP·LDAP·OIDC·Crowd 비밀번호, 프록시와 원격 인증 비밀번호, 베어러 토큰, apt 서명 키, S3 비밀 키, Azure 계정 키·SAS 토큰·client secret, google 서비스 계정 키, 웹훅 서명 비밀, SAML SP 키 쌍, 원격 URL의 사용자 정보와 쿼리)은 빠지며, 이런 문서를 적용하면 저장된 비밀값이 그대로 남습니다. `secrets=encrypted`로 내보내면 비밀값이 문서 끝의 `secrets` 블록에 암호화되어 들어갑니다. 암호화는 AES-256-GCM이고 키는 passphrase(12자 이상)에서 scrypt(N=32768, r=8, p=1)로 만듭니다. 다른 인스턴스에 같은 passphrase로 적용하면 비밀값도 복원됩니다. `secrets` 블록이 있으면 그 블록을 해당 섹션 비밀값의 전부로 보므로, 블록에 없는 비밀값은 지워집니다. 로컬 사용자의 비밀번호 해시는 `passwords=true`일 때만 들어갑니다. bcrypt 해시이므로 문서를 비밀로 다루세요. 해시 없이 새로 만든 로컬 사용자는 비밀번호가 없어 관리자가 설정해야 합니다.
+
+### REST API
+
+```bash
+# 내보내기(YAML, 비밀값 제외)
+curl -u admin -o cc.yaml https://cc.example.com/-/api/configuration
+# 비밀값(암호화)과 비밀번호 해시 포함
+curl -u admin -H 'X-Config-Passphrase: <12자 이상>' -o cc.yaml \
+  'https://cc.example.com/-/api/configuration?secrets=encrypted&passwords=true'
+# 계획만 보기
+curl -u admin -H 'X-Command-Center-UI: 1' --data-binary @cc.yaml \
+  'https://cc.example.com/-/api/configuration?dryRun=true'
+# 적용(문서의 섹션에 없는 객체까지 지우려면 prune=true)
+curl -u admin -H 'X-Command-Center-UI: 1' -H 'X-Config-Passphrase: <passphrase>' --data-binary @cc.yaml \
+  'https://cc.example.com/-/api/configuration?prune=true'
+```
+
+`include`·`exclude`(쉼표로 구분한 섹션 이름)로 일부 섹션만 내보내거나 적용하고, `format=json`으로 JSON을 받습니다.
+
+### 적용 방식
+
+- 먼저 문서 전체를 검사합니다(형식, 알 수 없는 필드, 객체마다의 규칙, 섹션 사이 참조, 잠금 방지). 문제가 하나라도 있으면 아무것도 바꾸지 않고 400으로 모든 문제를 돌려줍니다.
+- 문서에 없는 섹션은 건드리지 않습니다. `prune=true`이면 문서에 있는 섹션에서 나열되지 않은 객체를 지웁니다. 기본 blob store(default)와 기본 압축 작업은 지우지 않습니다. 마지막 관리자를 지우거나 관리자가 아무도 로그인할 수 없게 되는 문서는 거부됩니다.
+- 적용은 의존 순서(blob store → 라우팅 규칙·셀렉터·정리 정책 → 저장소 → 역할 → 사용자 → 설정 → realm → 작업·웹훅)로 관리 API와 같은 처리기를 거칩니다. 그래서 검증, 비밀값 암호화, 활동 이벤트, 다른 노드로의 알림이 화면에서 바꿀 때와 같습니다. 삭제는 맨 뒤에 역순으로 합니다. 적용은 클러스터 전체에서 한 번에 하나씩만 실행됩니다.
+- 한 단계가 실패하면 그때까지 적용한 단계를 역순으로 되돌리고, 409와 함께 단계별 상태(applied, failed, rolledBack, rollbackFailed, notAttempted)를 돌려줍니다. 지운 저장소를 되돌리면 정의만 다시 만들어지고 내용은 돌아오지 않습니다.
+- 계획(`dryRun=true`)은 객체마다 create, update, delete, unchanged와 바뀌는 필드의 이전 값과 새 값을 보여 줍니다. 비밀값은 바뀌었다는 것만 표시합니다. 비밀값과 비밀번호 해시가 없는 문서의 계획은 관리자 API 토큰으로도 볼 수 있어 CI의 드리프트 검사에 쓸 수 있습니다. 적용은 비밀번호나 세션으로 로그인한 관리자만 할 수 있습니다.
+
+### 명령줄
+
+```bash
+commandcenter config export -config /etc/commandcenter/config.yaml -o cc.yaml
+commandcenter config export -config /etc/commandcenter/config.yaml -secrets encrypted \
+  -passphrase-file /run/secrets/cc-config -passwords -o cc.yaml
+commandcenter config apply -config /etc/commandcenter/config.yaml -f cc.yaml -dry-run
+commandcenter config apply -config /etc/commandcenter/config.yaml -f cc.yaml -prune -passphrase-file /run/secrets/cc-config
+```
+
+명령줄은 `token create`, `gc`처럼 메타데이터 데이터베이스에 직접 연결해 같은 처리기로 적용하므로 서버가 실행 중이어도, 멈춰 있어도 쓸 수 있습니다. 실행 중인 노드는 알림을 받아 바로 반영합니다. 서버와 같은 비밀 키(`COMMANDCENTER_SECRET_KEY` 또는 `secretKeyFile`)와 같은 `dataDir`이 필요하므로 Kubernetes에서는 서버 파드 안에서(`kubectl exec`) 실행하세요. passphrase는 `-passphrase-file`이나 `COMMANDCENTER_CONFIG_PASSPHRASE`로 줍니다. 이벤트의 행위자는 `cli:config`로 기록됩니다. logging 섹션은 실행 중인 노드의 값이므로 명령줄에서는 건너뜁니다. `-o`로 쓴 파일은 권한 0600입니다.
+
+### 제한
+
+- blob store의 type, path, s3, google 설정과 Azure store의 계정·컨테이너·prefix·endpoint, 저장소의 format, type, blobStore는 바꿀 수 없습니다. Azure store의 자격 증명(방식, 비밀값, tenantId·clientId 등)은 바꿀 수 있습니다. 저장소의 blob store를 옮기려면 `repository.change-blobstore` 작업을 쓰세요.
+- realm을 끄면서 그 realm의 설정을 비우는 변경은, 설정이 realm 목록보다 먼저 적용되므로 실패합니다. 두 번에 나눠 적용하세요.
+- 비밀값 없이 LDAP, SMTP, OIDC, Crowd의 서버 주소를 바꾸면 화면에서와 같이 거부되고 되돌려집니다.
+- SAML SP 키 쌍은 비밀값과 함께만 옮겨집니다. 없으면 새 인스턴스가 자체 키 쌍을 만들므로 IdP에 SP 메타데이터를 다시 등록하세요.
+- 문서는 8 MiB까지입니다. 암호화한 내보내기는 매번 salt와 nonce가 달라 `secrets` 블록이 바뀝니다(풀어낸 내용은 같습니다).
 
 ## 설정 레퍼런스
 
