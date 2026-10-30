@@ -2,7 +2,9 @@ package webhook
 
 import (
 	"context"
+	"slices"
 	"strings"
+	"time"
 
 	"commandcenter/internal/meta"
 )
@@ -58,6 +60,26 @@ var Kinds = []Kind{
 	{"firewall.released", "A quarantined component was released to the proxy's allow list"},
 	{"vulnerability.updated", "Vulnerability data (OSV) was imported or downloaded, or its settings changed"},
 	{"component.vulnerable", "repository.evaluate found advisories a monitored repository's component did not have before (data.ids: the new ones, data.severity: the component's highest)"},
+	{"auth.login", "A user signed in to the UI with a password"},
+	{"auth.logout", "A user signed out of the UI"},
+	{"auth.failed", "A UI sign-in failed: wrong user name or password (data.subject: the name given)"},
+}
+
+// NexusKinds are the event names of Nexus Repository's webhooks, which a
+// webhook of payload format nexus subscribes to (as Nexus's webhook.global
+// and webhook.repository capabilities do). A commandcenter webhook may list
+// them too, as aliases of the kinds they cover.
+var NexusKinds = []Kind{
+	{"audit", "Nexus global audit (rm:global:audit): every recorded change, each component and asset change included; as an alias, every kind but ping"},
+	{"repository", "Nexus global repository (rm:global:repository): a repository was created, updated or deleted; as an alias, repository.*"},
+	{"component", "Nexus repository component (rm:repository:component): a component was created, updated or deleted, by an upload, a proxy fetch or a delete; as an alias, component.*"},
+	{"asset", "Nexus repository asset (rm:repository:asset): a file was created, replaced or deleted, by an upload, a proxy fetch or a delete; as an alias, asset.*"},
+}
+
+// nexusID is the X-Nexus-Webhook-ID of each Nexus event name: rm:<scope>:<name>.
+var nexusID = map[string]string{
+	"audit": "rm:global:audit", "repository": "rm:global:repository",
+	"component": "rm:repository:component", "asset": "rm:repository:asset",
 }
 
 var known = func() map[string]bool {
@@ -70,6 +92,9 @@ var known = func() map[string]bool {
 
 // KnownKind reports whether kind is one of Kinds.
 func KnownKind(kind string) bool { return known[kind] }
+
+// NexusKind reports whether name is one of NexusKinds.
+func NexusKind(name string) bool { return nexusID[name] != "" }
 
 // renamed maps activity event kinds to webhook event kinds; upload, delete
 // and task.run are mapped by mapEvent.
@@ -98,6 +123,13 @@ type event struct {
 	kind                                 string // webhook kind
 	source, actor, repo, subject, detail string // the activity event
 	format                               string // the repository's format, "" if unknown
+	ip                                   string // the client's address, "" if unknown
+
+	// A commit's component and asset events (Changes) instead of an
+	// activity event; actor and ip are then the committing request's, at
+	// the commit's time.
+	contents []content
+	at       time.Time
 }
 
 // mapKind returns the webhook kind of an activity event. An upload or delete
@@ -209,15 +241,54 @@ func (d *Dispatcher) data(ctx context.Context, e event) map[string]any {
 	return map[string]any{"subject": e.subject, "detail": e.detail}
 }
 
-// matches reports whether w subscribes to kind in repo.
+// matches reports whether the commandcenter webhook w subscribes to kind in
+// repo: by the kind itself, "*", or a Nexus name as an alias.
 func matches(w meta.Webhook, kind, repo string) bool {
-	if !w.Enabled || w.Repo != "" && w.Repo != repo {
+	if !w.Enabled || w.Repo != "" && w.Repo != repo || w.Format == meta.PayloadNexus {
 		return false
 	}
 	for _, k := range w.Events {
-		if k == "*" || k == kind {
+		switch k {
+		case "*", kind:
 			return true
+		case "audit":
+			if kind != "ping" {
+				return true
+			}
+		case "repository", "component", "asset":
+			if strings.HasPrefix(kind, k+".") {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// nexusWants returns the names among names the nexus webhook w lists, when
+// repo is in its scope.
+func nexusWants(w meta.Webhook, repo string, names ...string) []string {
+	if !w.Enabled || w.Format != meta.PayloadNexus || w.Repo != "" && w.Repo != repo {
+		return nil
+	}
+	var out []string
+	for _, n := range names {
+		if slices.Contains(w.Events, n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// activityNames are the Nexus event names an activity event reaches:
+// repository for a repository change, audit for every recorded change.
+// Uploads and deletes are none: a nexus webhook gets them from the content
+// rows of their commits (Dispatcher.Changes), proxy caching included.
+func activityNames(e event) []string {
+	switch {
+	case e.kind == "ping" || e.source == "upload" || e.source == "delete":
+		return nil
+	case strings.HasPrefix(e.kind, "repository."):
+		return []string{"repository", "audit"}
+	}
+	return []string{"audit"}
 }

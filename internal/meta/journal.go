@@ -34,6 +34,10 @@ type Change struct {
 	Tag     string      `json:"tag,omitempty"`     // a tag's
 	Asset   *AssetRow   `json:"asset,omitempty"`   // a put asset
 	Package *PackageRow `json:"package,omitempty"` // a put package
+	// Prev is what a put asset or tag row held before the commit, its blob
+	// SHA-256 or version; "" when the put created the row (webhook events;
+	// not journaled).
+	Prev string `json:"-"`
 }
 
 // Key names the row a change is about within its repository: two changes

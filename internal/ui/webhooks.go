@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -37,14 +38,16 @@ func (u *UI) webhookRoutes(mux *http.ServeMux) {
 }
 
 // webhookRequest is the body of POST and PUT. On PUT an absent secret keeps
-// the stored one; "" clears it. enabled defaults to true on POST.
+// the stored one; "" clears it. enabled defaults to true on POST. An absent
+// payloadFormat is commandcenter on POST and keeps the stored one on PUT.
 type webhookRequest struct {
-	Name    string   `json:"name"`
-	URL     string   `json:"url"`
-	Secret  *string  `json:"secret"`
-	Events  []string `json:"events"`
-	Repo    string   `json:"repo"`
-	Enabled *bool    `json:"enabled"`
+	Name          string   `json:"name"`
+	URL           string   `json:"url"`
+	Secret        *string  `json:"secret"`
+	Events        []string `json:"events"`
+	Repo          string   `json:"repo"`
+	Enabled       *bool    `json:"enabled"`
+	PayloadFormat string   `json:"payloadFormat"`
 }
 
 func webhookJSON(w meta.Webhook) map[string]any {
@@ -53,7 +56,7 @@ func webhookJSON(w meta.Webhook) map[string]any {
 		events = []string{}
 	}
 	return map[string]any{"id": w.ID, "name": w.Name, "url": w.URL, "secretSet": w.Secret != "", "events": events,
-		"repo": w.Repo, "enabled": w.Enabled, "created": rfc3339(w.Created), "updated": rfc3339(w.Updated)}
+		"repo": w.Repo, "enabled": w.Enabled, "payloadFormat": w.Format, "created": rfc3339(w.Created), "updated": rfc3339(w.Updated)}
 }
 
 func deliveryJSON(d meta.WebhookDelivery) map[string]any {
@@ -72,11 +75,21 @@ func (u *UI) validateWebhook(body webhookRequest) (meta.Webhook, []string) {
 	if pu, err := url.Parse(body.URL); err != nil || !pu.IsAbs() || pu.Host == "" || pu.Scheme != "http" && pu.Scheme != "https" {
 		errs = append(errs, "url must be an absolute http or https URL")
 	}
-	if len(body.Events) == 0 {
+	nexus := body.PayloadFormat == meta.PayloadNexus
+	if body.PayloadFormat != "" && !nexus && body.PayloadFormat != meta.PayloadCommandCenter {
+		errs = append(errs, fmt.Sprintf("payloadFormat must be %q or %q", meta.PayloadCommandCenter, meta.PayloadNexus))
+	}
+	switch {
+	case len(body.Events) == 0 && nexus:
+		errs = append(errs, "events must list at least one of the Nexus event names audit, repository, component and asset")
+	case len(body.Events) == 0:
 		errs = append(errs, "events must list at least one event kind or \"*\"")
 	}
 	for _, k := range body.Events {
-		if k != "*" && !webhook.KnownKind(k) {
+		switch {
+		case nexus && !webhook.NexusKind(k):
+			errs = append(errs, fmt.Sprintf("a webhook of payload format nexus lists Nexus event names (audit, repository, component, asset), not %q", k))
+		case !nexus && k != "*" && !webhook.KnownKind(k) && !webhook.NexusKind(k):
 			errs = append(errs, fmt.Sprintf("unknown event kind %q", k))
 		}
 	}
@@ -84,7 +97,7 @@ func (u *UI) validateWebhook(body webhookRequest) (meta.Webhook, []string) {
 		errs = append(errs, fmt.Sprintf("repository %q does not exist", body.Repo))
 	}
 	enabled := body.Enabled == nil || *body.Enabled
-	return meta.Webhook{Name: name, URL: body.URL, Events: body.Events, Repo: body.Repo, Enabled: enabled}, errs
+	return meta.Webhook{Name: name, URL: body.URL, Events: body.Events, Repo: body.Repo, Enabled: enabled, Format: body.PayloadFormat}, errs
 }
 
 func (u *UI) writeWebhookError(w http.ResponseWriter, r *http.Request, err error) {
@@ -131,15 +144,16 @@ func webhookSummary(w meta.Webhook) string {
 	if !w.Enabled {
 		state = "disabled"
 	}
-	return scope + " " + state + " events=" + strings.Join(w.Events, ",")
+	return scope + " " + state + " " + w.Format + " events=" + strings.Join(w.Events, ",")
 }
 
-// GET /-/api/webhooks/events (admin): the event kinds with descriptions.
+// GET /-/api/webhooks/events (admin): the event kinds with descriptions,
+// and the Nexus event names a webhook of payload format nexus lists.
 func (u *UI) webhookEvents(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": webhook.Kinds})
+	writeJSON(w, http.StatusOK, map[string]any{"events": webhook.Kinds, "nexusEvents": webhook.NexusKinds})
 }
 
 func (u *UI) listWebhooks(w http.ResponseWriter, r *http.Request) {
@@ -214,6 +228,7 @@ func (u *UI) updateWebhook(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body) {
 		return
 	}
+	body.PayloadFormat = cmp.Or(body.PayloadFormat, cur.Format)
 	h, errs := u.validateWebhook(body)
 	if len(errs) > 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": errs[0], "errors": errs})

@@ -1,12 +1,13 @@
 // Package webhook delivers activity events to the configured HTTP endpoints
 // (Nexus Repository's repository and global webhooks). The Dispatcher is an
 // EventSink in front of the activity recorder: every event the server
-// records is matched against the enabled webhooks, stored as one delivery
-// per webhook and sent by a pool of workers, with retries persisted in
-// webhook_deliveries so a restart resumes them. A worker sends only what
-// its node claimed in the table, so each delivery is sent once however
-// many nodes (and CLI commands, which store but never send) share the
-// database; at least once when a node dies mid-send.
+// records, and every commit of content rows (Changes, for the webhooks of
+// payload format nexus), is matched against the enabled webhooks, stored
+// as one delivery per webhook and sent by a pool of workers, with retries
+// persisted in webhook_deliveries so a restart resumes them. A worker
+// sends only what its node claimed in the table, so each delivery is sent
+// once however many nodes (and CLI commands, which store but never send)
+// share the database; at least once when a node dies mid-send.
 package webhook
 
 import (
@@ -25,11 +26,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
@@ -51,6 +54,7 @@ const (
 	CloseTimeout = 5 * time.Second
 
 	maxField   = 128
+	maxBatch   = 50 // events stored in one transaction
 	maxSubject = 512
 	maxDetail  = 1024
 	drainBody  = 4 << 10
@@ -82,6 +86,7 @@ type Dispatcher struct {
 	Next  repo.EventSink // the activity recorder; nil records nothing
 	Repos *repo.Registry // repository formats for the payload; nil leaves them empty
 	Log   *slog.Logger
+	Node  string           // this process's node id, the nexus payloads' nodeId; "" leaves it out
 	Now   func() time.Time // test hook
 
 	mu      sync.RWMutex
@@ -184,19 +189,66 @@ func (d *Dispatcher) Emit(kind, actor, repoName, subject, detail string) {
 	if d.Next != nil {
 		d.Next.Emit(kind, actor, repoName, subject, detail)
 	}
-	e := event{source: kind, actor: clip(actor, maxField), repo: clip(repoName, maxField),
+	d.activity(kind, actor, "", repoName, subject, detail)
+}
+
+// EmitCtx is Emit for an event a request caused: the nexus payloads name
+// the client's address in their initiator (repo.CtxSink).
+func (d *Dispatcher) EmitCtx(ctx context.Context, kind, actor, repoName, subject, detail string) {
+	if d.Next != nil {
+		repo.EmitContext(ctx, d.Next, kind, actor, repoName, subject, detail)
+	}
+	d.activity(kind, actor, auth.ClientIP(ctx), repoName, subject, detail)
+}
+
+func (d *Dispatcher) activity(kind, actor, ip, repoName, subject, detail string) {
+	e := event{source: kind, actor: clip(actor, maxField), ip: clip(ip, maxField), repo: clip(repoName, maxField),
 		subject: clip(subject, maxSubject), detail: clip(detail, maxDetail)}
-	if d.Repos != nil && repoName != "" {
-		if rp := d.Repos.Get(repoName); rp != nil {
-			e.format = rp.Format
-		}
+	if repoName != "" {
+		e.format = d.format(repoName)
 	}
 	e.kind = mapKind(kind, e.format, e.subject)
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	if d.closed || !d.anyMatch(e.kind, e.repo) {
+	if !d.closed && slices.ContainsFunc(d.hooks, func(w meta.Webhook) bool {
+		return matches(w, e.kind, e.repo) || len(nexusWants(w, e.repo, activityNames(e)...)) > 0
+	}) {
+		d.enqueue(e)
+	}
+}
+
+// Changes queues the component and asset events of the content rows one
+// commit wrote (meta.DB.OnCommit) for the nexus webhooks that subscribe to
+// them or to audit, with the initiator of ctx, the committing request's.
+// Whether a component was created, updated or deleted is read here, on the
+// committing goroutine, before the writer can change the component again;
+// it does not wait for the queue.
+func (d *Dispatcher) Changes(ctx context.Context, at time.Time, cs []meta.Change) {
+	d.mu.RLock()
+	hooks, closed := d.hooks, d.closed // Reload replaces the slice, never changes it
+	d.mu.RUnlock()
+	wants := func(repo string, names ...string) bool {
+		return slices.ContainsFunc(hooks, func(w meta.Webhook) bool { return len(nexusWants(w, repo, names...)) > 0 })
+	}
+	if closed || !slices.ContainsFunc(cs, func(c meta.Change) bool { return wants(c.Repo, "component", "asset", "audit") }) {
 		return
 	}
+	qctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), RequestTimeout)
+	defer cancel()
+	list := d.contents(qctx, cs, func(repo string) bool { return wants(repo, "component", "audit") })
+	if len(list) == 0 {
+		return
+	}
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if !d.closed {
+		d.enqueue(event{contents: list, at: at, actor: clip(auth.FromContext(ctx).Owner(), maxField), ip: clip(auth.ClientIP(ctx), maxField)})
+	}
+}
+
+// enqueue queues e for intake, or drops and counts it when the queue is
+// full. The caller holds mu.
+func (d *Dispatcher) enqueue(e event) {
 	select {
 	case d.events <- e:
 	default:
@@ -206,15 +258,6 @@ func (d *Dispatcher) Emit(kind, actor, repoName, subject, detail string) {
 			d.Log.Warn("webhook event queue is full: events are not delivered", "dropped", n)
 		}
 	}
-}
-
-func (d *Dispatcher) anyMatch(kind, repoName string) bool {
-	for _, w := range d.hooks {
-		if matches(w, kind, repoName) {
-			return true
-		}
-	}
-	return false
 }
 
 // Payload is the body of a delivery.
@@ -227,19 +270,104 @@ type Payload struct {
 	Data       map[string]any `json:"data"`
 }
 
-// intake stores one delivery per subscribed webhook for each queued event.
+// intake stores one delivery per subscribed webhook and event name for
+// each queued event, the events queued together in one transaction.
 func (d *Dispatcher) intake() {
 	defer d.wg.Done()
 	for e := range d.events {
+		batch := []event{e}
+	fill:
+		for len(batch) < maxBatch {
+			select {
+			case e, ok := <-d.events:
+				if !ok {
+					break fill
+				}
+				batch = append(batch, e)
+			default:
+				break fill
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), RequestTimeout)
-		d.store(ctx, e)
+		var dls []meta.WebhookDelivery
+		for _, e := range batch {
+			dls = append(dls, d.deliveries(ctx, e)...)
+		}
+		if err := d.DB.InsertDeliveries(ctx, dls); err != nil {
+			d.dropped.Add(int64(len(batch)))
+			d.Log.Warn("could not store webhook deliveries", "events", len(batch), "err", logsafe.Err(err))
+		} else if len(dls) > 0 {
+			d.Kick()
+		}
 		cancel()
 	}
 }
 
-func (d *Dispatcher) store(ctx context.Context, e event) {
+// deliveries returns the deliveries of e to the webhooks: a commandcenter
+// webhook gets the event once, with the event kind; a nexus one gets one
+// delivery per Nexus event name it lists that e reaches, with the
+// rm:<scope>:<name> id.
+func (d *Dispatcher) deliveries(ctx context.Context, e event) []meta.WebhookDelivery {
+	d.mu.RLock()
+	hooks := d.hooks // Reload replaces the slice, never changes it
+	d.mu.RUnlock()
 	now := d.Now()
-	p := Payload{ID: uuid(), Timestamp: now.UTC().Format(time.RFC3339), Event: e.kind, Actor: e.actor, Data: d.data(ctx, e)}
+	at := e.at
+	if at.IsZero() {
+		at = now
+	}
+	head := nexusHead{Timestamp: nexusTime(at), NodeID: d.Node, Initiator: initiator(e.actor, e.ip)}
+	var dls []meta.WebhookDelivery
+	add := func(w meta.Webhook, kind, body string) {
+		if len(body) > meta.MaxDeliveryPayload {
+			d.dropped.Add(1)
+			d.Log.Warn("a webhook payload is too large to deliver", "webhook", w.Name, "event", kind, "bytes", len(body))
+			return
+		}
+		dls = append(dls, meta.WebhookDelivery{ID: uuid(), WebhookID: w.ID, Event: kind, Status: meta.DeliveryPending,
+			Created: now, NextAt: now, Payload: body})
+	}
+	bodies := map[string]string{}
+	if e.contents != nil {
+		for _, c := range e.contents {
+			clear(bodies)
+			for _, w := range hooks {
+				for _, n := range nexusWants(w, c.repo, c.typ, "audit") {
+					if bodies[n] == "" {
+						bodies[n] = marshal(c.body(n, head))
+					}
+					add(w, nexusID[n], bodies[n])
+				}
+			}
+		}
+		return dls
+	}
+	var data map[string]any
+	for _, w := range hooks {
+		names := nexusWants(w, e.repo, activityNames(e)...)
+		cc := matches(w, e.kind, e.repo)
+		if data == nil && (cc || len(names) > 0) {
+			data = d.data(ctx, e)
+		}
+		if cc {
+			if bodies[""] == "" {
+				bodies[""] = ccBody(e, data, now)
+			}
+			add(w, e.kind, bodies[""])
+		}
+		for _, n := range names {
+			if bodies[n] == "" {
+				bodies[n] = marshal(activityBody(n, e, data, head))
+			}
+			add(w, nexusID[n], bodies[n])
+		}
+	}
+	return dls
+}
+
+// ccBody is the commandcenter payload of e.
+func ccBody(e event, data map[string]any, now time.Time) string {
+	p := Payload{ID: uuid(), Timestamp: now.UTC().Format(time.RFC3339), Event: e.kind, Actor: e.actor, Data: data}
 	if e.repo != "" {
 		p.Repository = &e.repo
 	}
@@ -248,21 +376,7 @@ func (d *Dispatcher) store(ctx context.Context, e event) {
 		p.Data = map[string]any{"subject": e.subject} // the envelope alone
 		body, _ = json.Marshal(p)
 	}
-	var dls []meta.WebhookDelivery
-	d.mu.RLock()
-	for _, w := range d.hooks {
-		if matches(w, e.kind, e.repo) {
-			dls = append(dls, meta.WebhookDelivery{ID: uuid(), WebhookID: w.ID, Event: e.kind, Status: meta.DeliveryPending,
-				Created: now, NextAt: now, Payload: string(body)})
-		}
-	}
-	d.mu.RUnlock()
-	if err := d.DB.InsertDeliveries(ctx, dls); err != nil {
-		d.dropped.Add(1)
-		d.Log.Warn("could not store webhook deliveries", "event", e.kind, "err", logsafe.Err(err))
-		return
-	}
-	d.Kick()
+	return string(body)
 }
 
 // poll claims due deliveries for the workers, up to maxClaimed at a time,
@@ -427,15 +541,27 @@ func sign(h func() hash.Hash, secret, body string) string {
 // Test sends a ping event to w at once, outside the queue, and records it
 // as a delivery with one attempt and no retry. It returns the response
 // status (0 when no response came) and the error of a failed send.
+//
+// A nexus webhook's ping is an audit record (rm:global:audit) of domain
+// webhook and type ping, as Nexus has no test event of its own.
 func (d *Dispatcher) Test(ctx context.Context, w meta.Webhook) (int, error) {
 	now := d.Now()
-	p := Payload{ID: uuid(), Timestamp: now.UTC().Format(time.RFC3339), Event: "ping", Actor: "", Data: map[string]any{"webhook": w.Name}}
-	if w.Repo != "" {
-		p.Repository = &w.Repo
+	kind := "ping"
+	var body string
+	if w.Format == meta.PayloadNexus {
+		b := nexusAuditBody{NodeID: d.Node, Initiator: ctxInitiator(ctx)}
+		b.Audit.Domain, b.Audit.Type, b.Audit.Context = "webhook", "ping", w.Name
+		b.Audit.Attributes = map[string]any{"webhook": w.Name}
+		kind, body = nexusID["audit"], marshal(b)
+	} else {
+		p := Payload{ID: uuid(), Timestamp: now.UTC().Format(time.RFC3339), Event: "ping", Actor: "", Data: map[string]any{"webhook": w.Name}}
+		if w.Repo != "" {
+			p.Repository = &w.Repo
+		}
+		body = marshal(p)
 	}
-	body, _ := json.Marshal(p)
 	// Sent before it is stored: a pending row would be the poller's to send too.
-	dl := meta.WebhookDelivery{ID: uuid(), WebhookID: w.ID, Event: "ping", Status: meta.DeliveryOK, Attempts: 1, Created: now, Payload: string(body)}
+	dl := meta.WebhookDelivery{ID: uuid(), WebhookID: w.ID, Event: kind, Status: meta.DeliveryOK, Attempts: 1, Created: now, Payload: body}
 	sctx, cancel := context.WithTimeout(ctx, RequestTimeout)
 	defer cancel()
 	code, err := d.send(sctx, w, dl)

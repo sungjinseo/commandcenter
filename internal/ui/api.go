@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -224,6 +225,7 @@ func (u *UI) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		u.emitAuth(r, "auth.failed", "", body.User, "invalid user name or password")
 		writeError(w, http.StatusUnauthorized, "invalid user name or password")
 		return
 	}
@@ -231,9 +233,22 @@ func (u *UI) login(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	u.emitAuth(r, "auth.login", p.Owner(), p.Owner(), "password")
 	http.SetCookie(w, c)
 	u.expireCookies(w, c.Name)
 	writeJSON(w, http.StatusOK, map[string]any{"user": p.User, "admin": p.Admin})
+}
+
+// emitAuth records a sign-in event for actor, about the user name subject
+// (as given: a name that is not plain is recorded quoted). A throttled
+// attempt records none, which bounds the failures recorded.
+func (u *UI) emitAuth(r *http.Request, kind, actor, subject, detail string) {
+	if !auth.PlainLoginName(subject) {
+		subject = strconv.QuoteToASCII(subject)
+	}
+	if u.Events != nil {
+		repo.EmitContext(r.Context(), u.Events, kind, actor, "", subject, detail)
+	}
 }
 
 // writeThrottled answers a sign-in the throttle refused; the UI shows
@@ -255,6 +270,9 @@ func (u *UI) logout(w http.ResponseWriter, r *http.Request) {
 			u.fail(w, r, err)
 			return
 		}
+	}
+	if p := principal(r); !p.Anonymous() {
+		u.emitAuth(r, "auth.logout", p.Owner(), p.Owner(), "")
 	}
 	u.expireCookies(w, "")
 	w.WriteHeader(http.StatusNoContent)

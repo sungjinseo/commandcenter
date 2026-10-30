@@ -182,19 +182,42 @@ func TestWebhookDeliveries(t *testing.T) {
 	if err != nil || len(list) != 2 || list[0].ID != "d2" || list[1].ID != "d1" {
 		t.Fatalf("list newest first: %+v, %v", list, err)
 	}
-	// Only the newest KeepDeliveries per webhook survive an insert.
+	// Only the newest KeepDeliveries sent ones per webhook survive an
+	// insert; the pending ones d1 and d2 too, up to MaxPendingDeliveries.
+	if err := db.RecordDeliveryAttempt(ctx, "d2", DeliveryOK, 1, 200, "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
 	var many []WebhookDelivery
 	for i := 0; i < KeepDeliveries+10; i++ {
-		many = append(many, mk(fmt.Sprintf("m%03d", i), "on", t0.Add(time.Duration(i+10)*time.Minute)))
+		dl := mk(fmt.Sprintf("m%03d", i), "on", t0.Add(time.Duration(i+10)*time.Minute))
+		dl.Status = DeliveryOK
+		many = append(many, dl)
 	}
 	if err := db.InsertDeliveries(ctx, many); err != nil {
 		t.Fatal(err)
 	}
-	if list, _ = db.ListDeliveries(ctx, "on", 1000); len(list) != KeepDeliveries || list[0].ID != "m209" || list[len(list)-1].ID != "m010" {
+	if list, _ = db.ListDeliveries(ctx, "on", 1000); len(list) != KeepDeliveries+1 || list[0].ID != "m209" || list[len(list)-2].ID != "m010" ||
+		list[len(list)-1].ID != "d1" {
 		t.Fatalf("pruned to %d, first %s last %s", len(list), list[0].ID, list[len(list)-1].ID)
 	}
+	if _, err := db.GetDelivery(ctx, "d2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old sent delivery survived pruning: %v", err)
+	}
+	pending := MaxPendingDeliveries
+	MaxPendingDeliveries = 3
+	t.Cleanup(func() { MaxPendingDeliveries = pending })
+	many = nil
+	for i := range 3 {
+		many = append(many, mk(fmt.Sprintf("p%d", i), "on", t0.Add(time.Duration(i+1000)*time.Minute)))
+	}
+	if err := db.InsertDeliveries(ctx, many); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.GetDelivery(ctx, "d1"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("old delivery survived pruning: %v", err)
+		t.Fatalf("the oldest pending delivery survived MaxPendingDeliveries newer ones: %v", err)
+	}
+	if list, _ = db.ListDeliveries(ctx, "on", 1000); len(list) != KeepDeliveries+3 || list[0].ID != "p2" {
+		t.Fatalf("after the pending cap: %d, first %s", len(list), list[0].ID)
 	}
 	if list, _ = db.ListDeliveries(ctx, "off", 10); len(list) != 1 {
 		t.Fatalf("other hook's deliveries pruned: %+v", list)

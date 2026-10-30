@@ -44,6 +44,9 @@ func TestOnCommitJournalsContentWrites(t *testing.T) {
 		if err := tx.SetDistTag(ctx, "r", "n", "latest", "1"); err != nil {
 			return err
 		}
+		if err := tx.SetDistTag(ctx, "r", "n", "latest", "2"); err != nil {
+			return err
+		}
 		if err := tx.ImportPackage(ctx, Package{Repo: "r", Format: "npm", Name: "n", Version: "1", Attrs: `{}`}, false); err != nil {
 			return err // kept: no change
 		}
@@ -75,13 +78,20 @@ func TestOnCommitJournalsContentWrites(t *testing.T) {
 	if c := got[1].changes[0]; c.Op != ChangePut || c.Asset.SHA256 != "s2" || !c.Asset.Created.Equal(t0) {
 		t.Fatalf("an upsert journals the created_at it keeps: %+v %+v", c, c.Asset)
 	}
+	// Prev is what a put replaced (webhook events): nothing, then s1.
+	if a, b := got[0].changes[0].Prev, got[1].changes[0].Prev; a != "" || b != "s1" {
+		t.Fatalf("asset Prev %q then %q, want \"\" then s1", a, b)
+	}
 	cs := got[2].changes
 	var kinds []string
 	for _, c := range cs {
 		kinds = append(kinds, c.Op+" "+c.Kind+" "+c.Label())
 	}
-	if want := "put package n@1,put package n@1,put tag n:latest,delete tag n:latest"; strings.Join(kinds, ",") != want {
+	if want := "put package n@1,put package n@1,put tag n:latest,put tag n:latest,delete tag n:latest"; strings.Join(kinds, ",") != want {
 		t.Fatalf("changes %q, want %q", strings.Join(kinds, ","), want)
+	}
+	if cs[2].Prev != "" || cs[3].Prev != "1" {
+		t.Fatalf("tag Prev %q then %q, want \"\" then 1", cs[2].Prev, cs[3].Prev)
 	}
 	if p := cs[1].Package; p == nil || !p.Yanked || p.Attrs != `{"v":1}` || p.Format != "npm" || !p.Created.Equal(t0) {
 		t.Fatalf("a yank journals the whole row: %+v", p)

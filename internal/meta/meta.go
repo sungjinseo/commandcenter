@@ -111,7 +111,13 @@ type querier interface {
 //	   (usage.go): expand-only, an older build ignores the tables, and its
 //	   asset and request writes still update the counters (the triggers run
 //	   in the database).
-const schemaVersion = 7
+//	8: webhooks.payload_format (commandcenter or nexus; existing rows
+//	   commandcenter): expand-only, an older build ignores it, matches none
+//	   of the Nexus event names a nexus webhook lists, and sends the
+//	   deliveries this one stored with the headers they need.
+//	8: events.ip and events.node (who and where, as Nexus's audit records
+//	   have them): expand-only, an older build's rows leave them empty.
+const schemaVersion = 8
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
 // build upgraded, stamped in schema_version.compat. A change older builds
@@ -130,7 +136,7 @@ const schemaVersion = 7
 //     when compat rises above its schemaVersion.
 //
 // TestSchemaCompat pins every version's decision, so a bump needs one.
-const schemaCompat = 6
+const schemaCompat = 7
 
 // Open opens the PostgreSQL database at url and creates or upgrades its
 // tables. Errors never hold the URL.
@@ -305,19 +311,23 @@ func (d *DB) PutAsset(ctx context.Context, a Asset) error {
 	return d.Tx(ctx, func(t *Tx) error { return t.PutAsset(ctx, a) })
 }
 
-// putAsset upserts a and returns the created_at the row keeps. q is a
-// transaction: the RETURNING query takes no write lock of its own.
-func putAsset(ctx context.Context, q querier, a Asset) (time.Time, error) {
+// putAsset upserts a and returns the created_at the row keeps and the
+// blob_sha256 it held before ("" when the row is new). q is a
+// transaction: the RETURNING query takes no write lock of its own, and
+// the CTE reads the row as it was before the statement.
+func putAsset(ctx context.Context, q querier, a Asset) (time.Time, string, error) {
 	var created int64
-	err := writeRow(ctx, q, `INSERT INTO assets(`+assetCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+	var prev string
+	err := writeRow(ctx, q, `WITH prev AS (SELECT blob_sha256 FROM assets WHERE repo = ? AND path = ?)
+INSERT INTO assets(`+assetCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(repo, path) DO UPDATE SET
   blob_sha256 = excluded.blob_sha256, size = excluded.size, content_type = excluded.content_type,
   sha1 = excluded.sha1, md5 = excluded.md5, sha512 = excluded.sha512,
   last_modified = excluded.last_modified, remote_etag = excluded.remote_etag,
   remote_last_modified = excluded.remote_last_modified, checked_at = excluded.checked_at
-RETURNING created_at`, []any{a.Repo, a.Path, a.BlobSHA256, a.Size, a.ContentType, a.SHA1, a.MD5, a.SHA512,
-		toMs(a.CreatedAt), toMs(a.LastModified), a.RemoteETag, a.RemoteLastModified, toMs(a.CheckedAt)}, &created)
-	return fromMs(created), err
+RETURNING created_at, COALESCE((SELECT blob_sha256 FROM prev), '')`, []any{a.Repo, a.Path, a.Repo, a.Path, a.BlobSHA256, a.Size, a.ContentType,
+		a.SHA1, a.MD5, a.SHA512, toMs(a.CreatedAt), toMs(a.LastModified), a.RemoteETag, a.RemoteLastModified, toMs(a.CheckedAt)}, &created, &prev)
+	return fromMs(created), prev, err
 }
 
 // DeleteAsset is Tx.DeleteAsset in a transaction of its own.

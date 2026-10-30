@@ -39,6 +39,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `GET /service/rest/v1/tasks?type=` filters by Nexus or Command Center task type id.
 - Nexus API assets carry `"maven2": {groupId, artifactId, version, extension, classifier}` (`{}` for other
   formats), `blobUpdated` and `lastVerified`.
+- Webhooks: payload format `nexus` (`payloadFormat`) sends Nexus Repository 3 webhooks: event names
+  `audit`, `repository`, `component`, `asset`, `X-Nexus-Webhook-ID` `rm:<scope>:<name>`, Nexus bodies
+  (timestamp, nodeId, initiator, action, component/asset/repository/audit) and the HMAC-SHA1 signature.
+- Webhooks: nexus component and asset events come from the stored content of every format: hosted
+  uploads, proxy caching, overwrites (UPDATED) and deletes.
+- Webhooks: the Nexus event names work as aliases in commandcenter webhooks; `GET
+  /-/api/webhooks/events` lists them as `nexusEvents`.
+- Activity: events record the client IP and the node (`ip`, `node`); UI sign-in, sign-out and failed
+  sign-in are recorded as `auth.login`, `auth.logout`, `auth.failed` (also webhook kinds).
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -55,6 +64,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   content-selector-only user lists and searches only the paths the selector matches.
 - Nexus API `sort=version` orders by each format's version rules (Maven `1.0-beta` before `1.0`); an unknown
   `sort` or `direction`, a bad `prerelease` or `last_updated` answers 400.
+- Activity keeps 10 000 uploads, deletes and failed sign-ins and, separately, 10 000 other events.
+- `repo.delete` events name the repository's format/type; `repository.deleted` payloads carry them.
 
 ### Fixed
 - A Nexus API repository PUT no longer resets the anonymous-read override, a yum repository's depth,
@@ -66,6 +77,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   main jar instead of `-javadoc.jar`/`-sources.jar`.
 - Checksum searches no longer match every component; a search naming a group no longer comes back empty.
 - Raw search by `group=/dir` finds the directory's files.
+- Webhook deliveries waiting to be sent were deleted once a webhook had 200 newer ones; up to 5 000
+  pending deliveries per webhook are now kept beside the 200 most recent sent or failed ones.
 
 ### Upgrade notes
 - Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by
@@ -78,6 +91,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start the listing again. `DELETE /v1/assets/{id}` now deletes non-raw files it used to refuse.
   Browse-only users and users granted only a group now see those repositories' content in the Nexus API;
   selector-only users see less than before.
+- Database schema 8, compat 7 (expand-only: 0.3.0 nodes keep running during a rolling upgrade). It adds
+  `webhooks.payload_format` (existing webhooks become `commandcenter`, their payloads unchanged) and
+  `events.ip`, `events.node`. During the rollout older nodes deliver nothing to `nexus` webhooks or to
+  aliases they do not know. Webhooks subscribed to `*` now also receive `auth.*` events.
 
 ## [0.3.0] - 2026-10-30
 

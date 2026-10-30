@@ -72,10 +72,11 @@ func (d *DB) Tx(ctx context.Context, fn func(*Tx) error) error {
 }
 
 func (t *Tx) PutAsset(ctx context.Context, a Asset) error {
-	created, err := putAsset(ctx, t.q, a)
+	created, prev, err := putAsset(ctx, t.q, a)
 	if err == nil {
 		a.CreatedAt = created
 		t.putAsset(a)
+		t.changes[len(t.changes)-1].Prev = prev
 	}
 	return err
 }
@@ -192,10 +193,13 @@ FROM packages WHERE repo = ? AND name = ? ORDER BY created_at, version`, repo, n
 }
 
 func (t *Tx) SetDistTag(ctx context.Context, repo, name, tag, version string) error {
-	_, err := t.q.ExecContext(ctx, `INSERT INTO dist_tags(repo, name, tag, version) VALUES(?,?,?,?)
-ON CONFLICT(repo, name, tag) DO UPDATE SET version = excluded.version`, repo, name, tag, version)
+	var prev string
+	err := writeRow(ctx, t.q, `WITH prev AS (SELECT version FROM dist_tags WHERE repo = ? AND name = ? AND tag = ?)
+INSERT INTO dist_tags(repo, name, tag, version) VALUES(?,?,?,?)
+ON CONFLICT(repo, name, tag) DO UPDATE SET version = excluded.version
+RETURNING COALESCE((SELECT version FROM prev), '')`, []any{repo, name, tag, repo, name, tag, version}, &prev)
 	if err == nil {
-		t.changes = append(t.changes, Change{Op: ChangePut, Kind: ChangeTag, Repo: repo, Name: name, Tag: tag, Version: version})
+		t.changes = append(t.changes, Change{Op: ChangePut, Kind: ChangeTag, Repo: repo, Name: name, Tag: tag, Version: version, Prev: prev})
 	}
 	return err
 }

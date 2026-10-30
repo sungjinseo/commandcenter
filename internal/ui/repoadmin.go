@@ -375,11 +375,15 @@ func (u *UI) deleteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unlock()
+	detail := "" // format/type, as on create: the webhooks name them
+	if rp := u.Repos.Get(name); rp != nil {
+		detail = rp.Format + "/" + rp.Type
+	}
 	if err := u.Repos.Delete(r.Context(), name); err != nil {
 		u.writeRepoError(w, r, err)
 		return
 	}
 	u.repoCache.reset()
-	u.emit(r, "repo.delete", name, name, "")
+	u.emit(r, "repo.delete", name, name, detail)
 	w.WriteHeader(http.StatusNoContent)
 }

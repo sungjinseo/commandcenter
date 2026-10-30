@@ -14,14 +14,23 @@ import (
 
 // Webhook is one stored webhook. Secret is the signing secret, sealed at rest
 // like the other secrets (secrets.go) and opened on read. Repo "" means the
-// hook is global; otherwise only that repository's events reach it.
+// hook is global; otherwise only that repository's events reach it. Format
+// is the payload format, PayloadCommandCenter or PayloadNexus; "" stores
+// PayloadCommandCenter.
 type Webhook struct {
 	ID, Name, URL, Secret string
 	Events                []string
 	Repo                  string
 	Enabled               bool
+	Format                string
 	Created, Updated      time.Time
 }
+
+// Webhook payload formats.
+const (
+	PayloadCommandCenter = "commandcenter"
+	PayloadNexus         = "nexus"
+)
 
 // Delivery statuses.
 const (
@@ -51,21 +60,27 @@ var MaxWebhooks = 100
 // ErrWebhookLimit is returned when MaxWebhooks webhooks exist already.
 var ErrWebhookLimit = errors.New("too many webhooks")
 
-// KeepDeliveries is how many deliveries are kept per webhook: older ones are
-// deleted when a new one is inserted.
+// KeepDeliveries is how many sent or failed deliveries are kept per
+// webhook: older ones are deleted when a new one is inserted.
 const KeepDeliveries = 200
+
+// MaxPendingDeliveries bounds the deliveries of one webhook waiting to be
+// sent: an insert beyond it deletes the oldest pending ones, so a receiver
+// that is down for long cannot grow the table without bound. A variable so
+// tests can lower it.
+var MaxPendingDeliveries = 5000
 
 // MaxDeliveryPayload bounds a stored payload.
 const MaxDeliveryPayload = 64 << 10
 
-const webhookCols = `id, name, url, secret, events, repo, enabled, created_at, updated_at`
+const webhookCols = `id, name, url, secret, events, repo, enabled, payload_format, created_at, updated_at`
 
 func (d *DB) scanWebhook(row scanner) (Webhook, error) {
 	var w Webhook
 	var events string
 	var enabled int
 	var created, updated int64
-	err := row.Scan(&w.ID, &w.Name, &w.URL, &w.Secret, &events, &w.Repo, &enabled, &created, &updated)
+	err := row.Scan(&w.ID, &w.Name, &w.URL, &w.Secret, &events, &w.Repo, &enabled, &w.Format, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Webhook{}, ErrNotFound
 	}
@@ -106,6 +121,8 @@ func (d *DB) GetWebhook(ctx context.Context, id string) (Webhook, error) {
 	return d.scanWebhook(d.sql.QueryRowContext(ctx, `SELECT `+webhookCols+` FROM webhooks WHERE id = ?`, id))
 }
 
+func payloadFormat(f string) string { return cmp.Or(f, PayloadCommandCenter) }
+
 func eventsJSON(events []string) string {
 	if events == nil {
 		events = []string{}
@@ -134,8 +151,8 @@ func (d *DB) CreateWebhook(ctx context.Context, w Webhook) error {
 			return ErrWebhookLimit
 		}
 		now := toMs(time.Now())
-		_, err := tx.q.ExecContext(ctx, `INSERT INTO webhooks(`+webhookCols+`) VALUES(?,?,?,?,?,?,?,?,?)`,
-			w.ID, w.Name, w.URL, secret, eventsJSON(w.Events), w.Repo, boolInt(w.Enabled), now, now)
+		_, err := tx.q.ExecContext(ctx, `INSERT INTO webhooks(`+webhookCols+`) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			w.ID, w.Name, w.URL, secret, eventsJSON(w.Events), w.Repo, boolInt(w.Enabled), payloadFormat(w.Format), now, now)
 		return err
 	})
 }
@@ -147,8 +164,9 @@ func (d *DB) UpdateWebhook(ctx context.Context, w Webhook) error {
 	if err != nil {
 		return fmt.Errorf("webhook secret: %w", err)
 	}
-	res, err := d.sql.ExecContext(ctx, `UPDATE webhooks SET name = ?, url = ?, secret = ?, events = ?, repo = ?, enabled = ?, updated_at = ? WHERE id = ?`,
-		w.Name, w.URL, secret, eventsJSON(w.Events), w.Repo, boolInt(w.Enabled), toMs(time.Now()), w.ID)
+	res, err := d.sql.ExecContext(ctx, `UPDATE webhooks SET name = ?, url = ?, secret = ?, events = ?, repo = ?, enabled = ?, payload_format = ?,
+  updated_at = ? WHERE id = ?`,
+		w.Name, w.URL, secret, eventsJSON(w.Events), w.Repo, boolInt(w.Enabled), payloadFormat(w.Format), toMs(time.Now()), w.ID)
 	if err != nil {
 		return err
 	}
@@ -211,9 +229,10 @@ func queryDeliveries(ctx context.Context, q querier, query string, args ...any) 
 	return out, rows.Err()
 }
 
-// InsertDeliveries stores the deliveries in one transaction and keeps only
-// the newest KeepDeliveries of each webhook they belong to. A payload longer
-// than MaxDeliveryPayload is refused.
+// InsertDeliveries stores the deliveries in one transaction and keeps, of
+// each webhook they belong to, the newest KeepDeliveries sent or failed ones
+// and the newest MaxPendingDeliveries pending ones. A payload longer than
+// MaxDeliveryPayload is refused.
 func (d *DB) InsertDeliveries(ctx context.Context, dls []WebhookDelivery) error {
 	if len(dls) == 0 {
 		return nil
@@ -233,9 +252,10 @@ func (d *DB) InsertDeliveries(ctx context.Context, dls []WebhookDelivery) error 
 			hooks[dl.WebhookID] = true
 		}
 		for id := range hooks {
-			if _, err := tx.q.ExecContext(ctx, `DELETE FROM webhook_deliveries WHERE webhook_id = ? AND id NOT IN
-(SELECT id FROM (SELECT id FROM webhook_deliveries WHERE webhook_id = ? ORDER BY created_at DESC, id DESC LIMIT ?) AS keep)`,
-				id, id, KeepDeliveries); err != nil {
+			if _, err := tx.q.ExecContext(ctx, `DELETE FROM webhook_deliveries WHERE webhook_id = ? AND id IN
+(SELECT id FROM (SELECT id, status = ? AS pending, ROW_NUMBER() OVER (PARTITION BY status = ? ORDER BY created_at DESC, id DESC) AS n
+  FROM webhook_deliveries WHERE webhook_id = ?) AS ranked WHERE n > CASE WHEN pending THEN CAST(? AS BIGINT) ELSE CAST(? AS BIGINT) END)`,
+				id, DeliveryPending, DeliveryPending, id, MaxPendingDeliveries, KeepDeliveries); err != nil {
 				return err
 			}
 		}

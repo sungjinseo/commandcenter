@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 )
@@ -50,6 +51,7 @@ type Recorder struct {
 	keep       int
 	pruneEvery int
 	Now        func() time.Time // test hook; read only before the first Emit
+	Node       string           // this process's node id, recorded with each event; set before the first Emit
 
 	mu     sync.RWMutex // guards closed and sends on ch
 	closed bool
@@ -79,8 +81,18 @@ func (r *Recorder) Dropped() int64 { return r.dropped.Load() }
 // recorder is closed) the event is dropped and counted. actor is the user name,
 // "" for anonymous or System.
 func (r *Recorder) Emit(kind, actor, repo, subject, detail string) {
+	r.emit("", kind, actor, repo, subject, detail)
+}
+
+// EmitCtx is Emit for an event a request caused: the row names the
+// client's address too (repo.CtxSink).
+func (r *Recorder) EmitCtx(ctx context.Context, kind, actor, repo, subject, detail string) {
+	r.emit(auth.ClientIP(ctx), kind, actor, repo, subject, detail)
+}
+
+func (r *Recorder) emit(ip, kind, actor, repo, subject, detail string) {
 	e := meta.Event{At: r.Now(), Kind: clip(kind, maxField), Actor: clip(actor, maxField), Repo: clip(repo, maxField),
-		Subject: clip(subject, maxSubject), Detail: clip(detail, maxDetail)}
+		Subject: clip(subject, maxSubject), Detail: clip(detail, maxDetail), IP: clip(ip, maxField), Node: r.Node}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.closed {

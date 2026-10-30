@@ -5,11 +5,14 @@ import (
 	"time"
 )
 
-// Event is one activity row (plan 11 Decision 3).
+// Event is one activity row (plan 11 Decision 3). IP is the address of the
+// client whose request caused it and Node the node that recorded it; ""
+// when unknown (work that is not a request; rows of older builds).
 type Event struct {
 	ID                                 int64 // 0 on insert
 	At                                 time.Time
 	Kind, Actor, Repo, Subject, Detail string
+	IP, Node                           string
 }
 
 // InsertEvents stores the events in one transaction.
@@ -19,8 +22,8 @@ func (d *DB) InsertEvents(ctx context.Context, evs []Event) error {
 	}
 	return d.Tx(ctx, func(tx *Tx) error {
 		for _, e := range evs {
-			if _, err := tx.q.ExecContext(ctx, `INSERT INTO events(at, kind, actor, repo, subject, detail) VALUES(?,?,?,?,?,?)`,
-				toMs(e.At), e.Kind, e.Actor, e.Repo, e.Subject, e.Detail); err != nil {
+			if _, err := tx.q.ExecContext(ctx, `INSERT INTO events(at, kind, actor, repo, subject, detail, ip, node) VALUES(?,?,?,?,?,?,?,?)`,
+				toMs(e.At), e.Kind, e.Actor, e.Repo, e.Subject, e.Detail, e.IP, e.Node); err != nil {
 				return err
 			}
 		}
@@ -28,9 +31,11 @@ func (d *DB) InsertEvents(ctx context.Context, evs []Event) error {
 	})
 }
 
-// PruneEvents deletes everything but the newest keep events and returns how
-// many rows it removed. Only the leader prunes (Leader): elsewhere it does
-// nothing.
+// PruneEvents deletes everything but the newest keep uploads, deletes and
+// failed sign-ins and the newest keep other events, and returns how many
+// rows it removed: a busy repository's uploads or a password guesser never
+// push the configuration changes out.
+// Only the leader prunes (Leader): elsewhere it does nothing.
 //
 // ponytail: the leader prunes after its own inserts, so while it records
 // no events the table grows past keep with the other nodes' ones; prune
@@ -39,7 +44,8 @@ func (d *DB) PruneEvents(ctx context.Context, keep int) (int64, error) {
 	if !d.Leader() {
 		return 0, nil
 	}
-	res, err := d.sql.ExecContext(ctx, `DELETE FROM events WHERE id <= (SELECT id FROM events ORDER BY id DESC LIMIT 1 OFFSET ?)`, keep)
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM events WHERE id IN (SELECT id FROM
+  (SELECT id, ROW_NUMBER() OVER (PARTITION BY kind IN ('upload', 'delete', 'auth.failed') ORDER BY id DESC) AS n FROM events) AS ranked WHERE n > ?)`, keep)
 	if err != nil {
 		return 0, err
 	}
@@ -49,7 +55,7 @@ func (d *DB) PruneEvents(ctx context.Context, keep int) (int64, error) {
 // ListEvents returns up to limit events, newest first. before > 0 returns only
 // events with a smaller id (the next page); kind, when set, filters by kind.
 func (d *DB) ListEvents(ctx context.Context, limit int, before int64, kind string) ([]Event, error) {
-	q := `SELECT id, at, kind, actor, repo, subject, detail FROM events WHERE 1=1`
+	q := `SELECT id, at, kind, actor, repo, subject, detail, ip, node FROM events WHERE 1=1`
 	var args []any
 	if before > 0 {
 		q += ` AND id < ?`
@@ -70,7 +76,7 @@ func (d *DB) ListEvents(ctx context.Context, limit int, before int64, kind strin
 	for rows.Next() {
 		var e Event
 		var at int64
-		if err := rows.Scan(&e.ID, &at, &e.Kind, &e.Actor, &e.Repo, &e.Subject, &e.Detail); err != nil {
+		if err := rows.Scan(&e.ID, &at, &e.Kind, &e.Actor, &e.Repo, &e.Subject, &e.Detail, &e.IP, &e.Node); err != nil {
 			return nil, err
 		}
 		e.At = fromMs(at)

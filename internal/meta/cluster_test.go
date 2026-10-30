@@ -413,6 +413,7 @@ func TestSchemaCompat(t *testing.T) {
 			"the shared token key and the secret key check: a full stop, as an older build would keep sessions in memory and leave " +
 			"stored sessions of a changed user valid for this one"},
 		{7, 6, "azure and google blob stores: no DDL, and the first such store raises compat to 7 (an older build would read it as an empty directory); reconcile_plans and reconcile_items: expand-only, new tables an older build never reads; usage counters and repository evaluation (expand-only: the triggers keep the counters for older builds' writes too)"},
+		{8, 7, "webhooks.payload_format and events.ip and node: expand-only, an older build ignores the columns and never matches a nexus webhook's event names"},
 	}
 	for i, d := range decisions {
 		if d.version != i+1 || d.compat < d.version-1 || d.compat > d.version || d.note == "" {

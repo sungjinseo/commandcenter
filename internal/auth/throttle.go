@@ -84,6 +84,16 @@ func WithClientAddr(ctx context.Context, remoteAddr string) context.Context {
 	return context.WithValue(ctx, clientAddrKey{}, remoteAddr)
 }
 
+// ClientIP is the IP of the client address WithClientAddr recorded in ctx,
+// without its port; "" when none was recorded (work that is not a request).
+func ClientIP(ctx context.Context) string {
+	remote, _ := ctx.Value(clientAddrKey{}).(string)
+	if ap, err := netip.ParseAddrPort(remote); err == nil {
+		return ap.Addr().Unmap().String()
+	}
+	return remote
+}
+
 // throttleAddr is the IP of remoteAddr without its port; an IPv6 address
 // counts as its /64, which one host usually holds whole.
 func throttleAddr(remoteAddr string) string {

@@ -491,14 +491,21 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// Started only after the checks above can no longer fail, so an error return
 	// never leaves the writer running against a database New is about to close.
 	evts := events.New(db)
+	evts.Node = node
 	// Every event goes through the webhook dispatcher to the recorder; Serve
 	// starts sending the deliveries.
-	hooks := &webhook.Dispatcher{DB: db, Next: evts, Repos: registry, Log: log}
+	hooks := &webhook.Dispatcher{DB: db, Next: evts, Repos: registry, Log: log, Node: node}
 	if err := hooks.Start(); err != nil {
 		evts.Close()
 		return nil, err
 	}
 	store.Events = hooks
+	// The commits' content rows also make the component and asset events
+	// of the nexus webhooks. Set before anything that writes content runs.
+	db.OnCommit = func(ctx context.Context, at time.Time, cs []meta.Change) {
+		store.Journal.Record(ctx, at, cs)
+		hooks.Changes(ctx, at, cs)
+	}
 	mailer := mail.New(log, hooks)
 	taskSvc.Mail = mailer
 

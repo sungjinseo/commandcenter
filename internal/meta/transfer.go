@@ -44,18 +44,22 @@ func (d *DB) CountPackages(ctx context.Context, repo string) (int64, error) {
 // unlike PutAsset it keeps the given creation time and writes the download
 // counters.
 func (t *Tx) ImportAsset(ctx context.Context, a Asset) error {
-	_, err := t.q.ExecContext(ctx, `INSERT INTO assets(`+assetSelect+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	var prev string
+	err := writeRow(ctx, t.q, `WITH prev AS (SELECT blob_sha256 FROM assets WHERE repo = ? AND path = ?)
+INSERT INTO assets(`+assetSelect+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(repo, path) DO UPDATE SET
   blob_sha256 = excluded.blob_sha256, size = excluded.size, content_type = excluded.content_type,
   sha1 = excluded.sha1, md5 = excluded.md5, sha512 = excluded.sha512,
   created_at = excluded.created_at, last_modified = excluded.last_modified, remote_etag = excluded.remote_etag,
   remote_last_modified = excluded.remote_last_modified, checked_at = excluded.checked_at,
-  downloads = excluded.downloads, last_downloaded = excluded.last_downloaded`,
+  downloads = excluded.downloads, last_downloaded = excluded.last_downloaded
+RETURNING COALESCE((SELECT blob_sha256 FROM prev), '')`, []any{a.Repo, a.Path,
 		a.Repo, a.Path, a.BlobSHA256, a.Size, a.ContentType, a.SHA1, a.MD5, a.SHA512,
 		toMs(a.CreatedAt), toMs(a.LastModified), a.RemoteETag, a.RemoteLastModified, toMs(a.CheckedAt),
-		a.Downloads, toMs(a.LastDownloaded))
+		a.Downloads, toMs(a.LastDownloaded)}, &prev)
 	if err == nil {
 		t.putAsset(a)
+		t.changes[len(t.changes)-1].Prev = prev
 	}
 	return err
 }

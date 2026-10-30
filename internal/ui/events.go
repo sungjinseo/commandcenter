@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"commandcenter/internal/logring"
+	"commandcenter/internal/repo"
 )
 
 const (
@@ -28,7 +29,7 @@ func (u *UI) emit(r *http.Request, kind, repoName, subject, detail string) {
 	if u.Events == nil {
 		return
 	}
-	u.Events.Emit(kind, principal(r).Owner(), repoName, subject, detail)
+	repo.EmitContext(r.Context(), u.Events, kind, principal(r).Owner(), repoName, subject, detail)
 }
 
 // GET /-/api/events?limit=50&before=<id>&kind= (admin): newest first. "next"
@@ -65,10 +66,12 @@ func (u *UI) listEvents(w http.ResponseWriter, r *http.Request) {
 		Repo    string `json:"repo"`
 		Subject string `json:"subject"`
 		Detail  string `json:"detail"`
+		IP      string `json:"ip"`
+		Node    string `json:"node"`
 	}
 	out := make([]row, 0, len(evs))
 	for _, e := range evs {
-		out = append(out, row{e.ID, rfc3339(e.At), e.Kind, e.Actor, e.Repo, e.Subject, e.Detail})
+		out = append(out, row{e.ID, rfc3339(e.At), e.Kind, e.Actor, e.Repo, e.Subject, e.Detail, e.IP, e.Node})
 	}
 	res := map[string]any{"events": out}
 	if next != 0 {

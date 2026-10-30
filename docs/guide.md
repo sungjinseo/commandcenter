@@ -1519,9 +1519,9 @@ SMTP 설정(`GET/PUT /-/api/settings/smtp`, 관리자)으로 예약 작업 실�
 
 ## Webhook
 
-Command Center는 Nexus Repository의 webhook처럼 서버에서 일어난 일을 HTTP POST로 외부 시스템에 알립니다. 관리자 화면의 Webhook 페이지(또는 `/-/api/webhooks` API)에서 등록하며, 전역 webhook은 모든 저장소의 이벤트를, 저장소 webhook은 그 저장소의 이벤트만 받습니다. 구독할 이벤트 종류는 `GET /-/api/webhooks/events`가 설명과 함께 나열하며 `*`는 전부를 뜻합니다. 주요 종류는 `component.created/deleted`, `asset.created/deleted`, `repository.created/updated/deleted`, `user.*`, `role.*`, `token.*`, `realm.updated`, `task.finished`, `cleanup.finished`, `webhook.*`, `blobstore.updated`, `staging.move`, `staging.delete`, `firewall.blocked`, `firewall.released`, `vulnerability.updated`입니다. 활동(activity) 목록에 기록되는 모든 이벤트가 webhook으로도 나가며, 이 버전이 모르는 새 종류는 이름 그대로 `*` 구독자에게 전달됩니다.
+Command Center는 Nexus Repository의 webhook처럼 서버에서 일어난 일을 HTTP POST로 외부 시스템에 알립니다. 관리자 화면의 Webhook 페이지(또는 `/-/api/webhooks` API)에서 등록하며, 전역 webhook은 모든 저장소의 이벤트를, 저장소 webhook은 그 저장소의 이벤트만 받습니다. 구독할 이벤트 종류는 `GET /-/api/webhooks/events`가 설명과 함께 나열하며 `*`는 전부를 뜻합니다. 주요 종류는 `component.created/deleted`, `auth.login/logout/failed`, `asset.created/deleted`, `repository.created/updated/deleted`, `user.*`, `role.*`, `token.*`, `realm.updated`, `task.finished`, `cleanup.finished`, `webhook.*`, `blobstore.updated`, `staging.move`, `staging.delete`, `firewall.blocked`, `firewall.released`, `vulnerability.updated`입니다. 활동(activity) 목록에 기록되는 모든 이벤트가 webhook으로도 나가며, 이 버전이 모르는 새 종류는 이름 그대로 `*` 구독자에게 전달됩니다.
 
-요청은 `Content-Type: application/json`이고 `X-Command-Center-Event`(이벤트 종류), `X-Command-Center-Delivery`(전달 ID) 헤더가 붙습니다. 비밀값(secret)을 설정하면 본문 전체의 HMAC-SHA256을 `X-Command-Center-Signature: sha256=<hex>`로, Nexus 호환용으로 HMAC-SHA1을 `X-Nexus-Webhook-Signature`로 함께 보냅니다(`X-Nexus-Webhook-Id`, `X-Nexus-Webhook-Delivery` 헤더도 붙지만 본문은 Command Center 고유 형식이므로 Nexus용 수신기는 본문 처리를 맞춰야 합니다). 본문은 다음과 같습니다.
+요청은 `Content-Type: application/json`이고 `X-Command-Center-Event`(이벤트 종류), `X-Command-Center-Delivery`(전달 ID) 헤더가 붙습니다. 비밀값(secret)을 설정하면 본문 전체의 HMAC-SHA256을 `X-Command-Center-Signature: sha256=<hex>`로, Nexus 호환용으로 HMAC-SHA1을 `X-Nexus-Webhook-Signature`로 함께 보냅니다(`X-Nexus-Webhook-Id`, `X-Nexus-Webhook-Delivery` 헤더도 붙습니다. Nexus용 수신기를 그대로 쓰려면 아래 "Nexus 형식" webhook을 만드세요). 본문은 다음과 같습니다.
 
 ```json
 {"id":"<uuid>","timestamp":"2026-10-29T09:00:00Z","event":"component.created","repository":"npm-hosted","actor":"alice",
@@ -1530,7 +1530,49 @@ Command Center는 Nexus Repository의 webhook처럼 서버에서 일어난 일�
 
 `data`는 종류별로 다릅니다: 컴포넌트는 `format, group, name, version`, 파일(asset)은 `path, size, sha256`, 저장소는 `name, format, type`, 작업은 `name, type, result`(OK 또는 Failed)입니다. `repository`는 저장소와 무관한 이벤트에서는 `null`입니다.
 
-전달은 백그라운드에서 4개의 작업자가 요청당 10초 제한으로 보내며, 2xx 응답이면 성공입니다. 그 외 응답이나 연결 실패는 30초, 2분, 10분, 1시간 뒤에 다시 시도하고(최대 5회) 리다이렉트는 따라가지 않습니다. 대기 중인 전달은 데이터베이스에 저장되므로 서버를 재시작해도 이어서 보냅니다. 비활성화한 webhook에는 보내지 않으며(대기 중인 전달은 다시 활성화할 때까지 멈춥니다), webhook을 지우면 그 전달 기록도 지워집니다. webhook마다 최근 200건의 전달 기록(상태, 시도 횟수, 응답 코드, 오류)을 보관하며 화면이나 `GET /-/api/webhooks/{id}/deliveries`에서 확인하고 `redeliver`로 다시 보낼 수 있습니다. "테스트" 버튼(`POST /-/api/webhooks/{id}/test`)은 `ping` 이벤트를 즉시 보내고 응답 코드를 알려 줍니다. 대상 URL은 프록시 원격과 같은 송신 정책을 따릅니다: 사설 주소도 허용되지만 `10.1`처럼 숫자로만 적은 IPv4 주소나 ASCII가 아닌 호스트 이름은 거부됩니다. 비밀값은 다른 비밀값과 같이 비밀값 키로 암호화해 저장하고 API로 돌려주지 않으며(`secretSet`만 알려 줍니다), 로그에도 본문과 비밀값은 남지 않습니다. 전달은 `serve`로 띄운 서버만 보냅니다. CLI 명령(`gc`, `token create` 등)에서 생긴 이벤트의 전달은 DB에 저장만 하고, 실행 중인 서버가 보냅니다. 실행 중인 서버가 없으면 다음에 시작하는 서버가 보냅니다. 각 전달은 그것을 가져간(claim) 노드 하나만 보냅니다. 보내는 도중 서버가 죽으면 다시 시작할 때 다시 보냅니다. 다른 노드가 있으면 60초 뒤 그 노드가 보냅니다. 따라서 같은 전달이 두 번 갈 수 있으므로(최소 한 번 전달), 수신 쪽은 `X-Command-Center-Delivery`(또는 `X-Nexus-Webhook-Delivery`)로 중복을 거르세요.
+### Nexus 형식
+
+webhook마다 본문 형식(`payloadFormat`)을 고릅니다. `commandcenter`는 위의 본문과 이벤트 종류를 그대로 씁니다. API 기본값이며, 이전 버전에서 만든 webhook은 모두 이 형식입니다. `nexus`는 Nexus Repository 3의 webhook과 같은 본문과 헤더를 보내므로 Nexus용으로 작성한 수신기를 고치지 않고 쓸 수 있습니다. `nexus` webhook의 `events`에는 Nexus 이벤트 이름 네 가지만 적습니다(`GET /-/api/webhooks/events`의 `nexusEvents`).
+
+| 이름 | `X-Nexus-Webhook-ID` | 보내는 때 |
+|---|---|---|
+| `repository` | `rm:global:repository` | 저장소 생성·수정·삭제 |
+| `audit` | `rm:global:audit` | 활동 목록에 기록되는 모든 변경과 각 컴포넌트·에셋 변경 |
+| `component` | `rm:repository:component` | 컴포넌트 생성·수정·삭제 |
+| `asset` | `rm:repository:asset` | 에셋(파일) 생성·교체·삭제 |
+
+Nexus에서는 `repository`·`audit`는 전역 webhook 전용, `component`·`asset`은 저장소 webhook 전용입니다. Command Center는 어느 쪽에서든 받습니다. 전역 webhook의 `component`는 모든 저장소의 컴포넌트를, 저장소 webhook의 `audit`는 그 저장소의 기록을 받습니다. 본문 예:
+
+```json
+{"timestamp":"2026-10-30T07:10:11.505+00:00","nodeId":"16048cb669b9-038c","initiator":"ci/10.0.0.7","repositoryName":"npm-proxy","action":"CREATED",
+ "component":{"id":"<32자리 16진수>","componentId":"<REST ID>","format":"npm","name":"lodash","group":"","version":"4.17.21"}}
+```
+
+- 에셋은 `"asset":{"id","assetId","format","name"}`이고 `name`은 앞에 `/`가 붙은 경로입니다(docker는 `/v2/<경로>`).
+- 저장소 본문은 `{"timestamp","nodeId","initiator","action","repository":{"format","name","type"}}`이고, audit 본문은 `{"nodeId","initiator","audit":{"domain","type","context","attributes"}}`입니다. Nexus처럼 audit에는 `timestamp`가 없습니다.
+- `action`은 `CREATED`, `UPDATED`, `DELETED` 중 하나입니다. `format`은 Nexus 표기(`maven2` 등)입니다.
+- `componentId`와 `assetId`는 `/service/rest/v1/components/{id}`, `/service/rest/v1/assets/{id}`에 그대로 쓸 수 있습니다. `id`는 같은 컴포넌트·에셋이면 항상 같은 32자리 16진수입니다.
+- raw 파일 컴포넌트의 이름은 `/<경로>`이고 그룹은 그 디렉터리(`/docs`)입니다. npm 범위는 `@` 없이 그룹에 들어갑니다.
+- `timestamp`는 UTC 밀리초에 `+00:00`을 붙인 형식입니다. `nodeId`는 변경이 일어난 노드입니다. `initiator`는 `사용자/클라이언트 IP`이고, 익명은 `anonymous/IP`, 예약 작업처럼 서버 자신이 한 작업은 `*SYSTEM`입니다.
+- 컴포넌트·에셋 이벤트는 요청이 아니라 저장된 내용에서 나옵니다. 그래서 모든 형식에서 hosted 업로드, proxy 캐싱(원격에서 처음 받아 저장할 때와 내용이 바뀐 새 버전을 받을 때), 덮어쓰기, 삭제(Cleanup 포함) 때 나옵니다.
+- 에셋은 내용(SHA-256)이 바뀔 때만 `UPDATED`입니다. 같은 내용을 다시 올리거나 재검증만 한 경우에는 보내지 않습니다.
+- 컴포넌트는 첫 파일이 저장될 때 `CREATED`, 마지막 파일이 지워질 때 `DELETED`이고, 그 사이에 파일이 추가·교체·삭제되면 `UPDATED`입니다(예: Maven의 jar 다음에 pom). docker hosted는 태그가 컴포넌트입니다. 태그를 만들면 `CREATED`, 다른 manifest로 옮기면 `UPDATED`, 지우면 `DELETED`입니다.
+- Nexus와 다른 점: 여러 건을 한 번에 지울 때도 `PURGED` 대신 건마다 `DELETED`를 보냅니다. 다운로드 기록이나 속성만 바뀐 경우에는 `UPDATED`를 보내지 않습니다. 저장소를 지울 때 컴포넌트마다의 이벤트는 보내지 않습니다.
+- 서명은 Nexus와 같이 비밀값으로 만든 본문의 HMAC-SHA1(소문자 16진수)이 `X-Nexus-Webhook-Signature`에 들어갑니다. `X-Command-Center-Signature`도 함께 붙습니다.
+- 재시도, 전달 기록, 재전달은 `commandcenter` 형식과 같습니다. 전달 기록의 이벤트 칸에는 `rm:repository:component` 같은 Nexus ID가 나옵니다.
+- Nexus에는 테스트 이벤트가 없어 "테스트" 버튼은 `rm:global:audit`로 `"audit":{"domain":"webhook","type":"ping"}`을 보냅니다.
+- `commandcenter` webhook의 `events`에도 Nexus 이름을 쓸 수 있으며 별칭으로 동작합니다: `component`는 `component.*`, `asset`은 `asset.*`, `repository`는 `repository.*`, `audit`는 `ping`을 뺀 모든 종류입니다. 본문과 보내는 때는 `commandcenter` 형식 그대로입니다(hosted 업로드·삭제만).
+- Nexus 3.91에는 webhook을 만드는 REST API가 없습니다(Capabilities 화면의 `Webhook: Global`, `Webhook: Repository`만 있습니다). 그래서 Command Center에도 Nexus 호환 경로는 없습니다. Nexus에서 옮길 때는 capability마다 `nexus` webhook을 하나 만들고 이벤트 종류, URL, 비밀값(Secret Key)을 그대로 옮깁니다. `Webhook: Repository`는 `repo`를 지정합니다.
+
+등록 예입니다. `payloadFormat`을 빼면 `commandcenter`가 되고, `PUT`에서 빼면 저장된 값을 유지합니다.
+
+```bash
+curl -u admin -H 'X-Command-Center-UI: 1' -H 'Content-Type: application/json' \
+  -d '{"name":"nexus-ci","url":"https://ci.example/nexus-hook","secret":"s3cret","events":["component","asset"],"repo":"npm-proxy","payloadFormat":"nexus"}' \
+  https://repo.example/-/api/webhooks
+```
+
+전달은 백그라운드에서 4개의 작업자가 요청당 10초 제한으로 보내며, 2xx 응답이면 성공입니다. 그 외 응답이나 연결 실패는 30초, 2분, 10분, 1시간 뒤에 다시 시도하고(최대 5회) 리다이렉트는 따라가지 않습니다. 대기 중인 전달은 데이터베이스에 저장되므로 서버를 재시작해도 이어서 보냅니다. 비활성화한 webhook에는 보내지 않으며(대기 중인 전달은 다시 활성화할 때까지 멈춥니다), webhook을 지우면 그 전달 기록도 지워집니다. webhook마다 보냈거나 실패한 최근 200건의 전달 기록(상태, 시도 횟수, 응답 코드, 오류)과 아직 보내지 않은 전달 최대 5 000건을 보관하며(넘으면 가장 오래된 대기 전달부터 지웁니다) 화면이나 `GET /-/api/webhooks/{id}/deliveries`에서 확인하고 `redeliver`로 다시 보낼 수 있습니다. "테스트" 버튼(`POST /-/api/webhooks/{id}/test`)은 `ping` 이벤트를 즉시 보내고 응답 코드를 알려 줍니다. 대상 URL은 프록시 원격과 같은 송신 정책을 따릅니다: 사설 주소도 허용되지만 `10.1`처럼 숫자로만 적은 IPv4 주소나 ASCII가 아닌 호스트 이름은 거부됩니다. 비밀값은 다른 비밀값과 같이 비밀값 키로 암호화해 저장하고 API로 돌려주지 않으며(`secretSet`만 알려 줍니다), 로그에도 본문과 비밀값은 남지 않습니다. 전달은 `serve`로 띄운 서버만 보냅니다. CLI 명령(`gc`, `token create` 등)에서 생긴 이벤트의 전달은 DB에 저장만 하고, 실행 중인 서버가 보냅니다. 실행 중인 서버가 없으면 다음에 시작하는 서버가 보냅니다. 각 전달은 그것을 가져간(claim) 노드 하나만 보냅니다. 보내는 도중 서버가 죽으면 다시 시작할 때 다시 보냅니다. 다른 노드가 있으면 60초 뒤 그 노드가 보냅니다. 따라서 같은 전달이 두 번 갈 수 있으므로(최소 한 번 전달), 수신 쪽은 `X-Command-Center-Delivery`(또는 `X-Nexus-Webhook-Delivery`)로 중복을 거르세요.
 
 등록 예:
 
@@ -2466,7 +2508,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 
 - **로그**: SYSTEM → 시스템 상태·로그에서 서버 로그를 봅니다. 최근 **2 000건 또는 1 MiB** 중 먼저 닿는 한도까지 메모리에 보관하며, 재시작하면 사라집니다(표준 출력의 JSON 로그는 그대로 `docker compose logs`로 남습니다). 수준(INFO/WARN/ERROR)과 텍스트로 거르고, "다운로드"는 `commandcenter.log` 텍스트 파일을 내려줍니다(`GET /-/api/logs`, `/-/api/logs/download`, 관리자 전용).
 - 로그에는 비밀 값이 들어가지 않습니다. 요청 경로의 토큰은 가려지고 NUL 같은 제어 문자는 `\x00` 꼴로 바뀌어 기록되며, proxy 원격 URL의 **자격 증명(userinfo)과 쿼리 값은 제거**하며, 인증 헤더는 기록하지 않습니다. 작업 로그에 나오는 URL도 같은 처리를 합니다.
-- **활동(Events)**: 대시보드의 "최근 운영 활동"과 `GET /-/api/events`(관리자, 최대 200건씩, `before`·`kind`로 페이징·필터). DB에 최근 10 000건만 남기며, 기록은 비동기라 큐(1 000건)가 가득 차면 요청을 막지 않고 그 이벤트를 버립니다. 모든 활동 이벤트는 등록한 webhook에도 HTTP POST로 전달됩니다("Webhook" 참고). 종류:
+- **활동(Events)**: 대시보드의 "최근 운영 활동"과 `GET /-/api/events`(관리자, 최대 200건씩, `before`·`kind`로 페이징·필터). DB에는 업로드·삭제·로그인 실패(`upload`, `delete`, `auth.failed`)를 최근 10 000건, 그 밖의 이벤트를 따로 최근 10 000건 남깁니다. 그래서 업로드가 많아도 설정 변경 기록이 밀려나지 않습니다. 요청이 일으킨 이벤트에는 클라이언트 IP(`ip`)가, 모든 이벤트에는 기록한 노드(`node`)가 함께 남습니다(이전 버전이 남긴 기록에서는 비어 있습니다). 기록은 비동기라 큐(1 000건)가 가득 차면 요청을 막지 않고 그 이벤트를 버립니다. 모든 활동 이벤트는 등록한 webhook에도 HTTP POST로 전달됩니다("Webhook" 참고). 종류:
 
   | kind | 시점 |
   |---|---|
@@ -2478,6 +2520,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
   | `task.run` | 작업 실행(결과와 요약) |
   | `cleanup` | 정리 결과(개수, 용량) |
   | `policy.create` / `policy.update` / `policy.delete` | 정책 변경 |
+  | `auth.login` / `auth.logout` / `auth.failed` | 웹 UI 비밀번호 로그인·로그아웃·로그인 실패. 실패에는 입력한 이름이 남고, 로그인 제한에 걸린 시도는 기록하지 않습니다. 저장소·API 요청의 Basic 인증 실패와 SSO 로그인은 기록하지 않습니다 |
   | `routingrule.*` / `selector.*` / `webhook.*` | 라우팅 규칙, 컨텐츠 셀렉터, webhook 변경 |
   | `usertoken.create` / `usertoken.reset` / `usertoken.delete` / `settings.userTokens` / `settings.defaultRoles` | 사용자 토큰 발급·재설정·삭제와 설정, 기본 역할 변경 |
   | `realms.ldap.update` / `realms.oidc.update` / `realms.crowd.update` / `realms.rutauth.update` / `realms.saml.update` / `realms.crowd.test` | Realm 설정 변경(바뀐 키 이름만), Crowd 연결 테스트 |
