@@ -204,14 +204,17 @@ repositories:
     writePolicy: allow_once           # allow: 같은 패키지_버전_아키텍처 덮어쓰기 허용(edit 권한)
     distribution: stable              # dists/<distribution>/ (기본 stable). sources.list의 suite
     component: main                   # 기본 main. 패키지는 pool/<component>/… 에 저장
-    # signingKey: |                   # 비밀번호 없는 RSA OpenPGP 개인키(ASCII armor). 있으면 Release.gpg·InRelease 서명, 공개키는 …/public.key
+    # signingKey: |                   # 비밀번호 없는 OpenPGP 개인키(RSA·ECDSA·Ed25519, ASCII armor). 있으면 Release.gpg·InRelease 서명(서명 부키 우선), 공개키는 …/public.key
     #   -----BEGIN PGP PRIVATE KEY BLOCK-----
     #   ...
   - name: apt-proxy                   # deb http://<host>/repository/apt-proxy bookworm main
     format: apt
     type: proxy
     remote: "https://deb.debian.org/debian/"   # dists/와 pool/이 있는 원격 저장소 URL. 서명은 원격 것을 그대로 전달
-    metadataMaxAge: "1h"              # dists/ 재확인 주기. pool/의 .deb는 영구 캐시
+    metadataMaxAge: "1h"              # .deb·.udeb가 아닌 파일(dists/ 등)의 재확인 주기. .deb는 영구 캐시
+    # distribution: bookworm          # 원격의 배포판 이름(정보용, enforceDistribution과 함께)
+    # enforceDistribution: true       # 다른 dists/<이름>/ 요청은 원격에 묻지 않고 404
+    # flat: true                      # 원격이 dists/ 없는 flat 저장소일 때(Nexus의 apt.flat)
   - name: apt-all                     # hosted 먼저, 없으면 proxy (경로 단위; Packages를 합치지는 않음)
     format: apt
     type: group
