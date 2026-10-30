@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -128,6 +129,7 @@ type Config struct {
 	MemoryLimitMiB      int             `yaml:"memoryLimitMiB"`
 	MaxUploadMiB        int             `yaml:"maxUploadMiB"`
 	MetricsFlushSeconds int             `yaml:"metricsFlushSeconds"` // hidden: how often download/request counters are written (default 30)
+	TaskRunTimeoutHours int             `yaml:"taskRunTimeoutHours"` // how long one task run may take before it is stopped (0: 6); the same on every node
 	SecretKeyFile       string          `yaml:"secretKeyFile"`       // file holding the key that encrypts stored secrets (or COMMANDCENTER_SECRET_KEY)
 	Database            Database        `yaml:"database"`
 	AnonymousRead       bool            `yaml:"anonymousRead"`
@@ -261,6 +263,12 @@ type Repository struct {
 	// and matches the format is checked by the registry, which can see the
 	// stored policies (plan 11 Decision 5).
 	CleanupPolicy string `yaml:"cleanupPolicy" json:"cleanupPolicy,omitempty"`
+	// CleanupPolicies lists every cleanup policy applied to this repository,
+	// in order, when there are several (each deletes on its own, as in
+	// Nexus); CleanupPolicy is then the first, so a build that knows one
+	// policy applies that one. With one policy only CleanupPolicy is set,
+	// as before. A file may give either; the list wins.
+	CleanupPolicies []string `yaml:"cleanupPolicies,omitempty" json:"cleanupPolicies,omitempty"`
 
 	// Online is a pointer so that a definition stored before plan 12 (no
 	// "online" key) reads as online; ApplyRepositoryDefaults sets nil to
@@ -482,8 +490,42 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// MaxCleanupPolicies is how many cleanup policies one repository may have.
+const MaxCleanupPolicies = 20
+
+// CleanupPolicyNames returns the cleanup policies applied to r, in order:
+// CleanupPolicies when set, else CleanupPolicy alone; nil when none.
+func (r Repository) CleanupPolicyNames() []string {
+	if len(r.CleanupPolicies) > 0 {
+		return r.CleanupPolicies
+	}
+	if r.CleanupPolicy != "" {
+		return []string{r.CleanupPolicy}
+	}
+	return nil
+}
+
+// SetCleanupPolicies sets the cleanup policies of r in their stored form
+// (see CleanupPolicies), dropping empty names and repeats.
+func (r *Repository) SetCleanupPolicies(names []string) {
+	var list []string
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n != "" && !slices.Contains(list, n) {
+			list = append(list, n)
+		}
+	}
+	r.CleanupPolicy, r.CleanupPolicies = "", nil
+	if len(list) > 0 {
+		r.CleanupPolicy = list[0]
+	}
+	if len(list) > 1 {
+		r.CleanupPolicies = list
+	}
+}
+
 // ApplyRepositoryDefaults fills the zero-valued fields of r with their defaults.
 func ApplyRepositoryDefaults(r *Repository) {
+	r.SetCleanupPolicies(r.CleanupPolicyNames())
 	if r.MetadataMaxAge == 0 {
 		r.MetadataMaxAge = Duration(24 * time.Hour)
 	}
@@ -532,6 +574,9 @@ func (c *Config) validate() error {
 	}
 	if c.Database.MaxConns < 0 || c.Database.MaxConns > 1000 {
 		add("database.maxConns must be between 1 and 1000 (0: the default)")
+	}
+	if c.TaskRunTimeoutHours < 0 || c.TaskRunTimeoutHours > 720 {
+		add("taskRunTimeoutHours must be between 1 and 720 (0: the default, 6)")
 	}
 	// baseURL and maxUploadMiB are import-only (plan 12): a problem is
 	// reported in SettingsErr and only matters before the first import.
@@ -799,8 +844,10 @@ func ValidateRepositories(list []Repository) error {
 				add("repository %q: depth must be 0 or 1", r.Name)
 			}
 		}
-		if r.CleanupPolicy != "" {
+		if names := r.CleanupPolicyNames(); len(names) > 0 {
 			switch {
+			case len(names) > MaxCleanupPolicies:
+				add("repository %q: at most %d cleanup policies", r.Name, MaxCleanupPolicies)
 			case r.Type != "hosted" && r.Type != "proxy":
 				add("repository %q: cleanupPolicy is only valid for hosted and proxy repositories", r.Name)
 			case r.Format == "cargo" && r.Type == "hosted":

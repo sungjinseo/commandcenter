@@ -47,14 +47,21 @@ const (
 	TypeTemp    = "blobstore.delete-temp-files"
 
 	TypePurgeUserTokens = "security.purge-expired-user-tokens"
+	TypePurgeUnused     = "repository.purge-unused"
 )
 
-// Seed task (Decision 7): created on the first start after plan 11 unless
-// tasks exist; the settings flag keeps a deleted seed from coming back.
+// Seed tasks (Decision 7): created on the first start of a new database
+// (no task and no seed flag); the settings flag keeps a deleted seed from
+// coming back. The compaction seed cannot be deleted. The cleanup seed
+// (core-16, Nexus's "Cleanup service") applies the repositories' cleanup
+// policies nightly; it is never added to a database that existed before
+// it, where it would start deleting what no task deleted until then.
 const (
-	SeedID       = "compact-blobstore"
-	seedFlag     = "tasks.seeded"
-	seedSchedule = "daily:03:00"
+	SeedID              = "compact-blobstore"
+	CleanupSeedID       = "cleanup-service"
+	seedFlag            = "tasks.seeded"
+	seedSchedule        = "daily:03:00"
+	cleanupSeedSchedule = "daily:01:00"
 )
 
 // Defaults of the run limits.
@@ -291,16 +298,24 @@ func (s *Service) NextRun(t meta.Task, now time.Time) time.Time {
 	return sc.Next(now, s.loc())
 }
 
-// Seed creates the compact-blobstore task on the first start (see SeedID).
+// Seed creates the seed tasks on the first start of a new database (see
+// SeedID).
 func (s *Service) Seed(ctx context.Context) error {
-	t := meta.Task{ID: SeedID, Name: "Compact blob store", Type: TypeCompact, Schedule: seedSchedule, Params: "{}", Enabled: true}
-	t.NextRun = s.NextRun(t, s.now())
-	seeded, err := s.DB.SeedTask(ctx, seedFlag, t)
+	seeds := []meta.Task{
+		{ID: SeedID, Name: "Compact blob store", Type: TypeCompact, Schedule: seedSchedule, Params: "{}", Enabled: true},
+		{ID: CleanupSeedID, Name: "Cleanup service", Type: TypeCleanup, Schedule: cleanupSeedSchedule, Params: `{"repos":[]}`, Enabled: true},
+	}
+	for i := range seeds {
+		seeds[i].NextRun = s.NextRun(seeds[i], s.now())
+	}
+	seeded, err := s.DB.SeedTask(ctx, seedFlag, seeds...)
 	if err != nil {
 		return fmt.Errorf("seed tasks: %w", err)
 	}
 	if seeded {
-		s.log().Info("created the scheduled task "+SeedID, "schedule", seedSchedule)
+		for _, t := range seeds {
+			s.log().Info("created the scheduled task "+t.ID, "schedule", t.Schedule)
+		}
 	}
 	return nil
 }
@@ -316,7 +331,17 @@ type Def struct {
 	// NotifyEmail lists who is mailed when a run fails. Nil means none on
 	// create and "unchanged" on update; an empty list clears it.
 	NotifyEmail []string `json:"notifyEmail"`
+	// NotifyOn is NotifyFailure (the default: failed runs are mailed) or
+	// NotifySuccessFailure (finished runs too, never stopped ones); ""
+	// means the default on create and "unchanged" on update.
+	NotifyOn string `json:"notifyOn"`
 }
+
+// Notification conditions (Def.NotifyOn).
+const (
+	NotifyFailure        = "failure"
+	NotifySuccessFailure = "success_failure"
+)
 
 // List returns every task, without the last logs.
 func (s *Service) List(ctx context.Context) ([]meta.Task, error) { return s.DB.ListTasks(ctx) }
@@ -436,6 +461,16 @@ func (s *Service) apply(t *meta.Task, d Def, prev *meta.Task) error {
 	} else if t.NotifyEmail == nil {
 		t.NotifyEmail = []string{}
 	}
+	switch d.NotifyOn {
+	case NotifyFailure, NotifySuccessFailure:
+		t.NotifyOn = d.NotifyOn
+	case "":
+		if t.NotifyOn == "" {
+			t.NotifyOn = NotifyFailure
+		}
+	default:
+		errs = append(errs, fmt.Sprintf("notifyOn %q: use %s or %s", clipStr(d.NotifyOn, 40), NotifyFailure, NotifySuccessFailure))
+	}
 
 	now := s.now()
 	sc, err := ParseScheduleIn(d.Schedule, s.loc())
@@ -444,8 +479,12 @@ func (s *Service) apply(t *meta.Task, d Def, prev *meta.Task) error {
 	} else {
 		t.Schedule = sc.String()
 		unchanged := prev != nil && t.Schedule == prev.Schedule
-		if sc.Kind == Once && !sc.At.After(now) && !unchanged {
+		switch {
+		case unchanged:
+		case sc.Kind == Once && !sc.At.After(now):
 			errs = append(errs, "the once time is in the past")
+		case sc.Kind == Cron && sc.Next(now, s.loc()).IsZero():
+			errs = append(errs, "the cron expression has no time left before the year 2100")
 		}
 	}
 

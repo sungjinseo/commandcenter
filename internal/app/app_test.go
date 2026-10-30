@@ -561,9 +561,15 @@ func TestTasksWired(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	// Deleted (the API refuses; QA L-3), the seed does not come back on the next start.
-	if err := a.Tasks.DB.DeleteTask(ctx, tasks.SeedID); err != nil {
-		t.Fatal(err)
+	// A new database also gets the nightly cleanup (core-16).
+	if cl, err := a.Tasks.Get(ctx, tasks.CleanupSeedID); err != nil || cl.Type != tasks.TypeCleanup || cl.Schedule != "daily:01:00" {
+		t.Fatalf("cleanup seed: %+v %v", cl, err)
+	}
+	// Deleted (the API refuses; QA L-3), the seeds do not come back on the next start.
+	for _, id := range []string{tasks.SeedID, tasks.CleanupSeedID} {
+		if err := a.Tasks.DB.DeleteTask(ctx, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	a.Close()
 	b, err := New(cfg, quiet())

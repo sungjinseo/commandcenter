@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 )
@@ -349,5 +350,67 @@ func TestRebuildMetadataAllFormats(t *testing.T) {
 	// A format without a rebuilder is refused.
 	if _, err := h.s.Create(context.Background(), Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"crates"}`)}); err == nil || !strings.Contains(err.Error(), "hosted repository of helm, maven") {
 		t.Fatalf("cargo: %v", err)
+	}
+}
+
+// olderThanDays keeps the temp files changed in the last days, never fewer
+// than the minimum ages (core-22).
+func TestDeleteTempFilesOlderThanDays(t *testing.T) {
+	h := newHarness(t)
+	tmp := filepath.Join(h.dir, "tmp")
+	for name, age := range map[string]time.Duration{"up-2d": 48 * time.Hour, "up-4d": 96 * time.Hour, "ses-2d": 49 * time.Hour, "ses-5d": 120 * time.Hour, "up-new": time.Minute} {
+		p := filepath.Join(tmp, name)
+		os.WriteFile(p, []byte("x"), 0o644)
+		os.Chtimes(p, time.Now().Add(-age), time.Now().Add(-age))
+	}
+	for _, bad := range []string{`{"olderThanDays":-1}`, `{"olderThanDays":"2"}`, `{"olderThan":2}`} {
+		if _, err := h.s.Create(context.Background(), Def{Name: "x", Type: TypeTemp, Schedule: "manual", Params: json.RawMessage(bad)}); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+	out, tk := h.run(t, TypeTemp, `{"olderThanDays":3}`)
+	if out.Result != ResultOK || out.Removed != 2 || tk.Params != `{"olderThanDays":3}` {
+		t.Fatalf("3 days: %+v %s", out, tk.Params)
+	}
+	left, _ := os.ReadDir(tmp)
+	var names []string
+	for _, e := range left {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, " ") != "ses-2d up-2d up-new" {
+		t.Fatalf("left: %v", names)
+	}
+	if out, _ := h.run(t, TypeTemp, `{}`); out.Removed != 2 { // the 1 hour and 24 hour minimums
+		t.Fatalf("default: %+v", out)
+	}
+}
+
+// resetProxyMetadata drops an apt proxy's cached dists/ files and keeps its
+// packages (core-45); without it an apt proxy is refused, and "every
+// repository" leaves apt proxies alone.
+func TestRebuildResetsAptProxy(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.storedRepos(t)
+	if _, err := h.reg.CreateDef(ctx, config.Repository{Name: "apt-px", Format: "apt", Type: "proxy", Remote: "https://deb.example.org/debian"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"dists/stable/InRelease", "dists/stable/main/binary-amd64/Packages.gz", "pool/main/h/hello/hello_1.0_amd64.deb"} {
+		h.put(t, "apt-px", p, "cached")
+	}
+	if _, err := h.s.Create(ctx, Def{Name: "x", Type: TypeRebuild, Schedule: "manual", Params: json.RawMessage(`{"repo":"apt-px"}`)}); err == nil ||
+		!strings.Contains(err.Error(), "set resetProxyMetadata") {
+		t.Fatalf("without the flag: %v", err)
+	}
+	if out, tk := h.run(t, TypeRebuild, `{"format":"maven"}`); out.Result != ResultOK || strings.Contains(tk.LastLog, "apt-px") {
+		t.Fatalf("every maven repository: %+v\n%s", out, tk.LastLog)
+	}
+	out, tk := h.run(t, TypeRebuild, `{"repo":"apt-px","resetProxyMetadata":true}`)
+	if out.Result != ResultOK || out.Removed != 2 || !strings.Contains(tk.LastLog, "apt-px: dropped 2 cached metadata files") {
+		t.Fatalf("reset: %+v\n%s", out, tk.LastLog)
+	}
+	as, _ := h.db.ListAssets(ctx, "apt-px", "")
+	if len(as) != 1 || as[0].Path != "pool/main/h/hello/hello_1.0_amd64.deb" {
+		t.Fatalf("left: %+v", as)
 	}
 }

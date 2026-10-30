@@ -60,7 +60,8 @@ func TestCleanupDraftPreviewAPI(t *testing.T) {
 		t.Fatalf("age: %s", r.body)
 	}
 	c := m["components"].([]any)[0].(map[string]any)
-	if c["group"] != "org.example" || c["name"] != "app" || c["version"] != "1.0" || c["lastUpdated"] != rfc3339(t0) ||
+	if c["group"] != "org.example" || c["name"] != "app" || c["version"] != "1.0" || c["lastUpdated"] != rfc3339(t0.Add(time.Hour)) || // last written
+
 		c["lastDownloaded"] != "" || c["assets"] != float64(2) || !strings.Contains(c["reason"].(string), "componentAgeDays 30") {
 		t.Fatalf("component: %v", c)
 	}
@@ -97,7 +98,7 @@ func TestCleanupDraftPreviewAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(rows) != 5 || strings.Join(rows[0], ",") != "group,name,version,lastUpdated,lastDownloaded,assets,bytes,reason" ||
-		strings.Join(rows[1][:7], ",") != "org.example,app,1.0,"+rfc3339(t0)+",,2,8" {
+		strings.Join(rows[1][:7], ",") != "org.example,app,1.0,"+rfc3339(t0.Add(time.Hour))+",,2,8" {
 		t.Fatalf("csv: %q", rows)
 	}
 

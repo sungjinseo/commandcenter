@@ -197,13 +197,15 @@ func TestPolicyValidateProFields(t *testing.T) {
 		want string
 	}{
 		{Criteria{Retain: 3}, ""},
+		{Criteria{PathPattern: "tmp/.*"}, ""}, // a path pattern alone, as Nexus (core-19)
 		{Criteria{Retain: 1001}, "retain must be between 0 and 1000"},
 		{Criteria{Retain: -1, ComponentAgeDays: 1}, "retain must be between"},
 		{Criteria{Retain: 3, RetainSortBy: "size"}, `unknown retainSortBy "size"`},
 		{Criteria{ComponentAgeDays: 1, PathPattern: "("}, "pathPattern:"},
 		{Criteria{ComponentAgeDays: 1, Exclude: Exclusion{NamePattern: "("}}, "exclude.namePattern:"},
 		{Criteria{ComponentAgeDays: 1, Exclude: Exclusion{VersionPattern: strings.Repeat("a", 201)}}, "exclude.versionPattern: at most 200"},
-		{Criteria{}, "set componentAgeDays, lastDownloadedDays or retain"},
+		{Criteria{}, "set componentAgeDays, lastDownloadedDays, retain or pathPattern"},
+		{Criteria{ReleaseType: "release"}, "set componentAgeDays, lastDownloadedDays, retain or pathPattern"},
 	} {
 		p := policy(tc.c)
 		err := p.Validate()

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -109,8 +110,8 @@ type policyJSON struct {
 func policyUsers(s *repo.Snapshot) map[string][]string {
 	out := map[string][]string{}
 	for _, rp := range s.Sorted {
-		if rp.CleanupPolicy != "" {
-			out[rp.CleanupPolicy] = append(out[rp.CleanupPolicy], rp.Name)
+		for _, p := range rp.CleanupPolicyNames() {
+			out[p] = append(out[p], rp.Name)
 		}
 	}
 	return out
@@ -231,7 +232,7 @@ func (u *UI) updatePolicy(w http.ResponseWriter, r *http.Request) {
 	err := u.Repos.WithWriteLock(r.Context(), func(s *repo.Snapshot) error {
 		var mismatched []string
 		for _, rp := range s.Sorted {
-			if rp.CleanupPolicy != name {
+			if !slices.Contains(rp.CleanupPolicyNames(), name) {
 				continue
 			}
 			users = append(users, rp.Name)
@@ -337,7 +338,7 @@ func (u *UI) previewPolicy(w http.ResponseWriter, r *http.Request) {
 		targets = []*repo.Repository{rp}
 	} else {
 		for _, rp := range snap.Sorted {
-			if rp.CleanupPolicy == p.Name {
+			if slices.Contains(rp.CleanupPolicyNames(), p.Name) {
 				targets = append(targets, rp)
 			}
 		}

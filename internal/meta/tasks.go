@@ -14,6 +14,7 @@ type Task struct {
 	ID, Name, Type, Schedule string
 	Params                   string   // JSON
 	NotifyEmail              []string // addresses mailed when a run fails
+	NotifyOn                 string   // "failure" or "success_failure": which runs are mailed
 	Enabled                  bool
 	Created, Updated         time.Time
 
@@ -27,6 +28,11 @@ type Task struct {
 	LastBytes      int64 // bytes removed (cleanup)
 
 	NextRun time.Time // zero: not scheduled
+
+	// A run now that waits for the run lock (QueueTaskRun): who asked, and
+	// when; the zero time when none waits.
+	QueuedBy string
+	QueuedAt time.Time
 }
 
 // TaskRun is the outcome of one run, stored by RecordTaskRun.
@@ -52,16 +58,18 @@ func taskSelect(withLog bool) string {
 		logCol = `last_log`
 	}
 	return `SELECT id, name, type, schedule, params, enabled, created_at, updated_at,
-  last_run, last_result, last_duration_ms, last_message, ` + logCol + `, last_removed, last_bytes, next_run, notify_email FROM tasks`
+  last_run, last_result, last_duration_ms, last_message, ` + logCol + `, last_removed, last_bytes, next_run, notify_email, notify_on,
+  queued_by, queued_at FROM tasks`
 }
 
 func scanTask(row scanner) (Task, error) {
 	var t Task
 	var enabled int
-	var created, updated, lastRun, nextRun int64
+	var created, updated, lastRun, nextRun, queued int64
 	var notify string
 	err := row.Scan(&t.ID, &t.Name, &t.Type, &t.Schedule, &t.Params, &enabled, &created, &updated,
-		&lastRun, &t.LastResult, &t.LastDurationMs, &t.LastMessage, &t.LastLog, &t.LastRemoved, &t.LastBytes, &nextRun, &notify)
+		&lastRun, &t.LastResult, &t.LastDurationMs, &t.LastMessage, &t.LastLog, &t.LastRemoved, &t.LastBytes, &nextRun, &notify, &t.NotifyOn,
+		&t.QueuedBy, &queued)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Task{}, ErrNotFound
 	}
@@ -75,7 +83,7 @@ func scanTask(row scanner) (Task, error) {
 			t.NotifyEmail = []string{}
 		}
 	}
-	t.Created, t.Updated, t.LastRun, t.NextRun = fromMs(created), fromMs(updated), fromMs(lastRun), fromMs(nextRun)
+	t.Created, t.Updated, t.LastRun, t.NextRun, t.QueuedAt = fromMs(created), fromMs(updated), fromMs(lastRun), fromMs(nextRun), fromMs(queued)
 	return t, nil
 }
 
@@ -108,6 +116,27 @@ func (d *DB) DueTasks(ctx context.Context, now time.Time) ([]Task, error) {
 ORDER BY next_run, id LIMIT ?`, toMs(now), MaxTasks)
 }
 
+// QueuedTasks returns the tasks with a queued run, the oldest request
+// first, without LastLog.
+func (d *DB) QueuedTasks(ctx context.Context) ([]Task, error) {
+	return queryTasks(ctx, d.sql, taskSelect(false)+` WHERE queued_at > 0 ORDER BY queued_at, id LIMIT ?`, MaxTasks)
+}
+
+// QueueTaskRun queues a run of task id for actor (at: when it was asked);
+// a run already queued keeps its actor and time. ErrNotFound if there is no
+// such task.
+func (d *DB) QueueTaskRun(ctx context.Context, id, actor string, at time.Time) error {
+	res, err := d.sql.ExecContext(ctx, `UPDATE tasks SET queued_by = CASE WHEN queued_at = 0 THEN ? ELSE queued_by END,
+  queued_at = CASE WHEN queued_at = 0 THEN ? ELSE queued_at END WHERE id = ?`, actor, toMs(at), id)
+	return affected(res, err)
+}
+
+// UnqueueTask drops the queued run of task id, if any: a run of it began.
+func (d *DB) UnqueueTask(ctx context.Context, id string) error {
+	_, err := d.sql.ExecContext(ctx, `UPDATE tasks SET queued_by = '', queued_at = 0 WHERE id = ? AND queued_at > 0`, id)
+	return err
+}
+
 // GetTask returns the task with its last log, or ErrNotFound.
 func (d *DB) GetTask(ctx context.Context, id string) (Task, error) {
 	return scanTask(d.sql.QueryRowContext(ctx, taskSelect(true)+` WHERE id = ?`, id))
@@ -121,10 +150,18 @@ func notifyJSON(addrs []string) string {
 	return string(b)
 }
 
+// notifyOn stores "" as the default, "failure".
+func notifyOn(s string) string {
+	if s == "" {
+		return "failure"
+	}
+	return s
+}
+
 func insertTask(ctx context.Context, q querier, t Task) error {
 	now := toMs(time.Now())
-	_, err := q.ExecContext(ctx, `INSERT INTO tasks(id, name, type, schedule, params, enabled, created_at, updated_at, next_run, notify_email)
-VALUES(?,?,?,?,?,?,?,?,?,?)`, t.ID, t.Name, t.Type, t.Schedule, t.Params, boolInt(t.Enabled), now, now, toMs(t.NextRun), notifyJSON(t.NotifyEmail))
+	_, err := q.ExecContext(ctx, `INSERT INTO tasks(id, name, type, schedule, params, enabled, created_at, updated_at, next_run, notify_email, notify_on)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)`, t.ID, t.Name, t.Type, t.Schedule, t.Params, boolInt(t.Enabled), now, now, toMs(t.NextRun), notifyJSON(t.NotifyEmail), notifyOn(t.NotifyOn))
 	return err
 }
 
@@ -146,12 +183,13 @@ func (d *DB) CreateTask(ctx context.Context, t Task) error {
 	})
 }
 
-// UpdateTask replaces the name, schedule, params, enabled flag and next run
-// of the task t.ID; ErrNotFound if there is none. The type and the last run
-// are kept.
+// UpdateTask replaces the name, schedule, params, enabled flag, next run
+// and notification settings of the task t.ID; ErrNotFound if there is
+// none. The type, the last run and a queued run are kept.
 func (d *DB) UpdateTask(ctx context.Context, t Task) error {
-	res, err := d.sql.ExecContext(ctx, `UPDATE tasks SET name = ?, schedule = ?, params = ?, enabled = ?, next_run = ?, notify_email = ?, updated_at = ?
-WHERE id = ?`, t.Name, t.Schedule, t.Params, boolInt(t.Enabled), toMs(t.NextRun), notifyJSON(t.NotifyEmail), toMs(time.Now()), t.ID)
+	res, err := d.sql.ExecContext(ctx, `UPDATE tasks SET name = ?, schedule = ?, params = ?, enabled = ?, next_run = ?, notify_email = ?, notify_on = ?,
+  updated_at = ? WHERE id = ?`, t.Name, t.Schedule, t.Params, boolInt(t.Enabled), toMs(t.NextRun), notifyJSON(t.NotifyEmail), notifyOn(t.NotifyOn),
+		toMs(time.Now()), t.ID)
 	return affected(res, err)
 }
 
@@ -194,11 +232,12 @@ func affected(res sql.Result, err error) error {
 	return nil
 }
 
-// SeedTask inserts t once per database, in one transaction: only when the
-// settings key flag is not set and no task exists. The flag is set either
-// way, so a seed task the admin deleted does not come back. It reports
-// whether it inserted t.
-func (d *DB) SeedTask(ctx context.Context, flag string, t Task) (bool, error) {
+// SeedTask inserts ts once per database, in one transaction: only when the
+// settings key flag is not set and no task exists (a new database). The
+// flag is set either way, so a seed task the admin deleted does not come
+// back, and a task seeded by a later version never appears on a database
+// that existed before it. It reports whether it inserted ts.
+func (d *DB) SeedTask(ctx context.Context, flag string, ts ...Task) (bool, error) {
 	seeded := false
 	err := d.Tx(ctx, func(tx *Tx) error {
 		var v string
@@ -214,8 +253,10 @@ func (d *DB) SeedTask(ctx context.Context, flag string, t Task) (bool, error) {
 			return err
 		}
 		if n == 0 {
-			if err := insertTask(ctx, tx.q, t); err != nil {
-				return err
+			for _, t := range ts {
+				if err := insertTask(ctx, tx.q, t); err != nil {
+					return err
+				}
 			}
 			seeded = true
 		}

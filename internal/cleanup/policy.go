@@ -24,17 +24,23 @@ type Policy struct {
 	Criteria
 	Notes            string    // free text for the administrators
 	Created, Updated time.Time // set when read from the database
+	// DownloadedOnly (not stored; the repository.purge-unused task): with
+	// LastDownloadedDays, a component never downloaded is not selected.
+	DownloadedOnly bool
 }
 
 // Criteria select components; every set criterion must hold (AND), and at
-// least one of the two ages must be set.
+// least one of the two ages, Retain or PathPattern must be set (as Nexus,
+// core-19: a path pattern alone selects every component with a matching
+// asset).
 type Criteria struct {
-	// ComponentAgeDays (0 = off): the component's newest asset was created
-	// more than N days ago.
+	// ComponentAgeDays (0 = off): the component's content was last written
+	// (uploaded, replaced or fetched again: the newest asset's later of its
+	// creation and modification times) more than N days ago.
 	ComponentAgeDays int `json:"componentAgeDays"`
 	// LastDownloadedDays (0 = off): no asset of the component was used in
-	// the last N days, where an asset never downloaded counts from its
-	// creation.
+	// the last N days, where an asset never downloaded counts from when its
+	// content was last written.
 	LastDownloadedDays int `json:"lastDownloadedDays"`
 	// ReleaseType is any (or ""), release or prerelease (see Prerelease).
 	ReleaseType string `json:"releaseType"`
@@ -52,7 +58,7 @@ type Criteria struct {
 	// ones included; equal versions share a rank and are kept together.
 	Retain int `json:"retain,omitempty"`
 	// RetainSortBy is "version" (CompareVersions; formats without a version
-	// order use the date) or "date" (the newest asset's creation time); set
+	// order use the date) or "date" (when the content was last written); set
 	// with Retain only, "version" by default.
 	RetainSortBy string `json:"retainSortBy,omitempty"`
 	// Exclude names components that are never selected.
@@ -113,8 +119,8 @@ func (p *Policy) Validate() error {
 	if p.Retain < 0 || p.Retain > MaxRetain {
 		add("retain must be between 0 and %d", MaxRetain)
 	}
-	if p.ComponentAgeDays <= 0 && p.LastDownloadedDays <= 0 && p.Retain <= 0 {
-		add("set componentAgeDays, lastDownloadedDays or retain (or several)")
+	if p.ComponentAgeDays <= 0 && p.LastDownloadedDays <= 0 && p.Retain <= 0 && p.PathPattern == "" {
+		add("set componentAgeDays, lastDownloadedDays, retain or pathPattern (or several)")
 	}
 	switch {
 	case p.Retain <= 0:

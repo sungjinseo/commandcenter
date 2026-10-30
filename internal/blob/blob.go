@@ -216,7 +216,11 @@ func open(root string, be backend) (*Store, error) {
 // file on every return, so only a killed process (SIGKILL, OOM, a stop
 // timeout) leaves one behind; a session is left behind by a client that
 // never finished it.
-func (s *Store) SweepTmp() (int, error) {
+func (s *Store) SweepTmp() (int, error) { return s.SweepTmpOlderThan(0) }
+
+// SweepTmpOlderThan is SweepTmp keeping, besides, every file modified in
+// the last age: the larger of age and each kind's own minimum applies.
+func (s *Store) SweepTmpOlderThan(age time.Duration) (int, error) {
 	dir := filepath.Join(s.root, "tmp")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -229,9 +233,9 @@ func (s *Store) SweepTmp() (int, error) {
 		var cutoff time.Time
 		switch {
 		case strings.HasPrefix(e.Name(), tmpPrefix):
-			cutoff = now.Add(-tmpMaxAge)
+			cutoff = now.Add(-max(tmpMaxAge, age))
 		case strings.HasPrefix(e.Name(), sessionPrefix):
-			cutoff = now.Add(-SessionMaxAge)
+			cutoff = now.Add(-max(SessionMaxAge, age))
 		default:
 			continue
 		}

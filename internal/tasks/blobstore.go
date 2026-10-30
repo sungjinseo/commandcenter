@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"commandcenter/internal/blob"
@@ -109,6 +110,32 @@ func groupUsage(ctx context.Context, s *Service, name string, bs *blob.Store, lo
 	return blobs, nil
 }
 
+// tempParams are blobstore.delete-temp-files' params: compactParams' store
+// and OlderThanDays (core-22), which keeps the temp files changed in the
+// last that many days (0: only the minimum ages, 1 hour for a write's temp
+// file and 24 hours for an upload session, so live uploads survive).
+type tempParams struct {
+	BlobStore     string `json:"blobStore,omitempty"`
+	OlderThanDays int    `json:"olderThanDays,omitempty"`
+}
+
+var tempFields = append(slices.Clone(blobStoreFields),
+	ParamSpec{Name: "olderThanDays", Type: "int", Help: "keep the temp files changed in the last that many days; 0: those older than 1 hour (upload sessions: 24 hours) go"})
+
+func tempParamsOf(s *Service, raw json.RawMessage, check bool) (string, []string) {
+	var p tempParams
+	if err := decodeParams(raw, &p); err != nil {
+		return "", []string{err.Error() + " (blobstore.delete-temp-files takes an optional blobStore and olderThanDays)"}
+	}
+	if p.OlderThanDays < 0 || p.OlderThanDays > 36500 {
+		return "", []string{"params.olderThanDays must be from 0 to 36500"}
+	}
+	if errs := checkBlobStore(s, p.BlobStore, check); errs != nil {
+		return "", errs
+	}
+	return encodeParams(p), nil
+}
+
 // runTemp removes the stale temp files and abandoned upload sessions of
 // each store's tmp/ (blob.Store.SweepTmp), as compaction does first.
 func runTemp(ctx context.Context, s *Service, t meta.Task, _ string, log *RunLog) (summary, error) {
@@ -116,10 +143,13 @@ func runTemp(ctx context.Context, s *Service, t meta.Task, _ string, log *RunLog
 	if err != nil {
 		return summary{msg: err.Error()}, err
 	}
+	var p tempParams
+	json.Unmarshal([]byte(t.Params), &p) // storeNames decoded it
+	age := time.Duration(p.OlderThanDays) * 24 * time.Hour
 	var removed int64
 	var errs []error
 	for _, name := range names {
-		n, err := s.Store.StoreByName(name).SweepTmp()
+		n, err := s.Store.StoreByName(name).SweepTmpOlderThan(age)
 		removed += int64(n)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("blob store %q: %w", name, err))

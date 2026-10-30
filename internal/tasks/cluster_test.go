@@ -226,3 +226,78 @@ func TestRerunAfterNodeDies(t *testing.T) {
 		t.Fatalf("B ran it %d times; task %+v", n, got)
 	}
 }
+
+// Run now on A while B runs another task: queued, not refused (core-31).
+// The queued run waits for B's, then the leader A starts it at a tick as
+// the admin who asked, records it as a run now, and drops the request; a
+// second request meanwhile keeps the first, and run now of B's own task
+// is still refused.
+func TestRunNowQueuedAcrossNodes(t *testing.T) {
+	h, b, _ := twoNodes(t)
+	release := make(chan struct{})
+	b.GC = func(context.Context, string) (int, int64, error) { <-release; return 1, 0, nil }
+	tk := h.create(t, Def{Name: "c", Type: TypeCompact, Schedule: "manual"})
+	other := h.create(t, Def{Name: "d", Type: TypeCompact, Schedule: "daily:03:00"})
+	if err := b.RunAsync(tk.ID, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	var busy *BusyError
+	if _, err := h.s.RunOrQueue(tk.ID, "alice"); !errors.As(err, &busy) || busy.Running != tk.ID {
+		t.Fatalf("run now of the running task: %v", err)
+	}
+	for _, actor := range []string{"alice", "bob"} {
+		if queued, err := h.s.RunOrQueue(other.ID, actor); err != nil || !queued {
+			t.Fatalf("run now of another task by %s: queued %v, %v", actor, queued, err)
+		}
+	}
+	if _, err := h.s.RunOrQueue("missing", "alice"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown task: %v", err)
+	}
+	if got := h.get(t, other.ID); got.QueuedBy != "alice" || got.QueuedAt.IsZero() {
+		t.Fatalf("queued: %+v", got)
+	}
+	ta := make(chan time.Time)
+	h.s.Ticks = ta
+	h.s.Start(context.Background())
+	defer h.s.Stop()
+	tick(ta) // B still runs: the queued run waits
+	if n := h.gcs.Load(); n != 0 {
+		t.Fatalf("ran beside B's run: %d", n)
+	}
+	close(release)
+	b.Wait()
+	tick(ta)
+	h.s.Wait()
+	got := h.get(t, other.ID)
+	if n := h.gcs.Load(); n != 1 || got.LastResult != ResultOK || !got.QueuedAt.IsZero() || got.QueuedBy != "" {
+		t.Fatalf("%d runs; task %+v", n, got)
+	}
+	if want := time.Date(2026, 10, 20, 3, 0, 0, 0, time.UTC); !got.NextRun.Equal(want) {
+		t.Fatalf("the queued run moved the next run to %s", got.NextRun)
+	}
+	var actor string
+	for _, e := range h.sink.Events() {
+		if e.Kind == "task.run" && e.Subject == other.ID {
+			actor = e.Actor
+		}
+	}
+	if actor != "alice" {
+		t.Fatalf("the queued run's actor %q:\n%s", actor, h.sink.String())
+	}
+	tick(ta) // consumed: no second run
+	if n := h.gcs.Load(); n != 1 {
+		t.Fatalf("%d runs after another tick", n)
+	}
+	// A run that starts another way (run now when the lock is free) answers
+	// a queued request too.
+	if err := h.db.QueueTaskRun(context.Background(), tk.ID, "carol", h.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if queued, err := h.s.RunOrQueue(tk.ID, "dave"); err != nil || queued {
+		t.Fatalf("free lock: queued %v, %v", queued, err)
+	}
+	h.s.Wait()
+	if got := h.get(t, tk.ID); !got.QueuedAt.IsZero() {
+		t.Fatalf("still queued after its run: %+v", got)
+	}
+}

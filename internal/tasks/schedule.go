@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +16,11 @@ const (
 	Daily   = "daily"
 	Weekly  = "weekly"
 	Monthly = "monthly"
+	Cron    = "cron"
 )
+
+// LastDay in Schedule.Days is the last day of the month ("last").
+const LastDay = 32
 
 // Schedule is a parsed schedule string:
 //
@@ -23,18 +28,21 @@ const (
 //	once:<RFC3339>          (an offset-less "2006-01-02T15:04[:05]" is in server time)
 //	hourly:<MM>
 //	daily:<HH:MM>
-//	weekly:<mon..sun>:<HH:MM>
-//	monthly:<1-28>:<HH:MM>
+//	weekly:<days>:<HH:MM>   days: mon..sun, comma-separated (mon,wed,fri)
+//	monthly:<days>:<HH:MM>  days: 1-31 or last, comma-separated (1,15,last)
+//	cron:<expression>       a Quartz cron expression (cron.go)
 //
-// Times are wall-clock times in the server's zone (time.Local, from TZ).
-// Monthly days stop at 28 so that every month has the day.
+// Times are wall-clock times in the server's zone (time.Local, from TZ). A
+// monthly day a month does not have (31 in April) is skipped that month,
+// as Quartz does; "last" is the month's last day.
 type Schedule struct {
-	Kind    string
-	At      time.Time    // once
-	Hour    int          // daily, weekly, monthly
-	Minute  int          // every kind but manual and once
-	Weekday time.Weekday // weekly
-	Day     int          // monthly
+	Kind     string
+	At       time.Time      // once
+	Hour     int            // daily, weekly, monthly
+	Minute   int            // every kind but manual, once and cron
+	Weekdays []time.Weekday // weekly: at least one, Monday first
+	Days     []int          // monthly: at least one, ascending, LastDay last
+	Cron     *CronExpr      // cron
 }
 
 var weekdays = map[string]time.Weekday{"sun": time.Sunday, "mon": time.Monday, "tue": time.Tuesday,
@@ -82,23 +90,72 @@ func ParseScheduleIn(s string, loc *time.Location) (Schedule, error) {
 		}
 		return Schedule{Kind: Daily, Hour: h, Minute: m}, nil
 	case Weekly:
-		day, hm, _ := strings.Cut(rest, ":")
-		wd, okDay := weekdays[strings.ToLower(day)]
+		days, hm, _ := strings.Cut(rest, ":")
+		wds, okDays := weekdaySet(days)
 		h, m, ok := hhmm(hm)
-		if !okDay || !ok {
-			return bad("weekly:<mon|tue|wed|thu|fri|sat|sun>:<HH:MM>")
+		if !okDays || !ok {
+			return bad("weekly:<days>:<HH:MM>, days mon, tue, wed, thu, fri, sat or sun, comma-separated (weekly:mon,thu:03:00)")
 		}
-		return Schedule{Kind: Weekly, Weekday: wd, Hour: h, Minute: m}, nil
+		return Schedule{Kind: Weekly, Weekdays: wds, Hour: h, Minute: m}, nil
 	case Monthly:
-		day, hm, _ := strings.Cut(rest, ":")
-		d, okDay := number(day, 1, 28)
+		days, hm, _ := strings.Cut(rest, ":")
+		ds, okDays := daySet(days)
 		h, m, ok := hhmm(hm)
-		if !okDay || !ok {
-			return bad("monthly:<day 1-28>:<HH:MM>")
+		if !okDays || !ok {
+			return bad("monthly:<days>:<HH:MM>, days 1-31 or last, comma-separated (monthly:1,15,last:03:00)")
 		}
-		return Schedule{Kind: Monthly, Day: d, Hour: h, Minute: m}, nil
+		return Schedule{Kind: Monthly, Days: ds, Hour: h, Minute: m}, nil
+	case Cron:
+		c, err := ParseCron(rest)
+		if err != nil {
+			return Schedule{}, fmt.Errorf("invalid schedule %q: %w", s, err)
+		}
+		return Schedule{Kind: Cron, Cron: c}, nil
 	}
-	return bad("manual, once:<time>, hourly:<MM>, daily:<HH:MM>, weekly:<day>:<HH:MM> or monthly:<1-28>:<HH:MM>")
+	return bad("manual, once:<time>, hourly:<MM>, daily:<HH:MM>, weekly:<days>:<HH:MM>, monthly:<days>:<HH:MM> or cron:<Quartz expression>")
+}
+
+// weekdaySet parses a comma-separated list of day names, Monday first.
+func weekdaySet(s string) ([]time.Weekday, bool) {
+	var seen [7]bool
+	for _, name := range strings.Split(s, ",") {
+		wd, ok := weekdays[strings.ToLower(strings.TrimSpace(name))]
+		if !ok {
+			return nil, false
+		}
+		seen[wd] = true
+	}
+	var out []time.Weekday
+	for i := 1; i <= 7; i++ {
+		if wd := time.Weekday(i % 7); seen[wd] {
+			out = append(out, wd)
+		}
+	}
+	return out, true
+}
+
+// daySet parses a comma-separated list of month days 1-31 and "last".
+func daySet(s string) ([]int, bool) {
+	var seen [LastDay + 1]bool
+	for _, d := range strings.Split(s, ",") {
+		d = strings.TrimSpace(d)
+		if strings.EqualFold(d, "last") {
+			seen[LastDay] = true
+			continue
+		}
+		n, ok := number(d, 1, 31)
+		if !ok {
+			return nil, false
+		}
+		seen[n] = true
+	}
+	var out []int
+	for d := 1; d <= LastDay; d++ {
+		if seen[d] {
+			out = append(out, d)
+		}
+	}
+	return out, true
 }
 
 // number parses a decimal of one or two digits in [lo, hi].
@@ -134,23 +191,51 @@ func (s Schedule) String() string {
 	case Daily:
 		return fmt.Sprintf("%s:%02d:%02d", Daily, s.Hour, s.Minute)
 	case Weekly:
-		return fmt.Sprintf("%s:%s:%02d:%02d", Weekly, weekdayNames[s.Weekday], s.Hour, s.Minute)
+		names := make([]string, len(s.Weekdays))
+		for i, wd := range s.Weekdays {
+			names[i] = weekdayNames[wd]
+		}
+		return fmt.Sprintf("%s:%s:%02d:%02d", Weekly, strings.Join(names, ","), s.Hour, s.Minute)
 	case Monthly:
-		return fmt.Sprintf("%s:%d:%02d:%02d", Monthly, s.Day, s.Hour, s.Minute)
+		days := make([]string, len(s.Days))
+		for i, d := range s.Days {
+			days[i] = strconv.Itoa(d)
+			if d == LastDay {
+				days[i] = "last"
+			}
+		}
+		return fmt.Sprintf("%s:%s:%02d:%02d", Monthly, strings.Join(days, ","), s.Hour, s.Minute)
+	case Cron:
+		return Cron + ":" + s.Cron.String()
 	}
 	return Manual
 }
 
+// runsOn reports whether a daily, weekly or monthly schedule runs on the
+// date y-mo-d (normalized as time.Date does).
+func (s Schedule) runsOn(y int, mo time.Month, d int) bool {
+	date := time.Date(y, mo, d, 0, 0, 0, 0, time.UTC)
+	switch s.Kind {
+	case Weekly:
+		return slices.Contains(s.Weekdays, date.Weekday())
+	case Monthly:
+		day := date.Day()
+		last := time.Date(date.Year(), date.Month()+1, 0, 0, 0, 0, 0, time.UTC).Day()
+		return slices.Contains(s.Days, day) || day == last && slices.Contains(s.Days, LastDay)
+	}
+	return true
+}
+
 // Next returns the first run time strictly after after, in loc's wall
-// clock; the zero time when there is none (manual, or once in the past).
-// Month and year ends carry over (see wall for DST).
+// clock; the zero time when there is none (manual, once in the past, a
+// cron expression with no time left). Month and year ends carry over (see
+// wall for DST).
 func (s Schedule) Next(after time.Time, loc *time.Location) time.Time {
 	if loc == nil {
 		loc = time.Local
 	}
 	t := after.In(loc)
 	y, mo, d := t.Date()
-	at := func(day int) time.Time { return wall(y, mo, day, s.Hour, s.Minute, loc) }
 	switch s.Kind {
 	case Once:
 		if s.At.After(after) {
@@ -166,35 +251,32 @@ func (s Schedule) Next(after time.Time, loc *time.Location) time.Time {
 			c = c.Add(time.Hour)
 		}
 		return c
-	case Daily:
-		if c := at(d); c.After(after) {
-			return c
+	case Daily, Weekly, Monthly:
+		// Every day set is met within 62 days (a 31st after January 31st
+		// is March 31st); a wall time on the first day may have passed.
+		for i := 0; i <= 62; i++ {
+			if !s.runsOn(y, mo, d+i) {
+				continue
+			}
+			if c := wall(y, mo, d+i, s.Hour, s.Minute, 0, loc); c.After(after) {
+				return c
+			}
 		}
-		return at(d + 1)
-	case Weekly:
-		days := (int(s.Weekday) - int(t.Weekday()) + 7) % 7
-		if c := at(d + days); c.After(after) {
-			return c
-		}
-		return at(d + days + 7)
-	case Monthly:
-		if c := wall(y, mo, s.Day, s.Hour, s.Minute, loc); c.After(after) {
-			return c
-		}
-		return wall(y, mo+1, s.Day, s.Hour, s.Minute, loc)
+	case Cron:
+		return s.Cron.Next(after, loc)
 	}
 	return time.Time{}
 }
 
-// wall returns the instant of wall-clock time h:m on the given date in loc
+// wall returns the instant of wall-clock time h:m:sec on the given date in loc
 // (day and month may overflow, as with time.Date). A wall time that occurs
 // twice (the hour repeated when DST ends) gives the first occurrence, so a
 // schedule runs once. A wall time that does not exist (skipped when DST
 // starts) gives the first valid instant after the gap, the transition.
 // time.Date leaves both cases unspecified, so the offsets in force a day
 // before and a day after are tried and the wall clock is checked.
-func wall(y int, mo time.Month, day, h, m int, loc *time.Location) time.Time {
-	naive := time.Date(y, mo, day, h, m, 0, 0, time.UTC) // normalized fields
+func wall(y int, mo time.Month, day, h, m, sec int, loc *time.Location) time.Time {
+	naive := time.Date(y, mo, day, h, m, sec, 0, time.UTC) // normalized fields
 	ny, nmo, nd := naive.Date()
 	_, offBefore := naive.Add(-24 * time.Hour).In(loc).Zone()
 	_, offAfter := naive.Add(24 * time.Hour).In(loc).Zone()
@@ -202,7 +284,7 @@ func wall(y int, mo time.Month, day, h, m int, loc *time.Location) time.Time {
 	for _, off := range []int{offBefore, offAfter} {
 		c := naive.Add(-time.Duration(off) * time.Second).In(loc)
 		cy, cmo, cd := c.Date()
-		if cy == ny && cmo == nmo && cd == nd && c.Hour() == h && c.Minute() == m && (best.IsZero() || c.Before(best)) {
+		if cy == ny && cmo == nmo && cd == nd && c.Hour() == h && c.Minute() == m && c.Second() == sec && (best.IsZero() || c.Before(best)) {
 			best = c
 		}
 	}
@@ -215,5 +297,5 @@ func wall(y int, mo time.Month, day, h, m int, loc *time.Location) time.Time {
 	if start, _ := x.ZoneBounds(); !start.IsZero() && !start.After(x) {
 		return start.In(loc)
 	}
-	return time.Date(y, mo, day, h, m, 0, 0, loc)
+	return time.Date(y, mo, day, h, m, sec, 0, loc)
 }

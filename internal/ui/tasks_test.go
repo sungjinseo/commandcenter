@@ -32,7 +32,8 @@ func TestTaskCRUD(t *testing.T) {
 	r = e.get(t, "/-/api/tasks", "admin")
 	wantStatus(t, r, http.StatusOK)
 	list := r.json(t)
-	if n := len(list["tasks"].([]any)); n != 2 || strings.Contains(r.body, "lastLog") || len(list["types"].([]any)) != len(tasks.Types()) {
+	// the two seeds and this one
+	if n := len(list["tasks"].([]any)); n != 3 || strings.Contains(r.body, "lastLog") || len(list["types"].([]any)) != len(tasks.Types()) {
 		t.Fatalf("list: %s", r.body)
 	}
 	r = e.get(t, "/-/api/tasks/"+id, "admin")
@@ -95,7 +96,7 @@ func TestTaskAPIAuth(t *testing.T) {
 			wantStatus(t, e.req(t, c.method, c.path, c.body, "admin", nil, false), http.StatusForbidden)
 		}
 	}
-	if list, _ := e.ui.Tasks.List(context.Background()); len(list) != 1 || list[0].Name != "Compact blob store" {
+	if list, _ := e.ui.Tasks.List(context.Background()); len(list) != 2 || list[0].Name != "Cleanup service" || list[1].Name != "Compact blob store" {
 		t.Fatalf("tasks changed: %+v", list)
 	}
 }
@@ -122,7 +123,8 @@ func TestTaskRunLogServed(t *testing.T) {
 }
 
 // POST /-/api/tasks/{id}/stop cancels the running task (202) and answers
-// 409 when it is not running; a run refused while another task runs names it.
+// 409 when it is not running; a run of the running task is refused, naming
+// it, and a run of another one is queued (core-31).
 func TestTaskStopAndConflict(t *testing.T) {
 	e := newEnv(t, "http://repo.example")
 	entered := make(chan struct{})
@@ -138,10 +140,18 @@ func TestTaskStopAndConflict(t *testing.T) {
 	wantStatus(t, e.admin(t, "POST", "/-/api/tasks/"+tasks.SeedID+"/run", ""), http.StatusAccepted)
 	<-entered
 	other := e.admin(t, "POST", "/-/api/tasks", `{"name":"Other","type":"blobstore.compact","schedule":"manual"}`).json(t)["id"].(string)
-	r := e.admin(t, "POST", "/-/api/tasks/"+other+"/run", "")
+	r := e.admin(t, "POST", "/-/api/tasks/"+tasks.SeedID+"/run", "")
 	wantStatus(t, r, http.StatusConflict)
 	if m := r.json(t); m["running"] != tasks.SeedID || m["runningName"] != "Compact blob store" {
 		t.Fatalf("409 body: %s", r.body)
+	}
+	r = e.admin(t, "POST", "/-/api/tasks/"+other+"/run", "")
+	wantStatus(t, r, http.StatusAccepted)
+	if m := r.json(t); m["queued"] != true || m["started"] != false {
+		t.Fatalf("queued run: %s", r.body)
+	}
+	if m := e.get(t, "/-/api/tasks/"+other, "admin").json(t); m["queued"] != true || m["status"] != "Waiting" {
+		t.Fatalf("queued task: %v", m)
 	}
 	wantStatus(t, e.admin(t, "POST", stop, ""), http.StatusAccepted)
 	e.ui.Tasks.Wait()

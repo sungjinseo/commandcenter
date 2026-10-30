@@ -122,6 +122,11 @@ type querier interface {
 //	   (no negative caching), keeping what they did (migrateNegativeTTL).
 //	   Expand-only: an older build reads "0s" and the new -1 as no negative
 //	   caching and ignores the new connection and negativeCacheEnabled keys.
+//	8: tasks.notify_on (mail on success too, core-36), queued_by and
+//	   queued_at (a run now queued behind another run, core-31): expand-only,
+//	   an older build ignores them, keeps them on its updates, mails
+//	   failures only and, as the leader, leaves queued runs waiting for a
+//	   leader of this version.
 const schemaVersion = 8
 
 // schemaCompat is the oldest schemaVersion that may run on a database this

@@ -418,6 +418,20 @@ func TestDatabase(t *testing.T) {
 	}
 }
 
+func TestTaskRunTimeoutHours(t *testing.T) {
+	if c, err := Parse([]byte("{}\n")); err != nil || c.TaskRunTimeoutHours != 0 {
+		t.Fatalf("default = %d err=%v", c.TaskRunTimeoutHours, err)
+	}
+	if c, err := Parse([]byte("taskRunTimeoutHours: 24\n")); err != nil || c.TaskRunTimeoutHours != 24 {
+		t.Fatalf("24: %d %v", c.TaskRunTimeoutHours, err)
+	}
+	for _, bad := range []string{"-1", "721"} {
+		if _, err := Parse([]byte("taskRunTimeoutHours: " + bad + "\n")); err == nil {
+			t.Fatalf("%s accepted", bad)
+		}
+	}
+}
+
 func TestMetricsFlushSeconds(t *testing.T) {
 	c, err := Parse([]byte("{}"))
 	if err != nil || c.MetricsFlushSeconds != 30 {

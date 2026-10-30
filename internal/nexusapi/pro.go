@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"commandcenter/internal/tasks"
 )
 
 // The endpoints Nexus Repository Pro has: cleanup policies, task create,
@@ -280,6 +282,48 @@ func (h *Handler) deleteCleanupPolicy(w http.ResponseWriter, r *http.Request) {
 // uiTask is what the Nexus task views take from the UI's task JSON.
 type uiTask struct {
 	ID, Name, Type, Status, LastMessage, LastResult, NextRun, LastRun string
+	Params                                                            map[string]any
+}
+
+// nexusTaskAliases are Nexus type ids that a Command Center type serves with
+// some parameters fixed (core-45).
+var nexusTaskAliases = map[string]struct {
+	typ    string
+	params map[string]any
+}{
+	"repository.apt.rebuild.metadata": {"repository.rebuild-metadata", map[string]any{"format": "apt"}},
+}
+
+// nexusTaskID is the Nexus type id of t: its alias when its parameters
+// are an alias's, else nexusTaskType.
+func nexusTaskID(t uiTask) string {
+	for id, a := range nexusTaskAliases {
+		if t.Type != a.typ {
+			continue
+		}
+		match := true
+		for k, v := range a.params {
+			match = match && t.Params[k] == v
+		}
+		if match {
+			return id
+		}
+	}
+	return nexusTaskType(t.Type)
+}
+
+// nexusTaskRefusals are Nexus type ids Command Center has no task for, and
+// why (core-44).
+var nexusTaskRefusals = map[string]string{
+	"repository.maven.publish-dotindex": "Command Center does not publish Maven indexer files (.index/): " +
+		"search with GET " + Prefix + "/search?maven.groupId=...&maven.artifactId=... instead",
+	"repository.maven.unpublish-dotindex":  "Command Center publishes no Maven indexer files (.index/): there is nothing to unpublish",
+	"create.browse.nodes":                  "not needed: the browse tree is read from the repository's assets, there is nothing to rebuild",
+	"repository.trim-browse-tree":          "not needed: the browse tree is read from the repository's assets, there is nothing to trim",
+	"repository.rebuild-index":             "not needed: search reads the repository's assets, there is no index to rebuild",
+	"repository.maven.repair-base-version": "not needed: the base version of a SNAPSHOT is read from its path",
+	"h2.backup.task":                       "Command Center keeps its metadata in PostgreSQL: back it up with pg_dump",
+	"script":                               "Command Center has no script API",
 }
 
 func nexusTaskItem(t uiTask) map[string]any {
@@ -290,7 +334,7 @@ func nexusTaskItem(t uiTask) map[string]any {
 	case "Failed":
 		result = "FAILED"
 	}
-	return map[string]any{"id": t.ID, "name": t.Name, "type": nexusTaskType(t.Type), "message": t.LastMessage,
+	return map[string]any{"id": t.ID, "name": t.Name, "type": nexusTaskID(t), "message": t.LastMessage,
 		"currentState": strings.ToUpper(t.Status), "lastRunResult": result, "nextRun": nullable(t.NextRun), "lastRun": nullable(t.LastRun)}
 }
 
@@ -358,20 +402,30 @@ func (h *Handler) taskTypes(w http.ResponseWriter, r *http.Request) (taskTypes, 
 	return res.Types, true
 }
 
-// resolve maps a Nexus type id, or a Command Center one, to the type.
-func (tt taskTypes) resolve(id string) (int, bool) {
+// resolve maps a Nexus type id, or a Command Center one, to the type and
+// the parameters an alias fixes (nil for none).
+func (tt taskTypes) resolve(id string) (int, map[string]any, bool) {
+	a, alias := nexusTaskAliases[id]
+	if alias {
+		id = a.typ
+	}
 	for i, t := range tt {
 		if t.Type == id || nexusTaskType(t.Type) == id {
-			return i, true
+			return i, a.params, true
 		}
 	}
-	return 0, false
+	return 0, nil, false
 }
 
 func (tt taskTypes) ids() string {
 	var ids []string
 	for _, t := range tt {
 		ids = append(ids, nexusTaskType(t.Type))
+	}
+	for id, a := range nexusTaskAliases {
+		if _, _, ok := tt.resolve(a.typ); ok {
+			ids = append(ids, id)
+		}
 	}
 	slices.Sort(ids)
 	return strings.Join(ids, ", ")
@@ -380,10 +434,14 @@ func (tt taskTypes) ids() string {
 // nexusProperties are Nexus property names with another name here.
 var nexusProperties = map[string]string{"blobstoreName": "blobStore", "repositoryName": "repository", "gracePeriodInDays": "gracePeriodDays"}
 
+// allBlobStores is Nexus's blobstoreName for every blob store.
+const allBlobStores = "(All Blob Stores)"
+
 // params maps Nexus task properties (strings) to the parameters of type i:
-// names renamed, values converted to the parameter's type. Others go
-// through as they are, so the type's own validation names them.
-func (tt taskTypes) params(i int, props map[string]any) (map[string]any, []string) {
+// names renamed, values converted to the parameter's type, then fixed (an
+// alias's) set. Others go through as they are, so the type's own
+// validation names them.
+func (tt taskTypes) params(i int, props, fixed map[string]any) (map[string]any, []string) {
 	t := tt[i]
 	out := map[string]any{}
 	var errs []string
@@ -392,11 +450,27 @@ func (tt taskTypes) params(i int, props map[string]any) (map[string]any, []strin
 		if n, ok := nexusProperties[k]; ok {
 			name = n
 		}
-		if t.Type == "repository.rebuild-metadata" && name == "repository" {
+		switch {
+		case t.Type == "repository.rebuild-metadata" && name == "repository":
 			name = "repo"
 			if v == "*" {
 				v = ""
 			}
+		case t.Type == "repository.purge-unused" && name == "repository":
+			name = "repos" // one repository, a comma list, or "*" for every proxy
+			if v == "*" {
+				v = ""
+			}
+		case name == "blobStore" && v == allBlobStores:
+			v = ""
+		case t.Type == "repository.rebuild-metadata" && name == "rebuildAptMetadataFullRebuild":
+			continue // Command Center always rebuilds apt metadata from its rows
+		case t.Type == "blobstore.compact" && name == "blobsOlderThan":
+			if v != "0" && v != float64(0) {
+				errs = append(errs, fmt.Sprintf("properties.blobsOlderThan: %v: Command Center keeps no deleted blobs: compaction removes "+
+					"the blobs no asset references once they are an hour old; only 0 is supported", v))
+			}
+			continue
 		}
 		s, isString := v.(string)
 		for _, p := range t.Params {
@@ -423,6 +497,9 @@ func (tt taskTypes) params(i int, props map[string]any) (map[string]any, []strin
 			}
 		}
 		out[name] = v
+	}
+	for k, v := range fixed {
+		out[k] = v
 	}
 	return out, errs
 }
@@ -459,9 +536,9 @@ func offsetZone(s string) (*time.Location, error) {
 
 // scheduleOf maps a Nexus frequency to a schedule string. startDate is an
 // instant and recurringDays are days in the timeZoneOffset zone (weekly: 1
-// Sunday to 7 Saturday; monthly: 1 to 28); the schedule runs at the same
-// instants in the server's zone loc. cron takes the Quartz expressions a
-// schedule can express, in the server's zone.
+// Sunday to 7 Saturday; monthly: 1 to 31, and 999 for the last day); the
+// schedule runs at the same instants in the server's zone loc. cron
+// takes any Quartz expression, in the server's zone.
 func scheduleOf(f *frequency, loc *time.Location) (string, error) {
 	kind := strings.ToLower(strings.TrimSpace(f.Schedule))
 	switch kind {
@@ -485,12 +562,6 @@ func scheduleOf(f *frequency, loc *time.Location) (string, error) {
 		ms *= 1000
 	}
 	start := time.UnixMilli(ms).In(zone)
-	day := func(lo, hi int, what string) (int, error) {
-		if len(f.RecurringDays) != 1 || f.RecurringDays[0] < lo || f.RecurringDays[0] > hi {
-			return 0, fmt.Errorf("frequency.recurringDays: a %s schedule takes one day, %s", kind, what)
-		}
-		return f.RecurringDays[0], nil
-	}
 	srv := start.In(loc)
 	switch kind {
 	case "once":
@@ -499,55 +570,71 @@ func scheduleOf(f *frequency, loc *time.Location) (string, error) {
 		return fmt.Sprintf("hourly:%02d", srv.Minute()), nil
 	case "daily":
 		return fmt.Sprintf("daily:%02d:%02d", srv.Hour(), srv.Minute()), nil
-	case "weekly":
-		d, err := day(1, 7, "1 (Sunday) to 7 (Saturday)")
-		if err != nil {
-			return "", err
+	}
+	if len(f.RecurringDays) == 0 || len(f.RecurringDays) > 32 {
+		return "", fmt.Errorf("frequency.recurringDays: a %s schedule takes one or more days", kind)
+	}
+	var days []string
+	var occ time.Time
+	if kind == "weekly" {
+		for _, d := range f.RecurringDays {
+			if d < 1 || d > 7 {
+				return "", fmt.Errorf("frequency.recurringDays: %d: a weekly schedule takes days 1 (Sunday) to 7 (Saturday)", d)
+			}
+			occ = time.Date(start.Year(), start.Month(), start.Day()+(d-1-int(start.Weekday())+7)%7, start.Hour(), start.Minute(), 0, 0, zone).In(loc)
+			days = append(days, weekdayNames[occ.Weekday()])
 		}
-		occ := time.Date(start.Year(), start.Month(), start.Day()+(d-1-int(start.Weekday())+7)%7, start.Hour(), start.Minute(), 0, 0, zone).In(loc)
-		return fmt.Sprintf("weekly:%s:%02d:%02d", weekdayNames[occ.Weekday()], occ.Hour(), occ.Minute()), nil
+		return fmt.Sprintf("weekly:%s:%02d:%02d", strings.Join(days, ","), occ.Hour(), occ.Minute()), nil
 	}
-	d, err := day(1, 28, "1 to 28")
-	if err != nil {
-		return "", err
+	// How many days the start time moves in the server's zone: days near
+	// the month's end cannot move with it (a 28th that becomes a 29th
+	// would skip February).
+	occ = time.Date(start.Year(), start.Month(), 15, start.Hour(), start.Minute(), 0, 0, zone).In(loc)
+	shift := occ.Day() - 15
+	for _, d := range f.RecurringDays {
+		switch {
+		case d == 999 && shift == 0:
+			days = append(days, "last")
+		case d < 1 || d > 31 && d != 999:
+			return "", fmt.Errorf("frequency.recurringDays: %d: a monthly schedule takes days 1 to 31, and 999 for the last day", d)
+		case shift == 0:
+			days = append(days, strconv.Itoa(d))
+		case d == 999 || d+shift < 1 || d+shift > 28:
+			return "", fmt.Errorf("frequency.recurringDays: day %d at %s falls on another day in the server's time zone (%s), "+
+				"which months do not all have: give the start date in the server's offset, or use a cron expression", d, start.Format("15:04 -07:00"), occ.Format("-07:00"))
+		default:
+			days = append(days, strconv.Itoa(d+shift))
+		}
 	}
-	occ := time.Date(start.Year(), start.Month(), d, start.Hour(), start.Minute(), 0, 0, zone).In(loc)
-	if occ.Day() > 28 {
-		return "", fmt.Errorf("frequency.recurringDays: day %d at %s falls on day %d in the server's time zone; monthly schedules run on days 1 to 28",
-			d, start.Format("15:04 -07:00"), occ.Day())
-	}
-	return fmt.Sprintf("monthly:%d:%02d:%02d", occ.Day(), occ.Hour(), occ.Minute()), nil
+	return fmt.Sprintf("monthly:%s:%02d:%02d", strings.Join(days, ","), occ.Hour(), occ.Minute()), nil
 }
 
-// cronSchedule maps the Quartz expressions (seconds minutes hours
-// day-of-month month day-of-week [year]) that a schedule can express.
+// cronSchedule maps a Quartz expression (seconds minutes hours
+// day-of-month month day-of-week [year]) to the schedule kind of the same
+// shape: hourly, daily, weekly on one day, monthly on one day, otherwise
+// cron. All run in the server's zone.
 func cronSchedule(expr string) (string, error) {
-	bad := fmt.Errorf("frequency.cronExpression: %q: supported are \"0 M * * * ?\" (hourly), \"0 M H * * ?\" (daily), "+
-		"\"0 M H ? * DAY\" (weekly, one day) and \"0 M H D * ?\" (monthly, day 1-28)", expr)
-	f := strings.Fields(strings.ToUpper(expr))
-	if len(f) < 6 || len(f) > 7 || f[0] != "0" || f[4] != "*" || len(f) == 7 && f[6] != "*" {
-		return "", bad
+	c, err := tasks.ParseCron(expr)
+	if err != nil {
+		return "", fmt.Errorf("frequency.cronExpression: %q: %v", expr, err)
+	}
+	f := strings.Fields(c.String())
+	if len(f) == 7 && f[6] != "*" || f[0] != "0" || f[4] != "*" {
+		return "cron:" + c.String(), nil
 	}
 	num := func(s string, lo, hi int) (int, bool) {
 		n, err := strconv.Atoi(s)
 		return n, err == nil && n >= lo && n <= hi && allDigits(s)
 	}
 	every := func(s string) bool { return s == "*" || s == "?" }
-	minute, ok := num(f[1], 0, 59)
-	if !ok {
-		return "", bad
-	}
+	minute, okMin := num(f[1], 0, 59)
+	hour, okHour := num(f[2], 0, 23)
 	dom, dow := f[3], f[5]
-	if f[2] == "*" {
-		if every(dom) && every(dow) {
-			return fmt.Sprintf("hourly:%02d", minute), nil
-		}
-		return "", bad
-	}
-	hour, ok := num(f[2], 0, 23)
 	switch {
-	case !ok:
-		return "", bad
+	case !okMin:
+	case f[2] == "*" && every(dom) && every(dow):
+		return fmt.Sprintf("hourly:%02d", minute), nil
+	case !okHour:
 	case every(dom) && every(dow):
 		return fmt.Sprintf("daily:%02d:%02d", hour, minute), nil
 	case every(dom):
@@ -555,25 +642,23 @@ func cronSchedule(expr string) (string, error) {
 		if n, ok := num(dow, 1, 7); ok { // Quartz: 1 is Sunday
 			wd = n - 1
 		}
-		if wd < 0 {
-			return "", bad
+		if wd >= 0 {
+			return fmt.Sprintf("weekly:%s:%02d:%02d", weekdayNames[wd], hour, minute), nil
 		}
-		return fmt.Sprintf("weekly:%s:%02d:%02d", weekdayNames[wd], hour, minute), nil
 	case every(dow):
-		d, ok := num(dom, 1, 28)
-		if !ok {
-			return "", bad
+		if d, ok := num(dom, 1, 31); ok {
+			return fmt.Sprintf("monthly:%d:%02d:%02d", d, hour, minute), nil
 		}
-		return fmt.Sprintf("monthly:%d:%02d:%02d", d, hour, minute), nil
 	}
-	return "", bad
+	return "cron:" + c.String(), nil
 }
 
 func allDigits(s string) bool { return s != "" && strings.Trim(s, "0123456789") == "" }
 
 // uiTaskDef maps a TaskTemplateXO to the UI's task body; i is the
-// resolved type. Absent fields are left out, so an update keeps them.
-func uiTaskDef(tt taskTypes, i int, b taskTemplate) (map[string]any, []string) {
+// resolved type and fixed the parameters its alias fixes. Absent fields
+// are left out, so an update keeps them.
+func uiTaskDef(tt taskTypes, i int, fixed map[string]any, b taskTemplate) (map[string]any, []string) {
 	d := map[string]any{"type": tt[i].Type}
 	var errs []string
 	if b.Name != "" {
@@ -589,15 +674,19 @@ func uiTaskDef(tt taskTypes, i int, b taskTemplate) (map[string]any, []string) {
 		}
 		d["schedule"] = sc
 	}
-	if b.Properties != nil {
-		params, perrs := tt.params(i, b.Properties)
+	if b.Properties != nil || fixed != nil {
+		params, perrs := tt.params(i, b.Properties, fixed)
 		errs = append(errs, perrs...)
 		d["params"] = params
 	}
 	switch strings.ToUpper(b.NotificationCondition) {
-	case "", "FAILURE":
+	case "":
+	case "FAILURE":
+		d["notifyOn"] = tasks.NotifyFailure
+	case "SUCCESS_FAILURE":
+		d["notifyOn"] = tasks.NotifySuccessFailure
 	default:
-		errs = append(errs, fmt.Sprintf("notificationCondition: %q: only FAILURE is supported (failed runs are mailed)", b.NotificationCondition))
+		errs = append(errs, fmt.Sprintf("notificationCondition: %q: use FAILURE or SUCCESS_FAILURE", b.NotificationCondition))
 	}
 	if b.AlertEmail != nil {
 		to := []string{}
@@ -625,7 +714,11 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	i, ok := tt.resolve(b.Type)
+	i, fixed, ok := tt.resolve(b.Type)
+	if why, refused := nexusTaskRefusals[b.Type]; !ok && refused {
+		writeValidation(w, []string{fmt.Sprintf("type: %s: %s", b.Type, why)})
+		return
+	}
 	if !ok {
 		writeValidation(w, []string{fmt.Sprintf("type: unknown task type %q: supported are %s", b.Type, tt.ids())})
 		return
@@ -634,7 +727,7 @@ func (h *Handler) createTask(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, []string{"frequency: required"})
 		return
 	}
-	d, errs := uiTaskDef(tt, i, b)
+	d, errs := uiTaskDef(tt, i, fixed, b)
 	if len(errs) > 0 {
 		writeValidation(w, errs)
 		return
@@ -668,16 +761,19 @@ func (h *Handler) updateTask(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	i, ok := tt.resolve(cur.Type)
+	i, fixed, ok := tt.resolve(nexusTaskID(cur))
 	if !ok {
 		writeMessage(w, http.StatusConflict, "the task's type "+strconv.Quote(cur.Type)+" is no longer available")
 		return
 	}
-	if b.Type != "" && b.Type != cur.Type && b.Type != nexusTaskType(cur.Type) {
+	if b.Type != "" && b.Type != cur.Type && b.Type != nexusTaskID(cur) {
 		writeValidation(w, []string{"type: the type of a task cannot change"})
 		return
 	}
-	d, errs := uiTaskDef(tt, i, b)
+	if b.Properties == nil {
+		fixed = nil // the stored params, which hold them, are kept
+	}
+	d, errs := uiTaskDef(tt, i, fixed, b)
 	if len(errs) > 0 {
 		writeValidation(w, errs)
 		return

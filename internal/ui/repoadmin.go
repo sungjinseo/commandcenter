@@ -78,6 +78,11 @@ type repoRequest struct {
 	// CleanupPolicy: absent (null) keeps the stored policy on update and
 	// means none on create; "" clears it; a name sets it.
 	CleanupPolicy *string `json:"cleanupPolicy"`
+	// CleanupPolicies sets every cleanup policy, in order, like
+	// CleanupPolicy for one (absent keeps, [] clears). With both,
+	// cleanupPolicies applies unless cleanupPolicy differs from its first
+	// name: a client that knows only cleanupPolicy changed it.
+	CleanupPolicies *[]string `json:"cleanupPolicies"`
 	// Online null or absent means online on create and unchanged on update.
 	Online *bool `json:"online"`
 	// BlobStore is set on create (empty defaults to "default"); it is immutable,
@@ -144,7 +149,8 @@ type repoConfigResponse struct {
 	WritePolicy          string            `json:"writePolicy"`
 	Depth                int               `json:"depth"`
 	AnonymousRead        *bool             `json:"anonymousRead"`
-	CleanupPolicy        string            `json:"cleanupPolicy"`
+	CleanupPolicy        string            `json:"cleanupPolicy"`   // the first of cleanupPolicies, "" if none
+	CleanupPolicies      []string          `json:"cleanupPolicies"` // every policy, in order
 	Online               bool              `json:"online"`
 	BlobStore            string            `json:"blobStore"`
 	Distribution         string            `json:"distribution,omitempty"`
@@ -227,6 +233,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		WritePolicy:          d.WritePolicy,
 		Depth:                d.Depth,
 		CleanupPolicy:        d.CleanupPolicy,
+		CleanupPolicies:      append([]string{}, d.CleanupPolicyNames()...),
 		Online:               d.IsOnline(),
 		BlobStore:            d.BlobStore,
 		Distribution:         d.Distribution,
@@ -283,9 +290,16 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 	if b.Evaluation != nil && *b.Evaluation != "inherit" {
 		d.Evaluation = *b.Evaluation
 	}
-	if b.CleanupPolicy != nil {
+	first := ""
+	if b.CleanupPolicies != nil && len(*b.CleanupPolicies) > 0 {
+		first = (*b.CleanupPolicies)[0]
+	}
+	switch {
+	case b.CleanupPolicies != nil && (b.CleanupPolicy == nil || *b.CleanupPolicy == first):
+		d.SetCleanupPolicies(*b.CleanupPolicies)
+	case b.CleanupPolicy != nil:
 		d.CleanupPolicy = *b.CleanupPolicy
-	} else {
+	default:
 		clear.KeepCleanupPolicy = true // update only; create ignores it
 	}
 	for _, f := range []struct {

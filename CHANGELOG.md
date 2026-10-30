@@ -53,6 +53,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cleared; groups cascade to every proxy member. `POST .../rebuild-index`: a no-op (204), 400 for groups.
 - Per-proxy `connection` settings (Nexus `httpClient.connection`): timeout, retries, User-Agent suffix,
   cookies. Proxy `negativeCacheEnabled` (Nexus `negativeCache.enabled`).
+- Cleanup: a repository can have several cleanup policies (`cleanupPolicies`, Nexus `policyNames`); each
+  applies on its own. A policy may have `pathPattern` as its only criterion, as in Nexus.
+- Tasks: `cron:<Quartz expression>` schedules; weekly on several days; monthly on days 1-31 and `last`.
+- Tasks: `notifyOn: success_failure` also mails finished runs (Nexus `notificationCondition: SUCCESS_FAILURE`).
+- Tasks: run now while another task runs is queued (202 `queued: true`); the leader starts it after that run.
+- Tasks: new databases get a nightly `cleanup-service` task (01:00); upgraded databases do not.
+- Tasks: `repository.cleanup` limits `maxComponents`/`scanAssets`; config `taskRunTimeoutHours`.
+- Tasks: `repository.purge-unused` deletes proxy components not downloaded for `lastUsed` days.
+- Tasks: `olderThanDays` for `blobstore.delete-temp-files`; `resetProxyMetadata` (apt proxies) for rebuilds.
+- Nexus API: task ids `repository.apt.rebuild.metadata`, `blobstore.metrics.reconcile`,
+  `repository.purge-unused`; `(All Blob Stores)` and `blobsOlderThan` 0; 400 with a reason for
+  publish-dotindex and other ids Command Center has no use for.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -81,6 +93,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checks name it; it is retried every few seconds.
 - Auto-block counts only the remote's own host and resets when remote access settings change.
 - HTTP settings: timeouts up to 3600 s; nonProxyHosts takes Java-style `*` globs.
+- Cleanup: age counts from when content was last written (ages, never-downloaded fallback, retain by date).
+- Tasks: run now of another task no longer answers 409 while a task runs; it is queued instead.
+- Nexus API: `blobstore.recalculate-size` tasks are listed as `blobstore.metrics.reconcile`.
 
 ### Fixed
 - A Nexus API repository PUT no longer resets the anonymous-read override, a yum repository's depth,
@@ -96,6 +111,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pending deliveries per webhook are now kept beside the 200 most recent sent or failed ones.
 - Nexus API: `metadataMaxAge`/`contentMaxAge`/`timeToLive` 0 and `negativeCache.enabled: false` were
   replaced by defaults; NTLM credentials were sent as Basic (now 400).
+- Nexus API: repository bodies with several `cleanup.policyNames` no longer drop all but the first.
 
 ### Upgrade notes
 - Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by
@@ -118,6 +134,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cached 404 instead of an uncached 502, so 502 rates in monitoring drop. A Terraform re-apply of a
   routing rule through the Nexus API changes it to whole-path matching. Saving a nonProxyHosts entry
   with a middle `*` is now refused.
+- Schema 8 also adds `tasks.notify_on`, `queued_by`, `queued_at`. During the rollout an older leader
+  leaves queued runs waiting until a new node leads, older nodes mail failures only, and an older node
+  that saves a repository with several policies keeps only the first: don't edit such repositories until
+  every node runs this version. No cleanup task is added on upgrade: create a `repository.cleanup` task if
+  repositories with policies should be cleaned nightly. Cleanup ages now start at the last write, so age
+  criteria delete the same or fewer components. Run now no longer refuses while another task runs:
+  scripts that relied on the 409 now get 202 with `queued: true`.
 
 ## [0.3.0] - 2026-10-30
 

@@ -367,3 +367,54 @@ func TestCleanupPreviewClientCancel(t *testing.T) {
 		t.Fatalf("logged: %s", logs.String())
 	}
 }
+
+// Several cleanup policies per repository (core-14): cleanupPolicies sets
+// them in order, cleanupPolicy is the first; a client that sends only
+// cleanupPolicy, or changes it in a body read back, sets that one alone.
+func TestRepositorySeveralCleanupPolicies(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	for _, b := range []string{`{"name":"mvn","format":"maven","componentAgeDays":30}`, `{"name":"keep3","format":"all","retain":3}`,
+		`{"name":"npm-only","format":"npm","componentAgeDays":30}`} {
+		wantStatus(t, e.admin(t, "POST", policiesPath, b), http.StatusCreated)
+	}
+	const repoPath = "/-/api/repositories/maven-releases"
+	policies := func(m map[string]any) string { return fmt.Sprintf("%v %v", m["cleanupPolicy"], m["cleanupPolicies"]) }
+	r := e.admin(t, "PUT", repoPath, `{"writePolicy":"allow","cleanupPolicies":["mvn","keep3","mvn"]}`)
+	wantStatus(t, r, http.StatusOK)
+	if got := policies(r.json(t)); got != "mvn [mvn keep3]" {
+		t.Fatalf("set: %s", got)
+	}
+	cfg := e.get(t, repoPath+"/config", "admin").json(t)
+	if got := policies(cfg); got != "mvn [mvn keep3]" {
+		t.Fatalf("config: %s", got)
+	}
+	// Both policies list the repository; the second cannot be deleted.
+	for _, p := range e.get(t, policiesPath, "admin").json(t)["policies"].([]any) {
+		pm := p.(map[string]any)
+		if want := map[string]string{"mvn": "[maven-releases]", "keep3": "[maven-releases]", "npm-only": "[]"}[pm["name"].(string)]; fmt.Sprint(pm["repositories"]) != want {
+			t.Fatalf("%s repositories: %v", pm["name"], pm["repositories"])
+		}
+	}
+	wantStatus(t, e.admin(t, "DELETE", policiesPath+"/keep3", ""), http.StatusConflict)
+	// An update without either keeps them; the body read back keeps them too.
+	if got := policies(e.admin(t, "PUT", repoPath, `{"writePolicy":"allow"}`).json(t)); got != "mvn [mvn keep3]" {
+		t.Fatalf("kept: %s", got)
+	}
+	if got := policies(e.admin(t, "PUT", repoPath, `{"writePolicy":"allow","cleanupPolicy":"mvn","cleanupPolicies":["mvn","keep3"]}`).json(t)); got != "mvn [mvn keep3]" {
+		t.Fatalf("read back: %s", got)
+	}
+	// A changed cleanupPolicy wins over the list read back with it.
+	if got := policies(e.admin(t, "PUT", repoPath, `{"writePolicy":"allow","cleanupPolicy":"keep3","cleanupPolicies":["mvn","keep3"]}`).json(t)); got != "keep3 [keep3]" {
+		t.Fatalf("changed cleanupPolicy: %s", got)
+	}
+	// Every policy is checked, each error named.
+	r = e.admin(t, "PUT", repoPath, `{"cleanupPolicies":["mvn","ghost","npm-only"]}`)
+	wantStatus(t, r, http.StatusBadRequest)
+	if !strings.Contains(r.body, "ghost") || !strings.Contains(r.body, "npm-only") {
+		t.Fatalf("bad: %s", r.body)
+	}
+	if got := policies(e.admin(t, "PUT", repoPath, `{"writePolicy":"allow","cleanupPolicies":[]}`).json(t)); got != " []" {
+		t.Fatalf("cleared: %s", got)
+	}
+	wantStatus(t, e.admin(t, "DELETE", policiesPath+"/keep3", ""), http.StatusNoContent)
+}

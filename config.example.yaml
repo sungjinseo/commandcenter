@@ -13,6 +13,7 @@ memoryLimitMiB: 80
 # 프로세스 환경의 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY(, AWS_SESSION_TOKEN)를 씁니다.
 # maxUploadMiB: 1024               # 업로드 본문 최대 크기(MiB). 기본 1024, 1..1048576. 초과하면 413
 # exportRoot: /var/lib/commandcenter-exports   # 저장소 내보내기·가져오기 작업이 읽고 쓰는 디렉터리(절대 경로, 또는 COMMANDCENTER_EXPORT_ROOT. 둘 다는 안 됨). 비우면 두 작업을 쓸 수 없음
+# taskRunTimeoutHours: 6           # 예약 작업 한 번의 최대 실행 시간(시간, 1-720). 모든 노드에 같은 값
 anonymousRead: true                # 익명 다운로드 허용 (저장소별 anonymousRead로 덮어쓰기 가능)
 
 users:

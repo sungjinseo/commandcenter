@@ -75,7 +75,8 @@ func TestCleanupPoliciesCompat(t *testing.T) {
 	}{
 		{"POST", path, body, 409, "already exists"},
 		{"POST", path, `{"name":"p2","format":"maven2","criteriaAssetRegex":"("}`, 400, `"id":"criteriaAssetRegex"`},
-		{"POST", path, `{"name":"p2","format":"maven2"}`, 400, "set criteriaLastBlobUpdated, criteriaLastDownloaded or retain"},
+		{"POST", path, `{"name":"p2","format":"maven2"}`, 400, "set criteriaLastBlobUpdated, criteriaLastDownloaded, retain or criteriaAssetRegex"},
+		{"POST", path, `{"name":"tmp-only","format":"raw","criteriaAssetRegex":"tmp/.*"}`, 201, `"criteriaAssetRegex":"tmp/.*"`},
 		{"POST", path, `{"name":"p2","format":"maven2","criteriaLastBlobUpdated":1,"criteriaReleaseType":"BOGUS"}`, 400, `"id":"criteriaReleaseType"`},
 		{"POST", path, `{"name":"p2","format":"bower","criteriaLastBlobUpdated":1}`, 400, "unknown format"},
 		{"POST", path, `{"name":"p2","format":"maven2","retain":2,"sortBy":"size"}`, 400, `unknown sortBy`},
@@ -103,7 +104,7 @@ func TestCleanupPoliciesCompat(t *testing.T) {
 			kinds = append(kinds, ev.Kind)
 		}
 	}
-	if strings.Join(kinds, ",") != "policy.delete,policy.update,policy.update,policy.create" {
+	if strings.Join(kinds, ",") != "policy.delete,policy.create,policy.update,policy.update,policy.create" { // the second create: tmp-only
 		t.Fatalf("events: %v", kinds)
 	}
 }
@@ -176,10 +177,11 @@ func TestTasksCompat(t *testing.T) {
 	}{
 		{"POST", v1 + "/tasks", `{"type":"tags.cleanup","name":"x","frequency":{"schedule":"manual"}}`, 400, "supported are blobstore.compact"},
 		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x"}`, 400, "frequency"},
-		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","frequency":{"schedule":"cron","cronExpression":"0 */5 * * * ?"}}`, 400, "cronExpression"},
-		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","frequency":{"schedule":"weekly","startDate":1900000000000,"recurringDays":[2,4]}}`, 400, "recurringDays"},
+		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","frequency":{"schedule":"cron","cronExpression":"0 0 1 * * *"}}`, 400, "cronExpression"},
+		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","frequency":{"schedule":"weekly","startDate":1900000000000,"recurringDays":[2,8]}}`, 400, "recurringDays"},
+		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","frequency":{"schedule":"monthly","startDate":1900000000000,"recurringDays":[]}}`, 400, "recurringDays"},
 		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","frequency":{"schedule":"daily"}}`, 400, "startDate"},
-		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","notificationCondition":"SUCCESS_FAILURE","frequency":{"schedule":"manual"}}`, 400, "notificationCondition"},
+		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","notificationCondition":"ALWAYS","frequency":{"schedule":"manual"}}`, 400, "notificationCondition"},
 		{"POST", v1 + "/tasks", `{"type":"blobstore.compact","name":"x","frequency":{"schedule":"manual"},"properties":{"blobstoreName":"nope"}}`, 400, "nope"},
 		{"PUT", v1 + "/tasks/" + id, `{"type":"repository.cleanup"}`, 400, "cannot change"},
 		{"PUT", v1 + "/tasks/missing", `{"name":"x"}`, 404, "not found"},
@@ -238,5 +240,136 @@ func TestSystemInformationCompat(t *testing.T) {
 		if strings.Contains(string(b), bad) {
 			t.Fatalf("leaked %q: %s", bad, b)
 		}
+	}
+}
+
+// Nexus task bodies Command Center now takes (wave 6): any cron expression,
+// several days a week or a month, mail on success, the type ids it serves
+// under another name, their properties, and the ids it refuses with a
+// reason.
+func TestTasksCompatSchedulesAndTypes(t *testing.T) {
+	e := start(t, false)
+	if st, b := e.ui("POST", "/-/api/repositories", `{"name":"apt-proxy","format":"apt","type":"proxy","remote":"https://deb.example.org/debian"}`); st != 201 {
+		t.Fatalf("apt proxy: %d %s", st, b)
+	}
+	start := time.Date(2030, 11, 1, 3, 30, 0, 0, time.UTC)
+	_, off := start.In(time.Local).Zone()
+	zone := fmt.Sprintf("%+03d:%02d", off/3600, off%3600/60) // the server's offset: days do not move
+	local := start.In(time.Local)
+	hm := fmt.Sprintf("%02d:%02d", local.Hour(), local.Minute())
+	create := func(body string) (string, map[string]any) {
+		t.Helper()
+		var it map[string]any
+		json.Unmarshal(e.want("POST", v1+"/tasks", "admin", body, 201), &it)
+		var m map[string]any
+		e.get("/-/api/tasks/"+it["id"].(string), "admin", &m)
+		return it["type"].(string), m
+	}
+	for _, tc := range []struct{ body, schedule string }{
+		{`{"type":"repository.cleanup","name":"q","frequency":{"schedule":"cron","cronExpression":"0 0/15 * * * ?"}}`, "cron:0 0/15 * * * ?"},
+		{`{"type":"repository.cleanup","name":"w","frequency":{"schedule":"cron","cronExpression":"0 0 2 ? * mon-fri"}}`, "cron:0 0 2 ? * MON-FRI"},
+		{`{"type":"repository.cleanup","name":"m","frequency":{"schedule":"cron","cronExpression":"0 0 2 31 * ?"}}`, "monthly:31:02:00"},
+		{fmt.Sprintf(`{"type":"repository.cleanup","name":"wk","frequency":{"schedule":"weekly","startDate":%d,"timeZoneOffset":%q,"recurringDays":[6,2,4]}}`,
+			start.UnixMilli(), zone), "weekly:mon,wed,fri:" + hm},
+		{fmt.Sprintf(`{"type":"repository.cleanup","name":"mo","frequency":{"schedule":"monthly","startDate":%d,"timeZoneOffset":%q,"recurringDays":[15,1,999]}}`,
+			start.UnixMilli(), zone), "monthly:1,15,last:" + hm},
+	} {
+		if _, m := create(tc.body); m["schedule"] != tc.schedule {
+			t.Errorf("%s: schedule %v, want %s", tc.body, m["schedule"], tc.schedule)
+		}
+	}
+
+	// Mail on success.
+	typ, m := create(`{"type":"blobstore.compact","name":"s","notificationCondition":"SUCCESS_FAILURE","alertEmail":"ops@example.com","frequency":{"schedule":"manual"}}`)
+	if typ != "blobstore.compact" || m["notifyOn"] != "success_failure" {
+		t.Fatalf("success mail: %v", m)
+	}
+	id := m["id"].(string)
+	e.want("PUT", v1+"/tasks/"+id, "admin", `{"notificationCondition":"FAILURE"}`, 204)
+	e.get("/-/api/tasks/"+id, "admin", &m)
+	if m["notifyOn"] != "failure" {
+		t.Fatalf("back to failure: %v", m)
+	}
+
+	// Type ids and properties.
+	for _, tc := range []struct{ body, nexusType, ccType, params string }{
+		{`{"type":"repository.apt.rebuild.metadata","name":"a","frequency":{"schedule":"manual"},
+			"properties":{"repositoryName":"*","rebuildAptMetadataFullRebuild":"true","resetProxyMetadata":"true"}}`,
+			"repository.apt.rebuild.metadata", "repository.rebuild-metadata", "map[format:apt resetProxyMetadata:true]"},
+		{`{"type":"repository.apt.rebuild.metadata","name":"a2","frequency":{"schedule":"manual"},"properties":{"repositoryName":"apt-proxy","resetProxyMetadata":"true"}}`,
+			"repository.apt.rebuild.metadata", "repository.rebuild-metadata", "map[format:apt repo:apt-proxy resetProxyMetadata:true]"},
+		{`{"type":"blobstore.metrics.reconcile","name":"r","frequency":{"schedule":"manual"},"properties":{"blobstoreName":"(All Blob Stores)"}}`,
+			"blobstore.metrics.reconcile", "blobstore.recalculate-size", "map[]"},
+		{`{"type":"blobstore.compact","name":"c","frequency":{"schedule":"manual"},"properties":{"blobstoreName":"(All Blob Stores)","blobsOlderThan":"0"}}`,
+			"blobstore.compact", "blobstore.compact", "map[]"},
+		{`{"type":"blobstore.delete-temp-files","name":"t","frequency":{"schedule":"manual"},"properties":{"blobstoreName":"default","olderThanDays":"2"}}`,
+			"blobstore.delete-temp-files", "blobstore.delete-temp-files", "map[blobStore:default olderThanDays:2]"},
+		{`{"type":"repository.purge-unused","name":"p","frequency":{"schedule":"manual"},"properties":{"repositoryName":"maven-central","lastUsed":"7"}}`,
+			"repository.purge-unused", "repository.purge-unused", "map[lastUsed:7 repos:[maven-central]]"},
+		{`{"type":"repository.purge-unused","name":"p2","frequency":{"schedule":"manual"},"properties":{"repositoryName":"*","lastUsed":"30"}}`,
+			"repository.purge-unused", "repository.purge-unused", "map[lastUsed:30 repos:[]]"},
+	} {
+		typ, m := create(tc.body)
+		if typ != tc.nexusType || m["type"] != tc.ccType || fmt.Sprint(m["params"]) != tc.params {
+			t.Errorf("%s: listed as %s, stored %v %v", tc.body, typ, m["type"], m["params"])
+		}
+		var item map[string]any
+		e.get(v1+"/tasks/"+m["id"].(string), "admin", &item)
+		if item["type"] != tc.nexusType {
+			t.Errorf("%s: GET type %v", tc.nexusType, item["type"])
+		}
+	}
+	// An update of an apt task keeps it an apt task.
+	var list struct{ Items []map[string]any }
+	e.get(v1+"/tasks", "admin", &list)
+	var aptID string
+	for _, it := range list.Items {
+		if it["name"] == "a2" {
+			aptID = it["id"].(string)
+		}
+	}
+	e.want("PUT", v1+"/tasks/"+aptID, "admin", `{"type":"repository.apt.rebuild.metadata","properties":{"repositoryName":"*","resetProxyMetadata":"true"}}`, 204)
+	e.get("/-/api/tasks/"+aptID, "admin", &m)
+	if fmt.Sprint(m["params"]) != "map[format:apt resetProxyMetadata:true]" {
+		t.Fatalf("apt update: %v", m["params"])
+	}
+
+	for _, tc := range []struct {
+		body string
+		has  string
+	}{
+		{`{"type":"repository.maven.publish-dotindex","name":"x","frequency":{"schedule":"manual"},"properties":{"repositoryName":"maven-releases"}}`, "/service/rest/v1/search"},
+		{`{"type":"repository.maven.unpublish-dotindex","name":"x","frequency":{"schedule":"manual"}}`, "nothing to unpublish"},
+		{`{"type":"create.browse.nodes","name":"x","frequency":{"schedule":"manual"}}`, "not needed"},
+		{`{"type":"h2.backup.task","name":"x","frequency":{"schedule":"manual"}}`, "pg_dump"},
+		{`{"type":"blobstore.compact","name":"x","frequency":{"schedule":"manual"},"properties":{"blobsOlderThan":"3"}}`, "keeps no deleted blobs"},
+		{`{"type":"repository.apt.rebuild.metadata","name":"x","frequency":{"schedule":"manual"},"properties":{"repositoryName":"apt-proxy"}}`, "resetProxyMetadata"},
+		{`{"type":"repository.apt.rebuild.metadata","name":"x","frequency":{"schedule":"manual"},"properties":{"repositoryName":"maven-releases"}}`, "not apt"},
+		{`{"type":"nope","name":"x","frequency":{"schedule":"manual"}}`, "repository.apt.rebuild.metadata"},
+	} {
+		if b := e.want("POST", v1+"/tasks", "admin", tc.body, 400); !strings.Contains(string(b), tc.has) {
+			t.Errorf("%s: %s", tc.body, b)
+		}
+	}
+}
+
+// Several cleanup policies through the Nexus repository API (core-14).
+func TestRepositoryPolicyNames(t *testing.T) {
+	e := start(t, false)
+	for _, p := range []string{"weekly", "keep"} {
+		e.want("POST", v1+"/cleanup-policies", "admin", fmt.Sprintf(`{"name":%q,"format":"maven2","criteriaLastBlobUpdated":30}`, p), 201)
+	}
+	body := `{"name":"maven-releases","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true,"writePolicy":"ALLOW_ONCE"},
+	  "cleanup":{"policyNames":["weekly","keep"]},"maven":{"versionPolicy":"RELEASE","layoutPolicy":"STRICT"}}`
+	e.want("PUT", v1+"/repositories/maven/hosted/maven-releases", "admin", body, 204)
+	var got map[string]any
+	e.get(v1+"/repositories/maven/hosted/maven-releases", "admin", &got)
+	if names := fmt.Sprint(got["cleanup"].(map[string]any)["policyNames"]); names != "[weekly keep]" {
+		t.Fatalf("policyNames: %s", names)
+	}
+	e.want("PUT", v1+"/repositories/maven/hosted/maven-releases", "admin", strings.Replace(body, `["weekly","keep"]`, `[]`, 1), 204)
+	e.get(v1+"/repositories/maven/hosted/maven-releases", "admin", &got)
+	if names := fmt.Sprint(got["cleanup"].(map[string]any)["policyNames"]); names != "[]" {
+		t.Fatalf("cleared: %s", names)
 	}
 }

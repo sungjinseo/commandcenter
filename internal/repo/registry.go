@@ -96,7 +96,7 @@ func (e *ValidationError) Error() string { return strings.Join(e.Errors, "; ") }
 // ClearSecrets holds Update's options. Password and BearerToken ask it to
 // drop the stored remote credentials; without them, an empty password or
 // bearer token keeps the stored value. KeepCleanupPolicy keeps the stored
-// cleanupPolicy, whatever def says (the API's absent field); it is applied
+// cleanup policies, whatever def says (the API's absent field); it is applied
 // under the write lock, so a concurrent change is not undone.
 type ClearSecrets struct {
 	Password          bool
@@ -379,7 +379,7 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	}
 	def.Connection = config.CleanConnection(def.Connection)
 	if clear.KeepCleanupPolicy {
-		def.CleanupPolicy = cur.CleanupPolicy
+		def.CleanupPolicy, def.CleanupPolicies = cur.CleanupPolicy, slices.Clone(cur.CleanupPolicies)
 	}
 	if clear.KeepFirewall {
 		def.Firewall = cloneDef(cur.Repository).Firewall
@@ -473,25 +473,31 @@ func (r *Registry) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
-// checkPolicy checks the cleanup policy that def names, if any: it must
-// exist and be for all formats or def's format. The static rules (hosted or
-// proxy, not Cargo hosted) are config.ValidateRepositories'.
+// checkPolicy checks the cleanup policies that def names, if any: each
+// must exist and be for all formats or def's format. The static rules
+// (hosted or proxy, not Cargo hosted) are config.ValidateRepositories'.
 func (r *Registry) checkPolicy(ctx context.Context, def config.Repository) error {
-	name := def.CleanupPolicy
-	if name == "" {
+	names := def.CleanupPolicyNames()
+	if len(names) == 0 {
 		return nil
 	}
 	if r.Policies == nil {
 		return &ValidationError{Errors: []string{fmt.Sprintf("repository %q: cleanup policies are not available", def.Name)}}
 	}
-	format, ok, err := r.Policies(ctx, name)
-	switch {
-	case err != nil:
-		return err
-	case !ok:
-		return &ValidationError{Errors: []string{fmt.Sprintf("repository %q: unknown cleanup policy %q", def.Name, name)}}
-	case format != "all" && format != def.Format:
-		return &ValidationError{Errors: []string{fmt.Sprintf("repository %q: cleanup policy %q is for %s repositories", def.Name, name, format)}}
+	var errs []string
+	for _, name := range names {
+		format, ok, err := r.Policies(ctx, name)
+		switch {
+		case err != nil:
+			return err
+		case !ok:
+			errs = append(errs, fmt.Sprintf("repository %q: unknown cleanup policy %q", def.Name, name))
+		case format != "all" && format != def.Format:
+			errs = append(errs, fmt.Sprintf("repository %q: cleanup policy %q is for %s repositories", def.Name, name, format))
+		}
+	}
+	if len(errs) > 0 {
+		return &ValidationError{Errors: errs}
 	}
 	return nil
 }

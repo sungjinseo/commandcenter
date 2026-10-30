@@ -63,6 +63,7 @@ func init() {
 // delete or move content a reconcile plan may need.
 var recoveryRefused = map[string]bool{
 	TypeCompact: true, TypeCleanup: true, TypePurge: true, TypeChangeBlobStore: true, TypeGroupRemove: true, TypeImport: true,
+	TypePurgeUnused: true,
 }
 
 // recoverySkip returns why a run of type typ is skipped now, "" when it

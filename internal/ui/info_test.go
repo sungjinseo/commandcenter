@@ -142,9 +142,16 @@ func TestSystemInformation(t *testing.T) {
 	}
 }
 
+// firstTask is the built-in compaction task as the list shows it.
 func firstTask(t *testing.T, e *env) map[string]any {
 	t.Helper()
-	return e.get(t, "/-/api/tasks", "admin").json(t)["tasks"].([]any)[0].(map[string]any)
+	for _, x := range e.get(t, "/-/api/tasks", "admin").json(t)["tasks"].([]any) {
+		if m := x.(map[string]any); m["id"] == tasks.SeedID {
+			return m
+		}
+	}
+	t.Fatal("no " + tasks.SeedID + " task")
+	return nil
 }
 
 func TestTasks(t *testing.T) {

@@ -369,6 +369,15 @@ func TestSeedOnFirstStartOnly(t *testing.T) {
 	if tk.Type != TypeCompact || tk.Schedule != "daily:03:00" || !tk.Enabled || !tk.NextRun.Equal(time.Date(2026, 10, 20, 3, 0, 0, 0, time.UTC)) {
 		t.Fatalf("seed: %+v", tk)
 	}
+	// The nightly cleanup of every repository with a policy (core-16).
+	cl := h.get(t, CleanupSeedID)
+	if cl.Type != TypeCleanup || cl.Name != "Cleanup service" || cl.Schedule != "daily:01:00" || !cl.Enabled || cl.Params != `{"repos":[]}` ||
+		!cl.NextRun.Equal(time.Date(2026, 10, 21, 1, 0, 0, 0, time.UTC)) {
+		t.Fatalf("cleanup seed: %+v", cl)
+	}
+	if err := h.s.Delete(ctx, CleanupSeedID); err != nil { // deletable, unlike the compaction seed
+		t.Fatal(err)
+	}
 	if err := h.db.DeleteTask(ctx, SeedID); err != nil {
 		t.Fatal(err)
 	}
@@ -377,6 +386,33 @@ func TestSeedOnFirstStartOnly(t *testing.T) {
 	}
 	if list, _ := h.s.List(ctx); len(list) != 0 {
 		t.Fatalf("seeded again: %+v", list)
+	}
+}
+
+// A database that has tasks, or was seeded by an older version (the flag
+// set), gets no cleanup seed: upgrades never add a deleting task.
+func TestCleanupSeedNotOnUpgrade(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	// An older version seeded the compaction task only.
+	old := meta.Task{ID: SeedID, Name: "Compact blob store", Type: TypeCompact, Schedule: seedSchedule, Params: "{}", Enabled: true}
+	if ok, err := h.db.SeedTask(ctx, seedFlag, old); err != nil || !ok {
+		t.Fatalf("old seed: %v %v", ok, err)
+	}
+	if err := h.s.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.s.Get(ctx, CleanupSeedID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cleanup seed on upgrade: %v", err)
+	}
+	// A database with tasks and no flag (before the seed existed) neither.
+	h2 := newHarness(t)
+	h2.create(t, Def{Name: "mine", Type: TypeCompact, Schedule: "manual"})
+	if err := h2.s.Seed(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := h2.s.List(ctx); len(list) != 1 || list[0].Name != "mine" {
+		t.Fatalf("tasks: %+v", list)
 	}
 }
 

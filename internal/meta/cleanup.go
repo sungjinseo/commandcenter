@@ -109,7 +109,7 @@ func (d *DB) UpdateCleanupPolicy(ctx context.Context, p CleanupPolicy) error {
 }
 
 // DeleteCleanupPolicy removes the named policy unless a stored repository
-// definition names it (a *PolicyInUseError listing them), in one transaction.
+// definition names it (cleanupPolicy or cleanupPolicies) (a *PolicyInUseError listing them), in one transaction.
 // ErrNotFound if there is no such policy.
 func (d *DB) DeleteCleanupPolicy(ctx context.Context, name string) error {
 	return d.Tx(ctx, func(tx *Tx) error {
@@ -138,7 +138,8 @@ func (d *DB) RepositoriesUsingPolicy(ctx context.Context, name string) ([]string
 }
 
 func reposUsingPolicy(ctx context.Context, q querier, name string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `SELECT name FROM repositories WHERE config::json ->> 'cleanupPolicy' = ? ORDER BY name`, name)
+	rows, err := q.QueryContext(ctx, `SELECT name FROM repositories WHERE config::jsonb ->> 'cleanupPolicy' = ?
+  OR config::jsonb -> 'cleanupPolicies' @> jsonb_build_array(?::text) ORDER BY name`, name, name)
 	if err != nil {
 		return nil, err
 	}

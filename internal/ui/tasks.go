@@ -36,6 +36,8 @@ type taskJSON struct {
 	Enabled        bool            `json:"enabled"`
 	Params         json.RawMessage `json:"params"`
 	NotifyEmail    []string        `json:"notifyEmail"`
+	NotifyOn       string          `json:"notifyOn"` // failure or success_failure
+	Queued         bool            `json:"queued"`   // a run now waits for the running task (RunOrQueue)
 	NextRun        string          `json:"nextRun"`
 	LastRun        string          `json:"lastRun"`
 	LastResult     string          `json:"lastResult"`
@@ -66,7 +68,7 @@ func (u *UI) toTaskJSON(t meta.Task, running string, withLog bool) taskJSON {
 	}
 	out := taskJSON{
 		ID: t.ID, Name: t.Name, Type: t.Type, TypeName: tasks.TypeName(t.Type), Status: status,
-		Schedule: t.Schedule, Enabled: t.Enabled, Params: params, NotifyEmail: notify,
+		Schedule: t.Schedule, Enabled: t.Enabled, Params: params, NotifyEmail: notify, NotifyOn: t.NotifyOn, Queued: !t.QueuedAt.IsZero(),
 		NextRun: rfc3339(t.NextRun), LastRun: rfc3339(t.LastRun), LastResult: t.LastResult,
 		LastDurationMs: t.LastDurationMs, LastRemoved: t.LastRemoved, LastBytes: t.LastBytes,
 		LastMessage: t.LastMessage, Created: rfc3339(t.Created), Updated: rfc3339(t.Updated),
@@ -206,16 +208,19 @@ func (u *UI) deleteTask(w http.ResponseWriter, r *http.Request) {
 }
 
 // runTask starts a task now and answers 202 at once; the task list shows it
-// Running, then its last result. 409 while a task runs.
+// Running, then its last result. While another task runs it is queued
+// instead (202 with queued true): the scheduler starts it when that run
+// ends. 409 while the task itself runs.
 func (u *UI) runTask(w http.ResponseWriter, r *http.Request) {
 	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) || !u.tasksAvailable(w) {
 		return
 	}
-	if err := u.Tasks.RunAsync(r.PathValue("id"), principal(r).Owner()); err != nil {
+	queued, err := u.Tasks.RunOrQueue(r.PathValue("id"), principal(r).Owner())
+	if err != nil {
 		u.writeTaskError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"started": true})
+	writeJSON(w, http.StatusAccepted, map[string]any{"started": !queued, "queued": queued})
 }
 
 // runGC is the plan 7 alias of running the compact task. It waits for the

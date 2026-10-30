@@ -259,10 +259,15 @@ func (im *importer) target(ctx context.Context) error {
 			im.log.Warnf("%s: blob store %q does not exist here: using the default store", im.dest, def.BlobStore)
 			def.BlobStore = ""
 		}
-		if def.CleanupPolicy != "" && !im.policyExists(ctx, def.CleanupPolicy) {
-			im.log.Warnf("%s: cleanup policy %q does not exist here: created without one", im.dest, def.CleanupPolicy)
-			def.CleanupPolicy = ""
+		var policies []string
+		for _, p := range def.CleanupPolicyNames() {
+			if im.policyExists(ctx, p) {
+				policies = append(policies, p)
+			} else {
+				im.log.Warnf("%s: cleanup policy %q does not exist here: created without it", im.dest, p)
+			}
 		}
+		def.SetCleanupPolicies(policies)
 		if def.RoutingRule != "" && im.s.Repos.Route(def.RoutingRule) == nil {
 			im.log.Warnf("%s: routing rule %q does not exist here: created without one", im.dest, def.RoutingRule)
 			def.RoutingRule = ""

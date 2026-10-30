@@ -220,3 +220,62 @@ func TestNoRecipientsNeverTouchesMailer(t *testing.T) {
 		t.Fatal("run blocked")
 	}
 }
+
+// notifyOn success_failure mails a finished run as well, but never a
+// stopped one; the default stays failure only (core-36).
+func TestNotifyOnSuccess(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	m := &fakeMailer{}
+	h.s.Mail = m
+	enableSMTP(t, h, "ko")
+	notify := []string{"ops@example.com"}
+	if _, err := h.s.Create(ctx, Def{Name: "bad", Type: TypeCompact, Schedule: "manual", NotifyOn: "always"}); err == nil || !strings.Contains(err.Error(), "notifyOn") {
+		t.Fatalf("bad notifyOn: %v", err)
+	}
+	tk := h.create(t, Def{Name: "Nightly compact", Type: TypeCompact, Schedule: "manual", NotifyEmail: notify, NotifyOn: NotifySuccessFailure})
+	if tk.NotifyOn != NotifySuccessFailure {
+		t.Fatalf("stored %q", tk.NotifyOn)
+	}
+	if out, _ := h.s.RunNow(tk.ID, "admin"); out.Result != ResultOK {
+		t.Fatalf("%+v", out)
+	}
+	got := m.all()
+	if len(got) != 1 || !strings.Contains(got[0].subject, "작업 완료: Nightly compact") || !strings.Contains(got[0].body, "완료되었습니다") ||
+		!strings.Contains(got[0].body, "removed 3 blobs") {
+		t.Fatalf("mails %+v", got)
+	}
+	// An update that omits notifyOn keeps it; failure turns success mail off.
+	if up, err := h.s.Update(ctx, tk.ID, Def{Name: "renamed"}); err != nil || up.NotifyOn != NotifySuccessFailure {
+		t.Fatalf("kept: %q %v", up.NotifyOn, err)
+	}
+	if up, err := h.s.Update(ctx, tk.ID, Def{NotifyOn: NotifyFailure}); err != nil || up.NotifyOn != NotifyFailure {
+		t.Fatalf("set: %q %v", up.NotifyOn, err)
+	}
+	h.s.RunNow(tk.ID, "admin")
+	if n := len(m.all()); n != 1 {
+		t.Fatalf("%d mails after a failure-only OK run", n)
+	}
+	def := h.create(t, Def{Name: "default", Type: TypeCompact, Schedule: "manual", NotifyEmail: notify})
+	if def.NotifyOn != NotifyFailure {
+		t.Fatalf("default %q", def.NotifyOn)
+	}
+
+	// Stopped: no mail, even with success_failure.
+	h.s.Update(ctx, tk.ID, Def{NotifyOn: NotifySuccessFailure})
+	started := make(chan struct{})
+	h.s.GC = func(ctx context.Context, _ string) (int, int64, error) {
+		close(started)
+		<-ctx.Done()
+		return 0, 0, ctx.Err()
+	}
+	if err := h.s.RunAsync(tk.ID, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	h.s.StopRun(tk.ID)
+	waitIdle(t, h.s)
+	if got := h.get(t, tk.ID); got.LastResult != ResultStopped || len(m.all()) != 1 {
+		t.Fatalf("stopped: %s, %d mails", got.LastResult, len(m.all()))
+	}
+}

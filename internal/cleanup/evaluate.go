@@ -22,8 +22,8 @@ const DefaultScanBudget = 20000
 var scanPage = 1000
 
 // Candidate is a component a policy selects for deletion. Component.Assets
-// lists every asset found for it, and LastUpdated is its newest asset's
-// creation time.
+// lists every asset found for it, and LastUpdated is when its content was
+// last written (written).
 type Candidate struct {
 	component.Component
 	Created        time.Time // the oldest asset's creation time
@@ -47,6 +47,7 @@ type compAgg struct {
 	oldest        time.Time // min created
 	newest        time.Time // max created
 	modified      time.Time // max last_modified
+	written       time.Time // max over assets of the later of created and last_modified (assetWritten)
 	lastDl        time.Time // max last_downloaded
 	lastUsed      time.Time // max over assets of last_downloaded, or created if never downloaded
 	unknownCreate bool      // an asset has no creation time
@@ -203,7 +204,7 @@ scan:
 		}
 		res.Candidates = append(res.Candidates, Candidate{
 			Component: component.Component{Repo: rp.Name, Format: rp.Format, Group: k.group, Name: k.name, Version: k.version,
-				LastUpdated: c.newest, Assets: c.assets,
+				LastUpdated: c.written, Assets: c.assets,
 				Evaluated: &component.Evaluated{Paths: paths, MaxCreated: c.newest, MaxModified: c.modified, LastDownloaded: c.lastDl}},
 			Created: c.oldest, LastDownloaded: c.lastDl, Bytes: c.bytes, Reason: reason,
 		})
@@ -246,16 +247,33 @@ func addAsset(comps map[compKey]*compAgg, format string, a meta.ScanAsset) {
 	if a.Modified.After(c.modified) {
 		c.modified = a.Modified
 	}
+	written := assetWritten(a)
+	if written.After(c.written) {
+		c.written = written
+	}
 	if a.LastDownloaded.After(c.lastDl) {
 		c.lastDl = a.LastDownloaded
 	}
 	used := a.LastDownloaded
 	if used.IsZero() {
-		used = a.Created
+		used = written
 	}
 	if used.After(c.lastUsed) {
 		c.lastUsed = used
 	}
+}
+
+// assetWritten is when a's current content was written, as near as the row
+// tells (core-17; Nexus ages by the blob's creation): created_at stays at
+// the first upload when the content is replaced, while last_modified moves
+// with it. A proxy's last_modified is the remote's Last-Modified, usually
+// older than the copy, so the later of the two is taken: an age never
+// counts from before the content was first stored here.
+func assetWritten(a meta.ScanAsset) time.Time {
+	if a.Modified.After(a.Created) {
+		return a.Modified
+	}
+	return a.Created
 }
 
 // unitPrefix returns a path prefix that every asset of the component of p
@@ -415,7 +433,7 @@ func rankVersions(format, sortBy string, comps map[compKey]*compAgg) {
 	byDate := sortBy == "date" || !HasVersionOrder(format)
 	newer := func(a, b compKey) int { // > 0: a is newer
 		if byDate {
-			return comps[a].newest.Compare(comps[b].newest) // an unknown time ranks oldest
+			return comps[a].written.Compare(comps[b].written) // an unknown time ranks oldest
 		}
 		return CompareVersions(format, a.version, b.version)
 	}
@@ -481,13 +499,13 @@ func (p Policy) selects(format string, k compKey, c *compAgg, m *matchers, now t
 		why = append(why, fmt.Sprintf("version %d of %d by %s, retain %d", c.rank, c.ranked, p.RetainSortBy, p.Retain))
 	}
 	if p.ComponentAgeDays > 0 {
-		if !olderThan(c.newest, p.ComponentAgeDays, now) {
+		if !olderThan(c.written, p.ComponentAgeDays, now) {
 			return ""
 		}
-		why = append(why, fmt.Sprintf("updated %d days ago (componentAgeDays %d)", int(now.Sub(c.newest)/(24*time.Hour)), p.ComponentAgeDays))
+		why = append(why, fmt.Sprintf("updated %d days ago (componentAgeDays %d)", int(now.Sub(c.written)/(24*time.Hour)), p.ComponentAgeDays))
 	}
 	if p.LastDownloadedDays > 0 {
-		if !olderThan(c.lastUsed, p.LastDownloadedDays, now) {
+		if !olderThan(c.lastUsed, p.LastDownloadedDays, now) || p.DownloadedOnly && c.lastDl.IsZero() {
 			return ""
 		}
 		why = append(why, fmt.Sprintf("not downloaded for %d days (lastDownloadedDays %d)", int(now.Sub(c.lastUsed)/(24*time.Hour)), p.LastDownloadedDays))

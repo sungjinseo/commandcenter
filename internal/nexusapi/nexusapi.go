@@ -359,10 +359,7 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 	if d.Type == "hosted" {
 		storage["writePolicy"] = strings.ToUpper(d.WritePolicy)
 	}
-	policies := []string{}
-	if d.CleanupPolicy != "" {
-		policies = []string{d.CleanupPolicy}
-	}
+	policies := append([]string{}, d.CleanupPolicyNames()...)
 	out := map[string]any{"name": d.Name, "format": nexusFormat(d.Format), "type": d.Type, "url": h.repoURL(d.Name),
 		"online": d.IsOnline(), "storage": storage}
 	if d.Type != "group" { // a Nexus group carries storage and group only
@@ -572,12 +569,8 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 	} else if b.RoutingRuleName != nil {
 		out["routingRule"] = *b.RoutingRuleName
 	}
-	if b.Cleanup != nil { // ponytail: one policy per repository here; Nexus allows several
-		name := ""
-		if len(b.Cleanup.PolicyNames) > 0 {
-			name = b.Cleanup.PolicyNames[0]
-		}
-		out["cleanupPolicy"] = name
+	if b.Cleanup != nil {
+		out["cleanupPolicies"] = append([]string{}, b.Cleanup.PolicyNames...)
 	}
 	if a := b.HTTPClient.Authentication; a != nil {
 		if strings.EqualFold(a.Type, "bearerToken") { // an empty token on update keeps the stored one
@@ -1501,6 +1494,7 @@ var nexusTaskTypes = map[string]string{
 	"blobstore.compact":           "blobstore.compact",
 	"blobstore.delete-temp-files": "blobstore.delete-temp-files",
 	"repository.cleanup":          "repository.cleanup",
+	"blobstore.recalculate-size":  "blobstore.metrics.reconcile",
 }
 
 func nexusTaskType(typ string) string {

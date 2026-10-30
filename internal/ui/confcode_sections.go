@@ -93,7 +93,7 @@ func init() {
 				// document keeps it without them.
 				{path: "remote", clear: "clearRemoteHiddenParts", when: remoteHidden, show: remotePublic},
 			},
-			keep: []string{"online", "autoBlock", "cleanupPolicy", "firewall"},
+			keep: []string{"online", "autoBlock", "cleanupPolicy", "cleanupPolicies", "firewall"},
 			canon: func(o confObj) any {
 				r := asConf[repoRequest](o)
 				d, _, err := r.definition()
@@ -146,7 +146,7 @@ func init() {
 			},
 			check: checkRealms},
 		{name: "tasks", key: "name", base: "/-/api/tasks", proto: func() any { return new(tasks.Def) }, extra: []string{"builtin"},
-			keep: []string{"enabled", "notifyEmail"}, keyOf: taskKey, idOf: taskID,
+			keep: []string{"enabled", "notifyEmail", "notifyOn"}, keyOf: taskKey, idOf: taskID,
 			keepDel: func(k string) bool { return k == tasks.SeedID },
 			avail:   func(u *UI) bool { return u.Tasks != nil }, read: readTasks, check: checkTasks},
 		{name: "webhooks", key: "name", base: "/-/api/webhooks", proto: func() any { return new(webhookRequest) },
@@ -465,6 +465,10 @@ func repoRequestOf(d config.Repository) repoRequest {
 	}
 	cp, on := d.CleanupPolicy, d.IsOnline()
 	b.CleanupPolicy, b.Online = &cp, &on
+	if len(d.CleanupPolicies) > 1 { // one policy: cleanupPolicy alone, as before
+		cps := slices.Clone(d.CleanupPolicies)
+		b.CleanupPolicies = &cps
+	}
 	if a := d.RemoteAuth; a != nil {
 		b.RemoteAuth = &repoAuthRequest{Username: a.Username, Password: a.Password, BearerToken: a.BearerToken}
 	}
@@ -978,7 +982,7 @@ func readTasks(c *confRun) ([]any, error) {
 	var out []any
 	for _, t := range list {
 		o := confObj{"name": t.Name, "type": t.Type, "schedule": t.Schedule, "params": json.RawMessage(t.Params),
-			"enabled": t.Enabled, "notifyEmail": nonNil(t.NotifyEmail)}
+			"enabled": t.Enabled, "notifyEmail": nonNil(t.NotifyEmail), "notifyOn": t.NotifyOn}
 		if !json.Valid([]byte(t.Params)) {
 			o["params"] = json.RawMessage("{}")
 		}
@@ -1096,6 +1100,11 @@ func (c *confRun) checkRefs() {
 		ref(at, "repositories", k, "routingRules", r.RoutingRule)
 		if r.CleanupPolicy != nil {
 			ref(at, "repositories", k, "cleanupPolicies", *r.CleanupPolicy)
+		}
+		if r.CleanupPolicies != nil {
+			for _, p := range *r.CleanupPolicies {
+				ref(at, "repositories", k, "cleanupPolicies", p)
+			}
 		}
 		for _, m := range append(slices.Clone(r.Members), r.WriteMember) {
 			ref(at, "repositories", k, "repositories", m)

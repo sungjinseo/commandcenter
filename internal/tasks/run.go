@@ -38,6 +38,7 @@ const (
 	recordNone      recordMode = iota // an ad-hoc run without a task row
 	recordManual                      // run now: next_run is left alone
 	recordScheduled                   // a due run: next_run is recomputed
+	recordQueued                      // a queued run now (RunOrQueue): as recordManual, if still queued
 )
 
 // runLock is the cluster lock (meta.DB.TryLock) a run holds from before it
@@ -169,13 +170,35 @@ func (s *Service) baseContext() context.Context {
 	return context.Background()
 }
 
-// RunDue runs the enabled tasks whose next run has come, one after the
-// other, as the system, on the leader only (meta.DB.Leader). When a run is
-// already going (a "run now", or on another node), it returns: the tasks
-// are still due at the next tick.
+// RunDue runs, on the leader only (meta.DB.Leader), the queued runs (see
+// RunOrQueue) as whoever asked for them, oldest first, then the enabled
+// tasks whose next run has come, as the system, one after the other. When
+// a run is already going (a "run now", or on another node), it returns:
+// the runs still wait at the next tick.
+//
+// A task whose next run passed while no node ran the scheduler (all of
+// them were down) runs once at the first tick, however many runs it
+// missed, and its next run is then computed from that time (core-47).
 func (s *Service) RunDue(ctx context.Context) {
 	if !s.DB.Leader() {
 		return
+	}
+	queued, err := s.DB.QueuedTasks(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log().Warn("scheduler: could not list queued runs", "err", logsafe.Err(err))
+		}
+		return
+	}
+	for _, t := range queued {
+		if ctx.Err() != nil {
+			return
+		}
+		_, err := s.run(t.ID, t.QueuedBy, recordQueued)
+		var busy *BusyError
+		if errors.As(err, &busy) {
+			return
+		}
 	}
 	due, err := s.DB.DueTasks(ctx, s.now())
 	if err != nil {
@@ -218,6 +241,28 @@ func (s *Service) RunAsync(id, actor string) error {
 	return nil
 }
 
+// RunOrQueue is RunAsync, except that while another task runs, on any
+// node, the run is queued instead of refused and queued is true: the
+// leader starts it at a scheduler tick once the run lock is free, as
+// actor, and records it as a run now. A second request for a task that
+// is already queued keeps the first. Different tasks never run at once:
+// compaction, blob store moves and reconcile plans rely on it. A
+// *BusyError when task id itself is running, ErrNotFound for an unknown
+// id.
+func (s *Service) RunOrQueue(id, actor string) (queued bool, err error) {
+	err = s.RunAsync(id, actor)
+	var busy *BusyError
+	if !errors.As(err, &busy) || busy.Running == id {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.DB.QueueTaskRun(ctx, id, actor, s.now()); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // RunCompact runs blob store compaction for actor and waits for it (POST
 // /-/api/gc): the first blobstore.compact task when one exists, so its
 // state is recorded, otherwise an unrecorded run with the type as the
@@ -246,7 +291,8 @@ func (s *Service) RunCompact(actor string) (Outcome, error) {
 
 // run takes the run lock (or answers *BusyError), reads the task and runs
 // it. A scheduled run skips a task that is no longer due (disabled,
-// rescheduled or deleted while another task ran).
+// rescheduled or deleted while another task ran), a queued one a task no
+// longer queued (another run of it began).
 func (s *Service) run(id, actor string, mode recordMode) (Outcome, error) {
 	unlock, err := s.Acquire()
 	if err != nil {
@@ -257,7 +303,8 @@ func (s *Service) run(id, actor string, mode recordMode) (Outcome, error) {
 		unlock()
 		return Outcome{}, err
 	}
-	if mode == recordScheduled && (!t.Enabled || t.NextRun.IsZero() || t.NextRun.After(s.now()) || s.isDeferred(t.ID)) {
+	if mode == recordScheduled && (!t.Enabled || t.NextRun.IsZero() || t.NextRun.After(s.now()) || s.isDeferred(t.ID)) ||
+		mode == recordQueued && t.QueuedAt.IsZero() {
 		unlock()
 		return Outcome{}, nil
 	}
@@ -284,6 +331,12 @@ func (s *Service) begin(id string, unlock func()) chan struct{} {
 	s.runCtx, s.runStop, s.unlock = ctx, stop, unlock
 	s.mu.Unlock()
 	s.mark(id, s.now())
+	// Any run begun now answers a run now that waits for one.
+	uctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.DB.UnqueueTask(uctx, id); err != nil {
+		s.log().Warn("could not drop the queued run of a task that began", "task", id, "err", logsafe.Err(err))
+	}
 	return done
 }
 
@@ -420,16 +473,14 @@ func (s *Service) execute(t meta.Task, actor string, mode recordMode, done chan 
 	if mode != recordNone {
 		s.record(t, out, rlog, mode == recordScheduled)
 	}
-	if out.Result == ResultFailed {
-		s.notifyFailure(t, out, rlog)
-	}
+	s.notifyRun(t, out, rlog)
 	if s.Events != nil {
 		detail := out.Result + ": " + out.Message
 		if out.Result == ResultOK {
 			detail = fmt.Sprintf("%s: %s in %d ms", ResultOK, out.Message, out.DurationMs)
 		}
 		s.Events.Emit("task.run", actor, "", t.ID, detail)
-		if t.Type == TypeCleanup {
+		if t.Type == TypeCleanup || t.Type == TypePurgeUnused {
 			s.Events.Emit("cleanup", actor, "", t.ID, cleanupDetail(sum))
 		}
 	}
