@@ -268,6 +268,8 @@ type Repository struct {
 	// (Nexus "blocked"): cached content is served stale, the rest is 502.
 	AutoBlock *bool `yaml:"autoBlock,omitempty" json:"autoBlock,omitempty"`
 	Blocked   bool  `yaml:"blocked,omitempty" json:"blocked,omitempty"`
+	// Replication (proxy; nil is none) is pull replication (replication.go).
+	Replication *Replication `yaml:"replication,omitempty" json:"replication,omitempty"`
 }
 
 // AutoBlocks reports whether a proxy auto-blocks; unset means yes.
@@ -657,6 +659,9 @@ func ValidateDefinition(r Repository) error {
 			continue
 		}
 		seen[m] = true
+	}
+	if err := validateReplication(r); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

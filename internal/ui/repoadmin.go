@@ -86,6 +86,9 @@ type repoRequest struct {
 	// Firewall (proxy only): absent (null) keeps the stored one on update
 	// and means none on create.
 	Firewall *config.Firewall `json:"firewall"`
+	// Replication (proxy only): pull replication; absent (null) keeps the
+	// stored one on update and means none on create.
+	Replication *config.Replication `json:"replication"`
 }
 
 // repoAuthResponse never carries a secret.
@@ -125,6 +128,17 @@ type repoConfigResponse struct {
 	Blocked                     bool          `json:"blocked"`
 	AutoBlock                   bool          `json:"autoBlock"`
 	Firewall                    *firewallJSON `json:"firewall,omitempty"` // proxies of a format with OSV data
+	// Proxies of a format with pull replication: its settings, and the
+	// source the remote names (null when it names no hosted repository).
+	Replication       *config.Replication `json:"replication,omitempty"`
+	ReplicationSource *replicationSource  `json:"replicationSource,omitempty"`
+}
+
+// replicationSource is the instance and hosted repository a proxy's remote
+// names (config.ReplicationSource), without credentials.
+type replicationSource struct {
+	URL        string `json:"url"`
+	Repository string `json:"repository"`
 }
 
 // firewallJSON is a proxy's firewall with its defaults applied.
@@ -193,6 +207,15 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		AutoBlock:                   d.Type == "proxy" && d.AutoBlocks(),
 		Firewall:                    firewallOf(d),
 	}
+	if d.Type == "proxy" && config.ReplicationFormats[d.Format] {
+		out.Replication = &config.Replication{}
+		if d.Replication != nil {
+			*out.Replication = *d.Replication
+		}
+		if base, name, ok := config.ReplicationSource(pub); ok {
+			out.ReplicationSource = &replicationSource{URL: base, Repository: name}
+		}
+	}
 	if d.AnonymousRead != nil {
 		v := *d.AnonymousRead
 		out.AnonymousRead = &v
@@ -215,9 +238,9 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		GPGPublicKey:                strings.TrimSpace(b.GPGPublicKey),
 		StrictContentTypeValidation: b.StrictContentTypeValidation, ContentDisposition: b.ContentDisposition,
 		Blocked: b.Blocked, AutoBlock: b.AutoBlock,
-		Firewall: b.Firewall,
+		Firewall: b.Firewall, Replication: b.Replication,
 	}
-	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey, KeepFirewall: b.Firewall == nil}
+	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey, KeepFirewall: b.Firewall == nil, KeepReplication: b.Replication == nil}
 	if b.CleanupPolicy != nil {
 		d.CleanupPolicy = *b.CleanupPolicy
 	} else {

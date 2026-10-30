@@ -199,6 +199,14 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	h.Serve(w, r, rp, path)
 }
 
+// ServeRepository serves r as a request for /repository/{name}/{path...}:
+// its "name" and "path" path values set and its caller in its context
+// (auth.WithPrincipal), without Handler's authentication, request log and
+// body limits. It is for in-process requests (pull replication's
+// prefetch), which then go through the same checks and format handler as
+// a client's.
+func (s *Server) ServeRepository(w http.ResponseWriter, r *http.Request) { s.repository(w, r) }
+
 // DefaultAccess is the access a request needs when its handler is no
 // repo.AccessDecider: GET/HEAD read, DELETE deletes, anything else adds.
 func DefaultAccess(r *http.Request) auth.Access {

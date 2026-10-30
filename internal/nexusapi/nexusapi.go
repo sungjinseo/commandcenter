@@ -335,6 +335,14 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 		}
 		out["httpClient"] = hc
 		out["routingRule"], out["routingRuleName"] = d.RoutingRule, d.RoutingRule
+		repl := map[string]any{"preemptivePullEnabled": false, "assetPathRegex": nil, "verifyChecksums": false}
+		if p := d.Replication; p != nil {
+			repl["preemptivePullEnabled"], repl["verifyChecksums"] = p.PreemptivePullEnabled, p.VerifyChecksums
+			if p.AssetPathRegex != "" {
+				repl["assetPathRegex"] = p.AssetPathRegex
+			}
+		}
+		out["replication"] = repl
 	case "group":
 		g := map[string]any{"memberNames": append([]string{}, d.Members...)}
 		if d.WriteMember != "" {
@@ -446,6 +454,9 @@ type repoBody struct {
 	// returns; either is accepted.
 	RoutingRule     *string `json:"routingRule"`
 	RoutingRuleName *string `json:"routingRuleName"`
+	// Replication is a proxy's pull replication (Nexus's replication
+	// object; verifyChecksums is Command Center's); absent keeps it.
+	Replication *config.Replication `json:"replication"`
 }
 
 // minutesText renders Nexus minutes in the config format.
@@ -501,6 +512,9 @@ func uiRepo(format, typ string, b repoBody) map[string]any {
 	}
 	if a := b.HTTPClient.Authentication; a != nil {
 		out["remoteAuth"] = map[string]any{"username": a.Username, "password": a.Password}
+	}
+	if b.Replication != nil {
+		out["replication"] = b.Replication
 	}
 	return out
 }
@@ -689,7 +703,8 @@ func (h *Handler) assetJSON(rp *repo.Repository, a meta.Asset) map[string]any {
 		"checksum":     map[string]string{"sha1": a.SHA1, "sha256": a.BlobSHA256, "md5": a.MD5, "sha512": a.SHA512},
 		"contentType":  a.ContentType,
 		"lastModified": rfc3339(a.LastModified), "blobCreated": rfc3339(a.CreatedAt), "lastDownloaded": rfc3339(a.LastDownloaded),
-		"fileSize": a.Size,
+		"fileSize": a.Size, "blobStoreName": repo.StoreOf(rp.Repository),
+		"uploader": nil, "uploaderIp": nil, // not recorded
 	}
 }
 
@@ -859,26 +874,30 @@ func (h *Handler) listAssets(w http.ResponseWriter, r *http.Request) {
 	if rp == nil {
 		return
 	}
-	var paths []string
-	if err := h.DB.WalkAssetPaths(r.Context(), rp.Name, "", func(p string) { paths = append(paths, p) }); err != nil {
+	// Keyset paging on the previous page's last asset, which need not exist
+	// any more: a replicating proxy pages through whole repositories while
+	// they change (pull replication).
+	after := ""
+	if tok := r.URL.Query().Get("continuationToken"); tok != "" {
+		name, p, ok := parseAssetID(tok)
+		if !ok || name != rp.Name {
+			writeMessage(w, http.StatusBadRequest, "invalid continuationToken")
+			return
+		}
+		after = p
+	}
+	assets, err := h.DB.AssetPage(r.Context(), rp.Name, after, time.Time{}, pageSize+1)
+	if err != nil {
 		h.fail(w, err)
 		return
 	}
-	paths, next, ok := page(paths, func(p string) string { return assetID(rp.Name, p) }, r.URL.Query().Get("continuationToken"))
-	if !ok {
-		writeMessage(w, http.StatusBadRequest, "invalid continuationToken")
-		return
+	next := ""
+	if len(assets) > pageSize {
+		assets = assets[:pageSize]
+		next = assetID(rp.Name, assets[pageSize-1].Path)
 	}
-	items := make([]map[string]any, 0, len(paths))
-	for _, p := range paths {
-		a, err := h.DB.GetAsset(r.Context(), rp.Name, p)
-		if errors.Is(err, meta.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			h.fail(w, err)
-			return
-		}
+	items := make([]map[string]any, 0, len(assets))
+	for _, a := range assets {
 		items = append(items, h.assetJSON(rp, a))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "continuationToken": nullable(next)})

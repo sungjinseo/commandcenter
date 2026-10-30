@@ -47,6 +47,12 @@ repositories:
     # routingRule: no-internal          # 이 proxy에 적용할 라우팅 규칙 이름(없으면 모두 통과)
     # autoBlock: true                   # 원격이 3번 연달아 실패하면 30초(두 배씩 5분까지) 묻지 않음. 그동안 캐시 제공, 없으면 바로 502
     # blocked: false                    # true: 원격에 전혀 묻지 않음(캐시만 제공)
+    # 풀 복제: remote가 다른 인스턴스의 hosted 저장소(<base>/repository/<이름>/)일 때, 그곳에 올라온 파일을
+    # repository.pull-replication 작업이 미리 받아 둡니다. 원본 계정은 remoteAuth에 넣습니다.
+    # replication:
+    #   preemptivePullEnabled: true
+    #   assetPathRegex: '^com/acme/'     # RE2, 비우면 전부
+    #   verifyChecksums: true
   - name: maven-releases
     format: maven
     type: hosted

@@ -778,6 +778,19 @@ repositories:
     routingRule: no-internal
 ```
 
+### 풀 복제(pull replication)
+
+다른 Command Center나 Nexus Repository 인스턴스(원본)의 hosted 저장소에 올라온 파일을 이 인스턴스(대상)의 proxy 저장소가 **요청이 오기 전에 미리** 받아 둡니다. Nexus Pro의 "Pre-emptive Pull"(content replication)에 해당하며 Command Center에서는 무료입니다. 멀리 떨어진 사이트에서도 첫 다운로드를 기다리지 않고, 원본이 멈춰도 받아 둔 파일은 대상이 계속 내려줍니다.
+
+- **설정**: 대상에 proxy 저장소를 만들고 `remote`를 원본 hosted 저장소의 URL(`<원본 base URL>/repository/<저장소>/`, 예 `https://nexus-a.example.com/repository/maven-releases/`)로 둡니다. 원본에 로그인할 계정은 proxy의 원격 인증(`remoteAuth`)에 넣습니다. 이 계정에는 원본 저장소의 읽기 권한이 있어야 합니다. 비밀번호와 토큰은 다른 원격 인증처럼 암호화해 저장하고 어떤 API에도 다시 보이지 않습니다. 그다음 proxy 설정의 `replication`에서 `preemptivePullEnabled`를 켭니다. `assetPathRegex`(RE2 정규식, 비우면 전부)로 복제할 경로를 좁힐 수 있으며, 경로 앞 `/`의 유무와 관계없이 맞춥니다(예 `^com/acme/`, `\.jar$`). `verifyChecksums`를 켜면 받은 파일의 체크섬이 원본 목록과 다를 때 그 파일을 지우고 실패로 셉니다.
+- **연결 테스트**: 저장소 설정의 연결 테스트(`POST /-/api/repositories/<이름>/replication/test`)는 원본이 응답하는지, 인증이 통하는지, 같은 포맷의 hosted 저장소인지 확인합니다.
+- **실행**: 예약 작업 `repository.pull-replication`(Pull replication)을 만듭니다. `repository`를 비우면 복제가 켜진 모든 proxy가, 이름을 주면 그 proxy 하나가 대상입니다. 가장 짧은 주기는 `hourly:<분>`입니다. 작업은 원본의 `GET /service/rest/v1/assets?repository=<저장소>`(Nexus REST API이며 Command Center도 제공합니다)를 끝까지 읽고, proxy가 같은 체크섬으로 아직 갖고 있지 않은 컴포넌트 파일을 proxy 자신의 경로로 요청합니다. 그래서 라우팅 규칙, 방화벽(OSV), 내용 검사, blob store와 쿼터, 활동 기록이 클라이언트 요청과 똑같이 적용되고, 다운로드 수에는 들어가지 않습니다. 한 번에 4개씩 받습니다.
+- **증분**: 끝까지 성공한 실행은 원본 목록에서 본 가장 새로운 `lastModified`를 DB에 기록하고, 다음 실행은 그 시각 1시간 전 이후에 바뀐 파일만 확인합니다. 실패한 파일(5xx, 네트워크 오류, 체크섬 불일치)이 있으면 그 파일의 시각부터 다시 봅니다. `full: true`로 실행하면 기록을 무시하고 모든 파일을 확인하되, 이미 있는 파일은 다시 받지 않습니다. proxy를 다시 만들거나 `remote` 또는 정규식을 바꾸면 처음부터 다시 봅니다. 진행 기록이 DB에 있으므로 여러 노드 중 어느 노드가 다음 실행을 맡아도 이어집니다.
+- **로그**: 작업 로그에 proxy마다 한 줄 요약이 남습니다(목록, 대상, 받음과 바이트, 이미 있음, 지난 실행 이후 변경 없음, 원본에서 바뀜, 거부(4xx: 라우팅 규칙, 방화벽, 검증), 실패). 파일별 메시지는 종류마다 20줄까지 남습니다. 실패가 하나라도 있으면 작업이 실패로 끝나므로 실패 알림 메일을 받을 수 있습니다.
+- **복제하지 않는 것**: 컴포넌트 파일만 복제합니다. `maven-metadata.xml`, `index.yaml`, repodata 같은 색인 문서는 proxy가 평소처럼 처음 쓸 때 받아 `metadataMaxAge`에 따라 갱신하고, 원본이 멈추면 캐시된 것을 내려줍니다. 원본에서 지운 파일은 대상에서 지우지 않으므로 대상의 cleanup 정책을 쓰세요. 이미 받은 파일이 원본에서 바뀌면(덮어쓰기) proxy의 `contentMaxAge`가 지날 때까지 기존 파일을 유지합니다. 설정, 사용자 같은 구성은 복제하지 않습니다.
+- **지원 포맷**: maven, npm, pypi, nuget, rubygems, helm, yum, apt, raw, go, cargo, conda, r, composer, conan, swift, terraform입니다. docker는 이미지를 이름과 태그로 받으므로 지원하지 않고, p2, cocoapods, huggingface는 원본이 될 hosted 저장소가 없어 지원하지 않습니다(400). cargo, terraform, composer 원본은 내려주는 다운로드 주소를 `baseURL`로 만들므로, 원본의 `baseURL`이 대상에서 접근할 수 있는 주소여야 합니다.
+- **Nexus REST API**: 저장소 본문의 `replication`(`preemptivePullEnabled`, `assetPathRegex`, Command Center 전용 `verifyChecksums`)을 받고 돌려줍니다. 원본이 Nexus일 때는 저장소 경로 배치가 Command Center와 같은 포맷(maven, npm, pypi, raw, helm, rubygems, yum, r)에서 동작하며, 실제 Nexus 원본으로는 아직 시험하지 않았습니다.
+
 ## 업로드
 
 사이드바 Upload(또는 Browse의 "Upload component")에서 브라우저로 파일을 올릴 수 있습니다. 쓰기 권한이 있는 hosted Maven, npm, PyPI 저장소가 있을 때만 보입니다. 브라우저가 각 클라이언트와 같은 요청을 만들어 기존 저장소 엔드포인트로 보내므로 검증과 쓰기 정책(`writePolicy`)은 서버 규칙 그대로입니다.

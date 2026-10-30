@@ -176,4 +176,5 @@ var apiDocs = []openapi.Route{
 	{Pattern: "GET /-/api/routing-rules/{name}", Summary: "One routing rule", Tag: "repositories", Auth: docAdmin, Reply: "RoutingRule"},
 	{Pattern: "PUT /-/api/routing-rules/{name}", Summary: "Updates a routing rule", Tag: "repositories", Auth: docAdminUI, Request: "RoutingRule", Reply: "RoutingRule"},
 	{Pattern: "DELETE /-/api/routing-rules/{name}", Summary: "Deletes a routing rule no proxy uses", Tag: "repositories", Auth: docAdminUI, Replies: map[int]string{204: "deleted", 409: "Error"}},
+	{Pattern: "POST /-/api/repositories/{name}/replication/test", Summary: "Checks a proxy's pull replication source: it answers with the remote credentials and has a hosted repository of the proxy's format (ok, source, repository, message)", Tag: "repositories", Auth: docAdminUI, Reply: "ReplicationCheck", Replies: map[int]string{400: "Error", 404: "Error"}},
 }

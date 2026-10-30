@@ -50,6 +50,7 @@ import (
 	"commandcenter/internal/metrics"
 	"commandcenter/internal/nexusapi"
 	"commandcenter/internal/proxy"
+	"commandcenter/internal/replication"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/resolve"
 	"commandcenter/internal/server"
@@ -653,8 +654,43 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		return terraform.RootDiscovery(registry.Snapshot().Sorted, authn.Snapshot().Settings().TerraformDefaultRepository, baseURL())
 	}
 	a.Handler = srv.Handler()
+	// Pull replication prefetches through the repository endpoint, as a
+	// client's HEAD: the server's checks and the format handler apply.
+	taskSvc.Replication = &replication.Service{DB: db, Store: store, Fetcher: fetcher,
+		Prefetch: func(ctx context.Context, rp *repo.Repository, p, actor string) int {
+			if actor == "" {
+				actor = "system"
+			}
+			req, err := http.NewRequestWithContext(auth.WithPrincipal(ctx, auth.Principal{User: actor, Admin: true}), http.MethodHead,
+				(&url.URL{Path: "/repository/" + rp.Name + "/" + p}).String(), nil)
+			if err != nil {
+				return 0
+			}
+			req.SetPathValue("name", rp.Name)
+			req.SetPathValue("path", p)
+			w := &statusOnly{h: http.Header{}}
+			srv.ServeRepository(w, req)
+			if w.status == 0 {
+				return http.StatusOK
+			}
+			return w.status
+		}}
 	return a, nil
 }
+
+// statusOnly is a ResponseWriter that keeps only the status.
+type statusOnly struct {
+	h      http.Header
+	status int
+}
+
+func (w *statusOnly) Header() http.Header { return w.h }
+func (w *statusOnly) WriteHeader(code int) {
+	if w.status == 0 {
+		w.status = code
+	}
+}
+func (w *statusOnly) Write(b []byte) (int, error) { w.WriteHeader(http.StatusOK); return len(b), nil }
 
 // loadRepositories imports cfg.Repositories into the database on the first
 // start, then returns the stored definitions (plan 9 Decision 1).

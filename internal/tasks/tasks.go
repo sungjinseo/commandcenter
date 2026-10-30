@@ -30,6 +30,7 @@ import (
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/replication"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/transfer"
 	"commandcenter/internal/vuln"
@@ -103,6 +104,8 @@ type Service struct {
 	Vuln       *vuln.Service  // vulnerability.sync and vulnerability.scan; nil: not available
 
 	Transfer *transfer.Service // repository.export and repository.import; nil: not available
+
+	Replication *replication.Service // repository.pull-replication; nil: not available
 
 	// Test hooks and limits; zero values mean the defaults.
 	Now           func() time.Time

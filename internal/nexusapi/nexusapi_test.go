@@ -556,3 +556,26 @@ func TestSecurityBlobstoresTasksAndNotFound(t *testing.T) {
 		t.Fatalf("unknown: %d %s", st, b)
 	}
 }
+
+// The asset list pages by key: a page continues after the previous page's
+// last asset even when that asset was deleted meanwhile (a replicating
+// proxy pages through a repository that changes), and lists the store.
+func TestAssetsPagingByKey(t *testing.T) {
+	e := start(t, true)
+	var paths []string
+	for i := 0; i < 60; i++ {
+		paths = append(paths, fmt.Sprintf("raw-files/f%03d", i))
+	}
+	e.upload(paths...)
+	var p page[map[string]any]
+	e.get(v1+"/assets?repository=raw-files", "", &p)
+	if len(p.Items) != 50 || p.ContinuationToken == nil || p.Items[0]["blobStoreName"] != "default" {
+		t.Fatalf("first page: %d items, token %v, %v", len(p.Items), p.ContinuationToken, p.Items[0])
+	}
+	e.want("DELETE", v1+"/assets/"+p.Items[49]["id"].(string), "ci", "", 204)
+	e.get(v1+"/assets?repository=raw-files&continuationToken="+*p.ContinuationToken, "", &p)
+	if len(p.Items) != 10 || p.Items[0]["path"] != "f050" || p.ContinuationToken != nil {
+		t.Fatalf("second page: %+v", p)
+	}
+	e.want("GET", v1+"/assets?repository=maven-releases&continuationToken="+base64.RawURLEncoding.EncodeToString([]byte("raw-files:f001")), "", "", 400)
+}

@@ -372,6 +372,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   list, a quarantine list and release, and `firewall.blocked` events.
 - `vulnerability.scan` task and repository vulnerability summaries: counts by severity in the repository
   list, top components per repository, advisories on the component view.
+- Pull replication (Nexus Pro "pre-emptive pull", free): a proxy whose remote is a hosted repository
+  of another Command Center or Nexus instance (`<base>/repository/<name>/`) gets `replication`
+  (`preemptivePullEnabled`, `assetPathRegex`, `verifyChecksums`) on the UI and Nexus repository APIs.
+  The new `repository.pull-replication` task pages the source's `GET /service/rest/v1/assets` and
+  fetches each component file the proxy lacks through the proxy's own endpoint (routing rule,
+  firewall, content checks, blob store and quota apply), incrementally by `lastModified`, with a
+  `full` option; progress is kept in the database. `POST /-/api/repositories/{name}/replication/test`
+  checks the source. 17 formats are supported; docker, p2, cocoapods and huggingface are refused (400).
+  `GET /service/rest/v1/assets` now pages by key and lists `blobStoreName`, `uploader` and `uploaderIp`.
 
 ### Changed
 
@@ -437,6 +446,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A start with a different secret key, or with none after one was used, is refused;
   `secret-key rotate` needs every node stopped. Without a secret key the token signing key is stored
   in plain text.
+- Pull replication progress is kept in settings rows `replication/<proxy>`. During a rolling upgrade,
+  edit replicating proxies on upgraded nodes only: an older node's edit drops `replication`, as with any
+  repository field it does not know, and an older scheduler leader fails a `repository.pull-replication`
+  run as an unknown type.
 - The database schema version is now 5: new tables `nodes` and `leases`, and the column
   `schema_version.compat`, created on the first start of this version. From now on the stamp also says
   which older builds may still run on the database: a build starts on a database of a newer schema only
