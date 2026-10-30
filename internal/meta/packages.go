@@ -28,8 +28,9 @@ var ErrExists = errors.New("already exists")
 
 // Tx is a write transaction.
 type Tx struct {
-	q   txConn
-	box sealer
+	q       txConn
+	box     sealer
+	changes []Change // the content rows written, for OnCommit
 }
 
 // Tx runs fn in a write transaction, the only one at a time (see
@@ -45,14 +46,39 @@ func (d *DB) Tx(ctx context.Context, fn func(*Tx) error) error {
 			panic(p)
 		}
 	}()
-	if err := fn(&Tx{q: txConn{tx: tx}, box: d.box}); err != nil {
+	t := &Tx{q: txConn{tx: tx}, box: d.box}
+	if err := fn(t); err != nil {
 		tx.Rollback()
 		return err
 	}
-	return tx.Commit()
+	var at time.Time
+	if len(t.changes) > 0 && d.OnCommit != nil {
+		// The database's clock, read under the write lock: the commits of
+		// every node in one order, the order they commit in.
+		var us int64
+		if err := tx.QueryRowContext(ctx, `SELECT (extract(epoch FROM clock_timestamp()) * 1000000)::bigint`).Scan(&us); err != nil {
+			tx.Rollback()
+			return err
+		}
+		at = time.UnixMicro(us).UTC()
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if !at.IsZero() {
+		d.OnCommit(ctx, at, t.changes)
+	}
+	return nil
 }
 
-func (t *Tx) PutAsset(ctx context.Context, a Asset) error { return putAsset(ctx, t.q, a) }
+func (t *Tx) PutAsset(ctx context.Context, a Asset) error {
+	created, err := putAsset(ctx, t.q, a)
+	if err == nil {
+		a.CreatedAt = created
+		t.putAsset(a)
+	}
+	return err
+}
 
 // DeleteAsset removes an asset record and returns its size; ErrNotFound when
 // there is none.
@@ -68,6 +94,7 @@ func (t *Tx) DeleteAsset(ctx context.Context, repo, path string) (int64, error) 
 	if err := deleteAsset(ctx, t.q, repo, path); err != nil {
 		return 0, err
 	}
+	t.changes = append(t.changes, Change{Op: ChangeDelete, Kind: ChangeAsset, Repo: repo, Path: path})
 	return size, nil
 }
 
@@ -90,6 +117,7 @@ func (t *Tx) DeletePackage(ctx context.Context, repo, name, version string) erro
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	t.changes = append(t.changes, Change{Op: ChangeDelete, Kind: ChangePackage, Repo: repo, Name: name, Version: version})
 	return nil
 }
 
@@ -105,22 +133,32 @@ func (t *Tx) InsertPackage(ctx context.Context, p Package) error {
 	}
 	_, err = t.q.ExecContext(ctx, `INSERT INTO packages(repo, format, name, version, attrs, yanked, created_at)
 VALUES(?,?,?,?,?,?,?)`, p.Repo, p.Format, p.Name, p.Version, p.Attrs, boolInt(p.Yanked), toMs(p.CreatedAt))
+	if err == nil {
+		t.putPackage(p)
+	}
 	return err
 }
 
 func (t *Tx) UpdatePackage(ctx context.Context, repo, name, version, attrs string) error {
-	res, err := t.q.ExecContext(ctx, `UPDATE packages SET attrs = ? WHERE repo = ? AND name = ? AND version = ?`,
-		attrs, repo, name, version)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+	return t.updatePackage(ctx, `attrs = ?`, attrs, repo, name, version)
+}
+
+// updatePackage sets one column of a package row and records the row as it
+// is then; ErrNotFound when there is none.
+func (t *Tx) updatePackage(ctx context.Context, set string, value any, repo, name, version string) error {
+	p := Package{Repo: repo, Name: name, Version: version}
+	var yanked int
+	var created int64
+	err := writeRow(ctx, t.q, `UPDATE packages SET `+set+` WHERE repo = ? AND name = ? AND version = ?
+RETURNING format, attrs, yanked, created_at`, []any{value, repo, name, version}, &p.Format, &p.Attrs, &yanked, &created)
+	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
+	if err != nil {
+		return err
+	}
+	p.Yanked, p.CreatedAt = yanked != 0, fromMs(created)
+	t.putPackage(p)
 	return nil
 }
 
@@ -156,6 +194,9 @@ FROM packages WHERE repo = ? AND name = ? ORDER BY created_at, version`, repo, n
 func (t *Tx) SetDistTag(ctx context.Context, repo, name, tag, version string) error {
 	_, err := t.q.ExecContext(ctx, `INSERT INTO dist_tags(repo, name, tag, version) VALUES(?,?,?,?)
 ON CONFLICT(repo, name, tag) DO UPDATE SET version = excluded.version`, repo, name, tag, version)
+	if err == nil {
+		t.changes = append(t.changes, Change{Op: ChangePut, Kind: ChangeTag, Repo: repo, Name: name, Tag: tag, Version: version})
+	}
 	return err
 }
 
@@ -171,6 +212,7 @@ func (t *Tx) DeleteDistTag(ctx context.Context, repo, name, tag string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	t.changes = append(t.changes, Change{Op: ChangeDelete, Kind: ChangeTag, Repo: repo, Name: name, Tag: tag})
 	return nil
 }
 
@@ -236,19 +278,7 @@ func listPackageNames(ctx context.Context, q querier, repo string) ([]string, er
 
 // SetYanked sets the yanked flag of one package version.
 func (t *Tx) SetYanked(ctx context.Context, repo, name, version string, yanked bool) error {
-	res, err := t.q.ExecContext(ctx, `UPDATE packages SET yanked = ? WHERE repo = ? AND name = ? AND version = ?`,
-		boolInt(yanked), repo, name, version)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return t.updatePackage(ctx, `yanked = ?`, boolInt(yanked), repo, name, version)
 }
 
 // ListPackageNamesCanonical returns the distinct names of repo whose canonical

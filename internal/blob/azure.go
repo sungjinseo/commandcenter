@@ -562,6 +562,8 @@ func (a *azure) check() error {
 
 // Meta objects: <prefix>/meta/<key>.
 
+var _ metaBackend = (*azure)(nil) // the reconcile journal works on azure stores
+
 func (a *azure) putMeta(key string, data []byte) error {
 	sum := md5.Sum(data)
 	return a.putBlob(a.name("meta/"+key), func() io.Reader { return bytes.NewReader(data) }, int64(len(data)), sum[:])

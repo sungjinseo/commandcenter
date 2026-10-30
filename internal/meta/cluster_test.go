@@ -412,7 +412,7 @@ func TestSchemaCompat(t *testing.T) {
 		{6, 6, "task run marks, webhook delivery claims and repositories.gen (expand-only) together with sessions and auth state in the database, " +
 			"the shared token key and the secret key check: a full stop, as an older build would keep sessions in memory and leave " +
 			"stored sessions of a changed user valid for this one"},
-		{7, 6, "azure and google blob stores: no DDL, and the first such store raises compat to 7 (an older build would read it as an empty directory)"},
+		{7, 6, "azure and google blob stores: no DDL, and the first such store raises compat to 7 (an older build would read it as an empty directory); reconcile_plans and reconcile_items: expand-only, new tables an older build never reads"},
 	}
 	for i, d := range decisions {
 		if d.version != i+1 || d.compat < d.version-1 || d.compat > d.version || d.note == "" {

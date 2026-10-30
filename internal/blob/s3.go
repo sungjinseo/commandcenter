@@ -523,9 +523,14 @@ func (s *s3) remove(sha string) error {
 
 // list is one ListObjectsV2 page under the prefix.
 func (s *s3) list(maxKeys int, token string) (*s3Listing, error) {
+	return s.listPrefix(s.key(""), maxKeys, token)
+}
+
+// listPrefix is one ListObjectsV2 page of the keys starting with prefix.
+func (s *s3) listPrefix(prefix string, maxKeys int, token string) (*s3Listing, error) {
 	q := url.Values{"list-type": {"2"}, "max-keys": {strconv.Itoa(maxKeys)}}
-	if s.cfg.Prefix != "" {
-		q.Set("prefix", s.cfg.Prefix+"/")
+	if prefix != "" {
+		q.Set("prefix", prefix)
 	}
 	if token != "" {
 		q.Set("continuation-token", token)
@@ -572,6 +577,69 @@ func (s *s3) walk(fn func(sha string, size int64, modTime time.Time) error) erro
 		}
 		token = page.NextContinuationToken
 	}
+}
+
+// metaKey is the object that holds meta object key: <prefix>/meta/<key>.
+// walk skips it, since what follows the prefix is no SHA-256.
+func (s *s3) metaKey(key string) string { return s.key("meta/" + key) }
+
+func (s *s3) putMeta(key string, data []byte) error {
+	sum := sha256.Sum256(data)
+	r, err := s.request(http.MethodPut, s.metaKey(key), nil, s.sse(), bytes.NewReader(data), int64(len(data)), hex.EncodeToString(sum[:]))
+	if err != nil {
+		return err
+	}
+	resp, err := s.do(r, http.StatusOK)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
+}
+
+// getMeta reads from a failover bucket too while this one is unavailable.
+func (s *s3) getMeta(key string) ([]byte, error) {
+	return withFailover(s, func(b *s3) ([]byte, error) {
+		body, _, err := b.get(b.metaKey(key), 0, -1)
+		if err != nil {
+			return nil, err
+		}
+		defer body.Close()
+		return io.ReadAll(io.LimitReader(body, maxMeta))
+	})
+}
+
+func (s *s3) listMeta(prefix string, fn func(string) error) error {
+	base := s.metaKey("")
+	token := ""
+	for {
+		page, err := s.listPrefix(base+prefix, 1000, token)
+		if err != nil {
+			return err
+		}
+		for _, o := range page.Contents {
+			if k, ok := strings.CutPrefix(o.Key, base); ok && strings.HasPrefix(k, prefix) {
+				if err := fn(k); err != nil {
+					return err
+				}
+			}
+		}
+		if !page.IsTruncated || page.NextContinuationToken == "" {
+			return nil
+		}
+		token = page.NextContinuationToken
+	}
+}
+
+func (s *s3) removeMeta(key string) error {
+	r, err := s.request(http.MethodDelete, s.metaKey(key), nil, nil, nil, 0, emptySHA256)
+	if err != nil {
+		return err
+	}
+	resp, err := s.do(r, http.StatusNoContent, http.StatusOK, http.StatusNotFound)
+	if err != nil {
+		return err
+	}
+	return resp.Body.Close()
 }
 
 func (s *s3) check() error {

@@ -382,6 +382,13 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		return nil, err
 	}
 	store := &repo.Store{Blobs: blobs, DB: db, Now: time.Now}
+	// Every commit of content rows is journaled into its blob store, from
+	// the first write on (before anything that writes starts).
+	store.Journal = repo.NewJournal(store, node, log)
+	db.OnCommit = store.Journal.Record
+	if _, err := db.LoadRecoveryMode(context.Background()); err != nil {
+		return nil, fmt.Errorf("load recovery mode: %w", err)
+	}
 	recorder := metrics.New(db)
 	store.Downloads = recorder.Download
 	fetcher := proxy.New(store, proxy.NewClient(), maxConcurrentFetches)
@@ -649,7 +656,8 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	webUI.FindComponents = nexus.Find
 	webUI.Importers = map[string]repo.ComponentImporter{"maven": mavenH, "npm": npmH, "raw": rawH, "pypi": pypiH, "nuget": nugetH, "helm": helmH, "yum": yumH}
 	srv := &server.Server{Registry: registry, Handlers: handlers, Auth: authn, Log: log,
-		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Nexus: nexus, Requests: recorder.Request, Docker: dockerH}
+		MaxUpload: int64(settings.MaxUploadMiB) << 20, UI: webUI, Nexus: nexus, Requests: recorder.Request, Docker: dockerH,
+		ReadOnly: func() string { return recoveryRefusal(db.Recovery()) }}
 	srv.TerraformDiscovery = func() []byte {
 		return terraform.RootDiscovery(registry.Snapshot().Sorted, authn.Snapshot().Settings().TerraformDefaultRepository, baseURL())
 	}
@@ -961,7 +969,7 @@ var accessReloadEvery = 5 * time.Second
 
 // The cache topics of meta.DB.Notify: a node that changed what the others
 // cache sends one after the commit, and every node re-reads it.
-var followTopics = []string{"access", "registry", "routing", "blobstores", "moves", "webhooks"}
+var followTopics = []string{"access", "registry", "routing", "blobstores", "moves", "webhooks", meta.RecoveryTopic}
 
 // follow keeps this node's caches in step with the database until ctx
 // ends: every accessReloadEvery, and at once when a node sends a topic's
@@ -989,7 +997,7 @@ func (a *App) follow(ctx context.Context) {
 	defer tick.Stop()
 	failing := map[string]bool{}
 	for {
-		todo := map[string]bool{"access": true}
+		todo := map[string]bool{"access": true, meta.RecoveryTopic: true}
 		select {
 		case <-ctx.Done():
 			return
@@ -1008,6 +1016,7 @@ func (a *App) follow(ctx context.Context) {
 			// one Resync re-reads the repositories, routing rules, blob stores and moves
 			{"registry", "repositories, routing rules, blob stores and moves", a.Registry.Resync},
 			{"webhooks", "webhooks", a.Webhooks.Reload},
+			{meta.RecoveryTopic, "recovery mode", func(ctx context.Context) error { _, err := a.DB.LoadRecoveryMode(ctx); return err }},
 		} {
 			if !todo[job.name] && (job.name != "registry" || !todo["routing"] && !todo["blobstores"] && !todo["moves"]) {
 				continue
@@ -1105,6 +1114,17 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 	if g := a.Store.GroupOf(storeName); g != "" {
 		return 0, 0, fmt.Errorf("blob store %q is a member of the group %q: compact the group", storeName, g)
 	}
+	// Read now, not cached: another node may have just turned it on.
+	if rm, err := a.DB.LoadRecoveryMode(ctx); err != nil {
+		return 0, 0, err
+	} else if rm.Enabled {
+		return 0, 0, errRecoveryGC
+	}
+	keep, err := a.reconcileKeep(ctx, bs, minAge)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer a.pruneJournal(ctx, storeName, bs)
 	// The walk below sees only blobs; temp files a killed process left are swept here.
 	if n, err := bs.SweepTmp(); err != nil {
 		a.log.Warn("could not sweep stale temp files", "blobStore", storeName, "removed", n, "err", logsafe.Err(err))
@@ -1115,6 +1135,15 @@ func (a *App) GCStore(ctx context.Context, storeName string, minAge time.Duratio
 	if storeName != repo.DefaultStore {
 		repos := a.gcScope(storeName)
 		inUse = func(sha string) (bool, error) { return a.DB.BlobInUseInRepos(ctx, sha, repos) }
+	}
+	if len(keep) > 0 { // what a reconcile plan may add
+		inDB := inUse
+		inUse = func(sha string) (bool, error) {
+			if keep[sha] {
+				return true, nil
+			}
+			return inDB(sha)
+		}
 	}
 	cutoff := time.Now().Add(-minAge)
 	cfg, isGroup := bs.Group()
@@ -1177,7 +1206,8 @@ func gcWalk(bs *blob.Store, inUse func(string) (bool, error), cutoff time.Time) 
 
 // Close stops the event writer (it drains its queue first) and closes the database.
 func (a *App) Close() error {
-	a.Mail.Close() // may still record a failed send as an event
+	a.Store.Journal.Close() // writes the records still queued
+	a.Mail.Close()          // may still record a failed send as an event
 	a.Webhooks.Close()
 	a.Vuln.Close()
 	a.Events.Close()

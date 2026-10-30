@@ -286,6 +286,100 @@ func (g *group) walk(fn func(sha string, size int64, modTime time.Time) error) e
 	return nil
 }
 
+// The meta objects of a group (the reconcile journal of its repositories)
+// go to every writable member, so that they outlive any one member being
+// drained; a read takes the union of every member's, read-only ones too. A
+// put succeeds when one member stored the object. A member removed from the
+// group takes its copies along: the others hold those written while they
+// were writable.
+
+func (g *group) putMeta(key string, data []byte) error {
+	var errs []error
+	stored := false
+	for _, m := range g.state.Load().members {
+		if m.readOnly {
+			continue
+		}
+		err := ErrNoMeta
+		if mb, ok := m.s.be.(metaBackend); ok {
+			err = mb.putMeta(key, data)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("member %q: %w", m.name, err))
+		} else {
+			stored = true
+		}
+	}
+	if stored {
+		return nil
+	}
+	return errors.Join(errs...)
+}
+
+// getMeta returns the first member's copy; ErrNotFound only when every
+// member answered that it has none.
+func (g *group) getMeta(key string) ([]byte, error) {
+	var first error
+	for _, m := range g.state.Load().members {
+		mb, ok := m.s.be.(metaBackend)
+		if !ok {
+			continue
+		}
+		data, err := mb.getMeta(key)
+		if err == nil {
+			return data, nil
+		}
+		if !errors.Is(err, ErrNotFound) && first == nil {
+			first = fmt.Errorf("member %q: %w", m.name, err)
+		}
+	}
+	if first != nil {
+		return nil, first
+	}
+	return nil, ErrNotFound
+}
+
+// listMeta lists the union of the members' keys, each once. A member that
+// cannot be listed fails the listing: a partial journal would read as
+// records that do not exist.
+// ponytail: the keys are collected and sorted in memory; a k-way merge if
+// a group's journal outgrows that.
+func (g *group) listMeta(prefix string, fn func(string) error) error {
+	seen := map[string]bool{}
+	for _, m := range g.state.Load().members {
+		mb, ok := m.s.be.(metaBackend)
+		if !ok {
+			continue
+		}
+		if err := mb.listMeta(prefix, func(k string) error { seen[k] = true; return nil }); err != nil {
+			return fmt.Errorf("member %q: %w", m.name, err)
+		}
+	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		if err := fn(k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *group) removeMeta(key string) error {
+	var errs []error
+	for _, m := range g.state.Load().members {
+		if mb, ok := m.s.be.(metaBackend); ok {
+			if err := mb.removeMeta(key); err != nil {
+				errs = append(errs, fmt.Errorf("member %q: %w", m.name, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
 func (g *group) check() error {
 	var errs []error
 	for _, m := range g.state.Load().members {

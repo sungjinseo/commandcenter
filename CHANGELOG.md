@@ -398,6 +398,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   above, MD5-checked; Range reads; retries with exponential backoff on 408/429/5xx; an endpoint override
   for emulators and private endpoints; health checks, soft quotas and group membership like S3 stores. A
   store on the same bucket and prefix as another google or S3 store (GCS S3 interoperability) is refused.
+- Reconcile the database with the blob stores after a restore (Nexus "Repair - Reconcile component
+  database from blob store", plan and execute). Every commit of an asset, package version or dist
+  tag writes a small journal record into its repository's blob store (asynchronous; a failed write
+  never fails the upload and is counted in `commandcenter_reconcile_journal_writes_total`). The
+  `blobstore.reconcile-plan` task compares a window of the journal (default 24 h, `since`, or `all`)
+  with the database and stores ADD, DELETE, SKIP and CONFLICT items (`GET /-/api/reconcile/plans`,
+  `.../{id}/items`); `blobstore.reconcile-execute` applies a plan through the upload code paths and
+  regenerates the index documents. Recovery mode (`PUT /-/api/recovery`) makes every node refuse
+  uploads and deletes with 503 and stops compaction, cleanup and the other content-moving tasks.
+  Compaction keeps the blobs a pending plan adds or the last day's journal puts, and prunes the
+  journal after `journalRetentionDays` (default 30).
 
 ### Changed
 
@@ -448,6 +459,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   can be rolling. Creating the first Azure or google blob store raises compat to 7: it is refused while
   a node of an older build is live, and from then on older builds refuse to start, because they would
   open the store as an empty directory. A rollback after that needs the backup taken before the upgrade.
+- Schema 7 also adds `reconcile_plans` and `reconcile_items` (expand-only). A schema-6 node next to a
+  schema-7 node writes no journal and its compaction does not keep a pending plan's blobs: finish the
+  rollout before relying on reconcile. The journal starts with the upgrade; earlier uploads cannot be
+  reconciled. Blob stores gain a `meta/` directory (file) or `<prefix>/meta/` keys (S3, Azure, GCS):
+  back them up with the blobs. Each upload commit now writes one extra small object (one S3 PUT),
+  proxy cache fills included.
 - Older builds refuse to start beside a running node, but this one starts beside an older one. Upgrade
   every node and do not mix versions except during a rolling upgrade. Blob store moves and group member
   removals wait until every node answers, which an older node never does.

@@ -16,6 +16,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -54,6 +55,105 @@ type backend interface {
 	check() error
 }
 
+// metaBackend keeps small named objects next to the blobs (the reconcile journal). key is a slash path such as
+// "journal/2026/10/30/09/<name>.json" (no leading slash, no "..", [A-Za-z0-9._/-] only); walk never reports them.
+type metaBackend interface {
+	putMeta(key string, data []byte) error
+	getMeta(key string) ([]byte, error)                      // ErrNotFound when missing
+	listMeta(prefix string, fn func(key string) error) error // keys starting with prefix, lexical order
+	removeMeta(key string) error                             // a missing key is not an error
+}
+
+// ErrNoMeta refuses a meta object on a store whose backend keeps none.
+var ErrNoMeta = errors.New("this blob store keeps no meta objects")
+
+// maxMeta bounds a meta object read back.
+const maxMeta = 16 << 20
+
+// validMetaKey reports whether key may name a meta object: a relative slash
+// path of [A-Za-z0-9._-] segments, none empty, "." or "..".
+func validMetaKey(key string) bool {
+	return key != "" && !strings.HasSuffix(key, "/") && validMetaPrefix(key)
+}
+
+// validMetaPrefix is validMetaKey for a listing prefix, which may be empty
+// or end with a slash.
+func validMetaPrefix(p string) bool {
+	if len(p) > 1024 || strings.HasPrefix(p, "/") {
+		return false
+	}
+	for _, c := range p {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' || c == '/') {
+			return false
+		}
+	}
+	segs := strings.Split(p, "/")
+	for i, seg := range segs {
+		if seg == "." || seg == ".." || seg == "" && i < len(segs)-1 {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Store) metaBackend() (metaBackend, error) {
+	mb, ok := s.be.(metaBackend)
+	if !ok {
+		return nil, ErrNoMeta
+	}
+	return mb, nil
+}
+
+// PutMeta stores data as the meta object key, replacing one there: a small
+// named object beside the blobs that Walk, Usage and GC never see.
+func (s *Store) PutMeta(key string, data []byte) error {
+	if !validMetaKey(key) {
+		return fmt.Errorf("invalid meta object key %q", key)
+	}
+	mb, err := s.metaBackend()
+	if err != nil {
+		return err
+	}
+	return mapErr(mb.putMeta(key, data))
+}
+
+// GetMeta reads the meta object key; ErrNotFound when there is none.
+func (s *Store) GetMeta(key string) ([]byte, error) {
+	if !validMetaKey(key) {
+		return nil, fmt.Errorf("invalid meta object key %q", key)
+	}
+	mb, err := s.metaBackend()
+	if err != nil {
+		return nil, err
+	}
+	return mb.getMeta(key)
+}
+
+// ListMeta calls fn with the key of every meta object that starts with
+// prefix, in lexical order, until fn returns an error.
+func (s *Store) ListMeta(prefix string, fn func(key string) error) error {
+	if !validMetaPrefix(prefix) {
+		return fmt.Errorf("invalid meta object prefix %q", prefix)
+	}
+	mb, err := s.metaBackend()
+	if err != nil {
+		return err
+	}
+	return mb.listMeta(prefix, fn)
+}
+
+// RemoveMeta deletes the meta object key; a missing one is not an error.
+func (s *Store) RemoveMeta(key string) error {
+	if !validMetaKey(key) {
+		return fmt.Errorf("invalid meta object key %q", key)
+	}
+	mb, err := s.metaBackend()
+	if err != nil {
+		return err
+	}
+	return mb.removeMeta(key)
+}
+
 // File is an open blob: http.ServeContent needs Seek, zip readers ReadAt.
 type File interface {
 	io.ReadSeekCloser
@@ -66,7 +166,8 @@ type Info struct {
 	ModTime time.Time
 }
 
-// dir is the filesystem backend: blobs/sha256/xx/yy/<sha> under root.
+// dir is the filesystem backend: blobs/sha256/xx/yy/<sha> under root, and
+// the meta objects at meta/<key>.
 type dir struct{ root string }
 
 var bufPool = sync.Pool{New: func() any { b := make([]byte, 32*1024); return &b }}
@@ -388,4 +489,112 @@ func (d dir) stat(sha string) (Info, error) {
 		return Info{}, err
 	}
 	return Info{Size: info.Size(), ModTime: info.ModTime()}, nil
+}
+
+func (d dir) metaPath(key string) string {
+	return filepath.Join(d.root, "meta", filepath.FromSlash(key))
+}
+
+// putMeta writes data to a temp file and renames it into place, so a reader
+// sees the old object or the new one, never a part.
+func (d dir) putMeta(key string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Join(d.root, "tmp"), tmpPrefix+"*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name()) // a no-op after the rename
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	dst := d.metaPath(key)
+	for try := 0; ; try++ {
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		// A removeMeta pruning the directory in between makes the rename
+		// fail once: make it again.
+		if err = os.Rename(f.Name(), dst); err == nil || try > 0 || !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+}
+
+func (d dir) getMeta(key string) ([]byte, error) {
+	f, err := os.Open(d.metaPath(key))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxMeta))
+}
+
+func (d dir) listMeta(prefix string, fn func(string) error) error {
+	return listMetaDir(filepath.Join(d.root, "meta"), "", prefix, fn)
+}
+
+// listMetaDir calls fn for the files under dir, whose keys start with rel,
+// that start with prefix, in lexical key order: a directory's entries sort
+// by their key, a subdirectory's with its trailing slash.
+func listMetaDir(dir, rel, prefix string, fn func(string) error) error {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	type entry struct {
+		key, name string
+		dir       bool
+	}
+	list := make([]entry, 0, len(entries))
+	for _, e := range entries {
+		k := rel + e.Name()
+		switch {
+		case e.IsDir():
+			if k += "/"; !strings.HasPrefix(k, prefix) && !strings.HasPrefix(prefix, k) {
+				continue
+			}
+		case !e.Type().IsRegular() || !strings.HasPrefix(k, prefix):
+			continue
+		}
+		list = append(list, entry{k, e.Name(), e.IsDir()})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].key < list[j].key })
+	for _, e := range list {
+		if e.dir {
+			err = listMetaDir(filepath.Join(dir, e.name), e.key, prefix, fn)
+		} else {
+			err = fn(e.key)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeMeta removes the object and then the directories it leaves empty.
+func (d dir) removeMeta(key string) error {
+	p := d.metaPath(key)
+	if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	top := filepath.Join(d.root, "meta")
+	for dir := filepath.Dir(p); len(dir) > len(top) && strings.HasPrefix(dir, top); dir = filepath.Dir(dir) {
+		if os.Remove(dir) != nil { // not empty
+			break
+		}
+	}
+	return nil
 }

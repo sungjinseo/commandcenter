@@ -2190,6 +2190,7 @@ curl -u admin http://localhost:8081/-/metrics
 | `commandcenter_blobstore_blobs{store}`, `commandcenter_blobstore_bytes` | blob store별 blob 수와 크기(30초 캐시) |
 | `commandcenter_tasks_last_result{task,type}` | 마지막 실행이 성공이면 1, 실패면 0(한 번도 안 돌았으면 없음) |
 | `commandcenter_health_check{name}` | 상태 점검(Database, Blob store, Memory, Remote fetch slots, Repositories) 통과 1, 실패 0 |
+| `commandcenter_reconcile_journal_writes_total{result="ok\|failed"}`, `commandcenter_reconcile_journal_queued`, `commandcenter_recovery_mode` | 이 노드의 reconcile 저널 쓰기와 대기 수, 복구 모드(켜짐 1) |
 
 Prometheus 수집 설정 예:
 
@@ -2281,6 +2282,11 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 | `vulnerability.sync` | OSV 덤프(`<dumpURL>/<생태계>/all.zip`)를 내려받아 로컬 취약점 DB에 저장("취약점 데이터와 방화벽(OSV)" 참고) | 없음 |
 | `vulnerability.scan` | hosted·proxy 저장소의 컴포넌트를 검사해 결과를 저장 | `repository`(선택. 비우면 대상 포맷의 모든 hosted·proxy 저장소) |
 | `security.purge-expired-user-tokens` | 만료된 사용자 토큰을 지움. `expirationDays`가 0이면 아무것도 지우지 않음("사용자 토큰" 참고) | 없음 |
+| `repository.pull-replication` | 복제가 켜진 proxy가 원본 hosted 저장소의 새 파일을 미리 받음("풀 복제" 참고) | `repository`(선택, 비우면 복제가 켜진 모든 proxy), `full`(기본 꺼짐) |
+| `blobstore.reconcile-plan` | 저널과 DB를 비교해 복원 뒤 되살리거나 지울 행의 계획(ADD·DELETE·SKIP·CONFLICT)을 저장. 아무것도 바꾸지 않음("DB 복원 뒤 blob store와 맞추기" 참고) | `blobStore`(선택), `sinceHours`(기본 24), `since`(RFC 3339), `all` |
+| `blobstore.reconcile-execute` | 계획의 ADD·DELETE를 적용하고 바뀐 hosted 저장소의 인덱스 문서를 다시 만듦. 다시 실행하면 FAILED만 재시도 | `planId`(필수) |
+
+복구 모드에서는 `blobstore.compact`, `repository.cleanup`, `maven.purge-snapshots`, `repository.change-blobstore`, `blobstore.group-remove-member`, `repository.import`가 실행되지 않고 "skipped"로 끝납니다.
 
 작업 목록 API(`GET /-/api/tasks`)의 `types[]`에는 종류마다 `params`(이름·형식·기본값)가 함께 옵니다. Nexus 호환 API(`GET /service/rest/v1/tasks`)는 `type`을 Nexus 이름으로 바꿔 줍니다(`repository.maven.rebuild-metadata`, `repository.maven.remove-snapshots`, `blobstore.delete-temp-files`). 같은 API로 작업을 만들고 고치고 실행·중지할 수도 있습니다("Nexus REST API 호환" 참고).
 
@@ -2384,6 +2390,30 @@ docker compose up -d
 외부 PostgreSQL이라면 그 서버에서 `pg_dump`/`pg_restore`(또는 관리형 서비스의 스냅샷)를 쓰고, 위의 blob 복사만 compose 볼륨에 합니다.
 
 **저장소 점검(verify-blobs)**: `repository.verify-blobs` 작업은 DB의 에셋이 가리키는 blob이 blob store에 실제로 있는지 점검합니다("예약 작업" 참고). 백업을 복원한 뒤나 blob 디렉터리를 옮긴 뒤 한 번 돌려 두 쪽이 같은 시점의 것인지 확인하세요. 기본은 존재와 크기만 보므로 빠르고, `checksum`을 켜면 blob을 다시 읽어 SHA-256까지 비교합니다. 큰 store는 `maxBytes`(기본 10 GiB)만큼 읽고 멈춘 뒤 다음 실행이 저장소별 커서에서 이어 가므로 매일 밤 일정으로 두면 전체를 돌아가며 점검합니다. 결과가 Failed면 로그에 빠진 blob(`missing:`)과 내용이 다른 blob(`mismatch:`)의 경로가 100개까지 남습니다. 작업은 아무것도 지우지 않습니다. 빠진 blob은 백업에서 해당 파일(`blobs/sha256/xx/yy/<sha>`)을 되돌리거나 에셋을 지우고 다시 올리고, 내용이 다른 blob은 디스크 손상을 의심하고 백업에서 되돌리세요.
+
+### DB 복원 뒤 blob store와 맞추기(reconcile)
+
+blob은 SHA-256 이름만 있고 저장소 경로를 모릅니다. 그래서 blob store보다 오래된 백업으로 DB를 되돌리면 백업 뒤에 올린 파일은 blob만 남고 DB에서 사라지며(404), 백업 뒤에 지운 파일은 DB에 다시 나타납니다. 이것을 되돌리는 것이 reconcile 저널과 두 작업입니다. Nexus의 "Repair - Reconcile component database from blob store"(계획과 실행)에 해당합니다.
+
+- **저널**: 에셋·패키지 버전·dist-tag 행을 쓰거나 지우는 모든 커밋은 커밋 직후 그 저장소의 blob store에 작은 JSON 레코드를 남깁니다. 위치는 파일 store가 `<store>/meta/journal/YYYY/MM/DD/HH/<나노초>-<난수>.json`, S3·Azure·google store가 `<prefix>/meta/journal/...`입니다. 레코드에는 저장소, 경로, SHA-256 등 체크섬, 크기, Content-Type, 생성·수정 시각, 올린 사람, 포맷의 버전 문서가 들어 있습니다. 시각은 PostgreSQL 서버의 시계라서 여러 노드의 레코드도 커밋 순서대로 정렬됩니다. 쓰기는 비동기라 업로드를 기다리게 하지 않고(측정값: 4 KiB 업로드 평균 0.8 ms에 약 0.05 ms 증가), 저널을 쓰지 못해도 업로드는 성공합니다. 실패는 서버 로그와 `commandcenter_reconcile_journal_writes_total{result="failed"}`에 남습니다. blob store 그룹은 쓰기 가능한 모든 멤버에 같은 레코드를 쓰고, 읽을 때는 모든 멤버의 합집합을 봅니다. 커밋마다 작은 객체가 하나 더 쓰이므로 S3 계열 store는 PUT 요청이 하나 늘어납니다(proxy 캐시 저장 포함).
+- **보관 기간**: 기본 30일이며 `PUT /-/api/recovery`의 `journalRetentionDays`(1~3650)로 바꿉니다. compact 작업이 돌 때 기간이 지난 레코드를 지웁니다. **reconcile은 저널에 남아 있는 것만 되살립니다.** 백업 주기보다 길게 두세요. compact 작업을 끄면 저널도 정리되지 않습니다. `meta/` 아래도 blob과 함께 백업하세요.
+- **복구 모드**: 켜져 있는 동안 모든 노드가 다운로드와 proxy는 그대로 서비스합니다. 업로드와 삭제(모든 포맷, Docker push, 컴포넌트 삭제와 스테이징 API)는 503과 이유를 돌려줍니다. compact, cleanup, `maven.purge-snapshots`, blob store 변경, 그룹 멤버 제거, 가져오기 작업은 돌지 않고 "skipped"로 끝납니다. 준비 상태(`/service/rest/v1/status/writable`)는 바뀌지 않으므로 로드 밸런서에서 노드가 빠지지 않습니다. 설정은 DB에 있어 모든 노드가 곧바로(늦어도 5초 안에) 따릅니다. `GET /-/api/recovery`는 상태와 이 노드의 저널 쓰기 수를 돌려줍니다.
+- **compact와의 관계**: 복원한 DB는 백업 뒤에 올린 blob을 하나도 참조하지 않으므로, compact가 되살릴 수 있는 blob을 지우게 됩니다. 그래서 복구 모드에서는 compact가 돌지 않습니다. 복구 모드가 아니어도 compact는 실행하지 않은 계획이 추가할 blob과, 지난 25시간(최소 나이 1시간 + 24시간) 동안 저널이 마지막으로 올렸다고 기록했지만 DB에 그 행이 없는 blob은 남깁니다. 그보다 오래된 것은 지우므로, 복원하면 다음 compact(기본 매일 03:00) 전에 복구 모드를 켜야 합니다.
+
+**절차**
+
+1. DB를 백업에서 복원합니다("백업과 복원" 참고). 복원한 DB에는 백업할 때의 설정이 들어 있으므로, 서버를 시작하면 **바로** 복구 모드를 켭니다: `PUT /-/api/recovery {"enabled":true,"message":"10월 29일 백업 복원 중"}`.
+2. 노드의 큐에 남은 레코드가 쓰이도록 몇 초 기다린 뒤 `blobstore.reconcile-plan` 작업을 만들어 실행합니다. 범위는 `since`(백업 시각보다 조금 이전, RFC 3339), `sinceHours`(기본 24), 또는 저널 전체를 보는 `all`로 정합니다. `blobStore`를 비우면 모든 store를 봅니다. 계획은 아무것도 바꾸지 않습니다.
+3. `GET /-/api/reconcile/plans`로 계획을, `GET /-/api/reconcile/plans/<ID>/items`로 항목을 확인합니다.
+   - **ADD**: DB에 없거나 더 오래된 행이고 blob이 있습니다.
+   - **DELETE**: 저널의 마지막 기록이 삭제인데 DB에 남은 행입니다.
+   - **SKIP**: blob이 없거나 크기가 다르거나, 저장소가 없거나, 그룹 저장소이거나, 같은 업로드의 파일에 blob이 없는 패키지 버전입니다.
+   - **CONFLICT**: DB에 저널보다 새로운 행이 있습니다.
+   - 저장소가 없어 SKIP이면 같은 이름·포맷·blob store로 만들고 다시 계획합니다.
+4. `blobstore.reconcile-execute` 작업을 `planId`로 실행합니다. 각 행을 트랜잭션 안에서 다시 확인하고 업로드와 같은 코드로 쓰며, 끝나면 바뀐 hosted 저장소의 인덱스 문서(maven-metadata.xml, npm 패키지 문서, helm index.yaml, yum·apt·conda·R·RubyGems 인덱스)를 다시 만듭니다. 실패한 항목은 FAILED로 남고 다시 실행하면 그것만 재시도합니다. 끝난 항목을 두 번 쓰지는 않습니다.
+5. 계획을 한 번 더 만들어 ADD와 DELETE가 0인지 확인한 뒤 복구 모드를 끕니다: `{"enabled":false}`.
+
+**한계**: 저장소의 생성과 삭제는 저널에 남지 않습니다. 이 버전 이전에 올린 파일, 저널 쓰기에 실패한 커밋, 보관 기간이 지난 레코드는 되살릴 수 없습니다. 패키지 행과 dist-tag에는 수정 시각이 없어 충돌을 일부만 알아봅니다. 계획은 다른 노드의 큐에 남은 레코드를 기다리지 않으므로, 복구 모드를 켜고 몇 초 뒤에 계획하세요. 저널 범위의 행마다 최신 레코드를 메모리에 들고 있으므로 바쁜 인스턴스의 30일 전체(`all`)는 수백 MB가 필요할 수 있습니다. `since`를 백업 시각 가까이 두세요.
 
 ### 릴리스 이미지와 바이너리
 

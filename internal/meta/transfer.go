@@ -54,6 +54,9 @@ ON CONFLICT(repo, path) DO UPDATE SET
 		a.Repo, a.Path, a.BlobSHA256, a.Size, a.ContentType, a.SHA1, a.MD5, a.SHA512,
 		toMs(a.CreatedAt), toMs(a.LastModified), a.RemoteETag, a.RemoteLastModified, toMs(a.CheckedAt),
 		a.Downloads, toMs(a.LastDownloaded))
+	if err == nil {
+		t.putAsset(a)
+	}
 	return err
 }
 
@@ -65,8 +68,14 @@ func (t *Tx) ImportPackage(ctx context.Context, p Package, replace bool) error {
 	if replace {
 		conflict = ` DO UPDATE SET format = excluded.format, attrs = excluded.attrs, yanked = excluded.yanked, created_at = excluded.created_at`
 	}
-	_, err := t.q.ExecContext(ctx, `INSERT INTO packages(repo, format, name, version, attrs, yanked, created_at)
+	res, err := t.q.ExecContext(ctx, `INSERT INTO packages(repo, format, name, version, attrs, yanked, created_at)
 VALUES(?,?,?,?,?,?,?) ON CONFLICT(repo, name, version)`+conflict,
 		p.Repo, p.Format, p.Name, p.Version, p.Attrs, boolInt(p.Yanked), toMs(p.CreatedAt))
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		t.putPackage(p)
+	}
+	return nil
 }

@@ -70,6 +70,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.vulnerabilityRoutes(mux)
 	u.samlRealmRoutes(mux)
 	u.replicationRoutes(mux)
+	u.reconcileRoutes(mux)
 }
 
 func principal(r *http.Request) auth.Principal { return auth.FromContext(r.Context()) }

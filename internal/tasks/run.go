@@ -379,6 +379,12 @@ func (s *Service) execute(t meta.Task, actor string, mode recordMode, done chan 
 		if !ok {
 			return summary{msg: "unknown task type"}, fmt.Errorf("unknown task type %q", t.Type)
 		}
+		if why, err := s.recoverySkip(ctx, t.Type); err != nil {
+			return summary{}, err
+		} else if why != "" {
+			rlog.Warnf("skipped: %s", why)
+			return summary{msg: "skipped: " + why}, nil
+		}
 		return def.run(ctx, s, t, actor, rlog)
 	}()
 	if err == nil && ctx.Err() != nil {

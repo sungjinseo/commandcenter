@@ -61,6 +61,10 @@ type Server struct {
 	// registry by host alone), or nil for a 404. It is public: terraform
 	// reads it before sending credentials.
 	TerraformDiscovery func() []byte
+
+	// ReadOnly, if set, returns why uploads and deletes are refused now
+	// (recovery mode), "" while they are not (recovery.go).
+	ReadOnly func() string
 }
 
 const realm = `Basic realm="commandcenter"`
@@ -116,7 +120,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /service/rest/swagger.json", s.Nexus)
 		mux.Handle("GET /service/rest/atlas/system-information", s.Nexus)
 	}
-	return s.wrap(mux)
+	return s.wrap(s.refuseWrites(mux))
 }
 
 func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +198,9 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	if !rp.IsOnline() || (acc.IsWrite() && rp.WriteTarget != nil && !rp.WriteTarget.IsOnline()) ||
 		(acc == auth.Read && rp.MembersOffline()) {
 		writeOffline(w)
+		return
+	}
+	if acc.IsWrite() && s.refused(w, r, errorWriter(h)) {
 		return
 	}
 	h.Serve(w, r, rp, path)

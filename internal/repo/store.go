@@ -76,6 +76,8 @@ type Store struct {
 	// advisories, is answered instead, whether the file was just fetched or
 	// cached.
 	Firewall func(ctx context.Context, repo, path string) error
+	// Journal, if set, writes the reconcile journal (journal.go).
+	Journal *Journal
 }
 
 // Definition returns the live definition of the named repository, or nil.
@@ -214,13 +216,7 @@ func (s *Store) blobsFor(name string) (*blob.Store, error) {
 // BlobStore returns the blob store that holds the given repository's blobs,
 // or an error (logged) when the repository names a store that does not exist.
 func (s *Store) BlobStore(repo string) (*blob.Store, error) {
-	name := ""
-	if s.StoreFor != nil {
-		name = s.StoreFor(repo)
-	}
-	if m, ok := s.MoveOf(repo); ok { // writes go to the store it moves to
-		name = m.Target
-	}
+	name := s.storeName(repo)
 	bs, err := s.blobsFor(name)
 	if err != nil {
 		slog.Error("repository names a blob store that does not exist; its blobs cannot be read or written",
@@ -228,6 +224,21 @@ func (s *Store) BlobStore(repo string) (*blob.Store, error) {
 		return nil, fmt.Errorf("repository %q: %w", repo, err)
 	}
 	return bs, nil
+}
+
+// storeName is the name of the blob store repo's writes go to.
+func (s *Store) storeName(repo string) string {
+	name := ""
+	if s.StoreFor != nil {
+		name = s.StoreFor(repo)
+	}
+	if m, ok := s.MoveOf(repo); ok { // writes go to the store it moves to
+		name = m.Target
+	}
+	if name == "" {
+		name = DefaultStore
+	}
+	return name
 }
 
 // StoreByName returns the named blob store, or nil when there is none.

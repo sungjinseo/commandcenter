@@ -205,6 +205,7 @@ func (u *UI) prometheusText(ctx context.Context) ([]byte, error) {
 		}
 		p.sample("commandcenter_health_check", v, "name", c.Name)
 	}
+	u.reconcileMetrics(&p)
 	return p.b.Bytes(), nil
 }
 

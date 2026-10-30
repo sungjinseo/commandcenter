@@ -36,6 +36,13 @@ type DB struct {
 	keys keyedLocks             // Lock's in-process mutexes (cluster.go)
 	cl   *cluster               // the lock connection and the listener
 	self atomic.Pointer[Member] // this process's node, once Join ran (nodes.go)
+
+	// OnCommit, if set, is called after each commit that wrote rows of
+	// assets, packages or dist_tags, with the database's clock just before
+	// the commit and those writes in order (the reconcile journal,
+	// journal.go). Set it before d is shared; it must not block.
+	OnCommit func(ctx context.Context, at time.Time, changes []Change)
+	recovery atomic.Pointer[RecoveryMode] // the cached recovery mode (reconcile.go)
 }
 
 // querier is implemented by *pool and txConn (dialect.go).
@@ -94,6 +101,11 @@ type querier interface {
 //	   so the upgrade itself is expand-only and stays rolling.
 //	7: blob_stores rows of type "google" (Google Cloud Storage stores): the
 //	   same, through the same raiseCompat in CreateBlobStore.
+//	7: reconcile_plans and reconcile_items (reconcile.go): expand-only, new
+//	   tables an older build never reads; beside this one it writes no
+//	   reconcile journal and its compaction does not keep the blobs a
+//	   pending plan adds, so plans are made and run once every node runs
+//	   this version.
 const schemaVersion = 7
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
@@ -282,22 +294,30 @@ func (d *DB) GetAsset(ctx context.Context, repo, path string) (Asset, error) {
 }
 
 // PutAsset inserts or replaces an asset; an existing CreatedAt is kept.
-func (d *DB) PutAsset(ctx context.Context, a Asset) error { return putAsset(ctx, d.sql, a) }
+// It is Tx.PutAsset in a transaction of its own, so the reconcile journal
+// records it (OnCommit).
+func (d *DB) PutAsset(ctx context.Context, a Asset) error {
+	return d.Tx(ctx, func(t *Tx) error { return t.PutAsset(ctx, a) })
+}
 
-func putAsset(ctx context.Context, q querier, a Asset) error {
-	_, err := q.ExecContext(ctx, `INSERT INTO assets(`+assetCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+// putAsset upserts a and returns the created_at the row keeps. q is a
+// transaction: the RETURNING query takes no write lock of its own.
+func putAsset(ctx context.Context, q querier, a Asset) (time.Time, error) {
+	var created int64
+	err := writeRow(ctx, q, `INSERT INTO assets(`+assetCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(repo, path) DO UPDATE SET
   blob_sha256 = excluded.blob_sha256, size = excluded.size, content_type = excluded.content_type,
   sha1 = excluded.sha1, md5 = excluded.md5, sha512 = excluded.sha512,
   last_modified = excluded.last_modified, remote_etag = excluded.remote_etag,
-  remote_last_modified = excluded.remote_last_modified, checked_at = excluded.checked_at`,
-		a.Repo, a.Path, a.BlobSHA256, a.Size, a.ContentType, a.SHA1, a.MD5, a.SHA512,
-		toMs(a.CreatedAt), toMs(a.LastModified), a.RemoteETag, a.RemoteLastModified, toMs(a.CheckedAt))
-	return err
+  remote_last_modified = excluded.remote_last_modified, checked_at = excluded.checked_at
+RETURNING created_at`, []any{a.Repo, a.Path, a.BlobSHA256, a.Size, a.ContentType, a.SHA1, a.MD5, a.SHA512,
+		toMs(a.CreatedAt), toMs(a.LastModified), a.RemoteETag, a.RemoteLastModified, toMs(a.CheckedAt)}, &created)
+	return fromMs(created), err
 }
 
+// DeleteAsset is Tx.DeleteAsset in a transaction of its own.
 func (d *DB) DeleteAsset(ctx context.Context, repo, path string) error {
-	return deleteAsset(ctx, d.sql, repo, path)
+	return d.Tx(ctx, func(t *Tx) error { _, err := t.DeleteAsset(ctx, repo, path); return err })
 }
 
 func deleteAsset(ctx context.Context, q querier, repo, path string) error {
