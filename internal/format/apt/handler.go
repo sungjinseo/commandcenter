@@ -1,13 +1,16 @@
 package apt
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -15,6 +18,7 @@ import (
 	"commandcenter/internal/blob"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/pgp"
 	"commandcenter/internal/proxy"
@@ -58,6 +62,22 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 			}
 			return repo.MethodNotAllowed(allow, "method %s not allowed", r.Method)
 		}
+	case p == "rebuild-indexes" && r.Method == http.MethodPost: // Nexus's: regenerate dists/ now
+		if rp.Type != "hosted" {
+			return repo.MethodNotAllowed("GET, HEAD", "method %s not allowed", r.Method)
+		}
+		if err := h.RebuildMetadata(r.Context(), rp, func(string, ...any) {}); err != nil {
+			return err
+		}
+		w.WriteHeader(http.StatusOK)
+		return nil
+	case isSnapshotWrite(r.Method, p):
+		target, err := repo.WriteTarget(rp)
+		if err != nil {
+			return repo.WithAllow(err, "GET, HEAD")
+		}
+		id, _ := snapshotRoot(p)
+		return h.snapshot(w, r, target, id)
 	case p == publicKeyPath:
 		if !get {
 			return repo.MethodNotAllowed("GET, HEAD", "method %s not allowed", r.Method)
@@ -92,35 +112,40 @@ func checkPath(p string) error {
 	return nil
 }
 
-// get serves a stored or cached file: dists/ is metadata (re-checked
-// after metadataMaxAge on a proxy), everything else content. A group asks
-// its members in order. A hosted repository nothing was uploaded to yet
-// answers its (empty) Release files, so `apt update` works before the
-// first upload.
+// get serves a stored or cached file: a package (.deb, .udeb) is content,
+// everything else metadata (re-checked after metadataMaxAge on a proxy,
+// flat remotes' root Release and Packages included). A group asks its
+// members in order (lookup). A hosted repository nothing was uploaded to
+// yet answers its (empty) Release files, so `apt update` works before the
+// first upload; one whose dists/ do not match its settings regenerates
+// them (heal).
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) error {
-	kind := proxy.Content
-	if strings.HasPrefix(p, "dists/") {
-		kind = proxy.Metadata
+	kind := proxy.Metadata
+	if isPackageFile(p) {
+		kind = proxy.Content
 	}
-	res, err := h.Resolver.LookupTarget(r.Context(), rp, proxy.Target{Key: p, Remote: p, NotHTML: true}, kind)
+	res, err := h.lookup(r.Context(), rp, p, kind)
 	if errors.Is(err, repo.ErrNotFound) && rp.Type == "hosted" && strings.HasPrefix(p, "dists/"+rp.Distribution+"/") {
-		names, err := h.Store.DB.ListPackageNames(r.Context(), rp.Name)
-		if err != nil {
-			return err
-		}
-		if len(names) > 0 {
+		names, lerr := h.Store.DB.ListPackageNames(r.Context(), rp.Name)
+		switch {
+		case lerr != nil:
+			return lerr
+		case len(names) > 0 && h.heal(r.Context(), rp):
+			res, err = h.lookup(r.Context(), rp, p, kind)
+		case len(names) > 0:
 			return repo.ErrNotFound
+		default:
+			files, err := build(rp, nil, h.Now())
+			if err != nil {
+				return err
+			}
+			b, ok := files[p]
+			if !ok {
+				return repo.ErrNotFound
+			}
+			repo.ServeText(w, r, string(b), contentType(p), time.Time{})
+			return nil
 		}
-		files, err := build(rp, nil, h.Now())
-		if err != nil {
-			return err
-		}
-		b, ok := files[p]
-		if !ok {
-			return repo.ErrNotFound
-		}
-		repo.ServeText(w, r, string(b), contentType(p), time.Time{})
-		return nil
 	}
 	if err != nil {
 		return err
@@ -132,6 +157,123 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 	}
 	repo.ServeAsset(w, r, h.Store, a)
 	return nil
+}
+
+func isPackageFile(p string) bool {
+	return strings.HasSuffix(p, ".deb") || strings.HasSuffix(p, ".udeb")
+}
+
+// lookup finds p in rp as the resolver does, a group asking its online
+// members in order, with apt's rules applied in every member: a proxy
+// enforcing its distribution has no other dists/<name>/, a refreshed
+// Release expires what was cached with the old one (release), and a
+// hosted repository also answers the pool path Nexus gives a package
+// (nexusPoolPath).
+func (h *Handler) lookup(ctx context.Context, rp *repo.Repository, p string, kind proxy.Kind) (proxy.Result, error) {
+	t := proxy.Target{Key: p, Remote: p, NotHTML: true}
+	switch rp.Type {
+	case "group":
+		var firstErr error
+		for _, m := range rp.OnlineMembers() {
+			res, err := h.lookup(ctx, m, p, kind)
+			if err == nil {
+				return res, nil
+			}
+			if repo.StatusOf(err) != http.StatusNotFound && firstErr == nil {
+				firstErr = err
+			}
+		}
+		return proxy.Result{}, cmp.Or(firstErr, repo.ErrNotFound)
+	case "proxy":
+		if rp.EnforceDistribution && strings.HasPrefix(p, "dists/") && !strings.HasPrefix(p, "dists/"+rp.Distribution+"/") {
+			return proxy.Result{}, repo.ErrNotFound
+		}
+		if base := path.Base(p); base == "Release" || base == "InRelease" {
+			return h.release(ctx, rp, t)
+		}
+	case "hosted":
+		if live := snapshotPackage(p); live != p { // a snapshot's packages are the live pool's
+			p, t = live, proxy.Target{Key: live}
+		}
+		res, err := h.Resolver.LookupTarget(ctx, rp, t, kind)
+		if errors.Is(err, repo.ErrNotFound) {
+			if alt := h.nexusPoolPath(ctx, rp, p); alt != "" {
+				return h.Resolver.LookupTarget(ctx, rp, proxy.Target{Key: alt}, kind)
+			}
+		}
+		return res, err
+	}
+	return h.Resolver.LookupTarget(ctx, rp, t, kind)
+}
+
+// release fetches a Release or InRelease through proxy rp. When it came
+// back changed, the metadata cached beside it (the other Release files,
+// Packages, Sources, Translation) belongs to the old one and would fail
+// apt's checksums: it is marked for revalidation on its next request, as
+// Nexus does. by-hash files and packages are named by their content and
+// keep their cache.
+func (h *Handler) release(ctx context.Context, rp *repo.Repository, t proxy.Target) (proxy.Result, error) {
+	prev, perr := h.Store.Get(ctx, rp.Name, t.Key)
+	res, err := h.Resolver.LookupTarget(ctx, rp, t, proxy.Metadata)
+	if err != nil || perr != nil || res.Asset.BlobSHA256 == prev.BlobSHA256 {
+		return res, err
+	}
+	// ponytail: a flat remote's root Release lists the whole cache to find its siblings; once per upstream change.
+	dir := t.Key[:strings.LastIndex(t.Key, "/")+1]
+	cached, lerr := h.Store.DB.ListAssets(ctx, rp.Name, dir)
+	for _, a := range cached {
+		if a.Path == t.Key || isPackageFile(a.Path) || strings.Contains(a.Path, "/by-hash/") {
+			continue
+		}
+		if lerr = h.Store.DB.MarkChecked(ctx, rp.Name, a.Path, time.Unix(0, 0)); lerr != nil {
+			break
+		}
+	}
+	if lerr != nil { // the Release is good; its siblings expire by metadataMaxAge instead
+		slog.Warn("apt proxy: could not expire the metadata of a replaced Release", "repo", rp.Name, "path", t.Key, "err", logsafe.Err(lerr))
+	}
+	return res, nil
+}
+
+// nexusPoolPath is where hosted rp keeps the package Nexus would serve at
+// p, pool/<first letter>/<package>/<package>_<version>_<arch>.deb (Nexus
+// lays its pool out so), so the download URLs of a repository migrated
+// from Nexus keep working; "" when p has another shape or rp has no such
+// package.
+func (h *Handler) nexusPoolPath(ctx context.Context, rp *repo.Repository, p string) string {
+	segs := strings.Split(p, "/")
+	arch, name, version, ok := component.SplitDeb(p)
+	if !ok || len(segs) != 4 || segs[0] != "pool" || segs[2] != name || segs[1] != name[:1] {
+		return ""
+	}
+	pkg, err := h.Store.DB.GetPackage(ctx, rp.Name, name, version+"_"+arch)
+	if err != nil {
+		return ""
+	}
+	r, err := parseRow(pkg.Attrs)
+	if err != nil || r.Filename == p {
+		return ""
+	}
+	return r.Filename
+}
+
+// heal regenerates the dists/ of hosted rp, which holds packages, when
+// they do not follow its settings: no Release for its distribution (it
+// was renamed) or no InRelease although it has a signing key. The update
+// that changed them regenerates them (ui); this repairs a failure there,
+// as Nexus rebuilds on such a request. It reports whether it rebuilt.
+func (h *Handler) heal(ctx context.Context, rp *repo.Repository) bool {
+	dist := "dists/" + rp.Distribution + "/"
+	_, rerr := h.Store.Get(ctx, rp.Name, dist+"Release")
+	_, ierr := h.Store.Get(ctx, rp.Name, dist+"InRelease")
+	if !errors.Is(rerr, repo.ErrNotFound) && !(rerr == nil && rp.SigningKey != "" && errors.Is(ierr, repo.ErrNotFound)) {
+		return false
+	}
+	if err := h.RebuildMetadata(ctx, rp, func(string, ...any) {}); err != nil {
+		slog.Warn("apt: could not regenerate dists/", "repo", rp.Name, "err", logsafe.Err(err))
+		return false
+	}
+	return true
 }
 
 // publicKey serves the public key of the repository's signing key, for
@@ -287,7 +429,9 @@ func (h *Handler) regenerate(ctx context.Context, tx *meta.Tx, rp *repo.Reposito
 	if err != nil {
 		return err
 	}
+	prev := map[string]meta.Asset{}
 	for _, a := range old {
+		prev[a.Path] = a
 		if _, keep := files[a.Path]; keep {
 			continue
 		}
@@ -300,7 +444,18 @@ func (h *Handler) regenerate(ctx context.Context, tx *meta.Tx, rp *repo.Reposito
 		if err != nil {
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, p, contentType(p), sums)); err != nil {
+		a := h.Store.NewAsset(rp.Name, p, contentType(p), sums)
+		if o, ok := prev[p]; ok {
+			if o.BlobSHA256 == sums.SHA256 {
+				continue // unchanged: its Last-Modified stays, so clients keep their copy
+			}
+			// apt revalidates with If-Modified-Since, in whole seconds: a
+			// change in the second of the previous one must still be newer.
+			if next := o.LastModified.Truncate(time.Second).Add(time.Second); a.LastModified.Before(next) {
+				a.LastModified = next
+			}
+		}
+		if err := tx.PutAsset(ctx, a); err != nil {
 			return err
 		}
 	}

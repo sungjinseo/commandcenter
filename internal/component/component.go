@@ -370,7 +370,7 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "nuget":
 		name, version, ok = SplitNuGet(p)
 		return "", name, version, ok
-	case "apt": // pool/<component>/<prefix>/<package>/<package>_<version>_<arch>.deb: the architecture is the group
+	case "apt": // <package>_<version>_<arch>.deb anywhere (SplitDeb): the architecture is the group
 		return SplitDeb(p)
 	case "composer":
 		name, version, ok = SplitComposer(p)
@@ -653,22 +653,29 @@ func SplitRPM(p string) (name, version string, ok bool) {
 	return stem[:j], stem[j+1:], true
 }
 
-// SplitDeb splits the path of a .deb in the pool as the apt format stores
-// it (and as Debian names them): the file <package>_<version>_<arch>.deb
-// under pool/<component>/<prefix>/<package>/, the version's ":" written
-// "%3a" as dpkg does. The architecture is the component's group.
+// SplitDeb splits the path of a Debian package, wherever it lies (the
+// apt format's pool/<component>/<prefix>/<package>/, Nexus's
+// pool/<letter>/<package>/, a flat or vendor layout a proxy caches): the
+// file <package>_<version>_<arch>.deb or .udeb, as Debian names them, the
+// version's ":" written "%3a" as dpkg does. The architecture is the
+// component's group.
 func SplitDeb(p string) (arch, name, version string, ok bool) {
-	segs := strings.Split(p, "/")
-	if len(segs) != 5 || segs[0] != "pool" {
-		return "", "", "", false
+	stem, cut := strings.CutSuffix(path.Base(p), ".deb")
+	if !cut {
+		stem, cut = strings.CutSuffix(path.Base(p), ".udeb")
 	}
-	stem, cut := strings.CutSuffix(segs[4], ".deb")
 	parts := strings.Split(stem, "_")
-	if !cut || len(parts) != 3 || parts[0] != segs[3] || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+	if !cut || len(parts) != 3 || !debNameRE.MatchString(parts[0]) || parts[1] == "" || !debArchRE.MatchString(parts[2]) {
 		return "", "", "", false
 	}
-	return parts[2], parts[0], strings.ReplaceAll(parts[1], "%3a", ":"), true
+	version = strings.ReplaceAll(strings.ReplaceAll(parts[1], "%3a", ":"), "%3A", ":")
+	return parts[2], parts[0], version, true
 }
+
+var (
+	debNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]*$`)
+	debArchRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+)
 
 // helmNameRE is a chart name as the helm format stores it: it starts a
 // `<name>-<version>.tgz` file name, so no "/" and no leading ".".

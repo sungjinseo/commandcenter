@@ -217,6 +217,11 @@ func newEnv(t *testing.T) *env {
 		{Name: "apt-signed", Format: "apt", Type: "hosted", WritePolicy: "allow_once", Distribution: "jammy", Component: "internal", SigningKey: testSigningKey(t)},
 		{Name: "apt-proxy", Format: "apt", Type: "proxy", Remote: ts.URL + "/debian/",
 			MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Minute)},
+		{Name: "apt-flat", Format: "apt", Type: "proxy", Remote: ts.URL + "/debian/", Flat: true,
+			MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Minute)},
+		{Name: "apt-enforce", Format: "apt", Type: "proxy", Remote: ts.URL + "/debian/", Distribution: "bookworm", EnforceDistribution: true,
+			MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Minute)},
+		{Name: "apt-enforce-group", Format: "apt", Type: "group", Members: []string{"apt-enforce"}},
 		{Name: "apt-all", Format: "apt", Type: "group", Members: []string{"apt-hosted", "apt-proxy"}, WriteMember: "apt-hosted"},
 		{Name: "apt-proxy-first", Format: "apt", Type: "group", Members: []string{"apt-proxy", "apt-signed"}},
 	}}

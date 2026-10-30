@@ -109,8 +109,8 @@ func validateWritePath(p string) error {
 	return nil
 }
 
-// ContentType returns the media type for a path whose upload named none:
-// by extension, else application/octet-stream.
+// ContentType returns the media type a path's extension names, else
+// application/octet-stream.
 func ContentType(p string) string {
 	if ct := mime.TypeByExtension(path.Ext(p)); ct != "" {
 		return ct
@@ -118,11 +118,31 @@ func ContentType(p string) string {
 	return "application/octet-stream"
 }
 
+// indexFiles are what a directory answers, as a web server's index: a
+// static site (documentation, Javadoc, reports) works from raw.
+var indexFiles = []string{"index.html", "index.htm"}
+
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
 	if isDir(p) {
-		// Only a hosted repository has a tree of its own to list: a proxy's
-		// cache is partial, and a remote's listing is a page that would
-		// be cached as a file at a directory path.
+		// The directory's index file, in any repository type (a group asks
+		// its members, a proxy its remote), if the caller may read it.
+		for _, name := range indexFiles {
+			if !h.Auth.Permits(auth.WithPath(r.Context(), p+name), rp.Name, auth.Read) {
+				continue
+			}
+			res, err := h.Resolver.LookupTarget(r.Context(), rp, proxy.Target{Key: p + name, Remote: p + name}, proxy.Content)
+			if err == nil {
+				h.serveFile(w, r, rp, p+name, res)
+				return
+			}
+			if !errors.Is(err, repo.ErrNotFound) {
+				repo.WriteError(w, r, err)
+				return
+			}
+		}
+		// Otherwise only a hosted repository has a tree of its own to
+		// list: a proxy's cache is partial, and a remote's listing is a
+		// page that would be cached as a file at a directory path.
 		if rp.Type != "hosted" {
 			repo.WriteError(w, r, repo.ErrNotFound)
 			return
@@ -135,6 +155,10 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 		repo.WriteError(w, r, err)
 		return
 	}
+	h.serveFile(w, r, rp, p, res)
+}
+
+func (h *Handler) serveFile(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string, res proxy.Result) {
 	proxy.SetStaleHeader(w, res)
 	a := res.Asset
 	if a.ContentType == "" {
@@ -200,10 +224,13 @@ func lastModified(e meta.DirEntry) string {
 	return e.LastModified.UTC().Format(time.RFC3339)
 }
 
-// put stores the body at p with the upload's Content-Type, or one from the
-// extension. The per-path lock makes the writePolicy and privilege checks
-// and the write atomic: overwriting an existing file (writePolicy allow)
-// needs Edit, a new one only the Add the server checked.
+// put stores the body at p with the type its extension names, else the
+// upload's Content-Type (Nexus's order, without its content detection),
+// else application/octet-stream; a form encoding, which curl --data-binary
+// declares by default, is no type. The per-path lock makes the
+// writePolicy and privilege checks and the write atomic: overwriting an
+// existing file (writePolicy allow) needs Edit, a new one only the Add the
+// server checked.
 func (h *Handler) put(r *http.Request, rp *repo.Repository, p string) error {
 	ctx := r.Context()
 	if rp.WritePolicy == "deny" {
@@ -223,9 +250,11 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p string) error {
 	case err != nil && !errors.Is(err, repo.ErrNotFound):
 		return err
 	}
-	ct := r.Header.Get("Content-Type")
-	if _, _, err := mime.ParseMediaType(ct); err != nil {
-		ct = ContentType(p)
+	ct := ContentType(p)
+	if declared := r.Header.Get("Content-Type"); ct == "application/octet-stream" {
+		if mt, _, err := mime.ParseMediaType(declared); err == nil && mt != "application/x-www-form-urlencoded" && !strings.HasPrefix(mt, "multipart/") {
+			ct = declared
+		}
 	}
 	body, err := repo.StrictBody(rp, p, ct, r.Body)
 	if err != nil {

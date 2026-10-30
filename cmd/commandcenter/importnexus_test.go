@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -158,7 +159,7 @@ func TestImportNexus(t *testing.T) {
 	nx.repos = []nexusRepo{
 		{"maven-hosted", "maven2", "hosted"}, {"maven-central", "maven2", "proxy"}, {"go-hosted", "go", "hosted"},
 		{"npm-hosted", "npm", "hosted"}, {"pypi-hosted", "pypi", "hosted"}, {"raw-hosted", "raw", "hosted"},
-		{"helm-hosted", "helm", "hosted"}, {"docker-hosted", "docker", "hosted"},
+		{"helm-hosted", "helm", "hosted"}, {"docker-hosted", "docker", "hosted"}, {"apt-hosted", "apt", "hosted"},
 	}
 	pom := func(v string) []byte {
 		return []byte(`<project><modelVersion>4.0.0</modelVersion><groupId>org.example</groupId><artifactId>app</artifactId><version>` + v + `</version></project>`)
@@ -182,6 +183,10 @@ func TestImportNexus(t *testing.T) {
 	chart := tgz(t, map[string]string{"mychart/Chart.yaml": "apiVersion: v2\nname: mychart\nversion: 0.1.0\n"})
 	nx.comps["helm-hosted"] = []nexusComponent{{Name: "mychart", Version: "0.1.0", Assets: []nexusAsset{nx.asset("helm-hosted", "mychart-0.1.0.tgz", chart)}}}
 	nx.comps["docker-hosted"] = []nexusComponent{{Name: "app", Version: "v1"}}
+	for _, v := range []string{"1.0", "1:2.0-1"} { // Nexus's pool layout, the epoch as it is
+		nx.comps["apt-hosted"] = append(nx.comps["apt-hosted"], nexusComponent{Name: "hello", Version: v, Assets: []nexusAsset{
+			nx.asset("apt-hosted", "pool/h/hello/hello_"+v+"_amd64.deb", debPackage("hello", v, "amd64"))}})
+	}
 	reg := newFakeRegistry()
 	regs := httptest.NewServer(reg)
 	defer regs.Close()
@@ -204,6 +209,7 @@ repositories:
   - { name: raw-hosted, format: raw, type: hosted }
   - { name: helm-hosted, format: helm, type: hosted }
   - { name: docker-hosted, format: docker, type: hosted }
+  - { name: apt-hosted, format: apt, type: hosted, distribution: bookworm }
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +246,7 @@ repositories:
 	base := []string{"import-nexus", "-from", nxs.URL, "-from-user", "nx", "-from-password-file", pwFile,
 		"-to", ts.URL, "-to-user", "ci", "-to-token-file", tokFile, "-docker-from", regs.URL, "-concurrency", "3",
 		"-repo", "maven-hosted=maven-releases", "-repo", "npm-hosted", "-repo", "pypi-hosted", "-repo", "raw-hosted",
-		"-repo", "helm-hosted", "-repo", "docker-hosted", "-repo", "maven-central", "-repo", "go-hosted", "-repo", "missing"}
+		"-repo", "helm-hosted", "-repo", "docker-hosted", "-repo", "apt-hosted", "-repo", "maven-central", "-repo", "go-hosted", "-repo", "missing"}
 	run := func(extra ...string) (string, error) {
 		var out bytes.Buffer
 		err := run(append(append([]string{}, base...), extra...), nil, &out)
@@ -275,6 +281,7 @@ repositories:
 	for _, want := range []string{"maven-hosted\tmaven\tapp\t1.0\t2\t", "maven-hosted\tmaven\tapp\t1.1\t2\t", "npm-hosted\tnpm\tpkg\t1.0.0\t1\t",
 		"pypi-hosted\tpypi\tdemo\t1.0\t1\t", "raw-hosted\traw\tdocs/readme.txt\t\t1\t9\tok", "helm-hosted\thelm\tmychart\t0.1.0\t1\t",
 		"docker-hosted\tdocker\tapp\tv1\t7\t", "maven-hosted -> maven-releases (maven): 2 copied, 0 skipped, 0 failed",
+		"apt-hosted -> apt-hosted (apt): 2 copied, 0 skipped, 0 failed",
 		"docker-hosted -> docker-hosted (docker): 1 copied, 0 skipped, 0 failed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q", want)
@@ -315,6 +322,13 @@ repositories:
 	if st, b, _ := get("/repository/raw-hosted/docs/readme.txt", ""); st != 200 || b != "hello raw" {
 		t.Errorf("raw: %d %q", st, b)
 	}
+	if st, b, _ := get("/repository/apt-hosted/dists/bookworm/main/binary-amd64/Packages", ""); st != 200 ||
+		!strings.Contains(b, "Version: 1.0\n") || !strings.Contains(b, "Version: 1:2.0-1\n") || !strings.Contains(b, "pool/main/h/hello/hello_1%3a2.0-1_amd64.deb") {
+		t.Errorf("apt Packages: %d %q", st, b)
+	}
+	if st, b, _ := get("/repository/apt-hosted/pool/h/hello/hello_1:2.0-1_amd64.deb", ""); st != 200 || b != string(nx.files["/repository/apt-hosted/pool/h/hello/hello_1:2.0-1_amd64.deb"]) {
+		t.Errorf("apt package at its Nexus path: %d", st)
+	}
 	if st, b, _ := get("/repository/helm-hosted/index.yaml", ""); st != 200 || !strings.Contains(b, "mychart-0.1.0.tgz") {
 		t.Errorf("helm index: %d %q", st, b)
 	}
@@ -345,7 +359,8 @@ repositories:
 		t.Errorf("second run downloaded %d files", nx.downloads-downloads)
 	}
 	for _, want := range []string{"maven-hosted\tmaven\tapp\t1.0\t0\t0\tskipped", "docker-hosted\tdocker\tapp\tv1\t0\t0\tskipped",
-		"npm-hosted -> npm-hosted (npm): 0 copied, 2 skipped, 0 failed", "pypi-hosted -> pypi-hosted (pypi): 0 copied, 1 skipped"} {
+		"npm-hosted -> npm-hosted (npm): 0 copied, 2 skipped, 0 failed", "pypi-hosted -> pypi-hosted (pypi): 0 copied, 1 skipped",
+		"apt-hosted -> apt-hosted (apt): 0 copied, 2 skipped, 0 failed"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("second run output lacks %q", want)
 		}
@@ -375,6 +390,28 @@ func TestImportNexusFlags(t *testing.T) {
 			t.Errorf("%v: accepted", args)
 		}
 	}
+}
+
+// debPackage is a minimal .deb: debian-binary, control.tar.gz with
+// ./control, an empty data.tar.gz.
+func debPackage(pkg, version, arch string) []byte {
+	var b bytes.Buffer
+	b.WriteString("!<arch>\n")
+	for _, m := range []struct {
+		name string
+		data []byte
+	}{
+		{"debian-binary", []byte("2.0\n")},
+		{"control.tar.gz", tarGz([]string{"./control"}, map[string]string{"./control": "Package: " + pkg + "\nVersion: " + version + "\nArchitecture: " + arch + "\nMaintainer: QA <qa@example.test>\nDescription: test\n"})},
+		{"data.tar.gz", tarGz(nil, nil)},
+	} {
+		fmt.Fprintf(&b, "%-16s%-12d%-6d%-6d%-8s%-10d`\n", m.name, 0, 0, 0, "100644", len(m.data))
+		b.Write(m.data)
+		if len(m.data)%2 == 1 {
+			b.WriteByte('\n')
+		}
+	}
+	return b.Bytes()
 }
 
 func tarGz(names []string, files map[string]string) []byte {

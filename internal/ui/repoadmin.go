@@ -2,13 +2,17 @@ package ui
 
 import (
 	"cmp"
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"commandcenter/internal/auth"
 	"commandcenter/internal/config"
+	"commandcenter/internal/logsafe"
+	"commandcenter/internal/pgp"
 	"commandcenter/internal/repo"
 )
 
@@ -91,11 +95,18 @@ type repoRequest struct {
 	BlobStore string `json:"blobStore"`
 	// apt hosted: distribution and component ("" for the defaults), and the
 	// signing key, write-only: an empty one on update keeps the stored key
-	// unless clearSigningKey is set.
-	Distribution    string `json:"distribution"`
-	Component       string `json:"component"`
-	SigningKey      string `json:"signingKey"`
-	ClearSigningKey bool   `json:"clearSigningKey"`
+	// unless clearSigningKey is set. signingKeyPassphrase unlocks a
+	// passphrase-protected signingKey given with it: the key is stored
+	// decrypted (sealed at rest) and the passphrase is not kept.
+	Distribution         string `json:"distribution"`
+	Component            string `json:"component"`
+	SigningKey           string `json:"signingKey"`
+	SigningKeyPassphrase string `json:"signingKeyPassphrase"`
+	ClearSigningKey      bool   `json:"clearSigningKey"`
+	// apt proxy: distribution (above) is the remote's; flat marks a flat
+	// remote; enforceDistribution answers 404 for other distributions.
+	Flat                bool `json:"flat"`
+	EnforceDistribution bool `json:"enforceDistribution"`
 	// terraform hosted: the ASCII-armored GPG public key the provider
 	// download documents list (not a secret: returned as stored).
 	GPGPublicKey string `json:"gpgPublicKey"`
@@ -160,6 +171,8 @@ type repoConfigResponse struct {
 	Distribution         string            `json:"distribution,omitempty"`
 	Component            string            `json:"component,omitempty"`
 	SigningKeySet        bool              `json:"signingKeySet"`
+	Flat                 bool              `json:"flat,omitempty"`
+	EnforceDistribution  bool              `json:"enforceDistribution,omitempty"`
 	GPGPublicKey         string            `json:"gpgPublicKey,omitempty"`
 
 	StrictContentTypeValidation bool          `json:"strictContentTypeValidation"`
@@ -244,6 +257,8 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		Distribution:         d.Distribution,
 		Component:            d.Component,
 		SigningKeySet:        d.SigningKey != "",
+		Flat:                 d.Flat,
+		EnforceDistribution:  d.EnforceDistribution,
 		GPGPublicKey:         d.GPGPublicKey,
 
 		StrictContentTypeValidation: d.StrictContentTypeValidation,
@@ -287,6 +302,7 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		AnonymousRead: b.AnonymousRead, Online: b.Online,
 		BlobStore:    b.BlobStore,
 		Distribution: b.Distribution, Component: b.Component, SigningKey: b.SigningKey,
+		Flat: b.Flat, EnforceDistribution: b.EnforceDistribution,
 		GPGPublicKey:                strings.TrimSpace(b.GPGPublicKey),
 		StrictContentTypeValidation: b.StrictContentTypeValidation, ContentDisposition: b.ContentDisposition,
 		Blocked: b.Blocked, AutoBlock: b.AutoBlock,
@@ -297,6 +313,16 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		KeepEvaluation: b.Evaluation == nil, KeepConnection: b.Connection == nil, KeepLayoutPolicy: b.LayoutPolicy == nil}
 	if b.LayoutPolicy != nil && *b.LayoutPolicy != "strict" {
 		d.LayoutPolicy = *b.LayoutPolicy
+	}
+	if b.SigningKeyPassphrase != "" {
+		if b.SigningKey == "" {
+			return d, clear, &repo.ValidationError{Errors: []string{fmt.Sprintf("repository %q: signingKeyPassphrase goes with the signingKey it unlocks (a stored key has none)", b.Name)}}
+		}
+		key, err := pgp.Unlock(b.SigningKey, b.SigningKeyPassphrase)
+		if err != nil {
+			return d, clear, &repo.ValidationError{Errors: []string{fmt.Sprintf("repository %q: signingKey: %v", b.Name, err)}}
+		}
+		d.SigningKey = key
 	}
 	if b.Evaluation != nil && *b.Evaluation != "inherit" {
 		d.Evaluation = *b.Evaluation
@@ -427,11 +453,12 @@ func (u *UI) updateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	def, clear, err := body.definition()
+	old := u.Repos.Get(name)
 	if err == nil {
 		// The form shows the remote without userinfo/query (and says so with
 		// remoteHasHiddenParts); sending that back unchanged must not strip
 		// them from the stored remote, unless clearRemoteHiddenParts asks.
-		if cur := u.Repos.Get(name); cur != nil && cur.Remote != "" && !body.ClearRemoteHiddenParts {
+		if cur := old; cur != nil && cur.Remote != "" && !body.ClearRemoteHiddenParts {
 			if pub, _, ok := publicRemote(cur.Remote); ok && def.Remote == pub {
 				def.Remote = cur.Remote
 			}
@@ -443,7 +470,26 @@ func (u *UI) updateRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.emit(r, "repo.update", def.Name, def.Name, def.Format+"/"+def.Type)
+	if old != nil && def.Format == "apt" && def.Type == "hosted" &&
+		(old.Distribution != def.Distribution || old.Component != def.Component || old.SigningKey != def.SigningKey) {
+		u.rebuildApt(r, def.Name)
+	}
 	writeJSON(w, http.StatusOK, repoConfigJSON(def))
+}
+
+// rebuildApt regenerates the dists/ of apt hosted repository name after
+// its distribution, component or signing key changed, so apt sees the
+// change now rather than after the next upload. A failure leaves the
+// update in place: the next request for the missing files regenerates
+// them, and so does repository.rebuild-metadata.
+func (u *UI) rebuildApt(r *http.Request, name string) {
+	rp := u.Repos.Get(name)
+	if u.Tasks == nil || u.Tasks.Rebuilders["apt"] == nil || rp == nil {
+		return
+	}
+	if err := u.Tasks.Rebuilders["apt"].RebuildMetadata(context.WithoutCancel(r.Context()), rp, func(string, ...any) {}); err != nil && u.Log != nil {
+		u.Log.Warn("could not regenerate the apt metadata after a repository update", "repository", name, "err", logsafe.Err(err))
+	}
 }
 
 func (u *UI) deleteRepo(w http.ResponseWriter, r *http.Request) {

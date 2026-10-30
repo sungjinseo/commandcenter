@@ -86,6 +86,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Task `security.purge-api-keys` deletes API and user tokens whose owner no longer resolves.
 - Content selectors in the Nexus API carry `"type": "csel"`; `GET /-/api/me` has `permissions` and
   `repositoryAdmin`.
+- APT: signing keys may be Ed25519 or ECDSA (P-256/384/521) as well as RSA; a signing subkey signs when
+  the key has one, and keys exported with `--export-secret-subkeys` work. Passphrase-protected keys with
+  `signingKeyPassphrase` (UI/API) or `aptSigning.passphrase` (Nexus API): the key is stored decrypted
+  (sealed), the passphrase is not kept.
+- APT: Nexus repository bodies carry `apt` and `aptSigning`; GET reports them, never the key.
+- APT proxies: `distribution`, `flat` and `enforceDistribution` (404 for other `dists/<name>/`).
+- APT: snapshots of hosted repositories (`MKCOL`/`PUT`/`DELETE .../snapshots/<id>`) for pinning.
+- APT: `POST /repository/<repo>/rebuild-indexes`; hosted repositories also serve a package at its Nexus
+  pool path; `import-nexus` copies apt.
+- Raw: a directory answers its `index.html`/`index.htm` in hosted, proxy and group repositories; folder
+  delete for hosted repositories (`DELETE /-/api/repositories/{name}/folder?path=`).
+- `GET /service/rest/repository/browse/<repo>/<dir>/`: Nexus's HTML directory listing.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -136,6 +148,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A duplicate privilege or role name in the Nexus API answers 400 (was 409), as Nexus does.
 - Deleting the user you are signed in as is refused (409).
 - `PUT /-/api/roles/{id}` replaces `name` and `roles` too: send them, or they are cleared.
+- APT: changing a hosted repository's distribution, component or signing key regenerates and re-signs
+  `dists/` at once; a request for missing `dists/` files repairs them.
+- APT proxies: everything but `.deb`/`.udeb` expires by `metadataMaxAge` (flat remotes refresh), and a
+  changed `Release`/`InRelease` expires the metadata cached beside it. Packages become components by file
+  name wherever they lie.
+- Raw: the stored Content-Type is the extension's first, then the declared one (curl's default form
+  encoding ignored), then `application/octet-stream`.
+- Nexus API: a raw repository created without `raw` gets `contentDisposition: attachment`; an update
+  without `raw` or `apt` keeps the stored values.
 
 ### Fixed
 - A Nexus API repository PUT no longer resets the anonymous-read override, a yum repository's depth,
@@ -155,6 +176,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Maven: the "latest snapshot" search download returned the oldest build or a classified file.
 - Maven: group metadata merges skip members naming another GA and keep plugins per artifactId and prefix;
   deleting a plugin's last version drops its prefix.
+- Nexus API: updating an apt repository reset a custom component to `main`.
+- APT: a `dists/` change in the same second as the previous one could answer 304 to apt.
 
 ### Upgrade notes
 - Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by
@@ -197,6 +220,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs the new version. Create nested roles and delegated privileges after the rollout.
 - Scripts that read `GET /service/rest/v1/security/roles` for `admin` or `target:action` privilege
   strings must use `nx-admin` and privilege names.
+- Existing apt proxies: cached files other than `.deb`/`.udeb` outside `dists/` (flat remotes) now
+  revalidate after `metadataMaxAge`; before, they were cached forever. An existing signing key with a
+  valid signing subkey now signs with that subkey, as gpg would (the subkey is already in `public.key`).
+  Raw Content-Type changes only for new uploads.
 
 ## [0.3.0] - 2026-10-30
 

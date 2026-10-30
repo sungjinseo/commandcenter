@@ -116,6 +116,8 @@ func (h *Handler) init() {
 	h.configRoutes(m, p)
 	h.repoAPIRoutes(m, p)
 	h.cacheRoutes(m, p)
+	// BrowsePrefix, outside the prefix too (the server routes it here)
+	m.HandleFunc("GET /service/rest/repository/browse/", h.browseHTML)
 	h.mux = m
 }
 
@@ -414,6 +416,19 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 		}
 		out["raw"] = map[string]any{"contentDisposition": cd}
 	}
+	if d.Format == "apt" && d.Type != "group" {
+		apt := map[string]any{"distribution": nullable(d.Distribution)}
+		if d.Type == "proxy" {
+			apt["flat"], apt["enforceDistribution"] = d.Flat, d.EnforceDistribution
+		}
+		out["apt"] = apt
+		// Nexus returns the key here; Command Center never does: a signed
+		// repository says so with a null keypair, which an update keeps.
+		out["aptSigning"] = nil
+		if d.SigningKey != "" {
+			out["aptSigning"] = map[string]any{"keypair": nil, "passphrase": nil}
+		}
+	}
 	return out
 }
 
@@ -514,9 +529,22 @@ type repoBody struct {
 		LayoutPolicy       string `json:"layoutPolicy"`       // STRICT | PERMISSIVE
 		ContentDisposition string `json:"contentDisposition"` // INLINE | ATTACHMENT
 	} `json:"maven"`
-	Raw struct {
+	Raw *struct {
 		ContentDisposition string `json:"contentDisposition"` // INLINE | ATTACHMENT
 	} `json:"raw"`
+	// Apt is Nexus's apt block: the distribution (hosted and proxy), flat
+	// and enforceDistribution (proxy). AptSigning's keypair is the
+	// ASCII-armored private key and passphrase its passphrase; both are
+	// write-only here.
+	Apt *struct {
+		Distribution        string `json:"distribution"`
+		Flat                *bool  `json:"flat"`
+		EnforceDistribution *bool  `json:"enforceDistribution"`
+	} `json:"apt"`
+	AptSigning *struct {
+		Keypair    string `json:"keypair"`
+		Passphrase string `json:"passphrase"`
+	} `json:"aptSigning"`
 	// RoutingRule is the request field, RoutingRuleName the one Nexus
 	// returns; either is accepted.
 	RoutingRule     *string `json:"routingRule"`
@@ -570,8 +598,16 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 		out["anonymousRead"], out["depth"], out["gpgPublicKey"] = cur.AnonymousRead, cur.Depth, cur.GPGPublicKey
 		out["contentDisposition"] = cur.ContentDisposition
 	}
-	if cd := strings.ToLower(b.Raw.ContentDisposition); cd != "" {
-		out["contentDisposition"] = cd
+	switch {
+	case b.Raw != nil && b.Raw.ContentDisposition != "":
+		out["contentDisposition"] = strings.ToLower(b.Raw.ContentDisposition)
+	case cur != nil:
+		out["contentDisposition"] = cur.ContentDisposition
+	case ccFormat(format) == "raw": // Nexus's default for a body without one
+		out["contentDisposition"] = "attachment"
+	}
+	if ccFormat(format) == "apt" {
+		aptSettings(out, typ, b, cur)
 	}
 	if ccFormat(format) == "maven" && typ != "group" {
 		if cd := strings.ToLower(b.Maven.ContentDisposition); cd != "" {
@@ -618,6 +654,31 @@ func supportedAuth(w http.ResponseWriter, b repoBody) bool {
 	}
 	writeValidation(w, []string{msg})
 	return false
+}
+
+// aptSettings maps the apt and aptSigning blocks. A block left out keeps
+// cur's values (an update) or the defaults (stable, unsigned); an empty
+// keypair keeps the stored key, which Nexus bodies cannot remove.
+// component is Command Center's own: an update keeps it.
+func aptSettings(out map[string]any, typ string, b repoBody, cur *config.Repository) {
+	if cur != nil {
+		out["distribution"], out["component"] = cur.Distribution, cur.Component
+		if typ == "proxy" {
+			out["flat"], out["enforceDistribution"] = cur.Flat, cur.EnforceDistribution
+		}
+	}
+	if a := b.Apt; a != nil {
+		out["distribution"] = a.Distribution
+		if typ == "proxy" && a.Flat != nil {
+			out["flat"] = *a.Flat
+		}
+		if typ == "proxy" && a.EnforceDistribution != nil {
+			out["enforceDistribution"] = *a.EnforceDistribution
+		}
+	}
+	if s := b.AptSigning; s != nil && s.Keypair != "" {
+		out["signingKey"], out["signingKeyPassphrase"] = s.Keypair, s.Passphrase
+	}
 }
 
 func decodeRepoBody(w http.ResponseWriter, r *http.Request) (repoBody, bool) {

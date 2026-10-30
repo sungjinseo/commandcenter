@@ -36,7 +36,7 @@ const importUsage = "usage: commandcenter import-nexus -from NEXUS_URL -from-use
 
 // nexusFormats maps a Nexus format to the Command Center format the import
 // writes with; other formats are reported as unsupported.
-var nexusFormats = map[string]string{"maven2": "maven", "npm": "npm", "pypi": "pypi", "raw": "raw", "helm": "helm", "docker": "docker"}
+var nexusFormats = map[string]string{"maven2": "maven", "npm": "npm", "pypi": "pypi", "raw": "raw", "helm": "helm", "docker": "docker", "apt": "apt"}
 
 // Nexus REST API v1 documents, the fields the import reads.
 type nexusRepo struct {
@@ -372,6 +372,8 @@ func (im *importer) copyComponent(ctx context.Context, m repoMap, format string,
 		r.err = im.copyRaw(ctx, m, c, &r)
 	case "helm":
 		r.err = im.copyHelm(ctx, m, c, &r)
+	case "apt":
+		r.err = im.copyApt(ctx, m, c, &r)
 	}
 	return r
 }
@@ -632,6 +634,27 @@ func (im *importer) copyHelm(ctx context.Context, m repoMap, c nexusComponent, r
 		file := path.Base(a.Path)
 		if err := im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+file, r); err != nil {
 			return fmt.Errorf("%s: %w", file, err)
+		}
+	}
+	return nil
+}
+
+// copyApt PUTs each package to the path Nexus has it at
+// (pool/<letter>/<package>/<file>.deb): Command Center reads its control
+// file and stores it at its own pool path, and generates dists/. A hosted
+// apt repository answers the Nexus path too, so -skip-existing finds what
+// an earlier run copied.
+func (im *importer) copyApt(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
+	for _, a := range c.Assets {
+		p := strings.TrimPrefix(a.Path, "/")
+		if !strings.HasSuffix(p, ".deb") {
+			continue
+		}
+		if !strings.HasPrefix(p, "pool/") {
+			p = "pool/" + path.Base(p)
+		}
+		if err := im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+p, r); err != nil {
+			return fmt.Errorf("%s: %w", path.Base(p), err)
 		}
 	}
 	return nil

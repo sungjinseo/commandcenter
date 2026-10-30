@@ -459,6 +459,7 @@ func repoRequestOf(d config.Repository) repoRequest {
 		Members: slices.Clone(d.Members), WriteMember: d.WriteMember, RoutingRule: d.RoutingRule,
 		VersionPolicy: d.VersionPolicy, WritePolicy: d.WritePolicy, Depth: d.Depth, BlobStore: d.BlobStore,
 		Distribution: d.Distribution, Component: d.Component, SigningKey: d.SigningKey, GPGPublicKey: d.GPGPublicKey,
+		Flat: d.Flat, EnforceDistribution: d.EnforceDistribution,
 		StrictContentTypeValidation: d.StrictContentTypeValidation, ContentDisposition: d.ContentDisposition,
 		Blocked: d.Blocked, AutoBlock: d.AutoBlock, Firewall: d.Firewall}
 	if d.AnonymousRead != nil {

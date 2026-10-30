@@ -44,6 +44,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/repositories/{name}/packages", u.packages)
 	mux.HandleFunc("GET /-/api/repositories/{name}/packages/{pkg...}", u.packageVersions)
 	mux.HandleFunc("DELETE /-/api/repositories/{name}/components", u.deleteComponent)
+	mux.HandleFunc("DELETE /-/api/repositories/{name}/folder", u.deleteFolder)
 	mux.HandleFunc("GET /-/api/repositories/{name}/components/metadata", u.componentMetadata)
 	mux.HandleFunc("GET /-/api/search", u.search)
 	mux.HandleFunc("GET /-/api/search/components", u.searchComponents)

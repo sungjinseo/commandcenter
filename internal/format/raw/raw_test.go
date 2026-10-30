@@ -37,6 +37,7 @@ type env struct {
 	repos map[string]*repo.Repository
 	hits  atomic.Int32 // upstream requests for /pub/lib.tgz
 	miss  atomic.Int32 // upstream requests for paths it does not have
+	dirs  atomic.Int32 // upstream requests for its directory page /pub/
 }
 
 // newEnv serves raw repositories through the real server (its Basic
@@ -58,7 +59,11 @@ func newEnv(t *testing.T) *env {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			io.WriteString(w, "<html>page</html>")
 		case "/pub/":
+			e.dirs.Add(1)
 			io.WriteString(w, "<html>Index of /pub/</html>")
+		case "/pub/www/index.html":
+			w.Header().Set("Content-Type", "text/html")
+			io.WriteString(w, "<html>www</html>")
 		default:
 			e.miss.Add(1)
 			http.NotFound(w, r)
@@ -154,12 +159,13 @@ func TestHostedUploadDownload(t *testing.T) {
 	if resp, _ := e.do("PUT", "files/docs/a.txt", "x", as("reader")); resp.StatusCode != 403 {
 		t.Fatalf("reader PUT: %d", resp.StatusCode)
 	}
+	// the extension's type wins over the declared one (Nexus's order)
 	e.put("files/docs/a.txt", "hello", hdr("Content-Type", "application/x-custom"))
-	e.put("files/docs/data.json", `{"k":1}`) // no Content-Type: sniffed by extension
+	e.put("files/docs/data.json", `{"k":1}`) // no Content-Type: by extension
 	e.put("files/blob.bin", "\x00\x01")      // unknown extension
 
 	resp, b := e.do("GET", "files/docs/a.txt", "")
-	if resp.StatusCode != 200 || b != "hello" || resp.Header.Get("Content-Type") != "application/x-custom" {
+	if resp.StatusCode != 200 || b != "hello" || resp.Header.Get("Content-Type") != "text/plain; charset=utf-8" {
 		t.Fatalf("GET: %d %q %q", resp.StatusCode, b, resp.Header.Get("Content-Type"))
 	}
 	if resp.Header.Get("ETag") == "" || resp.Header.Get("Last-Modified") == "" {
@@ -222,6 +228,22 @@ func TestHostedUploadDownload(t *testing.T) {
 	for i := range want {
 		if got[i].Kind != want[i].Kind || got[i].Repo != want[i].Repo || got[i].Subject != want[i].Subject {
 			t.Fatalf("event %d: %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// The stored type: the extension's, else the declared one, but for the
+// form encoding curl --data-binary declares, else octet-stream.
+func TestContentTypeOrder(t *testing.T) {
+	e := newEnv(t)
+	e.put("files/docs/notes", "n", hdr("Content-Type", "application/x-custom"))
+	e.put("files/docs/archive.zip", "PK", hdr("Content-Type", "application/x-www-form-urlencoded"))
+	e.put("files/docs/page.html", "<p>", hdr("Content-Type", "application/octet-stream"))
+	e.put("files/docs/curl", "c", hdr("Content-Type", "application/x-www-form-urlencoded"))
+	for p, want := range map[string]string{"files/docs/notes": "application/x-custom", "files/docs/archive.zip": "application/zip",
+		"files/docs/page.html": "text/html; charset=utf-8", "files/docs/curl": "application/octet-stream"} {
+		if resp, _ := e.do("GET", p, ""); resp.Header.Get("Content-Type") != want {
+			t.Errorf("GET %s: Content-Type %q, want %q", p, resp.Header.Get("Content-Type"), want)
 		}
 	}
 }
@@ -341,7 +363,8 @@ func TestDirectoryListing(t *testing.T) {
 	if resp, _ := e.do("GET", "files/nope/", ""); resp.StatusCode != 404 {
 		t.Fatalf("missing dir: %d", resp.StatusCode)
 	}
-	// An empty hosted repository still lists its root; proxies and groups list nothing.
+	// An empty hosted repository still lists its root; proxies and groups
+	// list nothing: they ask for index files only.
 	if resp, _ := e.do("GET", "site/", ""); resp.StatusCode != 200 {
 		t.Fatalf("empty root: %d", resp.StatusCode)
 	}
@@ -350,8 +373,32 @@ func TestDirectoryListing(t *testing.T) {
 			t.Errorf("GET %s: %d", p, resp.StatusCode)
 		}
 	}
-	if e.miss.Load() != 0 {
-		t.Fatalf("directory requests reached the remote: %d", e.miss.Load())
+	if e.dirs.Load() != 0 || e.miss.Load() != 6 { // index.html and index.htm of pub/, docs/ and the root, negative-cached
+		t.Fatalf("remote asked for its directory page %d times, %d misses", e.dirs.Load(), e.miss.Load())
+	}
+}
+
+// A directory answers its index.html, else index.htm, in every repository
+// type, before a hosted repository's listing (static sites in raw).
+func TestIndexFiles(t *testing.T) {
+	e := newEnv(t)
+	e.put("files/site/index.html", "<html>home</html>")
+	e.put("files/site/old/index.htm", "<html>old</html>")
+	e.put("files/site/old/index.html.bak", "x")
+	e.put("files/site/raw/a.txt", "a")
+	for p, want := range map[string]string{"files/site/": "<html>home</html>", "files/site/old/": "<html>old</html>",
+		"all/site/": "<html>home</html>", "mirror/pub/www/": "<html>www</html>", "all/pub/www/": "<html>www</html>"} {
+		resp, b := e.do("GET", p, "")
+		if resp.StatusCode != 200 || b != want || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
+			t.Errorf("GET %s: %d %q %q", p, resp.StatusCode, b, resp.Header.Get("Content-Type"))
+		}
+	}
+	if resp, b := e.do("HEAD", "files/site/", ""); resp.StatusCode != 200 || b != "" || resp.Header.Get("Content-Length") != "17" {
+		t.Fatalf("HEAD: %d %q %v", resp.StatusCode, b, resp.Header)
+	}
+	// without one, the hosted listing as before
+	if resp, b := e.do("GET", "files/site/raw/", ""); resp.StatusCode != 200 || !strings.Contains(b, "Index of /repository/files/site/raw/") {
+		t.Fatalf("listing: %d %s", resp.StatusCode, b)
 	}
 }
 

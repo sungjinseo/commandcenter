@@ -132,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /service/rest/metrics/prometheus", s.Nexus)
 		mux.Handle("GET /service/rest/metrics/data", s.Nexus)
 		mux.Handle("GET /service/rest/metrics/threads", s.Nexus)
+		mux.Handle("GET /service/rest/repository/browse/", s.Nexus)
 	}
 	return s.wrap(s.refuseWrites(mux))
 }

@@ -61,7 +61,7 @@ func TestParsePrivateKey(t *testing.T) {
 		t.Fatalf("public key packet: len %d of %d, %v", n, len(pub), err)
 	}
 	r := &mpiReader{b: pub[6:]}
-	if N, E := r.mpi(), r.mpi(); N.Cmp(k.priv.N) != 0 || E.Int64() != int64(k.priv.E) {
+	if N, E := r.mpi(), r.mpi(); N.Cmp(k.signer.pub.(*rsa.PublicKey).N) != 0 || E.Int64() != int64(k.signer.pub.(*rsa.PublicKey).E) {
 		t.Fatal("public key packet does not hold the private key's modulus and exponent")
 	}
 	if string(pkts[1].body) != "Command Center Test <apt@example.test>" {
@@ -101,7 +101,8 @@ type signature struct {
 	created               time.Time
 	issuer, issuerFP      string
 	left                  [2]byte
-	sig                   []byte
+	sig                   []byte   // the first MPI (RSA's only one)
+	mpis                  [][]byte // all of them (r and s for ECDSA and EdDSA)
 }
 
 func parseSignature(t *testing.T, armored string) signature {
@@ -143,10 +144,13 @@ func parseSignature(t *testing.T, armored string) signature {
 	b = b[2+ul:]
 	copy(s.left[:], b[:2])
 	r := &mpiReader{b: b[2:]}
-	s.sig = r.mpi().Bytes()
-	if r.err != nil || len(r.b) != 0 {
-		t.Fatalf("trailing bytes after the signature MPI: %v %d", r.err, len(r.b))
+	for len(r.b) > 0 && r.err == nil {
+		s.mpis = append(s.mpis, r.mpiBytes())
 	}
+	if r.err != nil || len(s.mpis) == 0 {
+		t.Fatalf("signature MPIs: %v", r.err)
+	}
+	s.sig = s.mpis[0]
 	return s
 }
 
@@ -193,21 +197,21 @@ func TestDetachSign(t *testing.T) {
 		t.Fatalf("armor:\n%s", armored)
 	}
 	s := parseSignature(t, armored)
-	if s.typ != sigBinary || s.pkAlgo != algoRSA || s.hashAlgo != hashSHA256 || !s.created.Equal(now) || s.issuer != keyID || s.issuerFP != fingerprint {
+	if len(s.mpis) != 1 || s.typ != sigBinary || s.pkAlgo != algoRSA || s.hashAlgo != hashSHA256 || !s.created.Equal(now) || s.issuer != keyID || s.issuerFP != fingerprint {
 		t.Fatalf("signature fields %+v", s)
 	}
-	verify(t, &k.priv.PublicKey, s, doc)
+	verify(t, k.signer.pub.(*rsa.PublicKey), s, doc)
 	// deterministic (PKCS#1 v1.5): the same input signs the same, so a
 	// regenerated Release.gpg does not change without cause
 	if again, _ := k.DetachSign(doc, now); again != armored {
 		t.Fatal("signature differs between runs")
 	}
 	// another document, or a corrupted signature, does not verify
-	if err := rsa.VerifyPKCS1v15(&k.priv.PublicKey, crypto.SHA256, digestOf(s, []byte("Origin: other\n")), s.sig); err == nil {
+	if err := rsa.VerifyPKCS1v15(k.signer.pub.(*rsa.PublicKey), crypto.SHA256, digestOf(s, []byte("Origin: other\n")), s.sig); err == nil {
 		t.Fatal("a signature over other text verified")
 	}
 	s.sig[10] ^= 1
-	if err := rsa.VerifyPKCS1v15(&k.priv.PublicKey, crypto.SHA256, digestOf(s, doc), s.sig); err == nil {
+	if err := rsa.VerifyPKCS1v15(k.signer.pub.(*rsa.PublicKey), crypto.SHA256, digestOf(s, doc), s.sig); err == nil {
 		t.Fatal("a corrupted signature verified")
 	}
 	t.Logf("DETACHED-BEGIN\n%sDETACHED-END", armored)
@@ -244,7 +248,7 @@ func TestClearSign(t *testing.T) {
 	if s.typ != sigText || s.issuer != keyID {
 		t.Fatalf("signature fields %+v", s)
 	}
-	verify(t, &k.priv.PublicKey, s, []byte(canon))
+	verify(t, k.signer.pub.(*rsa.PublicKey), s, []byte(canon))
 	// text that already ends with a newline gets no second one
 	out2, _ := k.ClearSign([]byte("A: 1\n"), now)
 	if !strings.Contains(out2, "\n\nA: 1\n-----BEGIN PGP SIGNATURE-----\n") {

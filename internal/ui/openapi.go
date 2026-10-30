@@ -45,6 +45,7 @@ var apiDocs = []openapi.Route{
 	{Pattern: "GET /-/api/repositories/{name}/packages", Summary: "Package names", Tag: "repositories", Query: []string{"q"}, Reply: "Packages"},
 	{Pattern: "GET /-/api/repositories/{name}/packages/{pkg...}", Summary: "A package's versions and tags", Tag: "repositories", Reply: "Versions"},
 	{Pattern: "DELETE /-/api/repositories/{name}/components", Summary: "Deletes a component (delete privilege)", Tag: "repositories", Auth: docUser, Query: []string{"group", "name", "version"}, Reply: "DeleteResult"},
+	{Pattern: "DELETE /-/api/repositories/{name}/folder", Summary: "Deletes the files under a directory of a raw hosted repository stored before the request (delete privilege per path): assets, bytes, denied, changed", Tag: "repositories", Auth: docUser, Query: []string{"path"}, Replies: map[int]string{200: "counts", 400: "Error", 403: "Error", 404: "Error"}},
 	{Pattern: "GET /-/api/repositories/{name}/components/metadata", Summary: "Format metadata of a component", Tag: "repositories", Query: []string{"group", "name", "version"}, Reply: "ComponentMetadata"},
 	{Pattern: "GET /-/api/search", Summary: "Asset path search", Tag: "search", Query: []string{"q", "repo"}, Reply: "SearchResult"},
 	{Pattern: "GET /-/api/search/components", Summary: "Component search", Tag: "search", Query: []string{"q", "repo", "format"}, Reply: "ComponentSearchResult"},

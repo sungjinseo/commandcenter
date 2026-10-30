@@ -243,13 +243,21 @@ type Repository struct {
 
 	// apt hosted: the dists/<distribution> and component the generated
 	// Release and Packages files are published under (defaults "stable"
-	// and "main"), and the ASCII-armored, unencrypted RSA OpenPGP private
-	// key that signs them (Release.gpg, InRelease); without one the
+	// and "main"), and the ASCII-armored OpenPGP private key, without a
+	// passphrase (the API and UI take one and store the key decrypted),
+	// that signs them (Release.gpg, InRelease): RSA, ECDSA or Ed25519, its
+	// signing subkey or primary key (pgp.ParsePrivateKey); without one the
 	// repository is unsigned ([trusted=yes]). The key is sealed at rest
 	// like the remote credentials.
 	Distribution string `yaml:"distribution,omitempty" json:"distribution,omitempty"`
 	Component    string `yaml:"component,omitempty" json:"component,omitempty"`
 	SigningKey   string `yaml:"signingKey,omitempty" json:"signingKey,omitempty"`
+	// apt proxy (Nexus's apt settings): Distribution is the remote's
+	// distribution, informational unless EnforceDistribution answers 404
+	// for every other dists/<name>/; Flat says the remote is a flat
+	// repository (Release and Packages at its root, no dists/).
+	Flat                bool `yaml:"flat,omitempty" json:"flat,omitempty"`
+	EnforceDistribution bool `yaml:"enforceDistribution,omitempty" json:"enforceDistribution,omitempty"`
 
 	// terraform hosted: the ASCII-armored OpenPGP public key whose private
 	// key signed the uploaded providers' SHA256SUMS files; the download
@@ -696,8 +704,17 @@ func ValidateDefinition(r Repository) error {
 	case r.Evaluation == "enabled" && !FirewallFormats[r.Format]:
 		errs = append(errs, fmt.Errorf("repository %q: evaluation: %s repositories have no vulnerability data (OSV)", r.Name, r.Format))
 	}
-	if (r.Distribution != "" || r.Component != "" || r.SigningKey != "") && (r.Format != "apt" || r.Type != "hosted") {
-		errs = append(errs, fmt.Errorf("repository %q: distribution, component and signingKey are only valid for apt hosted repositories", r.Name))
+	if (r.Component != "" || r.SigningKey != "") && (r.Format != "apt" || r.Type != "hosted") {
+		errs = append(errs, fmt.Errorf("repository %q: component and signingKey are only valid for apt hosted repositories", r.Name))
+	}
+	if r.Distribution != "" && (r.Format != "apt" || r.Type == "group") {
+		errs = append(errs, fmt.Errorf("repository %q: distribution is only valid for apt hosted and proxy repositories", r.Name))
+	}
+	if (r.Flat || r.EnforceDistribution) && (r.Format != "apt" || r.Type != "proxy") {
+		errs = append(errs, fmt.Errorf("repository %q: flat and enforceDistribution are only valid for apt proxy repositories", r.Name))
+	}
+	if r.EnforceDistribution && r.Distribution == "" {
+		errs = append(errs, fmt.Errorf("repository %q: enforceDistribution needs a distribution", r.Name))
 	}
 	for _, f := range []struct{ name, v string }{{"distribution", r.Distribution}, {"component", r.Component}} {
 		if f.v != "" && !aptNameRE.MatchString(f.v) {

@@ -175,9 +175,12 @@ func TestDeriveAsset(t *testing.T) {
 		{"nuget", "upstream/index.json", "", "", "", false},
 		{"apt", "pool/main/h/hello/hello_1.0_amd64.deb", "amd64", "hello", "1.0", true}, // the architecture is the group
 		{"apt", "pool/main/libf/libfoo1/libfoo1_1%3a0.9-2_arm64.deb", "arm64", "libfoo1", "1:0.9-2", true},
-		{"apt", "pool/main/h/hello/other_1.0_amd64.deb", "", "", "", false}, // not in its package's directory
+		{"apt", "pool/main/h/hello/other_1.0_amd64.deb", "amd64", "other", "1.0", true}, // the file name decides, wherever it lies
 		{"apt", "pool/main/h/hello/hello_1.0.deb", "", "", "", false},
-		{"apt", "pool/hello_1.0_amd64.deb", "", "", "", false},
+		{"apt", "pool/h/hello/hello_1.0_amd64.deb", "amd64", "hello", "1.0", true}, // Nexus's pool layout
+		{"apt", "binary/jenkins_2.4_all.deb", "all", "jenkins", "2.4", true},       // a flat remote
+		{"apt", "pool/main/d/debian-installer/di-utils_1.1_amd64.udeb", "amd64", "di-utils", "1.1", true},
+		{"apt", "pool/My_File_x.deb", "", "", "", false},
 		{"apt", "dists/stable/Release", "", "", "", false},
 		{"composer", "dist/acme/demo/1.0.0.0.zip", "", "acme/demo", "1.0.0.0", true},
 		{"composer", "dist/acme/demo/dev-main.zip", "", "acme/demo", "dev-main", true},

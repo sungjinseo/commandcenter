@@ -1,18 +1,26 @@
-// Package pgp is the little of OpenPGP (RFC 4880) an apt repository needs:
-// an unencrypted RSA v4 private key read from its ASCII armor, its public
-// key block, and SHA-256 signatures of a Release file, detached
-// (Release.gpg) or cleartext (InRelease). golang.org/x/crypto/openpgp is
-// deprecated and affected by GO-2026-5932, so this stays with the standard
-// library. Nothing here decrypts, verifies or handles other algorithms;
-// the tests verify what it signs by re-implementing the check.
+// Package pgp is the little of OpenPGP (RFC 4880, RFC 6637) an apt
+// repository needs: a v4 private key read from its ASCII armor (Unlock
+// removes its passphrase first), its public key block, and SHA-256
+// signatures of a Release file, detached (Release.gpg) or cleartext
+// (InRelease), made with the key's signing subkey or its primary key: RSA,
+// ECDSA (NIST curves) or EdDSA (Ed25519, as gpg writes it).
+// golang.org/x/crypto/openpgp is deprecated and affected by GO-2026-5932,
+// so this stays with the standard library. Nothing here verifies; the
+// tests check what it signs with their own reading of the format and,
+// where one is installed, with sqv.
 package pgp
 
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -34,25 +42,41 @@ const (
 
 	algoRSA         = 1 // RSA encrypt or sign
 	algoRSASignOnly = 3
+	algoECDSA       = 19
+	algoEdDSA       = 22 // EdDSA as gpg writes Ed25519 keys (RFC 4880bis "EdDSALegacy")
 	hashSHA256      = 8
 
 	sigBinary = 0x00 // signature of a binary document (Release.gpg)
 	sigText   = 0x01 // of a canonical text document (InRelease)
 
 	subCreated  = 2  // signature creation time
+	subKeyExp   = 9  // key expiration time, seconds after the key's creation
 	subIssuer   = 16 // issuer key ID
+	subKeyFlags = 27 // key flags of a self-signature or a subkey binding
 	subIssuerFP = 33 // issuer fingerprint
+
+	flagSign = 0x02 // key flags: may sign data
 )
 
 // maxArmored bounds a key block read from the configuration.
 const maxArmored = 1 << 20
 
-// Key is a parsed RSA private key with the user IDs and signatures of its
-// key block, for the public key block.
+// Key is a parsed private key block: the key that signs (a signing subkey,
+// or the primary key) and the public key block.
 type Key struct {
-	priv        *rsa.PrivateKey
-	fingerprint [20]byte
-	public      []byte // the public key block's packets, binary
+	signer      *signer
+	fingerprint [20]byte // the primary key's
+	public      []byte   // the public key block's packets, binary
+}
+
+// signer is a key with its secret part: its algorithm and fingerprint, as
+// a signature names them, and sign, which signs a digest and returns the
+// algorithm's signature MPIs.
+type signer struct {
+	algo byte
+	fp   [20]byte
+	pub  crypto.PublicKey // for the tests
+	sign func(digest []byte) ([]byte, error)
 }
 
 type packet struct {
@@ -60,11 +84,25 @@ type packet struct {
 	body []byte
 }
 
-// ParsePrivateKey reads an ASCII-armored OpenPGP private key block whose
-// primary key is an unencrypted v4 RSA key (gpg --export-secret-keys
-// --armor of a key made without a passphrase). Subkeys of any algorithm
-// are carried into the public key block; a passphrase-protected key, a v5
-// or v6 key and a non-RSA primary key are errors.
+// keyInfo is what ParsePrivateKey learns about one key of the block.
+type keyInfo struct {
+	pub       []byte // the public key packet body
+	fp        [20]byte
+	secret    []byte // the cleartext secret MPIs and checksum; nil without
+	encrypted bool   // the secret part is passphrase-protected
+	flags     int    // key flags of its self-signature or binding; -1 when none says
+	expires   uint32 // seconds after its creation it expires, by the same signature; 0: never
+	revoked   bool
+}
+
+// ParsePrivateKey reads an ASCII-armored OpenPGP private key block of v4
+// keys (gpg --export-secret-keys --armor, or --export-secret-subkeys).
+// The key that signs is the newest subkey bound with the signing flag, not
+// revoked or expired, whose secret part the block holds, as gpg chooses,
+// else the primary key
+// unless its flags exclude signing. It must be RSA (2048 bits or more),
+// ECDSA on P-256, P-384 or P-521, or Ed25519, and not passphrase-protected
+// (see Unlock). Every key's public part goes into the public key block.
 func ParsePrivateKey(armored string) (*Key, error) {
 	raw, err := unarmor(armored, "PGP PRIVATE KEY BLOCK")
 	if err != nil {
@@ -74,43 +112,287 @@ func ParsePrivateKey(armored string) (*Key, error) {
 	if err != nil {
 		return nil, err
 	}
-	k := &Key{}
+	var primary *keyInfo
+	var subkeys []*keyInfo
+	cur := (*keyInfo)(nil) // the key the next signatures are about
 	var out bytes.Buffer
 	for _, p := range pkts {
 		switch p.tag {
-		case tagSecretKey:
-			if k.priv != nil {
+		case tagSecretKey, tagSecretSubkey:
+			if p.tag == tagSecretKey && primary != nil {
 				return nil, errors.New("more than one primary key in the block")
 			}
-			pub, priv, err := parseSecretKey(p.body)
+			if p.tag == tagSecretSubkey && primary == nil {
+				return nil, errors.New("a subkey before the primary key")
+			}
+			k, err := readSecretPacket(p.body)
 			if err != nil {
 				return nil, err
 			}
-			k.priv = priv
-			k.fingerprint = sha1.Sum(append([]byte{0x99, byte(len(pub) >> 8), byte(len(pub))}, pub...))
-			writePacket(&out, tagPublicKey, pub)
-		case tagSecretSubkey:
-			n, err := publicKeyLen(p.body)
-			if err != nil {
-				return nil, fmt.Errorf("subkey: %w", err)
+			cur = k
+			if p.tag == tagSecretKey {
+				primary = k
+				writePacket(&out, tagPublicKey, k.pub)
+			} else {
+				subkeys = append(subkeys, k)
+				writePacket(&out, tagPublicSubkey, k.pub)
 			}
-			writePacket(&out, tagPublicSubkey, p.body[:n])
-		case tagUserID, tagUserAttr, tagSignature:
+		case tagSignature:
+			if cur != nil {
+				noteSignature(cur, cur == primary, p.body)
+			}
+			writePacket(&out, p.tag, p.body)
+		case tagUserID, tagUserAttr:
 			writePacket(&out, p.tag, p.body)
 		}
 	}
-	if k.priv == nil {
+	if primary == nil {
 		return nil, errors.New("no private key packet in the block")
 	}
-	k.public = out.Bytes()
+	if primary.revoked {
+		return nil, errors.New("the key is revoked")
+	}
+	k, err := chooseSigner(primary, subkeys)
+	if err != nil {
+		return nil, err
+	}
+	s, err := newSigner(k)
+	if err != nil {
+		return nil, err
+	}
+	return &Key{signer: s, fingerprint: primary.fp, public: out.Bytes()}, nil
+}
+
+// chooseSigner picks the key that signs, as ParsePrivateKey says.
+func chooseSigner(primary *keyInfo, subkeys []*keyInfo) (*keyInfo, error) {
+	var best *keyInfo
+	for _, k := range subkeys {
+		expired := k.expires != 0 && time.Now().Unix() >= int64(created(k))+int64(k.expires)
+		if k.revoked || expired || k.flags < 0 || k.flags&flagSign == 0 || !canSign(k.pub[5]) || (k.secret == nil && !k.encrypted) {
+			continue
+		}
+		if best == nil || created(k) >= created(best) {
+			best = k
+		}
+	}
+	if best == nil {
+		switch {
+		case primary.flags >= 0 && primary.flags&flagSign == 0:
+			return nil, errors.New("the key has no signing subkey with its secret part, and the primary key may not sign")
+		case primary.secret == nil && !primary.encrypted:
+			return nil, errors.New("the block holds no secret part of a signing key (exported with --export-secret-subkeys without a signing subkey?)")
+		case !canSign(primary.pub[5]):
+			return nil, fmt.Errorf("the signing key must be RSA, ECDSA or Ed25519 (public key algorithm %d)", primary.pub[5])
+		}
+		best = primary
+	}
+	if best.encrypted {
+		return nil, errors.New("the private key is passphrase-protected; give its passphrase or export it without one")
+	}
+	return best, nil
+}
+
+func canSign(algo byte) bool {
+	return algo == algoRSA || algo == algoRSASignOnly || algo == algoECDSA || algo == algoEdDSA
+}
+
+func created(k *keyInfo) uint32 { return binary.BigEndian.Uint32(k.pub[1:5]) }
+
+// readSecretPacket reads a v4 secret key or subkey packet body (§5.5.3):
+// the public key fields, then the string-to-key usage octet: 0 for a
+// cleartext secret part, 254 or 255 for an encrypted one or, with gpg's
+// S2K extension 101, for none at all (a key kept elsewhere).
+func readSecretPacket(b []byte) (*keyInfo, error) {
+	n, err := publicKeyLen(b)
+	if err != nil {
+		return nil, err
+	}
+	k := &keyInfo{pub: b[:n], flags: -1}
+	k.fp = sha1.Sum(append([]byte{0x99, byte(n >> 8), byte(n)}, b[:n]...))
+	rest := b[n:]
+	switch {
+	case len(rest) == 0:
+		return nil, errors.New("truncated secret key packet")
+	case rest[0] == 0:
+		k.secret = rest[1:]
+	case (rest[0] == 254 || rest[0] == 255) && len(rest) >= 3 && rest[2] == s2kGNU:
+		// no secret part here
+	default:
+		k.encrypted = true
+	}
 	return k, nil
 }
 
-// KeyID is the long key ID (16 hex digits) apt-key and `gpg --list-keys` show.
+// noteSignature records what a signature after k says about it: the key
+// flags and expiry of the primary key's first self-signature (user ID
+// certification or direct key) or of a subkey's binding, and revocations.
+func noteSignature(k *keyInfo, primary bool, b []byte) {
+	if len(b) < 6 || b[0] != 4 {
+		return
+	}
+	typ := b[1]
+	switch {
+	case primary && typ == 0x20, !primary && typ == 0x28:
+		k.revoked = true
+		return
+	case primary && (typ < 0x10 || typ > 0x13) && typ != 0x1f, !primary && typ != 0x18:
+		return
+	}
+	if k.flags >= 0 {
+		return
+	}
+	hl := int(binary.BigEndian.Uint16(b[4:6]))
+	if len(b) < 6+hl {
+		return
+	}
+	for sp := b[6 : 6+hl]; len(sp) > 0; {
+		var n, hdr int
+		switch {
+		case sp[0] < 192:
+			n, hdr = int(sp[0]), 1
+		case sp[0] < 255 && len(sp) >= 2:
+			n, hdr = (int(sp[0])-192)<<8+int(sp[1])+192, 2
+		case sp[0] == 255 && len(sp) >= 5:
+			n, hdr = int(binary.BigEndian.Uint32(sp[1:5])), 5
+		default:
+			return
+		}
+		if n < 1 || len(sp) < hdr+n {
+			return
+		}
+		switch body := sp[hdr : hdr+n]; {
+		case body[0]&0x7f == subKeyFlags && len(body) > 1:
+			k.flags = int(body[1])
+		case body[0]&0x7f == subKeyExp && len(body) == 5:
+			k.expires = binary.BigEndian.Uint32(body[1:])
+		}
+		sp = sp[hdr+n:]
+	}
+}
+
+// Curve OIDs (RFC 6637 §11, and gpg's for Ed25519).
+var (
+	oidP256    = []byte{0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07}
+	oidP384    = []byte{0x2b, 0x81, 0x04, 0x00, 0x22}
+	oidP521    = []byte{0x2b, 0x81, 0x04, 0x00, 0x23}
+	oidEd25519 = []byte{0x2b, 0x06, 0x01, 0x04, 0x01, 0xda, 0x47, 0x0f, 0x01}
+)
+
+// newSigner reads k's cleartext secret part: the algorithm's secret MPIs
+// and their two-octet checksum.
+func newSigner(k *keyInfo) (*signer, error) {
+	pub := &mpiReader{b: k.pub[6:]}
+	sec := &mpiReader{b: k.secret}
+	s := &signer{algo: k.pub[5], fp: k.fp}
+	switch s.algo {
+	case algoRSA, algoRSASignOnly:
+		N, E := pub.mpi(), pub.mpi()
+		if pub.err != nil || !E.IsInt64() || E.Int64() < 3 || E.Int64() > 1<<31-1 {
+			return nil, errors.New("malformed RSA public key")
+		}
+		D, P, Q := sec.mpi(), sec.mpi(), sec.mpi()
+		sec.mpi() // u = p^-1 mod q; Go recomputes its own CRT values
+		if err := sec.checksum(k.secret); err != nil {
+			return nil, err
+		}
+		priv := &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: N, E: int(E.Int64())}, D: D, Primes: []*big.Int{P, Q}}
+		priv.Precompute()
+		if err := priv.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid RSA key: %w", err)
+		}
+		if priv.N.BitLen() < 2048 {
+			return nil, fmt.Errorf("RSA key of %d bits: use 2048 or more", priv.N.BitLen())
+		}
+		s.pub = &priv.PublicKey
+		s.sign = func(digest []byte) ([]byte, error) {
+			sig, err := rsa.SignPKCS1v15(nil, priv, crypto.SHA256, digest)
+			return appendMPI(nil, new(big.Int).SetBytes(sig)), err
+		}
+	case algoECDSA:
+		oid, point := pub.field(), pub.mpiBytes()
+		var curve elliptic.Curve
+		switch {
+		case bytes.Equal(oid, oidP256):
+			curve = elliptic.P256()
+		case bytes.Equal(oid, oidP384):
+			curve = elliptic.P384()
+		case bytes.Equal(oid, oidP521):
+			curve = elliptic.P521()
+		default:
+			return nil, errors.New("ECDSA keys must be on P-256, P-384 or P-521")
+		}
+		d := sec.mpiBytes()
+		if err := sec.checksum(k.secret); err != nil {
+			return nil, err
+		}
+		size := (curve.Params().BitSize + 7) / 8
+		if pub.err != nil || len(d) > size {
+			return nil, errors.New("malformed ECDSA key")
+		}
+		priv, err := ecdsa.ParseRawPrivateKey(curve, leftPad(d, size))
+		if err != nil {
+			return nil, fmt.Errorf("invalid ECDSA key: %w", err)
+		}
+		if b, err := priv.PublicKey.Bytes(); err != nil || !bytes.Equal(b, point) {
+			return nil, errors.New("invalid ECDSA key: the secret part does not match the public key")
+		}
+		s.pub = &priv.PublicKey
+		s.sign = func(digest []byte) ([]byte, error) {
+			der, err := ecdsa.SignASN1(rand.Reader, priv, digest)
+			if err != nil {
+				return nil, err
+			}
+			var rs struct{ R, S *big.Int }
+			if _, err := asn1.Unmarshal(der, &rs); err != nil {
+				return nil, err
+			}
+			return appendMPI(appendMPI(nil, rs.R), rs.S), nil
+		}
+	case algoEdDSA:
+		oid, point := pub.field(), pub.mpiBytes()
+		if !bytes.Equal(oid, oidEd25519) {
+			return nil, errors.New("EdDSA keys must be Ed25519")
+		}
+		seed := sec.mpiBytes()
+		if err := sec.checksum(k.secret); err != nil {
+			return nil, err
+		}
+		if pub.err != nil || len(point) != 33 || point[0] != 0x40 || len(seed) > ed25519.SeedSize {
+			return nil, errors.New("malformed Ed25519 key")
+		}
+		priv := ed25519.NewKeyFromSeed(leftPad(seed, ed25519.SeedSize))
+		if !bytes.Equal(priv.Public().(ed25519.PublicKey), point[1:]) {
+			return nil, errors.New("invalid Ed25519 key: the secret part does not match the public key")
+		}
+		s.pub = priv.Public()
+		s.sign = func(digest []byte) ([]byte, error) {
+			sig := ed25519.Sign(priv, digest) // EdDSA signs the digest (RFC 4880bis §5.2.4)
+			r, sv := new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])
+			return appendMPI(appendMPI(nil, r), sv), nil
+		}
+	default:
+		return nil, fmt.Errorf("the signing key must be RSA, ECDSA or Ed25519 (public key algorithm %d)", s.algo)
+	}
+	return s, nil
+}
+
+func leftPad(b []byte, n int) []byte {
+	if len(b) >= n {
+		return b
+	}
+	return append(make([]byte, n-len(b)), b...)
+}
+
+// KeyID is the long key ID (16 hex digits) of the primary key, as apt-key
+// and `gpg --list-keys` show it.
 func (k *Key) KeyID() string { return fmt.Sprintf("%X", k.fingerprint[12:]) }
 
-// Fingerprint is the v4 fingerprint, 40 hex digits.
+// Fingerprint is the primary key's v4 fingerprint, 40 hex digits.
 func (k *Key) Fingerprint() string { return fmt.Sprintf("%X", k.fingerprint[:]) }
+
+// SignerFingerprint is the fingerprint of the key that signs: a subkey's
+// or the primary key's.
+func (k *Key) SignerFingerprint() string { return fmt.Sprintf("%X", k.signer.fp[:]) }
 
 // PublicKey is the ASCII-armored public key block: the key block's user
 // IDs, signatures and subkeys with the secret parts dropped, as `gpg
@@ -163,14 +445,15 @@ func canonical(text []byte) []byte {
 
 // sign builds a v4 signature packet (§5.2.3): the hashed subpackets
 // (creation time, issuer fingerprint), the issuer key ID unhashed, the
-// first two digest octets and the RSA PKCS#1 v1.5 signature over the
+// first two digest octets and the signing key's signature over the
 // SHA-256 of the document, the hashed part and its trailer.
 func (k *Key) sign(doc []byte, sigType byte, now time.Time) ([]byte, error) {
+	s := k.signer
 	var hashed bytes.Buffer
-	hashed.Write([]byte{4, sigType, algoRSA, hashSHA256})
+	hashed.Write([]byte{4, sigType, s.algo, hashSHA256})
 	var subs bytes.Buffer
 	writeSubpacket(&subs, subCreated, binary.BigEndian.AppendUint32(nil, uint32(now.Unix())))
-	writeSubpacket(&subs, subIssuerFP, append([]byte{4}, k.fingerprint[:]...))
+	writeSubpacket(&subs, subIssuerFP, append([]byte{4}, s.fp[:]...))
 	hashed.Write([]byte{byte(subs.Len() >> 8), byte(subs.Len())})
 	hashed.Write(subs.Bytes())
 
@@ -179,65 +462,24 @@ func (k *Key) sign(doc []byte, sigType byte, now time.Time) ([]byte, error) {
 	h.Write(hashed.Bytes())
 	h.Write([]byte{4, 0xff, byte(hashed.Len() >> 24), byte(hashed.Len() >> 16), byte(hashed.Len() >> 8), byte(hashed.Len())})
 	digest := h.Sum(nil)
-	sig, err := rsa.SignPKCS1v15(nil, k.priv, crypto.SHA256, digest)
+	mpis, err := s.sign(digest)
 	if err != nil {
 		return nil, err
 	}
 
 	var unhashed bytes.Buffer
-	writeSubpacket(&unhashed, subIssuer, k.fingerprint[12:])
+	writeSubpacket(&unhashed, subIssuer, s.fp[12:])
 	body := hashed.Bytes()
 	body = append(body, byte(unhashed.Len()>>8), byte(unhashed.Len()))
 	body = append(body, unhashed.Bytes()...)
 	body = append(body, digest[0], digest[1])
-	body = appendMPI(body, new(big.Int).SetBytes(sig))
+	body = append(body, mpis...)
 	var out bytes.Buffer
 	writePacket(&out, tagSignature, body)
 	return out.Bytes(), nil
 }
 
 // ---- keys ----
-
-// parseSecretKey reads a v4 secret key packet body (§5.5.3): the public
-// key fields, then the string-to-key usage octet (0: unencrypted), the
-// secret MPIs d, p, q, u and a checksum. It returns the public key packet
-// body and the RSA key.
-func parseSecretKey(b []byte) (pub []byte, priv *rsa.PrivateKey, err error) {
-	n, err := publicKeyLen(b)
-	if err != nil {
-		return nil, nil, err
-	}
-	if algo := b[5]; algo != algoRSA && algo != algoRSASignOnly {
-		return nil, nil, fmt.Errorf("the signing key must be RSA (public key algorithm %d)", algo)
-	}
-	r := &mpiReader{b: b[6:n]}
-	N, E := r.mpi(), r.mpi()
-	if r.err != nil || !E.IsInt64() || E.Int64() < 3 {
-		return nil, nil, errors.New("malformed RSA public key")
-	}
-	rest := b[n:]
-	if len(rest) == 0 {
-		return nil, nil, errors.New("truncated secret key packet")
-	}
-	if rest[0] != 0 {
-		return nil, nil, errors.New("the private key is passphrase-protected; export it without a passphrase")
-	}
-	r = &mpiReader{b: rest[1:]}
-	D, P, Q := r.mpi(), r.mpi(), r.mpi()
-	r.mpi() // u = p^-1 mod q; Go recomputes its own CRT values
-	if r.err != nil || len(r.b) < 2 {
-		return nil, nil, errors.New("malformed RSA secret key")
-	}
-	priv = &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: N, E: int(E.Int64())}, D: D, Primes: []*big.Int{P, Q}}
-	priv.Precompute()
-	if err := priv.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("invalid RSA key: %w", err)
-	}
-	if priv.N.BitLen() < 2048 {
-		return nil, nil, fmt.Errorf("RSA key of %d bits: use 2048 or more", priv.N.BitLen())
-	}
-	return b[:n], priv, nil
-}
 
 // publicKeyLen is the length of the public key fields that start a v4
 // key packet body (version, creation time, algorithm and the algorithm's
@@ -258,13 +500,13 @@ func publicKeyLen(b []byte) (int, error) {
 		r.mpis(3)
 	case 17: // DSA
 		r.mpis(4)
-	case 19, 22: // ECDSA, EdDSA: curve OID then one MPI
-		r.oid()
+	case algoECDSA, algoEdDSA: // curve OID then one MPI
+		r.field()
 		r.mpis(1)
 	case 18: // ECDH: curve OID, one MPI, KDF parameters
-		r.oid()
+		r.field()
 		r.mpis(1)
-		r.oid()
+		r.field()
 	default:
 		return 0, fmt.Errorf("public key algorithm %d is not supported", algo)
 	}
@@ -279,23 +521,26 @@ type mpiReader struct {
 	err error
 }
 
-func (r *mpiReader) mpi() *big.Int {
+// mpiBytes reads a multiprecision integer's octets (§3.2).
+func (r *mpiReader) mpiBytes() []byte {
 	if r.err != nil {
-		return new(big.Int)
+		return nil
 	}
 	if len(r.b) < 2 {
 		r.err = errors.New("truncated multiprecision integer")
-		return new(big.Int)
+		return nil
 	}
 	n := (int(binary.BigEndian.Uint16(r.b)) + 7) / 8
 	if len(r.b) < 2+n {
 		r.err = errors.New("truncated multiprecision integer")
-		return new(big.Int)
+		return nil
 	}
-	v := new(big.Int).SetBytes(r.b[2 : 2+n])
+	v := r.b[2 : 2+n]
 	r.b = r.b[2+n:]
 	return v
 }
+
+func (r *mpiReader) mpi() *big.Int { return new(big.Int).SetBytes(r.mpiBytes()) }
 
 func (r *mpiReader) mpis(n int) {
 	for i := 0; i < n; i++ {
@@ -303,16 +548,38 @@ func (r *mpiReader) mpis(n int) {
 	}
 }
 
-// oid skips a one-octet-length field (a curve OID or KDF parameters).
-func (r *mpiReader) oid() {
+// field reads a one-octet-length field (a curve OID or KDF parameters).
+func (r *mpiReader) field() []byte {
 	if r.err != nil {
-		return
+		return nil
 	}
 	if len(r.b) < 1 || len(r.b) < 1+int(r.b[0]) {
 		r.err = errors.New("truncated key field")
-		return
+		return nil
 	}
+	v := r.b[1 : 1+int(r.b[0])]
 	r.b = r.b[1+int(r.b[0]):]
+	return v
+}
+
+// checksum checks what follows the secret MPIs read from all: the
+// two-octet sum of their octets (§5.5.3), and nothing after it.
+func (r *mpiReader) checksum(all []byte) error {
+	if r.err != nil || len(r.b) != 2 {
+		return errors.New("malformed secret key")
+	}
+	if binary.BigEndian.Uint16(r.b) != sum16(all[:len(all)-2]) {
+		return errors.New("secret key checksum mismatch")
+	}
+	return nil
+}
+
+func sum16(b []byte) uint16 {
+	var s uint16
+	for _, c := range b {
+		s += uint16(c)
+	}
+	return s
 }
 
 func appendMPI(b []byte, v *big.Int) []byte {
