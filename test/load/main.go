@@ -321,8 +321,8 @@ func main() {
 			expectLength("maven uploaded jar "+path, path, size)
 		}
 	})
-	phase("npm group merge of a 30 MB document", func() {
-		npmPublishSmall()
+	phase("npm group with a 30 MB document", func() {
+		// npm-hosted has no "huge" yet: the group answers with npm-proxy's document.
 		var wg sync.WaitGroup
 		for i := 0; i < 10; i++ {
 			wg.Add(1)
@@ -334,6 +334,12 @@ func main() {
 			}()
 		}
 		wg.Wait()
+		// Once npm-hosted has it, the group answers with npm-hosted's alone
+		// (dependency confusion: the public versions are not mixed in).
+		npmPublishSmall()
+		if n := expectBody("npm group packument after a hosted publish", "GET", "/repository/npm-all/huge", nil, nil, 200, `"0.0.1"`); n > 64<<10 {
+			fail("npm group packument after a hosted publish: %d bytes, the proxy's versions are mixed in", n)
+		}
 	})
 	phase("npm 50 MiB publish", func() {
 		n := npmPublishBig(50 << 20)

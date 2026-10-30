@@ -15,7 +15,7 @@ for c in "${checks[@]}"; do
   [ "$c" = ha-smoke ] && script="test/ha/ha-smoke.sh"
   log="$(mktemp)"
   start=$(date +%s)
-  if "$script" >"$log" 2>&1; then result[$c]=OK; else result[$c]=FAIL; failed=1; fi
+  if bash "$script" >"$log" 2>&1; then result[$c]=OK; else result[$c]=FAIL; failed=1; fi
   duration[$c]=$(( $(date +%s) - start ))s
   # Load test: its own max-rss figure. Smoke tests: the docker stats usage
   # ("<name> 9.1MiB / 7.6GiB" -> "9.1MiB").

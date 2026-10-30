@@ -6,7 +6,7 @@
 #   4. install it from an empty cache; its dependency comes through npm-proxy
 #   5. add and list a dist-tag, and view the package
 #   6. deprecate through the group; unpublish one version, then the whole
-#      package; audit is 501
+#      package; audit goes to npm-proxy's remote, npm-hosted answers {}
 #   7. npm logout revokes the token
 # Finally prints the container's memory usage.
 set -euo pipefail
@@ -97,8 +97,14 @@ test "$(curl -s -o /dev/null -w '%{http_code}' "${REG}@smoke/hello/-/hello-1.0.0
 npm unpublish @smoke/hello --force --loglevel=error
 test "$(curl -s -o /dev/null -w '%{http_code}' "${HOSTED}@smoke%2fhello")" = 404
 
-echo "== audit is reported as unsupported"
-test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"express":["4.0.0"]}' "${REG}-/npm/v1/security/advisories/bulk")" = 501
+echo "== audit goes to the group's proxy member's remote; a hosted repository answers an empty report"
+tok="$(sed -n 's/.*:_authToken=//p' /work/.npmrc)"
+test -n "$tok"
+test "$(curl -s -o /tmp/audit.json -w '%{http_code}' -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+  -d '{"express":["4.0.0"]}' "${REG}-/npm/v1/security/advisories/bulk")" = 200
+grep -q '"express"' /tmp/audit.json
+test "$(curl -s -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' -d '{"express":["4.0.0"]}' \
+  http://commandcenter:8081/repository/npm-hosted/-/npm/v1/security/advisories/bulk)" = "{}"
 
 echo "== npm logout revokes the token"
 tok="$(sed -n 's/.*:_authToken=//p' /work/.npmrc)"
