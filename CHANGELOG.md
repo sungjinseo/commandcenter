@@ -391,6 +391,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   retried on 429/5xx. Nexus-compatible `POST /service/rest/v1/blobstores/azure` and
   `GET`/`PUT /service/rest/v1/blobstores/azure/{name}`. Azure stores take soft quotas and can be blob
   store group members.
+- Google Cloud Storage blob stores (`type: "google"`): blobs in a GCS bucket under an optional prefix
+  through the JSON API, authenticated with a service account key (sealed, never returned), the node's
+  application default credentials (`GOOGLE_APPLICATION_CREDENTIALS` or the metadata server: GKE Workload
+  Identity, GCE) or none for emulators. Multipart uploads up to 16 MiB and resumable chunked uploads
+  above, MD5-checked; Range reads; retries with exponential backoff on 408/429/5xx; an endpoint override
+  for emulators and private endpoints; health checks, soft quotas and group membership like S3 stores. A
+  store on the same bucket and prefix as another google or S3 store (GCS S3 interoperability) is refused.
 
 ### Changed
 
@@ -437,10 +444,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sessions stayed valid.
 
 ### Upgrade notes
-- Database schema 7 (compat 6). The upgrade runs no DDL for Azure stores and can be rolling. Creating
-  the first Azure blob store raises compat to 7: it is refused while a node of an older build is live,
-  and from then on older builds refuse to start, because they would open the store as an empty
-  directory. A rollback after that needs the backup taken before the upgrade.
+- Database schema 7 (compat 6). The upgrade runs no DDL for Azure and Google Cloud Storage stores and
+  can be rolling. Creating the first Azure or google blob store raises compat to 7: it is refused while
+  a node of an older build is live, and from then on older builds refuse to start, because they would
+  open the store as an empty directory. A rollback after that needs the backup taken before the upgrade.
 - Older builds refuse to start beside a running node, but this one starts beside an older one. Upgrade
   every node and do not mix versions except during a rolling upgrade. Blob store moves and group member
   removals wait until every node answers, which an older node never does.

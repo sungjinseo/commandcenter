@@ -1359,6 +1359,9 @@ func (h *Handler) blobStores(w http.ResponseWriter, r *http.Request) {
 		if s.Type == meta.BlobStoreAzure {
 			typ = "Azure Cloud Storage"
 		}
+		if s.Type == meta.BlobStoreGoogle {
+			typ = "Google Cloud Storage"
+		}
 		var free int64
 		if s.FsFree != nil {
 			free = *s.FsFree

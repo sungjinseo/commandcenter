@@ -61,6 +61,8 @@ type blobStoreRequest struct {
 	// A group's (Type "group"), see blobgroups.go.
 	Members    []blob.GroupMember `json:"members"`
 	FillPolicy string             `json:"fillPolicy"`
+	// A google store's (Type "google"): its bucket and credentials.
+	Google *blob.GCSConfig `json:"google"`
 }
 
 // blobStoreJSON is one store's wire shape. Path is the directory the store
@@ -88,7 +90,8 @@ type blobStoreJSON struct {
 	FillPolicy string             `json:"fillPolicy,omitempty"`
 	MemberOf   string             `json:"memberOf,omitempty"`
 	// An azure store's container and credentials, without the secrets.
-	Azure *azureJSON `json:"azure,omitempty"`
+	Azure  *azureJSON `json:"azure,omitempty"`
+	Google *gcsJSON   `json:"google,omitempty"`
 }
 
 // azureJSON is blob.AzureConfig without its secrets: what GET shows.
@@ -105,6 +108,16 @@ type azureJSON struct {
 	AccountKeySet   bool   `json:"accountKeySet"` // the secrets themselves are never shown
 	SASTokenSet     bool   `json:"sasTokenSet"`
 	ClientSecretSet bool   `json:"clientSecretSet"`
+}
+
+// gcsJSON is blob.GCSConfig without its account key: what GET shows.
+type gcsJSON struct {
+	Bucket         string `json:"bucket"`
+	Prefix         string `json:"prefix"`
+	Endpoint       string `json:"endpoint"`
+	Authentication string `json:"authentication"`
+	AccountKeySet  bool   `json:"accountKeySet"`  // the key itself is never shown
+	ServiceAccount string `json:"serviceAccount"` // the key's client_email; "" without a key
 }
 
 // s3JSON is blob.S3Config without its secret: what GET shows.
@@ -161,6 +174,11 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 		out.Azure = &azureJSON{AccountName: c.AccountName, ContainerName: c.ContainerName, Prefix: c.Prefix, Endpoint: c.Endpoint,
 			Auth: c.Auth, TenantID: c.TenantID, ClientID: c.ClientID, AuthorityHost: c.AuthorityHost, IMDSEndpoint: c.IMDSEndpoint,
 			AccountKeySet: c.AccountKey != "", SASTokenSet: c.SASToken != "", ClientSecretSet: c.ClientSecret != ""}
+	}
+	if bs.Type == meta.BlobStoreGoogle && bs.Google != nil {
+		c := bs.Google
+		out.Google = &gcsJSON{Bucket: c.Bucket, Prefix: c.Prefix, Endpoint: c.Endpoint, Authentication: c.Authentication,
+			AccountKeySet: c.AccountKey != "", ServiceAccount: c.ServiceAccount()}
 		out.QuotaViolated, _ = quotaState(out)
 		return out, nil
 	}
@@ -278,8 +296,22 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		row.Azure = body.Azure
+	case meta.BlobStoreGoogle:
+		if body.Google == nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`a google blob store needs "google" with at least its bucket`}})
+			return
+		}
+		if err := body.Google.Validate(); err != nil {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"google: " + err.Error()}})
+			return
+		}
+		row.Google = body.Google
 	default:
-		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`blob store type must be "file", "s3", "group" or "azure"`}})
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`blob store type must be "file", "s3", "group", "azure" or "google"`}})
+		return
+	}
+	if row.Type != meta.BlobStoreGoogle && body.Google != nil {
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{`"google" is a google store's ("type": "google")`}})
 		return
 	}
 	if row.Type != meta.BlobStoreGroup && (body.Members != nil || body.FillPolicy != "") {
@@ -300,8 +332,8 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
-		if row.Type == meta.BlobStoreS3 {
-			if err := u.checkS3Isolation(ctx, *row.S3); err != nil {
+		if loc := bucketLocation(row); loc != "" {
+			if err := u.checkBucketIsolation(ctx, loc); err != nil {
 				return err
 			}
 		} else if row.Type == meta.BlobStoreAzure {
@@ -329,9 +361,9 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		if err := probeWritable(root); err != nil {
 			return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: directory %s is not writable: %v", body.Name, root, err)}}
 		}
-		if row.Type == meta.BlobStoreS3 {
+		if loc := bucketLocation(row); loc != "" {
 			if err := bs.Check(); err != nil {
-				return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: bucket %s is not usable: %v", body.Name, row.S3.Bucket, err)}}
+				return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: bucket %s is not usable: %v", body.Name, loc, err)}}
 			}
 		}
 		if row.Type == meta.BlobStoreAzure {
@@ -357,6 +389,9 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 	detail := repo.StoreRoot(u.DataDir, stored)
 	if stored.Type == meta.BlobStoreS3 && stored.S3 != nil {
 		detail = "s3://" + stored.S3.Bucket + "/" + stored.S3.Prefix
+	}
+	if stored.Type == meta.BlobStoreGoogle && stored.Google != nil {
+		detail = "gs://" + stored.Google.Bucket + "/" + stored.Google.Prefix
 	}
 	if stored.Group != nil {
 		detail = groupDetail(*stored.Group)
@@ -575,18 +610,29 @@ func (u *UI) deleteBlobStore(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// checkS3Isolation rejects a new S3 store on the same bucket and prefix (at
-// the same endpoint) as an existing one: their GCs would delete each
-// other's blobs.
-func (u *UI) checkS3Isolation(ctx context.Context, c blob.S3Config) error {
+// bucketLocation is the object namespace of an S3 or google row (its
+// Location), "" for a file store or a group.
+func bucketLocation(bs meta.BlobStore) string {
+	switch {
+	case bs.Type == meta.BlobStoreS3 && bs.S3 != nil:
+		return bs.S3.Location()
+	case bs.Type == meta.BlobStoreGoogle && bs.Google != nil:
+		return bs.Google.Location()
+	}
+	return ""
+}
+
+// checkBucketIsolation rejects a new S3 or google store on the same bucket
+// and prefix (at the same endpoint) as an existing one of either type (GCS
+// serves the S3 API too): their GCs would delete each other's blobs.
+func (u *UI) checkBucketIsolation(ctx context.Context, loc string) error {
 	rows, err := u.DB.ListBlobStores(ctx)
 	if err != nil {
 		return err
 	}
 	for _, bs := range rows {
-		if o := bs.S3; bs.Type == meta.BlobStoreS3 && o != nil && o.Location() == c.Location() {
-			return &repo.ValidationError{Errors: []string{
-				fmt.Sprintf("s3 bucket %s prefix %q is already the %q store's", c.Bucket, c.Prefix, bs.Name)}}
+		if bucketLocation(bs) == loc {
+			return &repo.ValidationError{Errors: []string{fmt.Sprintf("bucket and prefix %s are already the %q store's", loc, bs.Name)}}
 		}
 	}
 	return nil

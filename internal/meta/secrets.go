@@ -443,6 +443,43 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 			return err
 		}
 		n += k
+		rows, err = tx.q.QueryContext(ctx, `SELECT name, config FROM blob_stores WHERE type = ?`, BlobStoreGoogle)
+		if err != nil {
+			return err
+		}
+		gstores := map[string]string{}
+		for rows.Next() {
+			var name, js string
+			if err := rows.Scan(&name, &js); err != nil {
+				rows.Close()
+				return err
+			}
+			gstores[name] = js
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for name, js := range gstores {
+			var m map[string]json.RawMessage // the rest of the row (the soft quota) stays as stored
+			var c blob.GCSConfig
+			if err := json.Unmarshal([]byte(js), &m); err != nil || json.Unmarshal(m["google"], &c) != nil {
+				return fmt.Errorf("blob store %q: decode stored google configuration", name)
+			}
+			changed := false
+			if err := rewrite(&c.AccountKey, &changed); err != nil {
+				return fmt.Errorf("blob store %q: accountKey: %w", name, err)
+			}
+			if !changed {
+				continue
+			}
+			m["google"], _ = json.Marshal(c)
+			b, _ := json.Marshal(m)
+			if _, err := tx.q.ExecContext(ctx, `UPDATE blob_stores SET config = ? WHERE name = ?`, string(b), name); err != nil {
+				return err
+			}
+			n++
+		}
 		rows, err = tx.q.QueryContext(ctx, `SELECT id, secret FROM webhooks WHERE secret <> ''`)
 		if err != nil {
 			return err

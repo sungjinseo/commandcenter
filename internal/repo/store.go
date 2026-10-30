@@ -156,6 +156,12 @@ func OpenStore(dataDir string, bs meta.BlobStore) (*blob.Store, error) {
 		}
 		return blob.OpenAzure(root, *bs.Azure)
 	}
+	if bs.Type == meta.BlobStoreGoogle {
+		if bs.Google == nil {
+			return nil, fmt.Errorf("blob store %q has no google configuration", bs.Name)
+		}
+		return blob.OpenGCS(root, *bs.Google)
+	}
 	return blob.Open(root)
 }
 

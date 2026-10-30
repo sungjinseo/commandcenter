@@ -92,6 +92,8 @@ type querier interface {
 //	   empty directory (404s, uploads left on its disk), but no DDL: the
 //	   first azure store's CreateBlobStore raises compat to 7 (raiseCompat),
 //	   so the upgrade itself is expand-only and stays rolling.
+//	7: blob_stores rows of type "google" (Google Cloud Storage stores): the
+//	   same, through the same raiseCompat in CreateBlobStore.
 const schemaVersion = 7
 
 // schemaCompat is the oldest schemaVersion that may run on a database this

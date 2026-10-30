@@ -28,6 +28,7 @@ type BlobStore struct {
 	Quota     *Quota            // soft quota; nil is none
 	Group     *blob.GroupConfig // for BlobStoreGroup
 	Azure     *blob.AzureConfig // for BlobStoreAzure; its accountKey, sasToken and clientSecret are sealed in the row
+	Google    *blob.GCSConfig   // for BlobStoreGoogle; its AccountKey is sealed in the row
 	CreatedAt time.Time
 }
 
@@ -63,8 +64,9 @@ func ValidateQuota(q *Quota) error {
 type storedConfig struct {
 	*blob.S3Config
 	*blob.GroupConfig
-	Quota *Quota            `json:"quota,omitempty"`
-	Azure *blob.AzureConfig `json:"azure,omitempty"` // under its own key: its prefix and endpoint would clash with the S3 fields
+	Quota  *Quota            `json:"quota,omitempty"`
+	Azure  *blob.AzureConfig `json:"azure,omitempty"`  // under its own key: its prefix and endpoint would clash with the S3 fields
+	Google *blob.GCSConfig   `json:"google,omitempty"` // a google store's, under its own key (the S3 fields are inline)
 }
 
 const (
@@ -72,6 +74,8 @@ const (
 	BlobStoreS3    = "s3"
 	BlobStoreGroup = "group"
 	BlobStoreAzure = "azure"
+	// BlobStoreGoogle holds its blobs in a Google Cloud Storage bucket.
+	BlobStoreGoogle = "google"
 )
 
 const blobStoreCols = `name, path, type, config, created_at`
@@ -113,6 +117,16 @@ func (s sealer) blobStoreRow(bs BlobStore) (typ, config string, err error) {
 			}
 		}
 		sc.Azure = &c
+	}
+	if bs.Type == BlobStoreGoogle {
+		if bs.Google == nil {
+			return "", "", fmt.Errorf("blob store %q: a google store needs its google configuration", bs.Name)
+		}
+		c := *bs.Google
+		if c.AccountKey, err = s.seal(c.AccountKey); err != nil {
+			return "", "", fmt.Errorf("blob store %q: accountKey: %w", bs.Name, err)
+		}
+		sc.Google = &c
 	}
 	b, err := json.Marshal(sc)
 	if err != nil {
@@ -198,7 +212,7 @@ func (d *DB) CreateBlobStore(ctx context.Context, bs BlobStore) error {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if typ == BlobStoreAzure {
+		if typ == BlobStoreAzure || typ == BlobStoreGoogle {
 			if err := raiseCompat(ctx, tx.q, schemaAzure); err != nil {
 				return fmt.Errorf("blob store %q: %w", bs.Name, err)
 			}
@@ -356,12 +370,28 @@ func (d *DB) scanBlobStore(row scanner) (BlobStore, error) {
 		}
 		bs.Azure = sc.Azure
 	}
+	if bs.Type == BlobStoreGoogle {
+		var sc struct {
+			Google *blob.GCSConfig `json:"google"`
+		}
+		err := json.Unmarshal([]byte(config), &sc)
+		if err == nil && sc.Google == nil {
+			err = errors.New("none stored")
+		}
+		if err != nil {
+			return BlobStore{}, fmt.Errorf("blob store %q: decode stored google configuration: %w", bs.Name, err)
+		}
+		bs.Google = sc.Google
+		if bs.Google.AccountKey, err = d.box.open(bs.Google.AccountKey); err != nil {
+			return BlobStore{}, fmt.Errorf("blob store %q: accountKey: %w", bs.Name, err)
+		}
+	}
 	return bs, nil
 }
 
-// schemaAzure is the first schema that opens azure blob stores. An older
-// build would open one as an empty directory: its repositories would read
-// nothing and their uploads would stay on the node's disk.
+// schemaAzure is the first schema that opens azure and google blob stores.
+// An older build would open one as an empty directory: its repositories
+// would read nothing and their uploads would stay on the node's disk.
 const schemaAzure = 7
 
 // raiseCompat makes the database refuse builds below schema v from now on

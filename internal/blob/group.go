@@ -312,7 +312,7 @@ func probe(target string, err error) Probe {
 
 // Health checks the store's backend: a directory store that its tmp accepts
 // a file, an S3 store that its bucket and each failover bucket lists, a
-// group each member's.
+// group each member's, a GCS store that its bucket answers.
 func (s *Store) Health() []Probe {
 	switch be := s.be.(type) {
 	case *s3:
@@ -332,6 +332,8 @@ func (s *Store) Health() []Probe {
 		return out
 	case *azure:
 		return []Probe{probe("container "+be.cfg.Location(), be.check())}
+	case *gcs:
+		return []Probe{probe("bucket "+be.cfg.Location(), be.check())}
 	}
 	f, err := os.CreateTemp(filepath.Join(s.root, "tmp"), "probe-*")
 	if err == nil {

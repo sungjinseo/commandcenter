@@ -753,6 +753,10 @@ func (h *Handler) systemInformation(w http.ResponseWriter, r *http.Request) {
 				Region   string `json:"region"`
 				Endpoint string `json:"endpoint"`
 			} `json:"s3"`
+			Google *struct {
+				Bucket   string `json:"bucket"`
+				Endpoint string `json:"endpoint"`
+			} `json:"google"`
 		} `json:"blobstores"`
 	}
 	json.Unmarshal(body, &bs)
@@ -762,6 +766,9 @@ func (h *Handler) systemInformation(w http.ResponseWriter, r *http.Request) {
 			"totalSpace": s.FsTotal, "usableSpace": s.FsFree}
 		if s.S3 != nil {
 			v["bucket"], v["region"], v["endpoint"] = s.S3.Bucket, s.S3.Region, s.S3.Endpoint
+		}
+		if s.Google != nil {
+			v["bucket"], v["endpoint"] = s.Google.Bucket, s.Google.Endpoint
 		}
 		stores[s.Name] = v
 	}
