@@ -27,6 +27,16 @@ func TestParsePath(t *testing.T) {
 		{"org/example/app/maven-metadata.xml.sha256", "sha256", true, nil},
 		{"org/example/app/1.0/other-1.0.jar", "", false, nil}, // file does not match artifactId
 		{"org/example/app/1.0/app-1.0.1.jar", "", false, nil}, // file version 1.0.1 is not directory version 1.0
+		// The extension is what follows the last dot (tar.* kept whole), so a
+		// classifier may hold dots; an extension may start with a digit.
+		{"org/example/app/1.0/app-1.0-linux.x86_64.zip", "", false,
+			&Coordinates{GroupID: "org.example", ArtifactID: "app", BaseVersion: "1.0", Version: "1.0", Classifier: "linux.x86_64", Extension: "zip"}},
+		{"org/example/app/1.0/app-1.0-bin.tar.gz", "", false,
+			&Coordinates{GroupID: "org.example", ArtifactID: "app", BaseVersion: "1.0", Version: "1.0", Classifier: "bin", Extension: "tar.gz"}},
+		{"org/example/app/1.0/app-1.0.7z", "", false,
+			&Coordinates{GroupID: "org.example", ArtifactID: "app", BaseVersion: "1.0", Version: "1.0", Extension: "7z"}},
+		{"org/example/app/1.0/app-1.0-linux.x86_64.zip.asc", "", false,
+			&Coordinates{GroupID: "org.example", ArtifactID: "app", BaseVersion: "1.0", Version: "1.0", Classifier: "linux.x86_64", Extension: "zip.asc"}},
 		{"short/x.jar", "", false, nil},
 	}
 	for _, c := range cases {
@@ -84,7 +94,7 @@ func TestParsePathRejectsControlAndQueryChars(t *testing.T) {
 func TestContentType(t *testing.T) {
 	cases := map[string]string{
 		"a.pom": "application/xml", "maven-metadata.xml": "application/xml", "a.jar": "application/java-archive",
-		"a.jar.sha1": "text/plain", "a.asc": "text/plain", "a.zip": "application/zip", "a.bin": "application/octet-stream",
+		"a.jar.sha1": "text/plain", "a.asc": "application/pgp-signature", "a.jar.asc": "application/pgp-signature", "a.zip": "application/zip", "a.bin": "application/octet-stream",
 	}
 	for in, want := range cases {
 		if got := ContentType(in); got != want {

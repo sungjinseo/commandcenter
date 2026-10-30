@@ -97,6 +97,10 @@ func (c Component) Label() string {
 // component. Metadata files and paths without a group are not components.
 // An sbt plugin's files in sbt's legacy layout, named without the cross
 // suffix of their artifact directory, belong to that directory's component.
+// As in Nexus, each timestamped build of a SNAPSHOT is a component of its
+// own: its version is the build's, 1.0-20261014.120000-3, and its base
+// version (MavenBaseVersion) the directory, 1.0-SNAPSHOT. Non-unique
+// X-SNAPSHOT files form the component X-SNAPSHOT.
 func DeriveMaven(p string) (group, name, version string, ok bool) {
 	segs := strings.Split(p, "/")
 	if len(segs) < 4 {
@@ -106,8 +110,17 @@ func DeriveMaven(p string) (group, name, version string, ok bool) {
 	if strings.HasPrefix(file, "maven-metadata.xml") {
 		return "", "", "", false
 	}
-	name, version = segs[len(segs)-3], segs[len(segs)-2]
-	if name == "" || version == "" || (!mavenFileMatches(file, name, version) && !sbtLegacyFile(file, name, version)) {
+	name, dirVersion := segs[len(segs)-3], segs[len(segs)-2]
+	if name == "" || dirVersion == "" {
+		return "", "", "", false
+	}
+	version, ok = mavenFileVersion(file, name, dirVersion)
+	if !ok {
+		if m := SbtPluginDir.FindStringSubmatch(name); m != nil {
+			version, ok = mavenFileVersion(file, m[1], dirVersion)
+		}
+	}
+	if !ok {
 		return "", "", "", false
 	}
 	for _, s := range segs[:len(segs)-3] {
@@ -122,38 +135,114 @@ func DeriveMaven(p string) (group, name, version string, ok bool) {
 // (yyyyMMdd.HHmmss-N; shorter time parts are tolerated).
 var SnapshotStamp = regexp.MustCompile("^[0-9]{8}[.][0-9]+-[0-9]+")
 
-// mavenFileMatches reports whether file starts with artifact-version, or for
-// a snapshot with artifact-base-stamp, ending at a name boundary.
-func mavenFileMatches(file, name, version string) bool {
+// mavenBuildRE is the timestamp-build suffix of a resolved SNAPSHOT version.
+var mavenBuildRE = regexp.MustCompile("-[0-9]{8}[.][0-9]+-[0-9]+$")
+
+// mavenFileVersion returns the version of file in directory dirVersion when
+// it starts with name-dirVersion, or for a snapshot with name-base-stamp,
+// ending at a name boundary: dirVersion, or the resolved base-stamp.
+func mavenFileVersion(file, name, dirVersion string) (string, bool) {
 	boundary := func(rest string) bool { return rest == "" || rest[0] == '-' || rest[0] == '.' }
-	rest, ok := strings.CutPrefix(file, name+"-"+version)
-	if ok && boundary(rest) {
-		return true
+	if rest, ok := strings.CutPrefix(file, name+"-"+dirVersion); ok && boundary(rest) {
+		return dirVersion, true
 	}
-	base, snap := strings.CutSuffix(version, "-SNAPSHOT")
+	base, snap := strings.CutSuffix(dirVersion, "-SNAPSHOT")
 	if !snap {
-		return false
+		return "", false
 	}
-	rest, ok = strings.CutPrefix(file, name+"-"+base+"-")
-	if !ok {
-		return false
-	}
+	rest, ok := strings.CutPrefix(file, name+"-"+base+"-")
 	stamp := SnapshotStamp.FindString(rest)
-	return stamp != "" && boundary(rest[len(stamp):])
+	if !ok || stamp == "" || !boundary(rest[len(stamp):]) {
+		return "", false
+	}
+	return base + "-" + stamp, true
+}
+
+// MavenBaseVersion is the base version of a Maven component version: X-SNAPSHOT
+// for a timestamped build X-yyyyMMdd.HHmmss-N, the version itself otherwise.
+func MavenBaseVersion(version string) string {
+	if loc := mavenBuildRE.FindStringIndex(version); loc != nil && loc[0] > 0 {
+		return version[:loc[0]] + "-SNAPSHOT"
+	}
+	return version
+}
+
+// MavenVersionDirs are the version directories that may hold the files of
+// Maven component version: the base version's, and for a version that looks
+// like a timestamped build also a directory of that name (a release in a
+// MIXED repository may be named so).
+func MavenVersionDirs(version string) []string {
+	if base := MavenBaseVersion(version); base != version {
+		return []string{base, version}
+	}
+	return []string{version}
+}
+
+// MavenFileParts returns the classifier and extension of file, a file of
+// Maven component name at (resolved) version: name-version[-classifier].ext.
+// The extension is what follows the last dot, or tar.* and cpio.*, so a
+// classifier may hold dots (app-1.0-linux.x86_64.zip: linux.x86_64, zip); a
+// signature's and a checksum's extension is the signed file's plus .asc or
+// the hash (jar.asc, jar.sha1), as in Nexus. An extension may start with a
+// digit (7z) unless it holds a dot (app-1.0.1.jar in directory 1.0 is no
+// file of 1.0). An sbt plugin's legacy-layout files are named without the
+// cross suffix of name. ok is false when file is not named so.
+func MavenFileParts(file, name, version string) (classifier, ext string, ok bool) {
+	tail, found := strings.CutPrefix(file, name+"-"+version)
+	if m := SbtPluginDir.FindStringSubmatch(name); !found && m != nil {
+		tail, found = strings.CutPrefix(file, m[1]+"-"+version)
+	}
+	if !found {
+		return "", "", false
+	}
+	return MavenTail(tail)
+}
+
+// MavenTail splits what follows name-version in a Maven file name
+// (MavenFileParts).
+func MavenTail(tail string) (classifier, ext string, ok bool) {
+	var suffix string
+	for _, h := range []string{".sha1", ".md5", ".sha256", ".sha512"} {
+		if t, cut := strings.CutSuffix(tail, h); cut && len(t) > 1 {
+			tail, suffix = t, h
+			break
+		}
+	}
+	if t, cut := strings.CutSuffix(tail, ".asc"); cut && len(t) > 1 {
+		tail, suffix = t, ".asc"+suffix
+	}
+	switch {
+	case strings.HasPrefix(tail, "-"):
+		s := tail[1:]
+		i := strings.LastIndexByte(s, '.')
+		if i <= 0 || i == len(s)-1 {
+			return "", "", false
+		}
+		classifier, ext = s[:i], s[i+1:]
+		for _, c := range []string{".tar", ".cpio"} {
+			if head, cut := strings.CutSuffix(classifier, c); cut && head != "" {
+				classifier, ext = head, c[1:]+"."+ext
+				break
+			}
+		}
+	case strings.HasPrefix(tail, "."):
+		ext = tail[1:]
+		if ext == "" || ext[0] >= '0' && ext[0] <= '9' && strings.Contains(ext, ".") {
+			return "", "", false
+		}
+	default:
+		return "", "", false
+	}
+	if strings.Trim(ext, "0123456789") == "" {
+		return "", "", false
+	}
+	return classifier, ext + suffix, true
 }
 
 // SbtPluginDir matches an artifact directory with sbt's _<scala>_<sbt>
 // plugin cross suffix, such as sbt-assembly_2.12_1.0. Its submatch is the
 // name without the suffix, which names the files of sbt's legacy layout there.
 var SbtPluginDir = regexp.MustCompile(`^(.+)_\d+(?:\.\d+)*_\d+(?:\.\d+)*$`)
-
-// sbtLegacyFile reports whether file, in artifact directory name, is named
-// as sbt's legacy layout names a plugin file: mavenFileMatches with the name
-// without the cross suffix.
-func sbtLegacyFile(file, name, version string) bool {
-	m := SbtPluginDir.FindStringSubmatch(name)
-	return m != nil && mavenFileMatches(file, m[1], version)
-}
 
 // DeriveNpm maps a tarball path name/-/name-version.tgz (or the scoped
 // form) to its component.

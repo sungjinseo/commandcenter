@@ -102,6 +102,9 @@ type repoRequest struct {
 	// contentDisposition ("" or "inline", "attachment").
 	StrictContentTypeValidation bool   `json:"strictContentTypeValidation"`
 	ContentDisposition          string `json:"contentDisposition"`
+	// LayoutPolicy (maven hosted and proxy): "strict" or "permissive";
+	// absent (null) keeps the stored one on update and means strict on create.
+	LayoutPolicy *string `json:"layoutPolicy"`
 	// Proxy remote: blocked never asks the remote; autoBlock null or absent
 	// means true.
 	Blocked   bool  `json:"blocked"`
@@ -160,6 +163,7 @@ type repoConfigResponse struct {
 
 	StrictContentTypeValidation bool          `json:"strictContentTypeValidation"`
 	ContentDisposition          string        `json:"contentDisposition"`
+	LayoutPolicy                string        `json:"layoutPolicy,omitempty"` // maven hosted and proxy: strict or permissive
 	Blocked                     bool          `json:"blocked"`
 	AutoBlock                   bool          `json:"autoBlock"`
 	Firewall                    *firewallJSON `json:"firewall,omitempty"` // proxies of a format with OSV data
@@ -251,6 +255,9 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		NegativeCacheEnabled: d.Type == "proxy" && (d.NegativeCacheEnabled == nil || *d.NegativeCacheEnabled),
 		Connection:           config.CleanConnection(d.Connection),
 	}
+	if d.Format == "maven" && d.Type != "group" {
+		out.LayoutPolicy = cmp.Or(d.LayoutPolicy, "strict")
+	}
 	if d.Type == "proxy" && config.ReplicationFormats[d.Format] {
 		out.Replication = &config.Replication{}
 		if d.Replication != nil {
@@ -286,7 +293,10 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		NegativeCacheEnabled: b.NegativeCacheEnabled, Connection: config.CleanConnection(b.Connection),
 	}
 	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey, KeepFirewall: b.Firewall == nil, KeepReplication: b.Replication == nil,
-		KeepEvaluation: b.Evaluation == nil, KeepConnection: b.Connection == nil}
+		KeepEvaluation: b.Evaluation == nil, KeepConnection: b.Connection == nil, KeepLayoutPolicy: b.LayoutPolicy == nil}
+	if b.LayoutPolicy != nil && *b.LayoutPolicy != "strict" {
+		d.LayoutPolicy = *b.LayoutPolicy
+	}
 	if b.Evaluation != nil && *b.Evaluation != "inherit" {
 		d.Evaluation = *b.Evaluation
 	}

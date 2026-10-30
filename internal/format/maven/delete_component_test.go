@@ -3,6 +3,7 @@ package maven
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -161,17 +162,46 @@ func TestDeleteComponentMavenNeighbours(t *testing.T) {
 	}
 }
 
+// A SNAPSHOT build is a component of its own (Nexus): deleting one leaves
+// the others; the version document follows the builds left, and the last
+// build takes the version out of the GA document.
 func TestDeleteComponentSnapshot(t *testing.T) {
 	e := newEnv(t)
 	base := "org/example/app/1.0-SNAPSHOT/"
-	vmeta := `<metadata><groupId>org.example</groupId><artifactId>app</artifactId><version>1.0-SNAPSHOT</version>
-<versioning><snapshot><timestamp>20261019.120000</timestamp><buildNumber>2</buildNumber></snapshot><lastUpdated>20261019120000</lastUpdated></versioning></metadata>`
-	e.putAll(t, "snapshots", base+"app-1.0-20261019.110000-1.jar", base+"app-1.0-20261019.120000-2.jar", base+"app-1.0-20261019.120000-2.pom")
-	if w := e.do("PUT", "snapshots", base+"maven-metadata.xml", vmeta); w.Code != 201 {
-		t.Fatalf("PUT version metadata: %d", w.Code)
-	}
+	e.putAll(t, "snapshots", base+"app-1.0-20261019.110000-1.jar", base+"app-1.0-20261019.110000-1.pom",
+		base+"app-1.0-20261019.120000-2.jar", base+"app-1.0-20261019.120000-2.pom", base+"app-1.0-20261019.120000-2-sources.jar")
 	e.putAll(t, "snapshots", "org/example/app/2.0-SNAPSHOT/app-2.0-SNAPSHOT.jar")
-	res, err := e.h.DeleteComponent(context.Background(), e.repos["snapshots"], mavenComp("1.0-SNAPSHOT"), "system")
+	snapshot := func() string {
+		w := e.do("GET", "snapshots", base+"maven-metadata.xml", "")
+		if w.Code != 200 {
+			return fmt.Sprint(w.Code)
+		}
+		m, err := ParseMetadata(w.Body)
+		if err != nil || m.Versioning == nil || m.Versioning.Snapshot == nil {
+			t.Fatalf("version document: %v %s", err, w.Body)
+		}
+		var vals []string
+		for _, sv := range m.Versioning.SnapshotVersions {
+			vals = append(vals, sv.Classifier+":"+sv.Value)
+		}
+		return fmt.Sprintf("%s-%d %s", m.Versioning.Snapshot.Timestamp, m.Versioning.Snapshot.BuildNumber, strings.Join(vals, ","))
+	}
+	// The older build: the documents name only the newer one and stay.
+	res, err := e.h.DeleteComponent(context.Background(), e.repos["snapshots"], mavenComp("1.0-20261019.110000-1"), "system")
+	if err != nil || res.Assets != 2 {
+		t.Fatalf("result = %+v %v", res, err)
+	}
+	if got := assetPaths(t, e, "snapshots", base); !strings.Contains(got, "-2.jar") || strings.Contains(got, "110000-1") {
+		t.Fatalf("snapshot folder: %s", got)
+	}
+	if got := snapshot(); got != "20261019.120000-2 :1.0-20261019.120000-2,:1.0-20261019.120000-2,sources:1.0-20261019.120000-2" { // jar, pom, sources
+		t.Fatalf("version document: %s", got)
+	}
+	if got := versionsOf(t, e, "snapshots"); !strings.HasPrefix(got, "1.0-SNAPSHOT,2.0-SNAPSHOT ") {
+		t.Fatalf("metadata: %s", got)
+	}
+	// The last build: the version leaves both documents.
+	res, err = e.h.DeleteComponent(context.Background(), e.repos["snapshots"], mavenComp("1.0-20261019.120000-2"), "system")
 	if err != nil || res.Assets != 3 {
 		t.Fatalf("result = %+v %v", res, err)
 	}
@@ -180,6 +210,25 @@ func TestDeleteComponentSnapshot(t *testing.T) {
 	}
 	if got := versionsOf(t, e, "snapshots"); !strings.HasPrefix(got, "2.0-SNAPSHOT ") {
 		t.Fatalf("metadata: %s", got)
+	}
+	// The non-unique 2.0-SNAPSHOT files are the component 2.0-SNAPSHOT.
+	if res, err := e.h.DeleteComponent(context.Background(), e.repos["snapshots"], mavenComp("2.0-SNAPSHOT"), "system"); err != nil || res.Assets != 1 {
+		t.Fatalf("non-unique: %+v %v", res, err)
+	}
+}
+
+// Deleting a build that the version document names (the newest) rebuilds
+// the document from the builds left.
+func TestDeleteComponentNewestBuild(t *testing.T) {
+	e := newEnv(t)
+	base := "org/example/app/1.0-SNAPSHOT/"
+	e.putAll(t, "snapshots", base+"app-1.0-20261019.110000-1.jar", base+"app-1.0-20261019.120000-2.jar")
+	if _, err := e.h.DeleteComponent(context.Background(), e.repos["snapshots"], mavenComp("1.0-20261019.120000-2"), "system"); err != nil {
+		t.Fatal(err)
+	}
+	w := e.do("GET", "snapshots", base+"maven-metadata.xml", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "<buildNumber>1</buildNumber>") || strings.Contains(w.Body.String(), "-2<") {
+		t.Fatalf("version document: %d %s", w.Code, w.Body)
 	}
 }
 

@@ -40,8 +40,9 @@ func (h *harness) mvnPaths(t *testing.T, prefix string) string {
 	return strings.Join(out, ",")
 }
 
-// A SNAPSHOT build deployed between the evaluation and the delete makes the
-// component newer than the policy allows: it is kept, and the run is OK.
+// A file of a SNAPSHOT build deployed between the evaluation and the delete
+// (a classified one, say) makes the component newer than the policy allows:
+// it is kept, and the run is OK. (Another build is a component of its own.)
 func TestCleanupKeepsComponentChangedAfterEvaluation(t *testing.T) {
 	h := newHarness(t)
 	const dir = "org/example/snap/1.0-SNAPSHOT/"
@@ -49,14 +50,14 @@ func TestCleanupKeepsComponentChangedAfterEvaluation(t *testing.T) {
 	h.put(t, "mvn", dir+"snap-1.0-20260801.000000-1.jar", "build-1")
 	h.clock.Set(t0)
 	h.wrapMaven(func(component.Component) {
-		h.put(t, "mvn", dir+"snap-1.0-20261020.020000-2.jar", "build-2")
+		h.put(t, "mvn", dir+"snap-1.0-20260801.000000-1-sources.jar", "build-1-sources")
 	})
 	tk := h.create(t, Def{Name: "c", Type: TypeCleanup, Schedule: "manual", Params: json.RawMessage(`{"repos":["mvn"]}`)})
 	out, err := h.s.RunNow(tk.ID, "admin")
 	if err != nil || out.Result != ResultOK || out.Removed != 0 {
 		t.Fatalf("outcome: %+v %v", out, err)
 	}
-	if got := h.mvnPaths(t, dir); got != dir+"snap-1.0-20260801.000000-1.jar,"+dir+"snap-1.0-20261020.020000-2.jar" {
+	if got := h.mvnPaths(t, dir); got != dir+"snap-1.0-20260801.000000-1-sources.jar,"+dir+"snap-1.0-20260801.000000-1.jar" {
 		t.Fatalf("assets left: %s", got)
 	}
 	if got := h.get(t, tk.ID); !strings.Contains(got.LastLog, "changed since evaluation") || !strings.Contains(got.LastLog, "1 changed since evaluation") {

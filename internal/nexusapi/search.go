@@ -518,6 +518,10 @@ func (cr criteria) compare(a, b *comp) int {
 	case "name":
 		c = strings.Compare(a.name, b.name)
 	case "version":
+		if a.format == "maven" && b.format == "maven" { // SNAPSHOT builds by timestamp and build number too
+			c = maven.CompareVersions(a.version, b.version)
+			break
+		}
 		eco := "" // vercmp's generic order across formats
 		if a.format == b.format {
 			eco = vuln.Ecosystems[a.format]

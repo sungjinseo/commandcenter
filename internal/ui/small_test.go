@@ -286,7 +286,7 @@ func TestRepositoryContentAndRemoteFields(t *testing.T) {
 	}
 	for body, want := range map[string]string{
 		`{"name":"x1","format":"raw","type":"hosted","contentDisposition":"download"}`:                                 "contentDisposition must be",
-		`{"name":"x2","format":"npm","type":"hosted","contentDisposition":"attachment"}`:                               "only valid for raw and gitlfs",
+		`{"name":"x2","format":"npm","type":"hosted","contentDisposition":"attachment"}`:                               "only valid for raw, gitlfs and maven",
 		`{"name":"x3","format":"raw","type":"proxy","remote":"https://r.example/","strictContentTypeValidation":true}`: "only valid for hosted",
 		`{"name":"x4","format":"raw","type":"hosted","blocked":true}`:                                                  "only valid for proxy",
 	} {

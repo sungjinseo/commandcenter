@@ -127,6 +127,14 @@ type querier interface {
 //	   an older build ignores them, keeps them on its updates, mails
 //	   failures only and, as the leader, leaves queued runs waiting for a
 //	   leader of this version.
+//	8: component_tags rows for Maven SNAPSHOT builds (mavenBuildTags): each
+//	   timestamped build is a component of its own now, so a tag on an
+//	   X-SNAPSHOT component is copied to the builds stored under it once,
+//	   on the upgrade; and maven.purge-snapshots tasks get "scope":"version",
+//	   the behaviour they were created with (scopePurgeTasks). Expand-only:
+//	   the X-SNAPSHOT rows stay, which an older build keeps reading, and it
+//	   ignores the rows of builds and runs the tasks as before (editing one
+//	   there refuses the new parameter).
 const schemaVersion = 8
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
@@ -221,11 +229,42 @@ func upgrade(p *pool, name string) error {
 			return err
 		}
 	}
+	if version > 0 && version < 8 {
+		for _, m := range []string{mavenBuildTags, scopePurgeTasks} {
+			if _, err := q.ExecContext(ctx, m); err != nil {
+				return ddlError(err, name)
+			}
+		}
+	}
 	if err := stampSchemaVersion(ctx, q, schemaVersion, schemaCompat); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
+
+// mavenBuildTags copies, once (the upgrade to schema 8), each tag of a Maven
+// X-SNAPSHOT component to the timestamped builds stored in its directory,
+// <artifactId>-<base>-<yyyyMMdd.HHmmss-N>[-.]...: the component version of
+// a build is <base>-<stamp> (component.DeriveMaven). The range on path is
+// the prefix ending in "-", up to the same prefix ending in ".".
+const mavenBuildTags = `
+INSERT INTO component_tags(tag, repo, grp, name, version)
+SELECT DISTINCT t.tag, t.repo, t.grp, t.name, left(t.version, -8) || s.stamp
+FROM component_tags t
+JOIN repositories r ON r.name = t.repo AND r.format = 'maven'
+CROSS JOIN LATERAL (SELECT replace(t.grp, '.', '/') || '/' || t.name || '/' || t.version || '/' || t.name || '-' || left(t.version, -8) AS prefix) p
+JOIN assets a ON a.repo = t.repo AND a.path > p.prefix AND a.path < left(p.prefix, -1) || '.'
+CROSS JOIN LATERAL (SELECT substr(a.path, length(p.prefix) + 1) AS rest) f
+CROSS JOIN LATERAL (SELECT substring(f.rest FROM '^([0-9]{8}[.][0-9]+-[0-9]+)([-.]|$)') AS stamp) s
+WHERE t.version LIKE '%-SNAPSHOT' AND s.stamp IS NOT NULL AND position('/' IN f.rest) = 0
+ON CONFLICT DO NOTHING`
+
+// scopePurgeTasks marks, once (the upgrade to schema 8), the existing
+// maven.purge-snapshots tasks with the scope they were created for: whole
+// SNAPSHOT versions per GA. New tasks default to Nexus's per-build scope.
+const scopePurgeTasks = `
+UPDATE tasks SET params = (params::jsonb || '{"scope":"version"}'::jsonb)::text
+WHERE type = 'maven.purge-snapshots' AND jsonb_typeof(params::jsonb) = 'object' AND params::jsonb -> 'scope' IS NULL`
 
 // beginUpgrade starts upgrade's transaction, which holds migrateLock and
 // waits without a timeout.

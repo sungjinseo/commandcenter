@@ -91,18 +91,23 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 		repo.WriteError(w, r, repo.ErrNotFound)
 		return
 	}
-	if rp.Type != "hosted" && !p.fetchable() {
-		// Only Maven files are fetched and cached: a directory path would
-		// cache the upstream's HTML listing as a file (QA L-12).
+	if rp.Type != "group" && !readable(rp, p) {
 		repo.WriteError(w, r, repo.ErrNotFound)
 		return
 	}
 	// A text/html answer for a file not named .html is an upstream directory
-	// listing or error page: it is not found and not cached (QA L-12).
-	t := proxy.Target{Key: p.Main, Remote: p.Main, NotHTML: !strings.HasSuffix(p.Main, ".html")}
-	if p.Metadata && rp.Type == "group" {
-		a, err = h.Resolver.MergedTarget(ctx, rp, t, "application/xml", mergeMetadata)
-	} else {
+	// listing or error page: it is not found and not cached (QA L-12). A
+	// group asks only the members whose policies allow the path.
+	t := proxy.Target{Key: p.Main, Remote: p.Main, NotHTML: !strings.HasSuffix(p.Main, ".html"),
+		Skip: func(m *repo.Repository) bool { return !readable(m, p) }}
+	switch {
+	case p.Metadata && rp.Type == "group":
+		// The salt re-merges the copies older builds stored, which merged
+		// documents of other GAs and kept plugins by prefix alone.
+		a, err = h.Resolver.MergedTargetSalted(ctx, rp, t, "application/xml", "m1:", mergeMetadata)
+	case p.Main == catalogPath && rp.Type == "group":
+		a, err = h.Resolver.MergedTarget(ctx, rp, t, "application/xml", mergeCatalogs)
+	default:
 		kind := proxy.Content
 		if p.Metadata {
 			kind = proxy.Metadata
@@ -115,12 +120,54 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 		return
 	}
 	proxy.SetStaleHeader(w, res)
+	if !p.Metadata {
+		// Files other than metadata carry the repository's disposition,
+		// inline by default (Nexus's content disposition).
+		def := h.Store.Definition(a.Repo)
+		if def == nil {
+			def = rp
+		}
+		disposition := def.ContentDisposition
+		if disposition == "" {
+			disposition = "inline"
+		}
+		repo.SetContentDisposition(w, disposition, p.Path)
+	}
 	if p.Hash != "" {
 		repo.ServeText(w, r, checksum(a, p.Hash), "text/plain", a.LastModified)
 		return
 	}
 	a.ContentType = ContentType(p.Main)
 	repo.ServeAsset(w, r, h.Store, a)
+}
+
+// readable reports whether hosted or proxy repository rp answers a read of
+// p: its version policy allows p (Nexus answers 404 otherwise and never asks
+// the remote), and a proxy fetches only Maven files unless its layout policy
+// is permissive. A directory path would cache the upstream's HTML listing as
+// a file (QA L-12); IDE index and other .meta paths are never fetched.
+func readable(rp *repo.Repository, p Path) bool {
+	if policyApplies(p) && checkVersionPolicy(rp.VersionPolicy, p) != nil {
+		return false
+	}
+	if rp.Type != "proxy" || p.fetchable() {
+		return true
+	}
+	return rp.LayoutPolicy == "permissive" && !reservedPath(p.Main)
+}
+
+// reservedPath reports whether p is under the Maven index or the repository
+// metadata directories (.index/, .meta/), which Command Center neither
+// fetches nor stores under any layout policy: there is no Maven indexer.
+func reservedPath(p string) bool {
+	return strings.HasPrefix(p, ".index/") || (strings.HasPrefix(p, ".meta/") && p != prefixesPath)
+}
+
+// policyApplies reports whether the version policy judges p: artifacts
+// (sbt's legacy layout included) and maven-metadata.xml documents. Other
+// paths of a permissive repository are neither releases nor snapshots.
+func policyApplies(p Path) bool {
+	return p.Coords != nil || p.Metadata || sbtLegacy(p.Main) != nil
 }
 
 func checksum(a meta.Asset, hash string) string {
@@ -166,8 +213,10 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 		io.Copy(io.Discard, io.LimitReader(r.Body, 4096))
 		return nil
 	}
-	if err := checkVersionPolicy(rp.VersionPolicy, p); err != nil {
-		return err
+	if policyApplies(p) {
+		if err := checkVersionPolicy(rp.VersionPolicy, p); err != nil {
+			return err
+		}
 	}
 	if p.Metadata {
 		return h.putMetadata(ctx, rp, p.Main, r.Body)
@@ -176,26 +225,32 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 	if c == nil {
 		c = sbtLegacy(p.Main)
 	}
-	if c == nil {
+	if c == nil && (rp.LayoutPolicy != "permissive" || reservedPath(p.Main) || strings.HasSuffix(p.Main, "/")) {
 		return repo.Errorf(http.StatusBadRequest, "%q is not a valid maven artifact path", p.Main)
 	}
 	body, err := repo.StrictBody(rp, p.Main, r.Header.Get("Content-Type"), r.Body)
 	if err != nil {
 		return err
 	}
-	if err := h.storeArtifact(ctx, rp, p, c, body); err != nil {
+	facts, err := h.storeArtifact(ctx, rp, p, c, body)
+	if err != nil {
 		return err
 	}
 	if !strings.HasSuffix(p.Main, ".asc") { // signatures are sidecars, not components
 		h.Store.Emit(r, "upload", rp.Name, p.Main, "")
 	}
 	if p.Coords == nil {
-		return nil // an sbt legacy-layout file: no version of the GA, so no metadata changes
+		return nil // an sbt legacy-layout file or another file: no version of a GA, so no metadata changes
+	}
+	if facts.Packaging == archetypePackaging {
+		if err := h.addArchetype(ctx, rp, p.Coords); err != nil {
+			slog.Warn("archetype-catalog.xml update failed", "repo", rp.Name, "path", p.Main, "err", err)
+		}
 	}
 	// Best-effort: the artifact is already stored, so failing the PUT would make
 	// a retry hit allow_once; the next write to this GA, or the GA
 	// maven-metadata.xml upload that ends mvn deploy, rebuilds the metadata anyway.
-	if err := h.rebuildGA(ctx, rp, p.Coords.GroupID, p.Coords.ArtifactID, false); err != nil {
+	if _, err := h.rebuildGA(ctx, rp, p.Coords.GroupID, p.Coords.ArtifactID, false); err != nil {
 		slog.Warn("maven-metadata.xml rebuild failed", "repo", rp.Name, "path", p.Main, "err", err)
 	}
 	if p.Coords.Snapshot {
@@ -211,23 +266,26 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p Path) error {
 // (writePolicy allow) needs Edit, a new one only the Add the server checked
 // (plan 12 Decision 2). A POM is checked once on disk, before it is recorded,
 // against c: p.Coords, or sbtLegacy's for a file in sbt's legacy layout.
-func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path, c *Coordinates, body io.Reader) error {
+func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path, c *Coordinates, body io.Reader) (pomFacts, error) {
+	var facts pomFacts
 	unlock, err := h.Store.Lock(ctx, "maven\x00asset\x00"+rp.Name+"\x00"+p.Main)
 	if err != nil {
-		return err
+		return facts, err
 	}
 	defer unlock()
 	_, err = h.Store.Get(ctx, rp.Name, p.Main)
 	switch {
-	case err == nil && rp.WritePolicy == "allow_once":
-		return repo.Errorf(http.StatusBadRequest, "repository %q does not allow updating assets: %s", rp.Name, p.Main)
+	case err == nil && rp.WritePolicy == "allow_once" && !strings.HasSuffix(p.Main, ".asc"):
+		// A signature may be redeployed, as Nexus allows: re-signing, or a
+		// deploy retried after it failed between the file and its .asc.
+		return facts, repo.Errorf(http.StatusBadRequest, "repository %q does not allow updating assets: %s", rp.Name, p.Main)
 	case err == nil && !h.Auth.Permits(ctx, rp.Name, auth.Edit):
-		return repo.Errorf(http.StatusForbidden, "user %q may not overwrite %s", auth.FromContext(ctx).User, p.Main)
+		return facts, repo.Errorf(http.StatusForbidden, "user %q may not overwrite %s", auth.FromContext(ctx).User, p.Main)
 	case err != nil && !errors.Is(err, repo.ErrNotFound):
-		return err
+		return facts, err
 	}
 	var verify func(blob.Sums) error
-	if c.Extension == "pom" && c.Classifier == "" {
+	if c != nil && c.Extension == "pom" && c.Classifier == "" {
 		body = http.MaxBytesReader(nil, io.NopCloser(body), maxPOMSize)
 		verify = func(s blob.Sums) error {
 			select {
@@ -241,19 +299,25 @@ func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path
 				return err
 			}
 			defer f.Close()
-			return checkPOM(f, c)
+			facts, err = checkPOMFacts(f, c)
+			return err
 		}
 	}
 	sums, err := h.Store.WriteBlob(rp.Name, body, verify)
 	if err != nil {
-		return err
+		return facts, err
 	}
-	return h.Store.DB.PutAsset(ctx, h.Store.NewAsset(rp.Name, p.Main, ContentType(p.Main), sums))
+	return facts, h.Store.DB.PutAsset(ctx, h.Store.NewAsset(rp.Name, p.Main, ContentType(p.Main), sums))
 }
 
 func (h *Handler) delete(r *http.Request, rp *repo.Repository, p Path) error {
 	if rp.WritePolicy == "deny" {
 		return repo.Errorf(http.StatusBadRequest, "repository %q is read-only", rp.Name)
+	}
+	if policyApplies(p) {
+		if err := checkVersionPolicy(rp.VersionPolicy, p); err != nil {
+			return err
+		}
 	}
 	if p.Hash != "" {
 		return nil // checksums are generated, nothing is stored
@@ -268,7 +332,7 @@ func (h *Handler) delete(r *http.Request, rp *repo.Repository, p Path) error {
 	if p.Coords != nil {
 		// Best-effort, as for PUT: the artifact is already gone, so a metadata
 		// failure is logged instead of failing the delete.
-		if err := h.rebuildGA(ctx, rp, p.Coords.GroupID, p.Coords.ArtifactID, true); err != nil {
+		if _, err := h.rebuildGA(ctx, rp, p.Coords.GroupID, p.Coords.ArtifactID, true); err != nil {
 			slog.Warn("maven-metadata.xml rebuild failed", "repo", rp.Name, "path", p.Main, "err", err)
 		}
 		if p.Coords.Snapshot {
@@ -368,7 +432,7 @@ func (h *Handler) putMetadata(ctx context.Context, rp *repo.Repository, path str
 	// names none), and its versions are still ignored.
 	d := dir(path)
 	if gaDir(up.GroupID, up.ArtifactID) == d {
-		if err := h.rebuildGA(ctx, rp, up.GroupID, up.ArtifactID, false); err != nil {
+		if _, err := h.rebuildGA(ctx, rp, up.GroupID, up.ArtifactID, false); err != nil {
 			return err
 		}
 	}
@@ -387,17 +451,35 @@ func (h *Handler) putMetadata(ctx context.Context, rp *repo.Repository, path str
 	return h.storeMetadata(ctx, rp, path, Merge(existing, &Metadata{Plugins: up.Plugins}))
 }
 
-// rebuildGA updates groupId/artifactId/maven-metadata.xml from the stored artifacts.
-// Everything but <plugins> is the server's and regenerated (QA L-11); the
-// plugins of the stored document (a groupId directory that is also a GA) are
-// kept. With replace (used after deletes), a GA without artifacts loses its
-// versioning: the document is removed, or keeps only its plugins; without, a
-// GA without artifacts gets no document.
-func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, artifactID string, replace bool) error {
+// rebuildGA updates groupId/artifactId/maven-metadata.xml from the stored artifacts
+// and returns the GA's versions. Everything but <plugins> is the server's
+// and regenerated (QA L-11); the plugins of the stored document (a groupId
+// directory that is also a GA) are kept. With replace (used after deletes),
+// a GA without artifacts loses its versioning: the document is removed, or
+// keeps only its plugins; without, a GA without artifacts gets no
+// document. After a delete, the archetype catalog drops versions that are
+// gone, and a GA left without versions leaves its groupId's plugin list.
+func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, artifactID string, replace bool) ([]string, error) {
+	versions, err := h.rebuildGADoc(ctx, rp, groupID, artifactID, replace)
+	if err != nil || !replace {
+		return versions, err
+	}
+	if err := h.syncArchetypes(ctx, rp, groupID, artifactID, versions); err != nil {
+		slog.Warn("archetype-catalog.xml update failed", "repo", rp.Name, "ga", groupID+":"+artifactID, "err", err)
+	}
+	if len(versions) == 0 {
+		if err := h.dropPlugin(ctx, rp, groupID, artifactID); err != nil {
+			slog.Warn("plugin-group maven-metadata.xml update failed", "repo", rp.Name, "ga", groupID+":"+artifactID, "err", err)
+		}
+	}
+	return versions, nil
+}
+
+func (h *Handler) rebuildGADoc(ctx context.Context, rp *repo.Repository, groupID, artifactID string, replace bool) ([]string, error) {
 	gaDir := strings.ReplaceAll(groupID, ".", "/") + "/" + artifactID
 	unlock, err := h.Store.Lock(ctx, "maven\x00"+rp.Name+"\x00"+gaDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer unlock()
 
@@ -416,15 +498,15 @@ func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, a
 		}
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	path := gaDir + "/maven-metadata.xml"
 	if len(versions) == 0 && !replace {
-		return nil
+		return nil, nil
 	}
 	existing, err := h.loadMetadata(ctx, rp, path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var plugins []Plugin
 	if existing != nil {
@@ -432,16 +514,16 @@ func (h *Handler) rebuildGA(ctx context.Context, rp *repo.Repository, groupID, a
 	}
 	if len(versions) == 0 {
 		if len(plugins) > 0 {
-			return h.storeMetadata(ctx, rp, path, Merge(&Metadata{Plugins: plugins}))
+			return nil, h.storeMetadata(ctx, rp, path, Merge(&Metadata{Plugins: plugins}))
 		}
 		if err := h.Store.Delete(ctx, rp.Name, path); err != nil && !errors.Is(err, repo.ErrNotFound) {
-			return err
+			return nil, err
 		}
-		return nil
+		return nil, nil
 	}
 	m := ForVersions(groupID, artifactID, versions, h.Now())
 	m.Plugins = plugins
-	return h.storeMetadata(ctx, rp, path, m)
+	return versions, h.storeMetadata(ctx, rp, path, m)
 }
 
 // loadMetadata returns the stored document, or nil if there is none or it is unreadable.

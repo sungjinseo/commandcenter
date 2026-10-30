@@ -75,9 +75,15 @@ func (c criteria) matchComponent(format, group, name, version string) bool {
 	if c.name != "" && !(containsFold(name, c.name) || (format == "pypi" && containsFold(name, pypi.Normalize(c.name)))) {
 		return false
 	}
-	// baseVersion is matched like version against the component version
-	// (for Maven snapshots that is the base version, e.g. 1.0-SNAPSHOT).
-	return matchVersion(c.version, c.versionRE, version) && matchVersion(c.baseVersion, c.baseVersionRE, version)
+	// baseVersion is matched like version against the base version: for a
+	// Maven SNAPSHOT build (1.0-20261014.120000-3) it is 1.0-SNAPSHOT, and
+	// version matches either, so a search for 1.0-SNAPSHOT lists its builds.
+	base := version
+	if format == "maven" {
+		base = component.MavenBaseVersion(version)
+	}
+	return (matchVersion(c.version, c.versionRE, version) || matchVersion(c.version, c.versionRE, base)) &&
+		matchVersion(c.baseVersion, c.baseVersionRE, base)
 }
 
 func containsFold(s, sub string) bool {
@@ -101,22 +107,8 @@ func assetParts(format, name, version, p string) (classifier, ext string) {
 	if format != "maven" {
 		return "", strings.TrimPrefix(path.Ext(file), ".")
 	}
-	rest := strings.TrimPrefix(file, name+"-")
-	if r, ok := strings.CutPrefix(rest, version); ok {
-		rest = r
-	} else if base, ok := strings.CutSuffix(version, "-SNAPSHOT"); ok {
-		if r, ok := strings.CutPrefix(rest, base+"-"); ok {
-			rest = component.SnapshotStamp.ReplaceAllString(r, "")
-		}
-	}
-	if c, ok := strings.CutPrefix(rest, "-"); ok {
-		i := strings.IndexByte(c, '.')
-		if i < 0 {
-			return c, ""
-		}
-		return c[:i], c[i+1:]
-	}
-	return "", strings.TrimPrefix(rest, ".")
+	classifier, ext, _ = component.MavenFileParts(file, name, version)
+	return classifier, ext
 }
 
 func (c criteria) matchAsset(format, name, version, p string) bool {

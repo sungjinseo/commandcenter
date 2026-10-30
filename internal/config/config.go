@@ -290,9 +290,14 @@ type Repository struct {
 	// "strict content type validation"; raw and maven check it (the other
 	// formats parse every upload as a package anyway).
 	StrictContentTypeValidation bool `yaml:"strictContentTypeValidation,omitempty" json:"strictContentTypeValidation,omitempty"`
-	// ContentDisposition (raw and gitlfs) is the Content-Disposition of
-	// downloads: "inline" (the default, "") or "attachment".
+	// ContentDisposition (raw and gitlfs; maven hosted and proxy) is the
+	// Content-Disposition of downloads: "inline" (the default, "") or
+	// "attachment". A Maven repository sends "inline" for its default.
 	ContentDisposition string `yaml:"contentDisposition,omitempty" json:"contentDisposition,omitempty"`
+	// LayoutPolicy (maven hosted and proxy) is Nexus's layout policy:
+	// "strict" (the default, "") stores and fetches Maven files only;
+	// "permissive" also stores and fetches any other path.
+	LayoutPolicy string `yaml:"layoutPolicy,omitempty" json:"layoutPolicy,omitempty"`
 	// AutoBlock (proxy; nil reads as true) stops asking a remote for a while
 	// after consecutive failures (proxy auto-block); Blocked never asks it
 	// (Nexus "blocked"): cached content is served stale, the rest is 502.
@@ -706,9 +711,18 @@ func ValidateDefinition(r Repository) error {
 		switch {
 		case r.ContentDisposition != "inline" && r.ContentDisposition != "attachment":
 			errs = append(errs, fmt.Errorf("repository %q: contentDisposition must be \"inline\" or \"attachment\"", r.Name))
-		case r.Format != "raw" && r.Format != "gitlfs":
-			errs = append(errs, fmt.Errorf("repository %q: contentDisposition is only valid for raw and gitlfs repositories", r.Name))
+		case r.Format == "maven" && r.Type == "group":
+			errs = append(errs, fmt.Errorf("repository %q: contentDisposition is not valid for maven group repositories", r.Name))
+		case r.Format != "raw" && r.Format != "gitlfs" && r.Format != "maven":
+			errs = append(errs, fmt.Errorf("repository %q: contentDisposition is only valid for raw, gitlfs and maven repositories", r.Name))
 		}
+	}
+	switch {
+	case r.LayoutPolicy == "":
+	case r.Format != "maven" || r.Type == "group":
+		errs = append(errs, fmt.Errorf("repository %q: layoutPolicy is only valid for maven hosted and proxy repositories", r.Name))
+	case r.LayoutPolicy != "strict" && r.LayoutPolicy != "permissive":
+		errs = append(errs, fmt.Errorf("repository %q: layoutPolicy must be \"strict\" or \"permissive\"", r.Name))
 	}
 	if r.Type != "proxy" && (r.Blocked || (r.AutoBlock != nil && !*r.AutoBlock)) {
 		errs = append(errs, fmt.Errorf("repository %q: blocked and autoBlock are only valid for proxy repositories", r.Name))

@@ -65,6 +65,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Nexus API: task ids `repository.apt.rebuild.metadata`, `blobstore.metrics.reconcile`,
   `repository.purge-unused`; `(All Blob Stores)` and `blobsOlderThan` 0; 400 with a reason for
   publish-dotindex and other ids Command Center has no use for.
+- Maven: `layoutPolicy` (strict, default | permissive) on hosted and proxy repositories; permissive stores
+  and fetches any path except `.index/` and `.meta/`. `contentDisposition` now applies to Maven too.
+- Maven: hosted repositories keep `archetype-catalog.xml` for their maven-archetype POMs; groups merge
+  their members' catalogs.
+- Tasks: `maven.purge-unused-snapshots` (Nexus `repository.maven.purge-unused-snapshots`, `lastUsed`).
+- Tasks: `repository.rebuild-metadata` takes Nexus's `groupId`, `artifactId`, `baseVersion`,
+  `cascadeRebuild` and `rebuildChecksums`, and rebuilds plugin-group `<plugins>` from plugin jars.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -96,6 +103,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Cleanup: age counts from when content was last written (ages, never-downloaded fallback, retain by date).
 - Tasks: run now of another task no longer answers 409 while a task runs; it is queued instead.
 - Nexus API: `blobstore.recalculate-size` tasks are listed as `blobstore.metrics.reconcile`.
+- Maven: each timestamped SNAPSHOT build is a component (version `1.0-yyyyMMdd.HHmmss-N`, base version
+  `1.0-SNAPSHOT`) in search, deletes, cleanup, tags and the Nexus API; tags are copied on upgrade.
+- Tasks: `maven.purge-snapshots` gets `scope`; `build` (new default) keeps the newest builds per SNAPSHOT
+  version, takes groups and `*`, allows minimumRetained -1 and finds releases in any Maven repository.
+  Existing tasks are stamped `scope: version` and behave as before.
+- Maven: version policy applies to GET/HEAD in hosted and proxy repositories (404, no remote request);
+  groups skip members whose policy refuses the path.
+- Maven: classifiers may contain dots and extensions may start with a digit (`linux.x86_64`, `7z`);
+  non-unique SNAPSHOT directories get a version document; `.asc` may be redeployed under allow_once
+  and is served as application/pgp-signature; downloads carry `Content-Disposition`.
+- Nexus API: `sort=version` uses Maven order (builds by timestamp too); a component lists its main file
+  first; `maven.layoutPolicy`/`contentDisposition` are reported as stored; groups have no `maven` object.
 
 ### Fixed
 - A Nexus API repository PUT no longer resets the anonymous-read override, a yum repository's depth,
@@ -112,6 +131,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Nexus API: `metadataMaxAge`/`contentMaxAge`/`timeToLive` 0 and `negativeCache.enabled: false` were
   replaced by defaults; NTLM credentials were sent as Basic (now 400).
 - Nexus API: repository bodies with several `cleanup.policyNames` no longer drop all but the first.
+- Maven: the "latest snapshot" search download returned the oldest build or a classified file.
+- Maven: group metadata merges skip members naming another GA and keep plugins per artifactId and prefix;
+  deleting a plugin's last version drops its prefix.
 
 ### Upgrade notes
 - Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by
@@ -141,6 +163,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repositories with policies should be cleaned nightly. Cleanup ages now start at the last write, so age
   criteria delete the same or fewer components. Run now no longer refuses while another task runs:
   scripts that relied on the 409 now get 202 with `queued: true`.
+- Schema 8 also copies each tag of a Maven `X-SNAPSHOT` component to the timestamped builds under it and
+  stamps existing `maven.purge-snapshots` tasks with `scope: version` (their old behaviour). Cleanup
+  policies now age SNAPSHOT builds individually: old builds inside an active SNAPSHOT can be deleted by
+  `componentAgeDays`/`lastDownloadedDays` (as in Nexus); `exclude.versionPattern: .*-SNAPSHOT` still
+  protects them, and `retain` counts base versions. Run a cleanup preview after upgrading. Component
+  counts, delete events and webhooks are per build. Proxies and groups with a version policy no longer
+  serve, or ask upstream for, the other kind.
 
 ## [0.3.0] - 2026-10-30
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/component"
 	"commandcenter/internal/format/conan"
 	"commandcenter/internal/format/gitlfs"
 	"commandcenter/internal/format/golang"
@@ -192,7 +193,8 @@ func (u *UI) readStored(ctx context.Context, rp *repo.Repository, path string) (
 func (u *UI) mavenMetadata(ctx context.Context, rp *repo.Repository, group, name, version string, m *componentMetadata) (bool, error) {
 	// The model POM lies in the version directory under its own name; a
 	// SNAPSHOT's timestamped POM is found through the directory listing.
-	dir := strings.ReplaceAll(group, ".", "/") + "/" + name + "/" + version + "/"
+	// A SNAPSHOT build's POM is named by the build, in the base version's directory.
+	dir := strings.ReplaceAll(group, ".", "/") + "/" + name + "/" + component.MavenBaseVersion(version) + "/"
 	pomPath := dir + name + "-" + version + ".pom"
 	b, ok, err := u.readStored(ctx, rp, pomPath)
 	if err != nil {

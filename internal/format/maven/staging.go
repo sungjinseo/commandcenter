@@ -26,16 +26,9 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	if c.Group == "" || c.Name == "" || c.Version == "" {
 		return nil, fmt.Errorf("maven component %q is incomplete", c.Label())
 	}
-	verDir := strings.ReplaceAll(c.Group, ".", "/") + "/" + c.Name + "/" + c.Version
-	all, err := h.Store.DB.ListAssets(ctx, src.Name, verDir+"/")
+	files, err := componentFiles(ctx, h.Store.DB.ListAssets, src.Name, c)
 	if err != nil {
 		return nil, err
-	}
-	var files []meta.Asset
-	for _, a := range all {
-		if g, name, v, ok := component.DeriveMaven(a.Path); ok && dir(a.Path) == verDir && g == c.Group && name == c.Name && v == c.Version {
-			files = append(files, a)
-		}
 	}
 	if len(files) == 0 {
 		return nil, repo.Errorf(http.StatusNotFound, "component %s not found in repository %q", c.Label(), src.Name)
@@ -68,13 +61,14 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		return nil, err
 	}
 	// Best-effort, as after a PUT: the files are stored.
-	if err := h.rebuildGA(ctx, dst, c.Group, c.Name, false); err != nil {
+	if _, err := h.rebuildGA(ctx, dst, c.Group, c.Name, false); err != nil {
 		slog.Warn("maven-metadata.xml rebuild failed", "repo", dst.Name, "component", c.Label(), "err", logsafe.Err(err))
 	}
-	if strings.HasSuffix(c.Version, "-SNAPSHOT") {
-		if err := h.rebuildSnapshotVersion(ctx, dst, verDir); err != nil {
+	if base := component.MavenBaseVersion(c.Version); strings.HasSuffix(base, "-SNAPSHOT") {
+		if err := h.rebuildSnapshotVersion(ctx, dst, gaDir(c.Group, c.Name)+"/"+base); err != nil {
 			slog.Warn("snapshot version metadata rebuild failed", "repo", dst.Name, "component", c.Label(), "err", logsafe.Err(err))
 		}
 	}
+	h.importedArchetype(ctx, dst, files)
 	return files, nil
 }

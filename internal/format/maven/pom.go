@@ -43,26 +43,36 @@ var pomRefRE = regexp.MustCompile(`\$\{[^}]*\}`)
 // deploy without flatten-maven-plugin, which Nexus accepts) or by the
 // parent, not by the POM's defaults. A POM that fails the check gets a 400.
 func checkPOM(r io.Reader, c *Coordinates) error {
+	_, err := checkPOMFacts(r, c)
+	return err
+}
+
+// pomFacts is what the server keeps of a POM: its packaging and name.
+type pomFacts struct{ Packaging, Name string }
+
+// checkPOMFacts is checkPOM that also returns the POM's packaging and name.
+func checkPOMFacts(r io.Reader, c *Coordinates) (pomFacts, error) {
 	b, err := io.ReadAll(r)
 	if err != nil {
-		return err
+		return pomFacts{}, err
 	}
 	vals, err := parsePOM(b)
 	if err != nil {
-		return err
+		return pomFacts{}, err
 	}
 	g, _ := expand(vals, inherited(vals, "groupId"))
 	a, _ := expand(vals, vals["artifactId"])
 	raw := inherited(vals, "version")
 	v, _ := expand(vals, raw)
 	if sameCoord(g, c.GroupID) && sameCoord(a, c.ArtifactID) && (strings.Contains(raw, "${") || v == c.BaseVersion || v == c.Version) {
-		return nil
+		name, _ := expand(vals, vals["name"])
+		return pomFacts{Packaging: vals["packaging"], Name: name}, nil
 	}
 	got := g + ":" + a + ":" + v
 	if raw != v {
 		got += " (version " + raw + ")"
 	}
-	return repo.Errorf(http.StatusBadRequest, ".pom declares %.300q, want %q", got, c.GroupID+":"+c.ArtifactID+":"+c.BaseVersion)
+	return pomFacts{}, repo.Errorf(http.StatusBadRequest, ".pom declares %.300q, want %q", got, c.GroupID+":"+c.ArtifactID+":"+c.BaseVersion)
 }
 
 // parsePOM is readPOM of b, or a 400. Maven reads bytes that are not
@@ -107,6 +117,7 @@ func sameCoord(s, want string) bool {
 
 // readPOM returns the trimmed text of the project's and its parent's
 // groupId, artifactId and version, keyed as "groupId" or "parent/version",
+// of the project's packaging and name,
 // and of the first maxPOMValues properties, keyed as "${name}".
 func readPOM(r io.Reader) (map[string]string, error) {
 	br := bufio.NewReader(r)
@@ -176,7 +187,7 @@ func readPOM(r io.Reader) (map[string]string, error) {
 // is not kept.
 func pomKey(names [3]string, depth int) string {
 	switch {
-	case depth == 2 && (names[1] == "groupId" || names[1] == "artifactId" || names[1] == "version"):
+	case depth == 2 && (names[1] == "groupId" || names[1] == "artifactId" || names[1] == "version" || names[1] == "packaging" || names[1] == "name"):
 		return names[1]
 	case depth == 3 && names[1] == "parent" && (names[2] == "groupId" || names[2] == "version"):
 		return "parent/" + names[2]

@@ -33,9 +33,13 @@ func (r *Resolver) Lookup(ctx context.Context, rp *repo.Repository, path string,
 }
 
 // LookupTarget is Lookup for a target whose cache key and remote path differ.
-// Groups skip offline members, and failing ones while a later member has the
-// asset; Owner is the lookup that fails closed instead.
+// Groups skip offline members, members the target skips (Target.Skip), and
+// failing ones while a later member has the asset; Owner is the lookup that
+// fails closed instead.
 func (r *Resolver) LookupTarget(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind) (proxy.Result, error) {
+	if t.Skip != nil && rp.Type != "group" && t.Skip(rp) {
+		return proxy.Result{}, repo.ErrNotFound
+	}
 	switch rp.Type {
 	case "hosted":
 		a, err := r.Store.Get(ctx, rp.Name, t.Key)

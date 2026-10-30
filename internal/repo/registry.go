@@ -107,6 +107,7 @@ type ClearSecrets struct {
 	KeepReplication   bool // keep the stored replication, whatever def says (the API's absent field)
 	KeepEvaluation    bool // keep the stored evaluation, whatever def says (the API's absent field)
 	KeepConnection    bool // keep the stored connection settings, whatever def says (the API's absent field)
+	KeepLayoutPolicy  bool // keep the stored layoutPolicy, whatever def says (the API's absent field)
 }
 
 // NewRegistry publishes the first snapshot from defs, which must already be
@@ -389,6 +390,9 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	}
 	if clear.KeepEvaluation {
 		def.Evaluation = cur.Evaluation
+	}
+	if clear.KeepLayoutPolicy {
+		def.LayoutPolicy = cur.LayoutPolicy
 	}
 	ra, err := mergeAuth(name, cur.Remote, def.Remote, cur.RemoteAuth, def.RemoteAuth, clear)
 	if err != nil {

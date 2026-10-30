@@ -148,8 +148,9 @@ func TestSearchEmptyClassifier(t *testing.T) {
 	}
 	eq(t, "no classifier", e.items(v1+"/search/assets?maven.artifactId=a&maven.classifier=", "ci", "path"),
 		"/org/x/a/0.9/a-0.9.jar", "/org/x/a/1.0/a-1.0.jar")
+	// Maven lists the main file first, then the classified ones in path order.
 	eq(t, "absent parameter", e.items(v1+"/search/assets?maven.artifactId=a&version=1.0", "ci", "path"),
-		"/org/x/a/1.0/a-1.0-javadoc.jar", "/org/x/a/1.0/a-1.0-sources.jar", "/org/x/a/1.0/a-1.0.jar")
+		"/org/x/a/1.0/a-1.0.jar", "/org/x/a/1.0/a-1.0-javadoc.jar", "/org/x/a/1.0/a-1.0-sources.jar")
 	// The full attribute names work as the aliases do.
 	eq(t, "full names", e.items(v1+"/search/assets?attributes.maven2.artifactId=a&assets.attributes.maven2.classifier=sources", "ci", "path"),
 		"/org/x/a/1.0/a-1.0-sources.jar")

@@ -415,7 +415,7 @@ func TestSchemaCompat(t *testing.T) {
 		{7, 6, "azure and google blob stores: no DDL, and the first such store raises compat to 7 (an older build would read it as an empty directory); reconcile_plans and reconcile_items: expand-only, new tables an older build never reads; usage counters and repository evaluation (expand-only: the triggers keep the counters for older builds' writes too)"},
 		{8, 7, "webhooks.payload_format, events.ip and node, tasks.notify_on, queued_by and queued_at; proxy negativeCacheTTL -1 now never expires, stored -1 rewritten to 0s " +
 			"(no negative caching, as before): expand-only, an older build ignores the new columns and keys (failure mails only, queued runs wait for a newer leader), " +
-			"reads 0s and -1 as no negative caching and never matches a nexus webhook's event names"},
+			"reads 0s and -1 as no negative caching and never matches a nexus webhook's event names; also component_tags rows of Maven SNAPSHOT builds copied from their X-SNAPSHOT components and the scope of existing maven.purge-snapshots tasks, once"},
 	}
 	for i, d := range decisions {
 		if d.version != i+1 || d.compat < d.version-1 || d.compat > d.version || d.note == "" {

@@ -1,6 +1,32 @@
 package maven
 
-import "strings"
+import (
+	"strings"
+
+	"commandcenter/internal/component"
+)
+
+// CompareVersions orders Maven component versions for sorting (search
+// sort=version, newest-first retention): by base version in Maven order
+// (Compare), so the builds of 1.0-SNAPSHOT sort between 0.9 and 1.0, then a
+// timestamped build after the non-unique X-SNAPSHOT and builds by
+// timestamp and build number. Search code of other packages calls it.
+func CompareVersions(a, b string) int {
+	ba, bb := component.MavenBaseVersion(a), component.MavenBaseVersion(b)
+	if c := Compare(ba, bb); c != 0 || a == b {
+		return c
+	}
+	switch {
+	case a == ba && b != bb:
+		return -1
+	case b == bb && a != ba:
+		return 1
+	}
+	if c := Compare(a, b); c != 0 {
+		return c
+	}
+	return strings.Compare(a, b)
+}
 
 // Compare orders Maven versions like a simplified ComparableVersion:
 // numbers compare numerically, and qualifiers order as

@@ -16,7 +16,9 @@ import (
 // timestamped builds stored in it, replacing whatever was there: the server
 // owns this document (plan 13 Decision 6). <snapshot> names the highest build,
 // and <snapshotVersions> the newest file of each classifier and extension.
-// Without timestamped files the document is removed.
+// A directory holding only non-unique X-SNAPSHOT files gets the non-unique
+// form, <snapshot><buildNumber>1</buildNumber></snapshot>, as Nexus writes
+// it; without any file the document is removed.
 func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repository, verDir string) error {
 	segs := strings.Split(verDir, "/")
 	if len(segs) < 3 || !strings.HasSuffix(segs[len(segs)-1], "-SNAPSHOT") {
@@ -42,10 +44,11 @@ func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repositor
 		return a.timestamp > b.timestamp
 	}
 	var (
-		latest build
-		found  bool
-		files  = map[string]SnapshotVersion{}
-		builds = map[string]build{} // per file key, the build of files[key]
+		latest    build
+		found     bool
+		nonUnique bool
+		files     = map[string]SnapshotVersion{}
+		builds    = map[string]build{} // per file key, the build of files[key]
 	)
 	base := strings.TrimSuffix(baseVersion, "SNAPSHOT")
 	err = h.Store.DB.WalkAssetPaths(ctx, rp.Name, verDir+"/", func(p string) { // streamed, as in rebuildGA
@@ -59,6 +62,7 @@ func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repositor
 		}
 		ts := strings.TrimPrefix(pp.Coords.Version, base)
 		if ts == pp.Coords.Version || !timestampRE.MatchString(ts) {
+			nonUnique = nonUnique || pp.Coords.Version == baseVersion
 			return // a non-unique X-SNAPSHOT file
 		}
 		i := strings.IndexByte(ts, '-')
@@ -84,11 +88,14 @@ func (h *Handler) rebuildSnapshotVersion(ctx context.Context, rp *repo.Repositor
 	if err != nil {
 		return err
 	}
-	if !found {
+	if !found && !nonUnique {
 		if err := h.Store.Delete(ctx, rp.Name, path); err != nil && !errors.Is(err, repo.ErrNotFound) {
 			return err
 		}
 		return nil
+	}
+	if !found {
+		latest = build{number: 1}
 	}
 	keys := make([]string, 0, len(files))
 	for k := range files {

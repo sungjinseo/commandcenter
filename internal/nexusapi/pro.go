@@ -473,8 +473,13 @@ func (tt taskTypes) params(i int, props, fixed map[string]any) (map[string]any, 
 			continue
 		}
 		s, isString := v.(string)
+		skip := false
 		for _, p := range t.Params {
 			if p.Name != name || !isString {
+				continue
+			}
+			if strings.TrimSpace(s) == "" && (p.Type == "bool" || p.Type == "int" || p.Type == "bytes") {
+				skip = true // an empty optional value, as Nexus forms send it: the default applies
 				continue
 			}
 			var err error
@@ -496,7 +501,9 @@ func (tt taskTypes) params(i int, props, fixed map[string]any) (map[string]any, 
 				errs = append(errs, fmt.Sprintf("properties.%s: %q is not a %s", k, s, p.Type))
 			}
 		}
-		out[name] = v
+		if !skip {
+			out[name] = v
+		}
 	}
 	for k, v := range fixed {
 		out[k] = v

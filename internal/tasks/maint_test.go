@@ -148,13 +148,15 @@ func (h *harness) versions(t *testing.T) string {
 	return strings.Join(out, " ")
 }
 
+// Scope version: the behaviour of tasks created before 0.3 (whole SNAPSHOT
+// versions per GA), which the schema 8 upgrade stamps on them.
 func TestPurgeSnapshotsTask(t *testing.T) {
 	ctx := context.Background()
 	t.Run("preview then defaults", func(t *testing.T) {
 		h := newHarness(t)
 		h.seedSnapshots(t)
 		h.sink.Reset()
-		out, tk := h.run(t, TypePurge, `{"repository":"mvn-none","preview":true}`)
+		out, tk := h.run(t, TypePurge, `{"repository":"mvn-none","scope":"version","preview":true}`)
 		if out.Result != ResultOK || out.Message != "mvn-none: preview: 2 of 3 SNAPSHOT versions would be removed (4 files, "+fmt.Sprint(bytesOf(h, "1.0-SNAPSHOT", "1.1-SNAPSHOT"))+" bytes)" || out.Removed != 0 {
 			t.Fatalf("preview: %+v", out)
 		}
@@ -164,10 +166,10 @@ func TestPurgeSnapshotsTask(t *testing.T) {
 		if v := h.versions(t); v != "1.0-SNAPSHOT 1.0 1.1-SNAPSHOT 1.2-SNAPSHOT" {
 			t.Fatalf("preview deleted: %s", v)
 		}
-		if tk.Params != `{"repository":"mvn-none","minimumRetained":1,"snapshotRetentionDays":30,"preview":true}` {
+		if tk.Params != `{"repository":"mvn-none","scope":"version","minimumRetained":1,"snapshotRetentionDays":30,"preview":true}` {
 			t.Fatalf("canonical: %s", tk.Params)
 		}
-		out, tk = h.run(t, TypePurge, `{"repository":"mvn-none"}`)
+		out, tk = h.run(t, TypePurge, `{"repository":"mvn-none","scope":"version"}`)
 		if out.Result != ResultOK || out.Removed != 2 || !strings.HasPrefix(out.Message, "mvn-none: removed 2 of 3 SNAPSHOT versions (4 files, ") {
 			t.Fatalf("defaults: %+v", out)
 		}
@@ -194,14 +196,14 @@ func TestPurgeSnapshotsTask(t *testing.T) {
 				deletes++
 			}
 		}
-		if deletes != 2 {
+		if deletes != 3 { // one per build: 1.0-SNAPSHOT had two
 			t.Fatalf("events: %s", h.sink)
 		}
 	})
 	t.Run("count only", func(t *testing.T) {
 		h := newHarness(t)
 		h.seedSnapshots(t)
-		if out, _ := h.run(t, TypePurge, `{"repository":"mvn-none","minimumRetained":2,"snapshotRetentionDays":0}`); out.Removed != 1 || h.versions(t) != "1.0 1.1-SNAPSHOT 1.2-SNAPSHOT" {
+		if out, _ := h.run(t, TypePurge, `{"repository":"mvn-none","scope":"version","minimumRetained":2,"snapshotRetentionDays":0}`); out.Removed != 1 || h.versions(t) != "1.0 1.1-SNAPSHOT 1.2-SNAPSHOT" {
 			t.Fatalf("%+v: %s", out, h.versions(t))
 		}
 	})
@@ -210,10 +212,10 @@ func TestPurgeSnapshotsTask(t *testing.T) {
 		h.seedSnapshots(t)
 		// Retained by count, removed because 1.0 was released: the grace
 		// period (release 80 days old) decides.
-		if out, _ := h.run(t, TypePurge, `{"repository":"mvn-none","minimumRetained":5,"removeIfReleased":true,"gracePeriodDays":100}`); out.Removed != 0 {
+		if out, _ := h.run(t, TypePurge, `{"repository":"mvn-none","scope":"version","minimumRetained":5,"removeIfReleased":true,"gracePeriodDays":100}`); out.Removed != 0 {
 			t.Fatalf("within grace: %+v", out)
 		}
-		out, tk := h.run(t, TypePurge, `{"repository":"mvn-none","minimumRetained":5,"removeIfReleased":true,"gracePeriodDays":60}`)
+		out, tk := h.run(t, TypePurge, `{"repository":"mvn-none","scope":"version","minimumRetained":5,"removeIfReleased":true,"gracePeriodDays":60}`)
 		if out.Removed != 1 || h.versions(t) != "1.0 1.1-SNAPSHOT 1.2-SNAPSHOT" || !strings.Contains(tk.LastLog, "removed org.example:app:1.0-SNAPSHOT (released;") {
 			t.Fatalf("%+v: %s\n%s", out, h.versions(t), tk.LastLog)
 		}
@@ -226,7 +228,7 @@ func TestPurgeSnapshotsTask(t *testing.T) {
 		}
 		// 1.0-SNAPSHOT: never downloaded, stored 89 days ago. 1.1: downloaded
 		// an hour ago. 1.2: never downloaded, stored 5 days ago.
-		out, tk := h.run(t, TypePurge, `{"repository":"mvn-none","minimumRetained":0,"snapshotRetentionDays":0,"lastDownloadedDays":10}`)
+		out, tk := h.run(t, TypePurge, `{"repository":"mvn-none","scope":"version","minimumRetained":0,"snapshotRetentionDays":0,"lastDownloadedDays":10}`)
 		if out.Removed != 1 || h.versions(t) != "1.0 1.1-SNAPSHOT 1.2-SNAPSHOT" || !strings.Contains(tk.LastLog, "(not downloaded for 10 days;") {
 			t.Fatalf("%+v: %s", out, h.versions(t))
 		}
@@ -234,12 +236,16 @@ func TestPurgeSnapshotsTask(t *testing.T) {
 	t.Run("validation", func(t *testing.T) {
 		h := newHarness(t)
 		for params, want := range map[string]string{
-			`{}`:                         "params.repository is required",
-			`{"repository":"nope"}`:      `"nope" does not exist`,
-			`{"repository":"mvn-group"}`: "takes a Maven hosted repository",
-			`{"repository":"mvn-ro"}`:    "read-only",
-			`{"repository":"mvn","minimumRetained":-1}`:       "params.minimumRetained must not be negative",
-			`{"repository":"mvn","snapshotRetentionDays":-1}`: "params.snapshotRetentionDays must not be negative",
+			`{}`:                    "params.repository is required",
+			`{"repository":"nope"}`: `"nope" does not exist`,
+			`{"repository":"mvn-group","scope":"version"}`:                "scope version takes a Maven hosted repository",
+			`{"repository":"crates"}`:                                     "the task takes a Maven hosted or proxy repository or group",
+			`{"repository":"mvn-ro"}`:                                     "read-only",
+			`{"repository":"*","scope":"version"}`:                        `"*" does not exist`,
+			`{"repository":"mvn","scope":"x"}`:                            `params.scope "x"`,
+			`{"repository":"mvn","minimumRetained":-2}`:                   "params.minimumRetained must be at least -1",
+			`{"repository":"mvn","scope":"version","minimumRetained":-1}`: "params.minimumRetained must be at least 0",
+			`{"repository":"mvn","snapshotRetentionDays":-1}`:             "params.snapshotRetentionDays must be at least 0",
 		} {
 			_, err := h.s.Create(ctx, Def{Name: "x", Type: TypePurge, Schedule: "manual", Params: json.RawMessage(params)})
 			if err == nil || !strings.Contains(err.Error(), want) {

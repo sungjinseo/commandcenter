@@ -435,6 +435,9 @@ func rankVersions(format, sortBy string, comps map[compKey]*compAgg) {
 		if byDate {
 			return comps[a].written.Compare(comps[b].written) // an unknown time ranks oldest
 		}
+		if format == "maven" { // the builds of a SNAPSHOT share its place, as its base version
+			return CompareVersions(format, component.MavenBaseVersion(a.version), component.MavenBaseVersion(b.version))
+		}
 		return CompareVersions(format, a.version, b.version)
 	}
 	for _, keys := range byName {
@@ -488,7 +491,10 @@ func (p Policy) selects(format string, k compKey, c *compAgg, m *matchers, now t
 	if k.group != "" {
 		subject = k.group + ":" + k.name
 	}
-	if m.exName != nil && m.exName.MatchString(subject) || m.exVersion != nil && m.exVersion.MatchString(k.version) {
+	// A Maven SNAPSHOT build is excluded by its base version too, so a
+	// pattern written for X-SNAPSHOT components keeps their builds.
+	if m.exName != nil && m.exName.MatchString(subject) || m.exVersion != nil && (m.exVersion.MatchString(k.version) ||
+		format == "maven" && m.exVersion.MatchString(component.MavenBaseVersion(k.version))) {
 		return ""
 	}
 	var why []string

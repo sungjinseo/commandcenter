@@ -45,16 +45,52 @@ func gaDir(group, artifact string) string {
 	return strings.ReplaceAll(group, ".", "/") + "/" + artifact
 }
 
+// RebuildScope narrows a rebuild (Nexus's rebuild-metadata properties):
+// GroupID, then ArtifactID, then BaseVersion name the level rebuilt; empty
+// is the whole repository. The levels below a named one are rebuilt too
+// unless NoCascade.
+type RebuildScope struct {
+	GroupID, ArtifactID, BaseVersion string
+	NoCascade                        bool
+}
+
+// prefix is the path prefix every asset of the scope has ("" for all).
+func (s RebuildScope) prefix() string {
+	if s.GroupID == "" {
+		return ""
+	}
+	p := strings.ReplaceAll(s.GroupID, ".", "/") + "/"
+	if s.ArtifactID != "" {
+		p += s.ArtifactID + "/"
+		if s.BaseVersion != "" {
+			p += s.BaseVersion + "/"
+		}
+	}
+	return p
+}
+
 // RebuildMetadata regenerates every GA maven-metadata.xml of hosted
 // repository rp from its stored artifacts, the way a DELETE does, and
 // removes GA documents whose GA has no artifact left. SNAPSHOT version-level
 // documents are regenerated from the timestamped builds (or removed when no
-// build is left), as after an artifact PUT or DELETE. It reads at most
+// build is left), as after an artifact PUT or DELETE. The plugin-group
+// documents' <plugins> and the archetype catalog are regenerated from the
+// stored POMs and plugin jars (RebuildMetadataScope). It reads at most
 // maxAssets asset paths (0 means DefaultRebuildScan) in path order; GAs that
-// may have unread artifacts are skipped, and so is the orphan cleanup, when
-// the budget is reached. logf (may be nil) receives progress and per-GA
-// failures, which do not stop the run.
+// may have unread artifacts are skipped, and so are the orphan cleanup, the
+// plugins and the catalog, when the budget is reached. logf (may be nil)
+// receives progress and per-GA failures, which do not stop the run.
 func (h *Handler) RebuildMetadata(ctx context.Context, rp *repo.Repository, maxAssets int,
+	logf func(format string, args ...any)) (RebuildResult, error) {
+	return h.RebuildMetadataScope(ctx, rp, maxAssets, RebuildScope{}, logf)
+}
+
+// RebuildMetadataScope is RebuildMetadata for the part of rp scope names:
+// a groupId rebuilds its plugin-group document's <plugins> and catalog
+// entries and, cascading, its GAs as an artifactId does; an artifactId its
+// GA document and, cascading, its SNAPSHOT version documents; a baseVersion
+// that version's document.
+func (h *Handler) RebuildMetadataScope(ctx context.Context, rp *repo.Repository, maxAssets int, scope RebuildScope,
 	logf func(format string, args ...any)) (RebuildResult, error) {
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -66,11 +102,19 @@ func (h *Handler) RebuildMetadata(ctx context.Context, rp *repo.Repository, maxA
 	if maxAssets <= 0 {
 		maxAssets = DefaultRebuildScan
 	}
+	prefix := scope.prefix()
+	inScope := func(k gaKey) bool {
+		return (scope.GroupID == "" || k.group == scope.GroupID) && (scope.ArtifactID == "" || k.artifact == scope.ArtifactID)
+	}
+	cascade := !scope.NoCascade || scope.GroupID == ""
+	doGAs := scope.BaseVersion == "" && (scope.ArtifactID != "" || cascade)
+	doSnaps := scope.BaseVersion != "" || cascade
+	doGroups := scope.ArtifactID == "" // plugin-group documents and the catalog
 
-	gas := map[gaKey]bool{}
-	var metaDirs []string         // directories holding a maven-metadata.xml
-	snapDirs := map[string]bool{} // SNAPSHOT version directories (files or a document)
-	after, scanned, next := "", 0, ""
+	gas := map[gaKey]map[string]bool{} // GA -> its base versions
+	var metaDirs []string              // directories holding a maven-metadata.xml
+	snapDirs := map[string]bool{}      // SNAPSHOT version directories (files or a document)
+	after, scanned, next := prefix, 0, ""
 scan:
 	for {
 		want := min(rebuildPage, maxAssets+1-scanned)
@@ -79,6 +123,9 @@ scan:
 			return res, err
 		}
 		for _, a := range page {
+			if !strings.HasPrefix(a.Path, prefix) {
+				break scan
+			}
 			if scanned == maxAssets {
 				res.Truncated, next = true, a.Path
 				break scan
@@ -90,6 +137,9 @@ scan:
 			case p.Metadata:
 				switch {
 				case isSnapshotPath(p):
+					if !inScope(dirGA(dir(dir(p.Main)))) || (scope.BaseVersion != "" && dir(p.Main)+"/" != prefix) {
+						break
+					}
 					switch d := dir(p.Main); {
 					case snapDirs[d] || len(snapDirs) < maxRebuildGAs:
 						snapDirs[d] = true
@@ -106,12 +156,18 @@ scan:
 			case p.Coords != nil:
 				k := gaKey{p.Coords.GroupID, p.Coords.ArtifactID}
 				d := dir(p.Main)
+				if !inScope(k) || (scope.BaseVersion != "" && d+"/" != prefix) {
+					break
+				}
 				newSnap := p.Coords.Snapshot && !snapDirs[d]
-				if (!gas[k] && len(gas) >= maxRebuildGAs) || (newSnap && len(snapDirs) >= maxRebuildGAs) {
+				if (gas[k] == nil && len(gas) >= maxRebuildGAs) || (newSnap && len(snapDirs) >= maxRebuildGAs) {
 					res.Truncated, next = true, a.Path
 					break scan
 				}
-				gas[k] = true
+				if gas[k] == nil {
+					gas[k] = map[string]bool{}
+				}
+				gas[k][p.Coords.BaseVersion] = true
 				if p.Coords.Snapshot {
 					snapDirs[d] = true
 				}
@@ -139,10 +195,13 @@ scan:
 		return gaDir(keys[i].group, keys[i].artifact) < gaDir(keys[j].group, keys[j].artifact)
 	})
 	for _, k := range keys {
+		if !doGAs {
+			break
+		}
 		if err := h.checkRebuild(ctx, rp); err != nil {
 			return res, err
 		}
-		if err := h.rebuildGA(ctx, rp, k.group, k.artifact, true); err != nil {
+		if _, err := h.rebuildGA(ctx, rp, k.group, k.artifact, true); err != nil {
 			res.Failed++
 			logf("%s:%s: rebuild failed: %v", k.group, k.artifact, err)
 			continue
@@ -154,7 +213,7 @@ scan:
 	// regenerate each, which also removes one whose folder has no build left.
 	dirs := make([]string, 0, len(snapDirs))
 	for d := range snapDirs {
-		if res.Truncated && strings.HasPrefix(next, d+"/") {
+		if !doSnaps || res.Truncated && strings.HasPrefix(next, d+"/") {
 			continue
 		}
 		dirs = append(dirs, d)
@@ -176,10 +235,10 @@ scan:
 	// directory names the GA, whatever groupId and artifactId the document
 	// names (older builds stored uploads as sent). A plugin-group document
 	// keeps its <plugins>; version-level (SNAPSHOT) ones were handled above.
-	if !res.Truncated {
+	if !res.Truncated && doGAs && scope.ArtifactID == "" {
 		for _, d := range metaDirs {
 			k := dirGA(d)
-			if gas[k] || gaDir(k.group, k.artifact) != d {
+			if gas[k] != nil || gaDir(k.group, k.artifact) != d || !inScope(k) {
 				continue
 			}
 			if err := h.checkRebuild(ctx, rp); err != nil {
@@ -194,7 +253,7 @@ scan:
 			if m == nil || m.Versioning == nil {
 				continue
 			}
-			if err := h.rebuildGA(ctx, rp, k.group, k.artifact, true); err != nil {
+			if _, err := h.rebuildGA(ctx, rp, k.group, k.artifact, true); err != nil {
 				res.Failed++
 				logf("%s:%s: removing the orphan metadata failed: %v", k.group, k.artifact, err)
 				continue
@@ -203,7 +262,124 @@ scan:
 			logf("%s:%s: removed the versions in maven-metadata.xml, the GA has no artifacts", k.group, k.artifact)
 		}
 	}
+	if doGroups && !res.Truncated {
+		if err := h.rebuildGroups(ctx, rp, scope.GroupID, gas, metaDirs, &res, logf); err != nil {
+			return res, err
+		}
+	}
 	return res, nil
+}
+
+// rebuildGroups regenerates, from the stored POMs and plugin jars, the
+// <plugins> of the plugin-group documents of groupID ("" for every one) and
+// the archetype catalog's entries. gas are the GAs the scan found, with
+// their versions, metaDirs the directories holding a maven-metadata.xml.
+// An uploaded plugin entry of a GA that still has versions is kept as sent;
+// entries of GAs without versions are dropped.
+// ponytail: one POM read per GA (and a jar read per plugin); record the
+// packaging at upload if rebuilds of huge repositories get slow.
+func (h *Handler) rebuildGroups(ctx context.Context, rp *repo.Repository, groupID string, gas map[gaKey]map[string]bool,
+	metaDirs []string, res *RebuildResult, logf func(string, ...any)) error {
+	plugins := map[string][]Plugin{} // groupId -> plugins found
+	var archetypes []Archetype
+	keys := make([]gaKey, 0, len(gas))
+	for k := range gas {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return gaDir(keys[i].group, keys[i].artifact) < gaDir(keys[j].group, keys[j].artifact)
+	})
+	for _, k := range keys {
+		vs := make([]string, 0, len(gas[k]))
+		for v := range gas[k] {
+			vs = append(vs, v)
+		}
+		sort.Strings(vs)
+		if err := h.checkRebuild(ctx, rp); err != nil {
+			return err
+		}
+		facts, ok := h.readGAFacts(ctx, rp, k.group, k.artifact, vs)
+		switch {
+		case !ok:
+		case facts.Packaging == archetypePackaging:
+			for _, v := range vs {
+				archetypes = append(archetypes, Archetype{GroupID: k.group, ArtifactID: k.artifact, Version: v})
+			}
+		case facts.prefix != "":
+			plugins[k.group] = append(plugins[k.group], Plugin{Name: cmpOr(facts.Name, k.artifact), Prefix: facts.prefix, ArtifactID: k.artifact})
+		}
+	}
+	groups := map[string]bool{}
+	for g := range plugins {
+		groups[g] = true
+	}
+	for _, d := range metaDirs { // stored plugin-group documents, which may hold stale entries
+		if g := strings.ReplaceAll(d, "/", "."); gas[dirGA(d)] == nil && (groupID == "" || g == groupID) {
+			groups[g] = true
+		}
+	}
+	names := make([]string, 0, len(groups))
+	for g := range groups {
+		names = append(names, g)
+	}
+	sort.Strings(names)
+	for _, g := range names {
+		found := plugins[g]
+		err := h.editPlugins(ctx, rp, strings.ReplaceAll(g, ".", "/"), func(old []Plugin) []Plugin {
+			var out []Plugin
+			kept := map[string]bool{}
+			for _, p := range old {
+				if gas[gaKey{g, p.ArtifactID}] != nil {
+					out = append(out, p)
+					kept[p.ArtifactID] = true
+				}
+			}
+			for _, p := range found {
+				if !kept[p.ArtifactID] {
+					out = append(out, p)
+				}
+			}
+			return out
+		})
+		if err != nil {
+			res.Failed++
+			logf("%s: plugin-group metadata rebuild failed: %v", g, err)
+		}
+	}
+	unlock, err := h.lockCatalog(ctx, rp)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if groupID != "" || rp.LayoutPolicy == "permissive" {
+		// Keep the other groups' entries, and in a permissive repository,
+		// which takes a catalog upload, the entries sent.
+		old, _, err := h.loadCatalog(ctx, rp)
+		if err != nil {
+			return err
+		}
+		seen := map[string]bool{}
+		for _, a := range archetypes {
+			seen[a.GroupID+":"+a.ArtifactID+":"+a.Version] = true
+		}
+		for _, a := range old {
+			if (groupID != "" && a.GroupID != groupID || rp.LayoutPolicy == "permissive") && !seen[a.GroupID+":"+a.ArtifactID+":"+a.Version] {
+				archetypes = append(archetypes, a)
+			}
+		}
+	}
+	if err := h.storeCatalog(ctx, rp, archetypes); err != nil {
+		res.Failed++
+		logf("%s: rebuild failed: %v", catalogPath, err)
+	}
+	return nil
+}
+
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // checkRebuild stops a rebuild that was cancelled or whose repository was
@@ -238,6 +414,10 @@ func (h *Handler) PurgeUnfetchable(ctx context.Context, rp *repo.Repository, log
 	}
 	if rp.Format != "maven" || rp.Type != "proxy" {
 		return 0, fmt.Errorf("purge %s %s repository %q: %w", rp.Format, rp.Type, rp.Name, component.ErrNotSupported)
+	}
+	if rp.LayoutPolicy == "permissive" { // it fetches any path: what it cached is wanted
+		logf("layout policy permissive: cached files that are not Maven files are kept")
+		return 0, nil
 	}
 	removed, after := 0, ""
 	for {

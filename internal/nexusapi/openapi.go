@@ -29,7 +29,7 @@ var apiDocs = []openapi.Route{
 	{Pattern: "GET " + Prefix + "/status/check", Summary: "The health checks in Nexus's shape", Tag: nx, Auth: nxAdmin, Reply: "NexusChecks"},
 	{Pattern: "GET " + Prefix + "/repositories", Summary: "Readable repositories", Tag: nx, Reply: "NexusRepositoryList"},
 	{Pattern: "GET " + Prefix + "/repositories/{name}", Summary: "One repository", Tag: nx, Reply: "NexusRepository"},
-	{Pattern: "GET " + Prefix + "/repositorySettings", Summary: "Every repository's settings (storage.strictContentTypeValidation, httpClient.blocked/autoBlock, raw.contentDisposition included)", Tag: nx, Auth: nxAdmin, Reply: "NexusRepositorySettingsList"},
+	{Pattern: "GET " + Prefix + "/repositorySettings", Summary: "Every repository's settings (storage.strictContentTypeValidation, httpClient.blocked/autoBlock, raw.contentDisposition, maven.layoutPolicy and maven.contentDisposition included; no maven object on groups)", Tag: nx, Auth: nxAdmin, Reply: "NexusRepositorySettingsList"},
 	{Pattern: "GET " + Prefix + "/repositories/{format}/{type}/{name}", Summary: "One repository's settings", Tag: nx, Auth: nxAdmin, Reply: "NexusRepositorySettings"},
 	{Pattern: "POST " + Prefix + "/repositories/{format}/{type}", Summary: "Creates a repository from a Nexus body", Tag: nx, Auth: nxAdmin, Request: "NexusRepositoryBody", Replies: map[int]string{201: "created", 400: "NexusValidation"}},
 	{Pattern: "PUT " + Prefix + "/repositories/{format}/{type}/{name}", Summary: "Updates a repository from a Nexus body", Tag: nx, Auth: nxAdmin, Request: "NexusRepositoryBody", Replies: map[int]string{204: "updated", 400: "NexusValidation"}},

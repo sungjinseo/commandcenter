@@ -26,7 +26,6 @@ import (
 	"commandcenter/internal/auth"
 	"commandcenter/internal/component"
 	"commandcenter/internal/config"
-	"commandcenter/internal/format/maven"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/resolve"
@@ -396,12 +395,19 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 		}
 		out["group"] = g
 	}
-	if d.Format == "maven" {
+	if d.Format == "maven" && d.Type != "group" { // a Nexus group has no maven object
 		vp := strings.ToUpper(d.VersionPolicy)
 		if vp == "" {
 			vp = "MIXED"
 		}
-		out["maven"] = map[string]any{"versionPolicy": vp, "layoutPolicy": "PERMISSIVE", "contentDisposition": "INLINE"}
+		lp, cd := "STRICT", "INLINE"
+		if d.LayoutPolicy == "permissive" {
+			lp = "PERMISSIVE"
+		}
+		if d.ContentDisposition == "attachment" {
+			cd = "ATTACHMENT"
+		}
+		out["maven"] = map[string]any{"versionPolicy": vp, "layoutPolicy": lp, "contentDisposition": cd}
 	}
 	if d.Format == "raw" {
 		cd := strings.ToUpper(d.ContentDisposition)
@@ -500,7 +506,9 @@ type repoBody struct {
 		Connection *config.Connection `json:"connection"`
 	} `json:"httpClient"`
 	Maven struct {
-		VersionPolicy string `json:"versionPolicy"`
+		VersionPolicy      string `json:"versionPolicy"`
+		LayoutPolicy       string `json:"layoutPolicy"`       // STRICT | PERMISSIVE
+		ContentDisposition string `json:"contentDisposition"` // INLINE | ATTACHMENT
 	} `json:"maven"`
 	Raw struct {
 		ContentDisposition string `json:"contentDisposition"` // INLINE | ATTACHMENT
@@ -561,8 +569,16 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 	if cd := strings.ToLower(b.Raw.ContentDisposition); cd != "" {
 		out["contentDisposition"] = cd
 	}
-	if typ == "group" { // Nexus group bodies name a blob store; Command Center groups have none
-		out["blobStore"] = ""
+	if ccFormat(format) == "maven" && typ != "group" {
+		if cd := strings.ToLower(b.Maven.ContentDisposition); cd != "" {
+			out["contentDisposition"] = cd
+		}
+		if lp := strings.ToLower(b.Maven.LayoutPolicy); lp != "" { // absent keeps the stored one
+			out["layoutPolicy"] = lp
+		}
+	}
+	if typ == "group" { // Nexus group bodies name a blob store and a maven object; Command Center groups have neither
+		out["blobStore"], out["versionPolicy"] = "", ""
 	}
 	if b.RoutingRule != nil {
 		out["routingRule"] = *b.RoutingRule
@@ -765,12 +781,30 @@ func (h *Handler) components(ctx context.Context, rp *repo.Repository) ([]*comp,
 	}
 	out := make([]*comp, 0, len(byKey))
 	for _, c := range byKey {
+		if c.format == "maven" { // the main file first, so search/assets/download finds it before a classified one
+			slices.SortStableFunc(c.paths, func(a, b string) int {
+				ca, _, _ := component.MavenFileParts(path.Base(a), c.name, c.version)
+				cb, _, _ := component.MavenFileParts(path.Base(b), c.name, c.version)
+				return cmpBool(ca != "", cb != "")
+			})
+		}
 		out = append(out, c)
 	}
 	slices.SortFunc(out, func(a, b *comp) int {
 		return strings.Compare(a.key(), b.key())
 	})
 	return out, nil
+}
+
+// cmpBool orders false before true.
+func cmpBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	}
+	return -1
 }
 
 func rfc3339(t time.Time) any {
@@ -797,11 +831,8 @@ func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[s
 		verified = rfc3339(a.CheckedAt) // the last time the remote was consulted
 	}
 	attrs := map[string]string{}
-	if c, _ := maven.ParsePath(a.Path); rp.Format == "maven" && c.Coords != nil {
-		attrs = map[string]string{"groupId": c.Coords.GroupID, "artifactId": c.Coords.ArtifactID, "version": c.Coords.Version, "extension": c.Coords.Extension}
-		if c.Coords.Classifier != "" {
-			attrs["classifier"] = c.Coords.Classifier
-		}
+	if rp.Format == "maven" {
+		attrs = maven2Attributes(a.Path) // a SNAPSHOT build's own version
 	}
 	return map[string]any{
 		"id":           assetID(rp.Name, a.Path),
@@ -817,6 +848,25 @@ func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[s
 		"uploader": nil, "uploaderIp": nil, // not recorded
 		nexusFormat(rp.Format): attrs,
 	}
+}
+
+// maven2Attributes is a Maven asset's "maven2" object, as Nexus lists it:
+// groupId, artifactId, version (a SNAPSHOT build's), classifier (when the
+// file has one) and extension; empty for metadata and other files.
+func maven2Attributes(p string) map[string]string {
+	g, a, v, ok := component.DeriveMaven(p)
+	if !ok {
+		return map[string]string{}
+	}
+	cl, ext, ok := component.MavenFileParts(path.Base(p), a, v)
+	if !ok {
+		return map[string]string{}
+	}
+	out := map[string]string{"groupId": g, "artifactId": a, "version": v, "extension": ext}
+	if cl != "" {
+		out["classifier"] = cl
+	}
+	return out
 }
 
 func escapePath(p string) string {
@@ -1489,12 +1539,13 @@ func (h *Handler) tasks(w http.ResponseWriter, r *http.Request) {
 // nexusTaskTypes maps Command Center task types to the Nexus type ids
 // scripts know; a type without one keeps its own id.
 var nexusTaskTypes = map[string]string{
-	"repository.rebuild-metadata": "repository.maven.rebuild-metadata",
-	"maven.purge-snapshots":       "repository.maven.remove-snapshots",
-	"blobstore.compact":           "blobstore.compact",
-	"blobstore.delete-temp-files": "blobstore.delete-temp-files",
-	"repository.cleanup":          "repository.cleanup",
-	"blobstore.recalculate-size":  "blobstore.metrics.reconcile",
+	"repository.rebuild-metadata":  "repository.maven.rebuild-metadata",
+	"maven.purge-snapshots":        "repository.maven.remove-snapshots",
+	"blobstore.compact":            "blobstore.compact",
+	"blobstore.delete-temp-files":  "blobstore.delete-temp-files",
+	"repository.cleanup":           "repository.cleanup",
+	"blobstore.recalculate-size":   "blobstore.metrics.reconcile",
+	"maven.purge-unused-snapshots": "repository.maven.purge-unused-snapshots",
 }
 
 func nexusTaskType(typ string) string {

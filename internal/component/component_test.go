@@ -10,7 +10,10 @@ func TestDeriveMaven(t *testing.T) {
 		{"org/example/app/1.0/app-1.0.jar", "org.example", "app", "1.0", true},
 		{"org/example/app/1.0/app-1.0.jar.sha1", "org.example", "app", "1.0", true},
 		{"org/example/app/1.0/app-1.0-sources.jar", "org.example", "app", "1.0", true},
-		{"com/x/a/1.0-SNAPSHOT/a-1.0-20261019.1-1.jar", "com.x", "a", "1.0-SNAPSHOT", true},
+		{"com/x/a/1.0-SNAPSHOT/a-1.0-20261019.1-1.jar", "com.x", "a", "1.0-20261019.1-1", true}, // a build is a component
+		{"com/x/a/1.0-SNAPSHOT/a-1.0-20261019.120000-2-sources.jar.asc", "com.x", "a", "1.0-20261019.120000-2", true},
+		{"com/x/a/1.0-SNAPSHOT/a-1.0-SNAPSHOT.jar", "com.x", "a", "1.0-SNAPSHOT", true},                            // non-unique
+		{"com/x/a/1.0-20261019.120000-2/a-1.0-20261019.120000-2.jar", "com.x", "a", "1.0-20261019.120000-2", true}, // a release named so
 		{"com/x/sbt-a_2.12_1.0/1.0/sbt-a_2.12_1.0-1.0.jar", "com.x", "sbt-a_2.12_1.0", "1.0", true},
 		{"com/x/sbt-a_2.12_1.0/1.0/sbt-a-1.0-sources.jar", "com.x", "sbt-a_2.12_1.0", "1.0", true}, // sbt's legacy layout
 		{"org/example/app/maven-metadata.xml", "", "", "", false},
@@ -297,5 +300,40 @@ func TestResultAdd(t *testing.T) {
 	r.Add(0)
 	if r != (Result{Assets: 2, Bytes: 3}) {
 		t.Fatalf("r = %+v", r)
+	}
+}
+
+func TestMavenBaseVersionAndParts(t *testing.T) {
+	for v, want := range map[string]string{"1.0-20261014.120000-3": "1.0-SNAPSHOT", "1.0-SNAPSHOT": "1.0-SNAPSHOT", "1.0": "1.0",
+		"2.0-rc1-20261014.1-12": "2.0-rc1-SNAPSHOT", "-20261014.120000-3": "-20261014.120000-3"} {
+		if got := MavenBaseVersion(v); got != want {
+			t.Errorf("MavenBaseVersion(%q) = %q, want %q", v, got, want)
+		}
+	}
+	if got := MavenVersionDirs("1.0-20261014.120000-3"); len(got) != 2 || got[0] != "1.0-SNAPSHOT" {
+		t.Errorf("MavenVersionDirs = %q", got)
+	}
+	for _, tc := range []struct{ file, version, cl, ext string }{
+		{"app-1.0.jar", "1.0", "", "jar"},
+		{"app-1.0-sources.jar", "1.0", "sources", "jar"},
+		{"app-1.0-linux.x86_64.zip", "1.0", "linux.x86_64", "zip"},
+		{"app-1.0-bin.tar.gz", "1.0", "bin", "tar.gz"},
+		{"app-1.0.tar.gz", "1.0", "", "tar.gz"},
+		{"app-1.0-bin.cpio.xz", "1.0", "bin", "cpio.xz"},
+		{"app-1.0.7z", "1.0", "", "7z"},
+		{"app-1.0.jar.asc", "1.0", "", "jar.asc"},
+		{"app-1.0-linux.x86_64.zip.asc", "1.0", "linux.x86_64", "zip.asc"},
+		{"app-1.0.jar.sha1", "1.0", "", "jar.sha1"},
+		{"app-1.0.asc", "1.0", "", "asc"},
+		{"app-1.0-20261014.120000-3-tests.jar", "1.0-20261014.120000-3", "tests", "jar"},
+		{"app-1.0.1.jar", "1.0", "", ""}, // version 1.0.1, not a file of 1.0
+		{"app-1.0.1", "1.0", "", ""},
+		{"app-1.0-.jar", "1.0", "", ""},
+		{"app-1.0", "1.0", "", ""},
+	} {
+		cl, ext, ok := MavenFileParts(tc.file, "app", tc.version)
+		if cl != tc.cl || ext != tc.ext || ok != (tc.ext != "") {
+			t.Errorf("MavenFileParts(%q, %q) = %q %q %v, want %q %q", tc.file, tc.version, cl, ext, ok, tc.cl, tc.ext)
+		}
 	}
 }

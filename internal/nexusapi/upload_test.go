@@ -338,7 +338,7 @@ func condaOf(name, version, build string) []byte {
 		"pkg-"+stem+".tar.zst", string(zstdRaw(tarOf("lib/x.py", "print('hi')"))))
 }
 
-func pom(g, a, v string) string {
+func simplePOM(g, a, v string) string {
 	return fmt.Sprintf("<project><modelVersion>4.0.0</modelVersion><groupId>%s</groupId><artifactId>%s</artifactId><version>%s</version></project>", g, a, v)
 }
 
@@ -454,10 +454,10 @@ func TestUploadMaven(t *testing.T) {
 	}
 	e.wantUpload(204, "ci", "maven-releases",
 		fil("maven2.asset1", "lib-2.0.jar", jar), text("maven2.asset1.extension", "jar"), text("maven2.asset1.classifier", ""),
-		fil("maven2.asset2", "pom.xml", []byte(pom("org.example", "lib", "2.0"))), text("maven2.asset2.extension", "pom"), text("maven2.asset2.classifier", ""),
+		fil("maven2.asset2", "pom.xml", []byte(simplePOM("org.example", "lib", "2.0"))), text("maven2.asset2.extension", "pom"), text("maven2.asset2.classifier", ""),
 		text("maven2.groupId", "org.example"), text("maven2.artifactId", "lib"), text("maven2.version", "2.0"), text("maven2.packaging", "jar"))
 	e.body("/repository/maven-releases/org/example/lib/2.0/lib-2.0.jar")
-	if p := e.body("/repository/maven-releases/org/example/lib/2.0/lib-2.0.pom"); p != pom("org.example", "lib", "2.0") {
+	if p := e.body("/repository/maven-releases/org/example/lib/2.0/lib-2.0.pom"); p != simplePOM("org.example", "lib", "2.0") {
 		t.Fatalf("uploaded pom: %s", p)
 	}
 
@@ -487,12 +487,10 @@ func TestUploadMaven(t *testing.T) {
 		fld("maven2.version", "1"), fld("maven2.color", "red"), fil("maven2.asset1", "x.jar", jar), fld("maven2.asset1.extension", "jar"))
 	e.wantInvalid("*", "same path", "ci", "maven-releases", fld("maven2.groupId", "g"), fld("maven2.artifactId", "x"), fld("maven2.version", "1"),
 		fil("maven2.asset1", "x.jar", jar), fld("maven2.asset1.extension", "jar"), fil("maven2.asset2", "y.jar", jar), fld("maven2.asset2.extension", "jar"))
-	e.wantInvalid("*", "no artifact path", "ci", "maven-releases", fld("maven2.groupId", "g"), fld("maven2.artifactId", "x"), fld("maven2.version", "1"),
-		fil("maven2.asset1", "x.jar", jar), fld("maven2.asset1.extension", "jar"), fld("maven2.asset1.classifier", "a.b"))
 	e.wantInvalid("*", ".pom", "ci", "maven-releases", fil("maven2.asset1", "pom.xml", []byte("<project><version>${v}</version></project>")),
 		fld("maven2.asset1.extension", "pom"))
 	// The POM is stored first: when it fails (allow_once here), no other file is.
-	e.wantUpload(204, "ci", "maven-releases", fil("maven2.asset1", "pom.xml", []byte(pom("org.example", "late", "1"))), fld("maven2.asset1.extension", "pom"))
+	e.wantUpload(204, "ci", "maven-releases", fil("maven2.asset1", "pom.xml", []byte(simplePOM("org.example", "late", "1"))), fld("maven2.asset1.extension", "pom"))
 	e.wantInvalid("*", "does not allow updating", "ci", "maven-releases", fld("maven2.groupId", "org.example"), fld("maven2.artifactId", "late"),
 		fld("maven2.version", "1"), fld("maven2.generate-pom", "on"), fil("maven2.asset1", "x.jar", jar), fld("maven2.asset1.extension", "jar"))
 	e.missing("/repository/maven-releases/org/example/late/1/late-1.jar")

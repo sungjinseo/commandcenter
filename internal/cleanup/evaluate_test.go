@@ -160,6 +160,7 @@ func TestPrereleasePerFormat(t *testing.T) {
 		pre             bool
 	}{
 		{"maven", "1.0-SNAPSHOT", true},
+		{"maven", "1.0-20261014.120000-3", true},
 		{"maven", "1.0", false},
 		{"maven", "1.0.0-rc1", false}, // a Maven release, whatever its name
 		{"npm", "1.0.0", false},
@@ -192,7 +193,7 @@ func TestEvaluateReleaseTypeMavenAndPypi(t *testing.T) {
 	m := testRepo("m", "maven", "hosted")
 	e.put(t, "m", "g/a/1.0/a-1.0.jar", 1, daysAgo(60), time.Time{})
 	e.put(t, "m", "g/a/1.1-SNAPSHOT/a-1.1-20260101.120000-1.jar", 1, daysAgo(60), time.Time{})
-	if got := e.labels(t, m, policy(Criteria{ComponentAgeDays: 30, ReleaseType: "prerelease"})); got != "g:a:1.1-SNAPSHOT" {
+	if got := e.labels(t, m, policy(Criteria{ComponentAgeDays: 30, ReleaseType: "prerelease"})); got != "g:a:1.1-20260101.120000-1" { // a SNAPSHOT build
 		t.Fatalf("maven prerelease: %q", got)
 	}
 	if got := e.labels(t, m, policy(Criteria{ComponentAgeDays: 30, ReleaseType: "release"})); got != "g:a:1.0" {

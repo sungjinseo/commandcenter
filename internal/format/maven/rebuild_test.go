@@ -325,13 +325,17 @@ func TestRebuildKeepsPluginsBesideGA(t *testing.T) {
 func TestRebuildRemovesOrphanVersions(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
-	e.putAll(t, "releases", "org/example/1.0/example-1.0.pom", "org/example.app/1.0/example.app-1.0.pom")
+	e.putAll(t, "releases", "org/example/1.0/example-1.0.pom", "org/example.app/1.0/example.app-1.0.pom",
+		"org/plugins/p-maven-plugin/1.0/p-maven-plugin-1.0.jar")
 	versions := `<versioning><versions><version>9.9</version></versions></versioning>`
 	orphans := map[string]string{
 		"org/example/app": `<metadata><groupId>org.example</groupId><artifactId>app</artifactId>` + versions + `</metadata>`, // under GA org:example
 		"org/plain/lib":   `<metadata>` + versions + `</metadata>`,
 		"org/foreign/lib": `<metadata><groupId>evil</groupId><artifactId>other</artifactId>` + versions + `</metadata>`,
-		"org/plugins":     `<metadata><plugins><plugin><prefix>p</prefix><artifactId>p-maven-plugin</artifactId></plugin></plugins>` + versions + `</metadata>`,
+		// The entry of p-maven-plugin, which has a version, stays; the one
+		// of gone-maven-plugin, which has none, goes (maven-15).
+		"org/plugins": `<metadata><plugins><plugin><prefix>p</prefix><artifactId>p-maven-plugin</artifactId></plugin>` +
+			`<plugin><prefix>gone</prefix><artifactId>gone-maven-plugin</artifactId></plugin></plugins>` + versions + `</metadata>`,
 	}
 	for d, doc := range orphans {
 		e.seed(t, "releases", d+"/maven-metadata.xml", doc)
@@ -345,7 +349,7 @@ func TestRebuildRemovesOrphanVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.GAs != 2 || res.Removed != len(orphans) || res.Failed != 0 {
+	if res.GAs != 3 || res.Removed != len(orphans) || res.Failed != 0 {
 		t.Fatalf("result: %+v", res)
 	}
 	for d := range orphans {

@@ -77,17 +77,26 @@ func WriteMetadata(w io.Writer, m *Metadata) error {
 }
 
 // Merge combines metadata documents. Versions are unioned and re-sorted,
-// latest/release are recomputed, and the newest snapshot entries win.
+// latest/release are recomputed, and the newest snapshot entries win. A
+// document naming another groupId or artifactId than the first one that
+// names them is left out, as Nexus does. Plugins are kept once per
+// artifactId and prefix, a later document's name replacing an earlier one's,
+// sorted by artifactId.
 func Merge(ms ...*Metadata) *Metadata {
 	out := &Metadata{ModelVersion: "1.1.0"}
 	versions := map[string]bool{}
 	snaps := map[string]SnapshotVersion{}
-	plugins := map[string]bool{}
+	var snapKeys []string          // first-seen order
+	plugins := map[[2]string]int{} // (artifactId, prefix) -> index in out.Plugins
 	var v Versioning
 	hasVersioning := false
 
 	for _, m := range ms {
 		if m == nil {
+			continue
+		}
+		if out.GroupID != "" && m.GroupID != "" && m.GroupID != out.GroupID ||
+			out.ArtifactID != "" && m.ArtifactID != "" && m.ArtifactID != out.ArtifactID {
 			continue
 		}
 		if out.GroupID == "" {
@@ -100,10 +109,15 @@ func Merge(ms ...*Metadata) *Metadata {
 			out.Version = m.Version
 		}
 		for _, p := range m.Plugins {
-			if !plugins[p.Prefix] {
-				plugins[p.Prefix] = true
-				out.Plugins = append(out.Plugins, p)
+			k := [2]string{p.ArtifactID, p.Prefix}
+			if i, ok := plugins[k]; ok {
+				if p.Name != "" {
+					out.Plugins[i].Name = p.Name
+				}
+				continue
 			}
+			plugins[k] = len(out.Plugins)
+			out.Plugins = append(out.Plugins, p)
 		}
 		mv := m.Versioning
 		if mv == nil {
@@ -122,11 +136,16 @@ func Merge(ms ...*Metadata) *Metadata {
 		}
 		for _, sv := range mv.SnapshotVersions {
 			k := sv.Classifier + "\x00" + sv.Extension
-			if cur, ok := snaps[k]; !ok || sv.Updated > cur.Updated {
+			cur, ok := snaps[k]
+			if !ok {
+				snapKeys = append(snapKeys, k)
+			}
+			if !ok || Compare(sv.Value, cur.Value) > 0 || Compare(sv.Value, cur.Value) == 0 && sv.Updated > cur.Updated {
 				snaps[k] = sv
 			}
 		}
 	}
+	sort.SliceStable(out.Plugins, func(i, j int) bool { return out.Plugins[i].ArtifactID < out.Plugins[j].ArtifactID })
 	if !hasVersioning {
 		return out
 	}
@@ -148,12 +167,7 @@ func Merge(ms ...*Metadata) *Metadata {
 			break
 		}
 	}
-	keys := make([]string, 0, len(snaps))
-	for k := range snaps {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range snapKeys {
 		v.SnapshotVersions = append(v.SnapshotVersions, snaps[k])
 	}
 	out.Versioning = &v

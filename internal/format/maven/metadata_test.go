@@ -2,6 +2,7 @@ package maven
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,12 +91,26 @@ func TestMergeDeterministicEquivalentVersions(t *testing.T) {
 	}
 }
 
+// Plugins are kept once per artifactId and prefix, a later name replacing
+// an earlier one, and sorted by artifactId; the same prefix of two
+// artifactIds is kept twice, as Nexus merges.
 func TestMergePlugins(t *testing.T) {
-	a := &Metadata{Plugins: []Plugin{{Name: "A", Prefix: "a", ArtifactID: "a-plugin"}}}
-	b := &Metadata{Plugins: []Plugin{{Name: "A2", Prefix: "a", ArtifactID: "x"}, {Name: "B", Prefix: "b", ArtifactID: "b-plugin"}}}
+	a := &Metadata{Plugins: []Plugin{{Name: "A", Prefix: "a", ArtifactID: "z-plugin"}, {Name: "B", Prefix: "b", ArtifactID: "b-plugin"}}}
+	b := &Metadata{Plugins: []Plugin{{Name: "A2", Prefix: "a", ArtifactID: "x"}, {Name: "B2", Prefix: "b", ArtifactID: "b-plugin"}}}
 	m := Merge(a, b)
-	if len(m.Plugins) != 2 || m.Plugins[0].Name != "A" || m.Versioning != nil {
+	want := []Plugin{{Name: "B2", Prefix: "b", ArtifactID: "b-plugin"}, {Name: "A2", Prefix: "a", ArtifactID: "x"}, {Name: "A", Prefix: "a", ArtifactID: "z-plugin"}}
+	if !slices.Equal(m.Plugins, want) || m.Versioning != nil {
 		t.Fatalf("plugins = %+v versioning = %+v", m.Plugins, m.Versioning)
+	}
+}
+
+// A member document naming another GA than the first is left out.
+func TestMergeSkipsOtherGA(t *testing.T) {
+	a := &Metadata{GroupID: "g", ArtifactID: "a", Versioning: &Versioning{Versions: []string{"1.0"}}}
+	other := &Metadata{GroupID: "g", ArtifactID: "b", Versioning: &Versioning{Versions: []string{"9.0"}}}
+	plain := &Metadata{Versioning: &Versioning{Versions: []string{"2.0"}}}
+	if got := strings.Join(Merge(a, other, plain).Versioning.Versions, ","); got != "1.0,2.0" {
+		t.Fatalf("versions = %s", got)
 	}
 }
 

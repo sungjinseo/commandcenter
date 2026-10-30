@@ -80,6 +80,12 @@ type Target struct {
 	// internal registry fails closed instead of letting a later member's
 	// same-named package stand in (resolve.Owner).
 	DeniedIsFailure bool
+
+	// Skip, if set, tells the resolver which hosted or proxy repositories do
+	// not answer for the target (a Maven version policy): such a repository
+	// is not found without a lookup, so a proxy asks no remote, and a group
+	// asks its other members.
+	Skip func(rp *repo.Repository) bool
 }
 
 type Fetcher struct {

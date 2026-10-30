@@ -141,23 +141,11 @@ func parseCoords(segs []string) *Coordinates {
 	default:
 		return nil
 	}
-	if len(rest) == len(c.Version) || (rest[len(c.Version)] != '-' && rest[len(c.Version)] != '.') {
+	cl, ext, ok := component.MavenTail(rest[len(c.Version):])
+	if !ok {
 		return nil
 	}
-	tail := rest[len(c.Version):]
-	if strings.HasPrefix(tail, "-") {
-		i := strings.IndexByte(tail, '.')
-		if i < 0 {
-			return nil
-		}
-		c.Classifier = tail[1:i]
-		tail = tail[i:]
-	}
-	ext, ok := strings.CutPrefix(tail, ".")
-	if !ok || ext == "" || isDigit(ext[0]) {
-		return nil
-	}
-	c.Extension = ext
+	c.Classifier, c.Extension = cl, ext
 	return c
 }
 
@@ -168,8 +156,10 @@ func ContentType(path string) string {
 		return "application/xml"
 	case strings.HasSuffix(path, ".jar"), strings.HasSuffix(path, ".war"), strings.HasSuffix(path, ".ear"):
 		return "application/java-archive"
+	case strings.HasSuffix(path, ".asc"):
+		return "application/pgp-signature"
 	case strings.HasSuffix(path, ".sha1"), strings.HasSuffix(path, ".md5"), strings.HasSuffix(path, ".sha256"),
-		strings.HasSuffix(path, ".sha512"), strings.HasSuffix(path, ".asc"):
+		strings.HasSuffix(path, ".sha512"):
 		return "text/plain"
 	case strings.HasSuffix(path, ".zip"):
 		return "application/zip"

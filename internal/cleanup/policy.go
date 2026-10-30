@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/semver"
@@ -179,8 +180,8 @@ func FormatMatches(policyFormat, repoFormat string) bool {
 // parse count as releases.
 func Prerelease(format, version string) bool {
 	switch format {
-	case "maven":
-		return strings.HasSuffix(version, "-SNAPSHOT")
+	case "maven": // a SNAPSHOT build (1.0-20261014.120000-3) too
+		return strings.HasSuffix(component.MavenBaseVersion(version), "-SNAPSHOT")
 	case "pypi":
 		return pypiPrerelease(version)
 	case "composer": // normalized: 1.0.0.0-beta1, 1.0.0.0-RC1, dev-main, 1.0.0.0-dev; -patch is a release

@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"commandcenter/internal/component"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/semver"
@@ -68,8 +69,8 @@ func FromComponent(format, group, name, version string) (Package, bool) {
 		return Package{}, false
 	}
 	switch format {
-	case "maven":
-		name = group + ":" + name
+	case "maven": // a SNAPSHOT build is looked up as its base version, X-SNAPSHOT
+		name, version = group+":"+name, component.MavenBaseVersion(version)
 	case "npm":
 		if group != "" {
 			name = group + "/" + name

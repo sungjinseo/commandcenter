@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"commandcenter/internal/cleanup"
+	"commandcenter/internal/format/maven"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 )
@@ -37,7 +38,12 @@ var types = map[string]typeDef{
 	TypeRebuild: {name: "Rebuild repository metadata", params: rebuildParamsOf, run: runRebuild, fields: []ParamSpec{
 		{Name: "repo", Type: "repository", Help: "a Maven hosted or proxy, or an apt, yum, helm or conda hosted repository; empty: every one"},
 		{Name: "format", Type: "format", Help: "with an empty repo: only repositories of this format"},
-		{Name: "resetProxyMetadata", Type: "bool", Help: "apt proxies too: drop their cached metadata, so it is fetched again (after a change of the remote)"}}},
+		{Name: "resetProxyMetadata", Type: "bool", Help: "apt proxies too: drop their cached metadata, so it is fetched again (after a change of the remote)"},
+		{Name: "groupId", Type: "string", Help: "Maven hosted only: rebuild this groupId (its plugins, and with cascadeRebuild its GAs)"},
+		{Name: "artifactId", Type: "string", Help: "with groupId: rebuild this GA (and with cascadeRebuild its SNAPSHOT versions)"},
+		{Name: "baseVersion", Type: "string", Help: "with artifactId: rebuild this SNAPSHOT version's document"},
+		{Name: "cascadeRebuild", Type: "bool", Default: true, Help: "with groupId or artifactId: also the levels below"},
+		{Name: "rebuildChecksums", Type: "bool", Default: false, Help: "accepted for Nexus scripts; checksums are always computed"}}},
 	TypeVerify: {name: "Verify blobs", params: verifyParamsOf, run: runVerify, fields: verifyFields},
 	TypePurge:  {name: "Remove Maven snapshots", params: purgeParamsOf, run: runPurge, fields: purgeFields},
 	TypeRecalc: {name: "Recalculate blob store size", params: compactParams, run: runRecalc, fields: blobStoreFields},
@@ -47,6 +53,8 @@ var types = map[string]typeDef{
 	TypeExport:          {name: "Export repositories", params: exportParamsOf, run: runExport, fields: exportFields},
 	TypePurgeUnused:     {name: "Delete unused components", params: purgeUnusedParamsOf, run: runPurgeUnused, fields: purgeUnusedFields},
 	TypeImport:          {name: "Import repositories", params: importParamsOf, run: runImport, fields: importFields},
+
+	TypeMavenPurgeUnused: {name: "Remove unused Maven snapshots", params: mavenPurgeUnusedParamsOf, run: runPurge, fields: mavenPurgeUnusedFields},
 }
 
 var blobStoreFields = []ParamSpec{{Name: "blobStore", Type: "blobStore", Help: "empty: every blob store"}}
@@ -604,6 +612,20 @@ type rebuildParams struct {
 	Repository         string `json:"repository,omitempty"`
 	Format             string `json:"format,omitempty"`
 	ResetProxyMetadata bool   `json:"resetProxyMetadata,omitempty"`
+	// Nexus's repository.maven.rebuild-metadata properties: the Maven
+	// level rebuilt (maven.RebuildScope). rebuildChecksums is accepted and
+	// ignored: checksums are computed from the stored files.
+	GroupID          string `json:"groupId,omitempty"`
+	ArtifactID       string `json:"artifactId,omitempty"`
+	BaseVersion      string `json:"baseVersion,omitempty"`
+	CascadeRebuild   *bool  `json:"cascadeRebuild,omitempty"`
+	RebuildChecksums bool   `json:"rebuildChecksums,omitempty"`
+}
+
+// scope is the Maven part of the repository p names.
+func (p rebuildParams) scope() maven.RebuildScope {
+	return maven.RebuildScope{GroupID: p.GroupID, ArtifactID: p.ArtifactID, BaseVersion: p.BaseVersion,
+		NoCascade: p.CascadeRebuild != nil && !*p.CascadeRebuild}
 }
 
 // rebuildable reports whether the task can rebuild rp's metadata: a Maven
@@ -640,6 +662,19 @@ func rebuildParamsOf(s *Service, raw json.RawMessage, check bool) (string, []str
 	if p.Format != "" && !slices.Contains(s.rebuildFormats(), p.Format) {
 		return "", []string{fmt.Sprintf("params.format %q is not one of %s", p.Format, strings.Join(s.rebuildFormats(), ", "))}
 	}
+	switch {
+	case p.ArtifactID != "" && p.GroupID == "":
+		return "", []string{"params.artifactId needs params.groupId"}
+	case p.BaseVersion != "" && p.ArtifactID == "":
+		return "", []string{"params.baseVersion needs params.artifactId"}
+	case p.GroupID != "" && p.Format != "" && p.Format != "maven":
+		return "", []string{"params.groupId applies to Maven repositories only"}
+	}
+	for _, f := range []struct{ name, v string }{{"groupId", p.GroupID}, {"artifactId", p.ArtifactID}, {"baseVersion", p.BaseVersion}} {
+		if strings.ContainsAny(f.v, "/\\") || f.v == "." || f.v == ".." || strings.TrimSpace(f.v) != f.v {
+			return "", []string{fmt.Sprintf("params.%s %q is not a Maven coordinate", f.name, f.v)}
+		}
+	}
 	rp := s.Repos.Get(p.Repo)
 	switch {
 	case p.Repo == "" || !check:
@@ -651,6 +686,8 @@ func rebuildParamsOf(s *Service, raw json.RawMessage, check bool) (string, []str
 		return "", []string{fmt.Sprintf("repository %q is %s %s: the task takes a Maven hosted or proxy repository, an apt proxy with resetProxyMetadata, or a hosted repository of %s", p.Repo, rp.Format, rp.Type, strings.Join(s.rebuildFormats(), ", "))}
 	case p.Format != "" && p.Format != rp.Format:
 		return "", []string{fmt.Sprintf("repository %q is %s, not %s", p.Repo, rp.Format, p.Format)}
+	case p.GroupID != "" && (rp.Format != "maven" || rp.Type != "hosted"):
+		return "", []string{fmt.Sprintf("repository %q is %s %s: params.groupId takes a Maven hosted repository", p.Repo, rp.Format, rp.Type)}
 	}
 	return encodeParams(p), nil
 }
@@ -669,10 +706,10 @@ func runRebuild(ctx context.Context, s *Service, t meta.Task, _ string, log *Run
 		case !s.rebuildable(rp, p.ResetProxyMetadata):
 			return summary{}, fmt.Errorf("repository %q is now %s %s, which the task cannot rebuild: edit or delete this task", p.Repo, rp.Format, rp.Type)
 		}
-		return rebuildOne(ctx, s, rp, log)
+		return rebuildOne(ctx, s, rp, p, log)
 	}
 	for _, rp := range s.Repos.Snapshot().Sorted {
-		if s.rebuildable(rp, p.ResetProxyMetadata) && (p.Format == "" || p.Format == rp.Format) {
+		if s.rebuildable(rp, p.ResetProxyMetadata) && (p.Format == "" || p.Format == rp.Format) && (p.GroupID == "" || rp.Format == "maven" && rp.Type == "hosted") {
 			repos = append(repos, rp)
 		}
 	}
@@ -682,7 +719,7 @@ func runRebuild(ctx context.Context, s *Service, t meta.Task, _ string, log *Run
 		if err := ctx.Err(); err != nil {
 			return summary{msg: fmt.Sprintf("rebuilt the metadata of %d repositories", len(repos)), removed: removed}, err
 		}
-		sum, err := rebuildOne(ctx, s, rp, log)
+		sum, err := rebuildOne(ctx, s, rp, p, log)
 		removed += sum.removed
 		if err != nil {
 			failed++
@@ -726,7 +763,7 @@ func resetAptProxy(ctx context.Context, s *Service, rp *repo.Repository, log *Ru
 }
 
 // rebuildOne rebuilds rp's metadata with the right rebuilder.
-func rebuildOne(ctx context.Context, s *Service, rp *repo.Repository, log *RunLog) (summary, error) {
+func rebuildOne(ctx context.Context, s *Service, rp *repo.Repository, p rebuildParams, log *RunLog) (summary, error) {
 	if rp.Format == "apt" && rp.Type == "proxy" {
 		return resetAptProxy(ctx, s, rp, log)
 	}
@@ -754,8 +791,17 @@ func rebuildOne(ctx context.Context, s *Service, rp *repo.Repository, log *RunLo
 		log.Infof("%s", sum.msg)
 		return sum, err
 	}
-	log.Infof("%s: rebuilding maven-metadata.xml of every GA", rp.Name)
-	res, err := s.Maven.RebuildMetadata(ctx, rp, s.RebuildScan, log.Infof)
+	if p.RebuildChecksums {
+		log.Infof("%s: rebuildChecksums: nothing to do, checksums are computed from the stored files", rp.Name)
+	}
+	scope := p.scope()
+	switch {
+	case scope.GroupID == "":
+		log.Infof("%s: rebuilding maven-metadata.xml of every GA", rp.Name)
+	default:
+		log.Infof("%s: rebuilding the Maven metadata of %s", rp.Name, strings.Trim(scope.GroupID+":"+scope.ArtifactID+":"+scope.BaseVersion, ":"))
+	}
+	res, err := s.Maven.RebuildMetadataScope(ctx, rp, s.RebuildScan, scope, log.Infof)
 	sum := summary{msg: fmt.Sprintf("%s: rebuilt %d GA metadata documents, removed %d; refreshed %d SNAPSHOT version documents",
 		rp.Name, res.GAs, res.Removed, res.Snapshots), removed: int64(res.Removed)}
 	if res.Truncated {
