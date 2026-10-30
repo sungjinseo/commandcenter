@@ -144,7 +144,7 @@ func (r *Resolver) All(ctx context.Context, rp *repo.Repository, path string, ki
 func (r *Resolver) AllTarget(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind) ([]proxy.Result, error) {
 	var out []proxy.Result
 	var firstErr error
-	for _, m := range leaves(rp) {
+	for _, m := range Leaves(rp) {
 		res, err := r.LookupTarget(ctx, m, t, kind)
 		if err == nil {
 			out = append(out, res)
@@ -244,8 +244,9 @@ func fingerprint(results []proxy.Result, salt string) string {
 	return "group:" + salt + hex.EncodeToString(h.Sum(nil))
 }
 
-// leaves flattens nested groups into their non-group members, each once, in order.
-func leaves(rp *repo.Repository) []*repo.Repository {
+// Leaves flattens nested groups into their online non-group members, each
+// once, in order; a repository that is no group is its own leaf.
+func Leaves(rp *repo.Repository) []*repo.Repository {
 	var out []*repo.Repository
 	seen := map[string]bool{}
 	var walk func(*repo.Repository)

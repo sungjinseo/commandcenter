@@ -8,6 +8,7 @@ package nexusapi
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -16,7 +17,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -26,9 +26,10 @@ import (
 	"commandcenter/internal/auth"
 	"commandcenter/internal/component"
 	"commandcenter/internal/config"
+	"commandcenter/internal/format/maven"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
-	"commandcenter/internal/semver"
+	"commandcenter/internal/resolve"
 )
 
 // Prefix is where the API is mounted.
@@ -45,11 +46,12 @@ type Handler struct {
 	DB      *meta.DB
 	BaseURL func() string                       // the live baseURL, without trailing slash
 	UI      interface{ Routes(*http.ServeMux) } // the web UI, whose /-/api/ handlers do the writes
-
-	// Repository serves an in-process request for /repository/{name}/{path...}
-	// (server.Server.ServeRepository): the component upload sends each file
-	// there, as the format's own client would. nil: no component upload.
-	Repository func(http.ResponseWriter, *http.Request)
+	// Store drops a proxy's cached file, and ServeRepository serves an
+	// in-process request for /repository/{name}/{path...} (server.Server's):
+	// the component upload sends each file there as the format's own client
+	// would, and single-file deletes go there; nil disables both.
+	Store           *repo.Store
+	ServeRepository func(http.ResponseWriter, *http.Request)
 	// TempDir holds the files of a component upload while it is processed;
 	// "" is the system's.
 	TempDir string
@@ -184,44 +186,51 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request) (auth.Principal,
 	return p, true
 }
 
-// readable returns the named repository when p may read it; a hidden
-// repository is as unknown as a missing one.
+// readable returns the named repository when p may browse or read it; a
+// hidden repository is as unknown as a missing one.
 func (h *Handler) readable(p auth.Principal, name string) *repo.Repository {
 	rp := h.Repos.Get(name)
-	if rp == nil || !h.Auth.Can(p, name, auth.Read) {
+	if rp == nil || !h.Auth.Can(p, name, auth.Browse) {
 		return nil
 	}
 	return rp
 }
 
-// readableAll returns every repository p may read, by name.
+// readableAll returns every repository p may browse or read, by name.
 func (h *Handler) readableAll(p auth.Principal) []*repo.Repository {
 	var out []*repo.Repository
 	for _, rp := range h.Repos.Snapshot().Sorted {
-		if h.Auth.Can(p, rp.Name, auth.Read) {
+		if h.Auth.Can(p, rp.Name, auth.Browse) {
 			out = append(out, rp)
 		}
 	}
 	return out
 }
 
-// lookupRepo answers the repository named by the query parameter or 400,
-// 401 (anonymous) or 404.
+// lookupRepo answers the repository whose content the query parameter (or
+// an id) names, which the caller may list itself or through a group that
+// contains it, or 400, 401 (anonymous) or 404.
 func (h *Handler) lookupRepo(w http.ResponseWriter, r *http.Request, name string) *repo.Repository {
-	p := principal(r)
 	if name == "" {
 		writeMessage(w, http.StatusBadRequest, "repository is required")
 		return nil
 	}
-	rp := h.readable(p, name)
-	if rp == nil {
-		if p.Anonymous() {
-			deny(w, p)
-		} else {
-			writeMessage(w, http.StatusNotFound, "repository not found")
-		}
+	rp := h.Repos.Get(name)
+	if rp == nil || !h.viewOf(r).can(name) {
+		h.hidden(w, principal(r))
+		return nil
 	}
 	return rp
+}
+
+// hidden answers for a repository p may not see: 401 for anonymous callers
+// (a challenge), else 404 as for a missing one.
+func (h *Handler) hidden(w http.ResponseWriter, p auth.Principal) {
+	if p.Anonymous() {
+		deny(w, p)
+	} else {
+		writeMessage(w, http.StatusNotFound, "repository not found")
+	}
 }
 
 // ---- in-process calls of the UI's JSON API ----
@@ -419,8 +428,10 @@ func (h *Handler) listRepositories(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) getRepository(w http.ResponseWriter, r *http.Request) {
-	if rp := h.lookupRepo(w, r, r.PathValue("name")); rp != nil {
+	if rp := h.readable(principal(r), r.PathValue("name")); rp != nil {
 		writeJSON(w, http.StatusOK, h.repoJSON(rp, h.usage(r.Context())))
+	} else {
+		h.hidden(w, principal(r))
 	}
 }
 
@@ -645,17 +656,21 @@ func (h *Handler) deleteRepository(w http.ResponseWriter, r *http.Request) {
 
 // ---- components and assets ----
 
-// comp is a derived component with the paths of its files.
+// comp is a derived component with the paths of its files and the
+// repository its download URLs use (a group it was found through; "" for
+// its own).
 type comp struct {
 	repo, format, group, name, version string
 	paths                              []string
+	via                                string
 }
 
 func (c *comp) key() string { return c.repo + ":" + c.group + ":" + c.name + ":" + c.version }
 
 // compID and assetID are the opaque ids: base64url of "<repo>:<group>:<name>:<version>"
-// and "<repo>:<path>". A repository name holds no ":", and a name holds
-// one only for raw, whose version is empty, so the last ":" splits it.
+// and "<repo>:<path>", with the stored path and raw name (no leading "/";
+// one is accepted). A repository name holds no ":", and a name holds one
+// only for raw, whose version is empty, so the last ":" splits it.
 func compID(c *comp) string { return base64.RawURLEncoding.EncodeToString([]byte(c.key())) }
 
 func parseCompID(id string) (c comp, ok bool) {
@@ -672,7 +687,7 @@ func parseCompID(id string) (c comp, ok bool) {
 	if i < 0 {
 		return c, false
 	}
-	c.name, c.version = parts[2][:i], parts[2][i+1:]
+	c.name, c.version = strings.TrimPrefix(parts[2][:i], "/"), parts[2][i+1:]
 	return c, c.name != ""
 }
 
@@ -686,6 +701,7 @@ func parseAssetID(id string) (repoName, p string, ok bool) {
 		return "", "", false
 	}
 	repoName, p, ok = strings.Cut(string(b), ":")
+	p = strings.TrimPrefix(p, "/")
 	return repoName, p, ok && p != ""
 }
 
@@ -738,23 +754,6 @@ func (h *Handler) components(ctx context.Context, rp *repo.Repository) ([]*comp,
 	return out, nil
 }
 
-// page cuts the page after the continuation token (the id of the previous
-// page's last item) and returns the next token ("" on the last page).
-func page[T any](items []T, id func(T) string, token string) ([]T, string, bool) {
-	if token != "" {
-		i := slices.IndexFunc(items, func(x T) bool { return id(x) == token })
-		if i < 0 {
-			return nil, "", false
-		}
-		items = items[i+1:]
-	}
-	if len(items) > pageSize {
-		items = items[:pageSize]
-		return items, id(items[len(items)-1]), true
-	}
-	return items, "", true
-}
-
 func rfc3339(t time.Time) any {
 	if t.IsZero() {
 		return nil
@@ -762,18 +761,42 @@ func rfc3339(t time.Time) any {
 	return t.UTC().Format("2006-01-02T15:04:05.000-07:00") // Nexus's ISO form: milliseconds, +00:00
 }
 
-func (h *Handler) assetJSON(rp *repo.Repository, a meta.Asset) map[string]any {
+// assetJSON renders a file of rp as Nexus 3.91 does: the path with a
+// leading "/", the download URL on via's URL ("": rp's; a group a search
+// went through), only the checksums stored, and the format's attributes
+// ({"maven2": {groupId, artifactId, version, extension, classifier}},
+// {"<format>": {}} for the others).
+func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[string]any {
+	sums := map[string]string{}
+	for k, v := range map[string]string{"sha1": a.SHA1, "sha256": a.BlobSHA256, "md5": a.MD5, "sha512": a.SHA512} {
+		if v != "" {
+			sums[k] = v
+		}
+	}
+	var verified any
+	if rp.Type == "proxy" {
+		verified = rfc3339(a.CheckedAt) // the last time the remote was consulted
+	}
+	attrs := map[string]string{}
+	if c, _ := maven.ParsePath(a.Path); rp.Format == "maven" && c.Coords != nil {
+		attrs = map[string]string{"groupId": c.Coords.GroupID, "artifactId": c.Coords.ArtifactID, "version": c.Coords.Version, "extension": c.Coords.Extension}
+		if c.Coords.Classifier != "" {
+			attrs["classifier"] = c.Coords.Classifier
+		}
+	}
 	return map[string]any{
 		"id":           assetID(rp.Name, a.Path),
-		"path":         a.Path,
-		"downloadUrl":  h.repoURL(rp.Name) + "/" + escapePath(a.Path),
+		"path":         "/" + a.Path,
+		"downloadUrl":  h.repoURL(cmp.Or(via, rp.Name)) + "/" + escapePath(a.Path),
 		"repository":   rp.Name,
 		"format":       nexusFormat(rp.Format),
-		"checksum":     map[string]string{"sha1": a.SHA1, "sha256": a.BlobSHA256, "md5": a.MD5, "sha512": a.SHA512},
+		"checksum":     sums,
 		"contentType":  a.ContentType,
 		"lastModified": rfc3339(a.LastModified), "blobCreated": rfc3339(a.CreatedAt), "lastDownloaded": rfc3339(a.LastDownloaded),
+		"blobUpdated": rfc3339(a.LastModified), "lastVerified": verified,
 		"fileSize": a.Size, "blobStoreName": repo.StoreOf(rp.Repository),
 		"uploader": nil, "uploaderIp": nil, // not recorded
+		nexusFormat(rp.Format): attrs,
 	}
 }
 
@@ -796,28 +819,20 @@ func (h *Handler) componentJSON(ctx context.Context, rp *repo.Repository, c *com
 		if err != nil {
 			return nil, err
 		}
-		assets = append(assets, h.assetJSON(rp, a))
+		assets = append(assets, h.assetJSON(rp, c.via, a))
 	}
-	var group, version any
-	switch {
-	case c.format == "raw": // Nexus: group is the directory, a raw file has no version
-		group = "/" + strings.TrimSuffix(path.Dir(c.name), ".")
-	case c.format == "npm":
-		if c.group != "" {
-			group = strings.TrimPrefix(c.group, "@")
-		}
-	case c.group != "":
-		group = c.group
-	}
-	if c.version != "" {
-		version = c.version
+	// Nexus: a raw file's group is its directory, its name the path with a
+	// leading "/", and it has no version.
+	name := c.name
+	if c.format == "raw" {
+		name = "/" + name
 	}
 	tags, err := h.DB.ComponentTags(ctx, c.metaKey())
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"id": compID(c), "repository": c.repo, "format": nexusFormat(c.format),
-		"group": group, "name": c.name, "version": version, "assets": assets, "tags": tags}, nil
+		"group": nullable(compGroup(c)), "name": name, "version": nullable(c.version), "assets": assets, "tags": tags}, nil
 }
 
 func (h *Handler) fail(w http.ResponseWriter, err error) {
@@ -828,24 +843,53 @@ func (h *Handler) fail(w http.ResponseWriter, err error) {
 	writeMessage(w, http.StatusInternalServerError, "internal error")
 }
 
+// listComponents lists a repository's components; a group's are its
+// members' (Nexus: a helper for users), each with its own repository and
+// downloads through the group.
 func (h *Handler) listComponents(w http.ResponseWriter, r *http.Request) {
 	rp := h.lookupRepo(w, r, r.URL.Query().Get("repository"))
 	if rp == nil {
 		return
 	}
-	comps, err := h.components(r.Context(), rp)
-	if err != nil {
-		h.fail(w, err)
+	v := h.viewOf(r)
+	members := resolve.Leaves(rp)
+	var comps []*comp
+	for _, m := range members {
+		cs, err := h.components(r.Context(), m)
+		if err != nil {
+			h.fail(w, err)
+			return
+		}
+		for _, c := range cs {
+			if c = v.visible(c); c != nil {
+				if rp.Type == "group" {
+					c.via = rp.Name
+				}
+				comps = append(comps, c)
+			}
+		}
+	}
+	token := r.URL.Query().Get("continuationToken")
+	if tok, ok := parseCompID(token); token != "" && (!ok || !slices.ContainsFunc(members, func(m *repo.Repository) bool { return m.Name == tok.repo })) {
+		writeMessage(w, http.StatusBadRequest, "invalid continuationToken")
 		return
 	}
-	h.writeComponentPage(w, r, comps, r.URL.Query().Get("continuationToken"))
+	var cr criteria // repository and key order
+	slices.SortFunc(comps, cr.compare)
+	h.writeComponentPage(w, r, comps, cr, token)
 }
 
-func (h *Handler) writeComponentPage(w http.ResponseWriter, r *http.Request, comps []*comp, token string) {
-	comps, next, ok := page(comps, compID, token)
+// writeComponentPage answers the page of comps (sorted by cr) after token.
+func (h *Handler) writeComponentPage(w http.ResponseWriter, r *http.Request, comps []*comp, cr criteria, token string) {
+	comps, ok := h.after(comps, cr, token)
 	if !ok {
 		writeMessage(w, http.StatusBadRequest, "invalid continuationToken")
 		return
+	}
+	next := ""
+	if len(comps) > pageSize {
+		comps = comps[:pageSize]
+		next = compID(comps[pageSize-1])
 	}
 	items := make([]map[string]any, 0, len(comps))
 	for _, c := range comps {
@@ -885,7 +929,9 @@ func (h *Handler) findComponent(w http.ResponseWriter, r *http.Request) (*repo.R
 	}
 	k := want.key()
 	if i := slices.IndexFunc(comps, func(c *comp) bool { return c.key() == k }); i >= 0 {
-		return rp, comps[i]
+		if c := h.viewOf(r).visible(comps[i]); c != nil {
+			return rp, c
+		}
 	}
 	writeMessage(w, http.StatusNotFound, "component not found")
 	return nil, nil
@@ -938,36 +984,76 @@ func (h *Handler) deleteDerived(w http.ResponseWriter, r *http.Request, rp *repo
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// listAssets lists a repository's files, a group's members' files (by
+// member name, then path), each with its own repository and downloads
+// through the group.
 func (h *Handler) listAssets(w http.ResponseWriter, r *http.Request) {
 	rp := h.lookupRepo(w, r, r.URL.Query().Get("repository"))
 	if rp == nil {
 		return
 	}
+	members := resolve.Leaves(rp)
+	slices.SortFunc(members, func(a, b *repo.Repository) int { return strings.Compare(a.Name, b.Name) })
+	via := ""
+	if rp.Type == "group" {
+		via = rp.Name
+	}
 	// Keyset paging on the previous page's last asset, which need not exist
 	// any more: a replicating proxy pages through whole repositories while
-	// they change (pull replication).
-	after := ""
+	// they change (pull replication), a cleanup script deletes as it pages.
+	afterRepo, after := "", ""
 	if tok := r.URL.Query().Get("continuationToken"); tok != "" {
 		name, p, ok := parseAssetID(tok)
-		if !ok || name != rp.Name {
+		if !ok || !slices.ContainsFunc(members, func(m *repo.Repository) bool { return m.Name == name }) {
 			writeMessage(w, http.StatusBadRequest, "invalid continuationToken")
 			return
 		}
-		after = p
+		afterRepo, after = name, p
 	}
-	assets, err := h.DB.AssetPage(r.Context(), rp.Name, after, time.Time{}, pageSize+1)
-	if err != nil {
-		h.fail(w, err)
-		return
+	v := h.viewOf(r)
+	type item struct {
+		rp *repo.Repository
+		a  meta.Asset
+	}
+	var page []item
+	for _, m := range members {
+		if m.Name < afterRepo {
+			continue
+		}
+		from := ""
+		if m.Name == afterRepo {
+			from = after
+		}
+		// Files the caller does not see are skipped; read on until the page
+		// is full or the member ends.
+		for len(page) <= pageSize {
+			assets, err := h.DB.AssetPage(r.Context(), m.Name, from, time.Time{}, pageSize+1)
+			if err != nil {
+				h.fail(w, err)
+				return
+			}
+			for _, a := range assets {
+				if v.sees(m, a.Path) {
+					page = append(page, item{m, a})
+				}
+			}
+			if len(assets) <= pageSize {
+				break
+			}
+			from = assets[len(assets)-1].Path
+		}
+		if len(page) > pageSize {
+			break
+		}
 	}
 	next := ""
-	if len(assets) > pageSize {
-		assets = assets[:pageSize]
-		next = assetID(rp.Name, assets[pageSize-1].Path)
+	if len(page) > pageSize {
+		page = page[:pageSize]
+		next = assetID(page[pageSize-1].rp.Name, page[pageSize-1].a.Path)
 	}
-	items := make([]map[string]any, 0, len(assets))
-	for _, a := range assets {
-		items = append(items, h.assetJSON(rp, a))
+	items := make([]map[string]any, 0, len(page))
+	for _, x := range page {
+		items = append(items, h.assetJSON(x.rp, via, x.a))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "continuationToken": nullable(next)})
 }
@@ -983,7 +1069,7 @@ func (h *Handler) findAsset(w http.ResponseWriter, r *http.Request) (*repo.Repos
 		return nil, meta.Asset{}, false
 	}
 	a, err := h.DB.GetAsset(r.Context(), rp.Name, p)
-	if errors.Is(err, meta.ErrNotFound) {
+	if errors.Is(err, meta.ErrNotFound) || (err == nil && !h.viewOf(r).sees(rp, p)) {
 		writeMessage(w, http.StatusNotFound, "asset not found")
 		return nil, meta.Asset{}, false
 	}
@@ -996,13 +1082,21 @@ func (h *Handler) findAsset(w http.ResponseWriter, r *http.Request) (*repo.Repos
 
 func (h *Handler) getAsset(w http.ResponseWriter, r *http.Request) {
 	if rp, a, ok := h.findAsset(w, r); ok {
-		writeJSON(w, http.StatusOK, h.assetJSON(rp, a))
+		writeJSON(w, http.StatusOK, h.assetJSON(rp, "", a))
 	}
 }
 
-// deleteAsset: Command Center deletes components, not single files, so a
-// raw file (a component of its own) can be deleted here; other formats
-// answer 400 and point at DELETE /components/{id}.
+// deleteAsset deletes one file, any format, by the format's rules:
+//   - a proxy's (any format) cached copy is dropped; the next request
+//     fetches it again;
+//   - a hosted Maven file goes through the Maven handler's delete, which
+//     rebuilds maven-metadata.xml;
+//   - a hosted file that is a component of its own (a raw file, an npm
+//     tarball, a .deb or .rpm, a .nupkg, ...) goes through the component
+//     delete, which updates the format's index files;
+//   - anything else is part of a larger component (one layer of a docker
+//     image, one file of a Go module or a PyPI release) or generated
+//     metadata: 400, delete the component instead.
 func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	if p.Anonymous() {
@@ -1013,306 +1107,99 @@ func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if rp.Format != "raw" {
-		writeMessage(w, http.StatusBadRequest, "Command Center deletes whole components: use DELETE /service/rest/v1/components/{id}")
+	switch {
+	case rp.Type == "proxy":
+		h.dropCached(w, r, rp, a.Path)
+	case rp.Type == "hosted" && rp.Format == "maven":
+		h.deleteMavenFile(w, r, rp, a.Path)
+	case rp.Type == "hosted":
+		c, err := h.ownComponent(r.Context(), rp, a.Path)
+		switch {
+		case err != nil:
+			h.fail(w, err)
+		case c == nil:
+			writeMessage(w, http.StatusBadRequest, "this file is part of a larger component or generated metadata: delete the component (DELETE /service/rest/v1/components/{id})")
+		default:
+			h.deleteDerived(w, r, rp, c)
+		}
+	default:
+		writeMessage(w, http.StatusBadRequest, "a group has no files of its own: delete the file in its member")
+	}
+}
+
+// dropCached deletes a proxy's cached file, after the delete check on its
+// path.
+func (h *Handler) dropCached(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
+	pr := principal(r)
+	switch {
+	case !h.Auth.CanPath(pr, rp.Name, auth.Delete, selectorPath(rp, p)):
+		deny(w, pr)
+		return
+	case h.Store == nil:
+		writeMessage(w, http.StatusNotImplemented, "file deletion is not available")
 		return
 	}
-	h.deleteDerived(w, r, rp, &comp{repo: rp.Name, format: "raw", name: a.Path, paths: []string{a.Path}})
-}
-
-// ---- search ----
-
-// criteria are the Nexus search parameters Command Center can answer.
-type criteria struct {
-	q, group, name, version, extension, classifier string
-	sort, direction                                string
-}
-
-func parseCriteria(q url.Values) criteria {
-	first := func(keys ...string) string {
-		for _, k := range keys {
-			if v := strings.TrimSpace(q.Get(k)); v != "" {
-				return v
-			}
-		}
-		return ""
-	}
-	c := criteria{
-		q:          first("q"),
-		group:      first("group", "maven.groupId", "npm.scope"),
-		name:       first("name", "maven.artifactId", "docker.imageName"),
-		version:    first("version", "maven.baseVersion", "docker.imageTag"),
-		extension:  first("maven.extension"),
-		classifier: first("maven.classifier"),
-		sort:       first("sort"),
-		direction:  strings.ToLower(first("direction")),
-	}
-	if c.direction == "" {
-		c.direction = "asc"
-		if c.sort == "version" {
-			c.direction = "desc"
-		}
-	}
-	return c
-}
-
-// match is Nexus's exact match, case-insensitive, with "*" wildcards.
-func match(want, got string) bool {
-	if want == "" {
-		return true
-	}
-	if !strings.Contains(want, "*") {
-		return strings.EqualFold(want, got)
-	}
-	parts := strings.Split(want, "*")
-	for i, p := range parts {
-		parts[i] = regexp.QuoteMeta(p)
-	}
-	re := regexp.MustCompile("(?is)^" + strings.Join(parts, ".*") + "$")
-	return re.MatchString(got)
-}
-
-func containsFold(s, sub string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
-}
-
-// assetParts is the classifier and extension of a maven file
-// name-version[-classifier].ext; other formats have only an extension.
-func assetParts(c *comp, p string) (classifier, ext string) {
-	file := path.Base(p)
-	if c.format != "maven" {
-		return "", strings.TrimPrefix(path.Ext(file), ".")
-	}
-	rest, ok := strings.CutPrefix(file, c.name+"-"+c.version)
-	if !ok {
-		return "", strings.TrimPrefix(path.Ext(file), ".")
-	}
-	if cl, ok := strings.CutPrefix(rest, "-"); ok {
-		classifier, ext, _ = strings.Cut(cl, ".")
-		return classifier, ext
-	}
-	return "", strings.TrimPrefix(rest, ".")
-}
-
-// matches reports whether c matches cr, with its paths cut to the matching
-// files when extension or classifier are given (nil when none match).
-func (cr criteria) matches(c *comp) *comp {
-	group := c.group
-	if c.format == "npm" {
-		group = strings.TrimPrefix(group, "@")
-	}
-	if !match(strings.TrimPrefix(cr.group, "@"), group) || !match(cr.name, c.name) || !match(cr.version, c.version) {
-		return nil
-	}
-	if cr.q != "" && !(containsFold(c.group, cr.q) || containsFold(c.name, cr.q) || containsFold(c.version, cr.q) ||
-		slices.ContainsFunc(c.paths, func(p string) bool { return containsFold(p, cr.q) })) {
-		return nil
-	}
-	if cr.extension == "" && cr.classifier == "" {
-		return c
-	}
-	out := *c
-	out.paths = nil
-	for _, p := range c.paths {
-		cl, ext := assetParts(c, p)
-		if match(cr.classifier, cl) && match(strings.TrimPrefix(cr.extension, "."), ext) {
-			out.paths = append(out.paths, p)
-		}
-	}
-	if len(out.paths) == 0 {
-		return nil
-	}
-	return &out
-}
-
-// compareVersions orders versions: semver when both are, else segment by
-// segment with numeric segments compared as numbers (1.10 after 1.9).
-func compareVersions(a, b string) int {
-	if va, ok := semver.Parse(a); ok {
-		if vb, ok := semver.Parse(b); ok {
-			return semver.Compare(va, vb)
-		}
-	}
-	sep := func(r rune) bool { return r == '.' || r == '-' || r == '_' || r == '+' }
-	as, bs := strings.FieldsFunc(a, sep), strings.FieldsFunc(b, sep)
-	for i := 0; i < len(as) && i < len(bs); i++ {
-		na, ea := strconv.Atoi(as[i])
-		nb, eb := strconv.Atoi(bs[i])
-		var c int
-		if ea == nil && eb == nil {
-			c = na - nb
-		} else {
-			c = strings.Compare(as[i], bs[i])
-		}
-		if c != 0 {
-			return c
-		}
-	}
-	return len(as) - len(bs)
-}
-
-func (cr criteria) order(comps []*comp) {
-	if cr.sort == "" {
-		return
-	}
-	key := func(c *comp) string {
-		switch cr.sort {
-		case "group":
-			return c.group
-		case "name":
-			return c.name
-		case "repository":
-			return c.repo
-		case "format":
-			return c.format
-		}
-		return c.version
-	}
-	slices.SortStableFunc(comps, func(a, b *comp) int {
-		var c int
-		if cr.sort == "version" {
-			c = compareVersions(a.version, b.version)
-		} else {
-			c = strings.Compare(key(a), key(b))
-		}
-		if cr.direction == "desc" {
-			c = -c
-		}
-		return c
+	err := h.Store.Tx(r.Context(), rp, func(tx *meta.Tx) error {
+		_, err := tx.DeleteAsset(r.Context(), rp.Name, p)
+		return err
 	})
-}
-
-// searched runs a search: the matching components of the readable
-// repositories the parameters select, in the requested order.
-func (h *Handler) searched(w http.ResponseWriter, r *http.Request) ([]*comp, criteria, bool) {
-	q := r.URL.Query()
-	p := principal(r)
-	cr := parseCriteria(q)
-	var repos []*repo.Repository
-	if name := q.Get("repository"); name != "" {
-		rp := h.lookupRepo(w, r, name)
-		if rp == nil {
-			return nil, cr, false
-		}
-		repos = []*repo.Repository{rp}
-	} else if repos = h.readableAll(p); p.Anonymous() && len(repos) == 0 {
-		deny(w, p)
-		return nil, cr, false
-	}
-	out, err := h.find(r.Context(), repos, q)
-	if err != nil {
+	switch {
+	case errors.Is(err, meta.ErrNotFound):
+		writeMessage(w, http.StatusNotFound, "asset not found")
+	case err != nil:
 		h.fail(w, err)
-		return nil, cr, false
+	default:
+		h.Store.Emit(r, "delete", rp.Name, p, "")
+		w.WriteHeader(http.StatusNoContent)
 	}
-	return out, cr, true
 }
 
-// find runs a search in repos (groups skipped): the components that match
-// the parameters q, the format and tag included, in the requested order.
-func (h *Handler) find(ctx context.Context, repos []*repo.Repository, q url.Values) ([]*comp, error) {
-	cr := parseCriteria(q)
-	format := ccFormat(q.Get("format"))
-	tagged, err := h.tagged(ctx, q.Get("tag"))
+// deleteMavenFile deletes a hosted Maven file as a client's DELETE does
+// (the server's checks, then the Maven handler).
+func (h *Handler) deleteMavenFile(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
+	if h.ServeRepository == nil {
+		writeMessage(w, http.StatusNotImplemented, "file deletion is not available")
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, (&url.URL{Path: "/repository/" + rp.Name + "/" + p}).String(), nil)
 	if err != nil {
+		writeMessage(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	req.SetPathValue("name", rp.Name)
+	req.SetPathValue("path", p)
+	req.Header.Set("X-Request-Id", r.Header.Get("X-Request-Id"))
+	req.RemoteAddr = r.RemoteAddr
+	rec := &recorder{h: http.Header{}}
+	h.ServeRepository(rec, req)
+	switch {
+	case rec.status == 0 || rec.status < 300:
+		w.WriteHeader(http.StatusNoContent)
+	case rec.status == http.StatusUnauthorized || rec.status == http.StatusForbidden:
+		deny(w, principal(r))
+	default:
+		writeMessage(w, rec.status, strings.TrimSpace(rec.body.String()))
+	}
+}
+
+// ownComponent returns the component file p of hosted rp is all of, nil
+// when p is no component's or one of several files. ponytail: a
+// whole-repository scan of paths per delete, as findComponent does; index
+// the derivation if deletes in huge repositories get slow.
+func (h *Handler) ownComponent(ctx context.Context, rp *repo.Repository, p string) (*comp, error) {
+	group, name, version, ok := component.DeriveAsset(rp.Format, p)
+	if !ok {
+		return nil, nil
+	}
+	n := 0
+	if err := h.DB.WalkAssetPaths(ctx, rp.Name, "", func(q string) {
+		if g, nm, v, ok := component.DeriveAsset(rp.Format, q); ok && g == group && nm == name && v == version {
+			n++
+		}
+	}); err != nil || n != 1 {
 		return nil, err
 	}
-	var out []*comp
-	for _, rp := range repos {
-		if rp.Type == "group" || (format != "" && rp.Format != format) || (tagged != nil && !tagged[meta.ComponentKey{Repo: rp.Name}]) {
-			continue
-		}
-		comps, err := h.components(ctx, rp)
-		if err != nil {
-			return nil, err
-		}
-		for _, c := range comps {
-			if tagged != nil && !tagged[c.metaKey()] {
-				continue
-			}
-			if m := cr.matches(c); m != nil {
-				out = append(out, m)
-			}
-		}
-	}
-	cr.order(out)
-	return out, nil
-}
-
-func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
-	comps, _, ok := h.searched(w, r)
-	if !ok {
-		return
-	}
-	h.writeComponentPage(w, r, comps, r.URL.Query().Get("continuationToken"))
-}
-
-type hit struct {
-	rp *repo.Repository
-	a  meta.Asset
-}
-
-// hits flattens the components' files, in component order.
-func (h *Handler) hits(ctx context.Context, comps []*comp) ([]hit, error) {
-	var out []hit
-	for _, c := range comps {
-		rp := h.Repos.Get(c.repo)
-		for _, p := range c.paths {
-			a, err := h.DB.GetAsset(ctx, c.repo, p)
-			if errors.Is(err, meta.ErrNotFound) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-			out = append(out, hit{rp, a})
-		}
-	}
-	return out, nil
-}
-
-func (h *Handler) searchAssets(w http.ResponseWriter, r *http.Request) {
-	comps, _, ok := h.searched(w, r)
-	if !ok {
-		return
-	}
-	hits, err := h.hits(r.Context(), comps)
-	if err != nil {
-		h.fail(w, err)
-		return
-	}
-	hits, next, ok := page(hits, func(x hit) string { return assetID(x.rp.Name, x.a.Path) }, r.URL.Query().Get("continuationToken"))
-	if !ok {
-		writeMessage(w, http.StatusBadRequest, "invalid continuationToken")
-		return
-	}
-	items := make([]map[string]any, 0, len(hits))
-	for _, x := range hits {
-		items = append(items, h.assetJSON(x.rp, x.a))
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "continuationToken": nullable(next)})
-}
-
-// searchDownload redirects to the one matching asset; several match only
-// with a sort, which picks the first (sort=version&direction=desc: the
-// newest), as Nexus does.
-func (h *Handler) searchDownload(w http.ResponseWriter, r *http.Request) {
-	comps, cr, ok := h.searched(w, r)
-	if !ok {
-		return
-	}
-	hits, err := h.hits(r.Context(), comps)
-	if err != nil {
-		h.fail(w, err)
-		return
-	}
-	switch {
-	case len(hits) == 0:
-		writeMessage(w, http.StatusNotFound, "Search returned no assets")
-	case len(hits) > 1 && cr.sort == "":
-		writeMessage(w, http.StatusBadRequest, "Search returned multiple assets, please refine search criteria to find a single asset")
-	default:
-		http.Redirect(w, r, h.repoURL(hits[0].rp.Name)+"/"+escapePath(hits[0].a.Path), http.StatusFound)
-	}
+	return &comp{repo: rp.Name, format: rp.Format, group: group, name: name, version: version, paths: []string{p}}, nil
 }
 
 // ---- status, security, blob stores, tasks ----
@@ -1569,8 +1456,11 @@ func (h *Handler) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(body, &res)
 	items := []map[string]any{}
+	typ := r.URL.Query().Get("type") // Nexus's type id, or Command Center's
 	for _, t := range res.Tasks {
-		items = append(items, nexusTaskItem(t))
+		if typ == "" || typ == t.Type || typ == nexusTaskType(t.Type) {
+			items = append(items, nexusTaskItem(t))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "continuationToken": nil})
 }

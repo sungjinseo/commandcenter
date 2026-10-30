@@ -28,6 +28,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nugetProxy`, `npm`, `pypi`, `cargo`/`terraform`/`swift` (`requireAuthentication`), and
   `httpClient.authentication` of type `bearerToken`.
 - System information: `system-environment`, `system-network` and `system-properties` sections.
+- Nexus API search: `md5`/`sha1`/`sha256`/`sha512`, `prerelease`, `last_updated`/`lastBlobUpdated`, the
+  `g:a:v[:ext[:classifier]]` form of `q`, space-separated alternatives and quotes in every value, `?` as a
+  wildcard, full attribute names (`attributes.maven2.*`, `assets.attributes.*`), and the format a `maven.*`,
+  `npm.*` or `docker.*` parameter implies.
+- Nexus API `repository=` takes several names, `*`/`?` wildcards and groups (searched through their members,
+  downloads through the group); `GET /v1/components` and `/v1/assets` on a group list its members' content.
+- `DELETE /service/rest/v1/assets/{id}` for every format: a proxy's cached copy, a Maven file (metadata
+  rebuilt), or a hosted file that is a whole component; 400 for part of a larger component.
+- `GET /service/rest/v1/tasks?type=` filters by Nexus or Command Center task type id.
+- Nexus API assets carry `"maven2": {groupId, artifactId, version, extension, classifier}` (`{}` for other
+  formats), `blobUpdated` and `lastVerified`.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -38,12 +49,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   NuGet V2, quarantine removal, PERMISSIVE yum at depth 1, yum signing) are refused with 400.
 - Routing rule create answers 204; deleting a rule in use answers 400; deleting a blob store in use
   answers 400; Nexus errors carry `"id":"*"`; dates have milliseconds; `?userId=` is a prefix.
+- Nexus API asset `path` and raw component `name` start with `/`, as Nexus 3.91 renders them; `checksum`
+  lists only stored sums. Pull replication accepts both forms.
+- Nexus API listings and search follow browse or read on the repository or a group containing it; a
+  content-selector-only user lists and searches only the paths the selector matches.
+- Nexus API `sort=version` orders by each format's version rules (Maven `1.0-beta` before `1.0`); an unknown
+  `sort` or `direction`, a bad `prerelease` or `last_updated` answers 400.
 
 ### Fixed
 - A Nexus API repository PUT no longer resets the anonymous-read override, a yum repository's depth,
   a terraform repository's GPG key or the content disposition when its body has no field for them
   (the anonymous-read reset could make a private repository readable).
 - `PUT /v1/repositories/…/{name}` with another name in the body is refused instead of ignored.
+- Nexus API continuation tokens stay valid after their item is deleted (cleanup scripts got 400).
+- `maven.classifier=` (empty) selects files without a classifier, so `search/assets/download` serves the
+  main jar instead of `-javadoc.jar`/`-sources.jar`.
+- Checksum searches no longer match every component; a search naming a group no longer comes back empty.
+- Raw search by `group=/dir` finds the directory's files.
 
 ### Upgrade notes
 - Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by
@@ -51,6 +73,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   silently before can now get 400 (docker connector ports, `v1Enabled:true`, `nugetVersion:V2`,
   `removeQuarantined:true`, ...): remove those values. Clients checking for 201 on routing-rule
   create, or 409 on deleting a rule or blob store in use, must change those checks.
+- Scripts that compare the Nexus API asset `path` or raw component `name` must allow the leading `/`
+  (ids are unchanged). Search/assets continuation tokens issued before the upgrade are rejected with 400:
+  start the listing again. `DELETE /v1/assets/{id}` now deletes non-raw files it used to refuse.
+  Browse-only users and users granted only a group now see those repositories' content in the Nexus API;
+  selector-only users see less than before.
 
 ## [0.3.0] - 2026-10-30
 

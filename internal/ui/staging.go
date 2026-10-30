@@ -258,7 +258,12 @@ func (u *UI) selection(w http.ResponseWriter, r *http.Request, repos []*repo.Rep
 		}
 	}
 	comps, err := u.FindComponents(r.Context(), repos, q)
-	if err != nil {
+	var bad *repo.Error // a search parameter with a bad value
+	switch {
+	case errors.As(err, &bad):
+		writeError(w, bad.Status, bad.Msg)
+		return nil, false
+	case err != nil:
 		u.fail(w, r, err)
 		return nil, false
 	}

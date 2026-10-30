@@ -345,7 +345,7 @@ func TestComponentsPagingGetDelete(t *testing.T) {
 	if id, _ := base64.RawURLEncoding.DecodeString(all[0].ID); string(id) != "maven-releases:org.x:a000:1.0" {
 		t.Fatalf("id = %s", id)
 	}
-	if a := all[0].Assets; len(a) != 2 || a[0].Path != "org/x/a000/1.0/a000-1.0.jar" || a[1].Path != "org/x/a000/1.0/a000-1.0.pom" ||
+	if a := all[0].Assets; len(a) != 2 || a[0].Path != "/org/x/a000/1.0/a000-1.0.jar" || a[1].Path != "/org/x/a000/1.0/a000-1.0.pom" ||
 		a[0].DownloadURL != "http://nexus.example.com/repository/maven-releases/org/x/a000/1.0/a000-1.0.jar" ||
 		a[0].Format != "maven2" || a[0].FileSize != int64(len("bytes-of-"+paths[0])) || len(a[0].Checksum["sha1"]) != 40 || len(a[0].Checksum["sha256"]) != 64 || len(a[0].Checksum["md5"]) != 32 {
 		t.Fatalf("assets = %+v", a)
@@ -377,7 +377,7 @@ func TestAssets(t *testing.T) {
 	e.upload("maven-releases/org/x/a/1.0/a-1.0.jar", "raw-files/docs/readme.txt", "raw-files/top.bin")
 	var p page[asset]
 	e.get(v1+"/assets?repository=maven-releases", "", &p)
-	if len(p.Items) < 1 || p.Items[0].Path != "org/x/a/1.0/a-1.0.jar" || p.ContinuationToken != nil {
+	if len(p.Items) < 1 || p.Items[0].Path != "/org/x/a/1.0/a-1.0.jar" || p.ContinuationToken != nil {
 		t.Fatalf("assets = %+v", p)
 	}
 	var a asset
@@ -385,15 +385,15 @@ func TestAssets(t *testing.T) {
 	if a.Path != p.Items[0].Path || a.Repository != "maven-releases" || a.DownloadURL == "" {
 		t.Fatalf("asset = %+v", a)
 	}
-	e.want("DELETE", v1+"/assets/"+a.ID, "ci", "", 400) // not raw: whole components only
+	e.want("DELETE", v1+"/assets/"+a.ID, "", "", 401)
 
 	e.get(v1+"/assets?repository=raw-files", "", &p)
-	if len(p.Items) != 2 || p.Items[0].Path != "docs/readme.txt" {
+	if len(p.Items) != 2 || p.Items[0].Path != "/docs/readme.txt" {
 		t.Fatalf("raw assets = %+v", p)
 	}
 	var comps page[comp]
 	e.get(v1+"/components?repository=raw-files", "", &comps)
-	if c := comps.Items[0]; c.Name != "docs/readme.txt" || *c.Group != "/docs" || c.Version != nil {
+	if c := comps.Items[0]; c.Name != "/docs/readme.txt" || *c.Group != "/docs" || c.Version != nil {
 		t.Fatalf("raw component = %+v", c)
 	}
 	if c := comps.Items[1]; *c.Group != "/" {
@@ -446,7 +446,7 @@ func TestSearch(t *testing.T) {
 		t.Fatalf("search/assets ext: %+v", assets.Items)
 	}
 	e.get(v1+"/search/assets?name=lib&version=1.10&maven.extension=jar&maven.classifier=sources", "", &assets)
-	if len(assets.Items) != 1 || assets.Items[0].Path != "org/x/lib/1.10/lib-1.10-sources.jar" {
+	if len(assets.Items) != 1 || assets.Items[0].Path != "/org/x/lib/1.10/lib-1.10-sources.jar" {
 		t.Fatalf("search/assets classifier: %+v", assets.Items)
 	}
 
@@ -574,7 +574,7 @@ func TestAssetsPagingByKey(t *testing.T) {
 	}
 	e.want("DELETE", v1+"/assets/"+p.Items[49]["id"].(string), "ci", "", 204)
 	e.get(v1+"/assets?repository=raw-files&continuationToken="+*p.ContinuationToken, "", &p)
-	if len(p.Items) != 10 || p.Items[0]["path"] != "f050" || p.ContinuationToken != nil {
+	if len(p.Items) != 10 || p.Items[0]["path"] != "/f050" || p.ContinuationToken != nil {
 		t.Fatalf("second page: %+v", p)
 	}
 	e.want("GET", v1+"/assets?repository=maven-releases&continuationToken="+base64.RawURLEncoding.EncodeToString([]byte("raw-files:f001")), "", "", 400)

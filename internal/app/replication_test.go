@@ -73,7 +73,10 @@ func sourceAssets(t *testing.T, n *node, name string) []listedAsset {
 		if err := json.Unmarshal([]byte(n.want(t, "GET", "/service/rest/v1/assets?"+q.Encode(), nil, ok(200))), &page); err != nil {
 			t.Fatal(err)
 		}
-		out = append(out, page.Items...)
+		for _, a := range page.Items {
+			a.Path = strings.TrimPrefix(a.Path, "/") // the REST API's leading "/"
+			out = append(out, a)
+		}
 		if token = page.ContinuationToken; token == "" {
 			return out
 		}

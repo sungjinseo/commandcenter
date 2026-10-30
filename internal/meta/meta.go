@@ -390,6 +390,42 @@ func (d *DB) WalkAssetPaths(ctx context.Context, repo, prefix string, fn func(pa
 	return rows.Err()
 }
 
+// AssetPathsWhere returns the paths of repo's assets whose checksums equal
+// sums (md5, sha1, sha256 for the blob's, sha512; lower-case hex, stored
+// sums compared without case)
+// and, with a non-zero since, that were last modified at or after it.
+func (d *DB) AssetPathsWhere(ctx context.Context, repo string, sums map[string]string, since time.Time) (map[string]bool, error) {
+	q := `SELECT path FROM assets WHERE repo = ?`
+	args := []any{repo}
+	for _, col := range []string{"md5", "sha1", "sha256", "sha512"} {
+		if v, ok := sums[col]; ok {
+			if col == "sha256" {
+				col = "blob_sha256"
+			}
+			q += ` AND lower(` + col + `) = ?`
+			args = append(args, v)
+		}
+	}
+	if !since.IsZero() {
+		q += ` AND last_modified >= ?`
+		args = append(args, toMs(since))
+	}
+	rows, err := d.sql.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out[p] = true
+	}
+	return out, rows.Err()
+}
+
 func (d *DB) MarkChecked(ctx context.Context, repo, path string, t time.Time) error {
 	_, err := d.sql.ExecContext(ctx, `UPDATE assets SET checked_at = ? WHERE repo = ? AND path = ?`, toMs(t), repo, path)
 	return err

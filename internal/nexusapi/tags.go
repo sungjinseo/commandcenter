@@ -55,7 +55,11 @@ func (h *Handler) tagged(ctx context.Context, tag string) (map[meta.ComponentKey
 // tag association and staging use it (ui.ComponentFinder), so they act on
 // what a search shows.
 func (h *Handler) Find(ctx context.Context, repos []*repo.Repository, q url.Values) ([]component.Component, error) {
-	comps, err := h.find(ctx, repos, q)
+	cr, err := parseCriteria(q)
+	if err != nil {
+		return nil, repo.Errorf(http.StatusBadRequest, "%v", err)
+	}
+	comps, err := h.find(ctx, repos, cr, q.Get("tag"))
 	if err != nil {
 		return nil, err
 	}

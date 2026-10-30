@@ -202,7 +202,7 @@ func (h *Handler) uploadComponent(w http.ResponseWriter, r *http.Request) {
 	case !rp.IsOnline():
 		writeJSON(w, http.StatusBadRequest, refuse("*", "repository %q is offline", rp.Name))
 		return
-	case spec == nil || h.Repository == nil:
+	case spec == nil || h.ServeRepository == nil:
 		writeJSON(w, http.StatusBadRequest, refuse("*", "the upload API does not take %s components; use the format's own client", nexusFormat(rp.Format)))
 		return
 	case !h.Auth.Can(p, rp.Name, auth.Add):
@@ -415,7 +415,7 @@ func (h *Handler) native(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	req.Header.Set("X-Request-Id", r.Header.Get("X-Request-Id"))
 	req.RemoteAddr = r.RemoteAddr
 	rec := &recorder{h: http.Header{}}
-	h.Repository(rec, req)
+	h.ServeRepository(rec, req)
 	if rec.status < 300 {
 		return true
 	}

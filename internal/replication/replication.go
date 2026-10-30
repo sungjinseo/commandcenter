@@ -406,7 +406,8 @@ func (s *Service) page(ctx context.Context, rp *repo.Repository, base, src, toke
 	}
 	out := make([]Asset, 0, len(body.Items))
 	for _, it := range body.Items {
-		out = append(out, Asset{Path: it.Path, SHA1: it.Checksum.SHA1, SHA256: it.Checksum.SHA256, DownloadURL: it.DownloadURL,
+		// Nexus 3.91 (and Command Center) list paths with a leading "/".
+		out = append(out, Asset{Path: strings.TrimPrefix(it.Path, "/"), SHA1: it.Checksum.SHA1, SHA256: it.Checksum.SHA256, DownloadURL: it.DownloadURL,
 			LastModified: parseTime(it.LastModified)})
 	}
 	return out, body.ContinuationToken, nil
