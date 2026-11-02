@@ -415,9 +415,13 @@ func TestMetricsCompat(t *testing.T) {
 // settings list; paths without a twin are 404.
 func TestBetaAliases(t *testing.T) {
 	e := start(t, false)
+	// The file system's free space moves between two reads while other
+	// packages' tests write.
+	free := regexp.MustCompile(`"availableSpaceInBytes":\d+`)
 	same := func(beta, v1path string) {
 		t.Helper()
-		if a, b := e.want("GET", "/service/rest/beta"+beta, "admin", "", 200), e.want("GET", v1+v1path, "admin", "", 200); string(a) != string(b) {
+		a, b := e.want("GET", "/service/rest/beta"+beta, "admin", "", 200), e.want("GET", v1+v1path, "admin", "", 200)
+		if a, b := free.ReplaceAll(a, nil), free.ReplaceAll(b, nil); string(a) != string(b) {
 			t.Fatalf("beta %s: %s\nv1 %s: %s", beta, a, v1path, b)
 		}
 	}
