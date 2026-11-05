@@ -530,4 +530,40 @@ func TestListingPermissions(t *testing.T) {
 			t.Fatalf("dev GET %s: %d, want %d", x.Path, st, want)
 		}
 	}
+	// The HTML index shows a selector-only user the same: the directories
+	// that hold a file the selector matches, and those files.
+	const index = "/service/rest/repository/browse/maven-releases/"
+	if st, b := getAs(e, index+"org/", "dev", "longenough"); st != 200 || !strings.Contains(string(b), `href="acme/"`) || strings.Contains(string(b), "other") {
+		t.Fatalf("dev's index of org/: %d %s", st, b)
+	}
+	if st, b := getAs(e, index+"org/other/lib/1.0/", "dev", "longenough"); st != 404 || strings.Contains(string(b), "lib-1.0.jar") {
+		t.Fatalf("dev's index of a hidden directory: %d %s", st, b)
+	}
+	if st, b := getAs(e, index+"org/acme/lib/1.0/", "dev", "longenough"); st != 200 || !strings.Contains(string(b), "lib-1.0.jar") {
+		t.Fatalf("dev's index of a visible directory: %d %s", st, b)
+	}
+	if st, b := getAs(e, index+"org/", "bob", "longenough"); st != 200 || !strings.Contains(string(b), `href="other/"`) {
+		t.Fatalf("bob's index of org/: %d %s", st, b)
+	}
+	// A component seen in part is found by its visible files only: q must
+	// not tell whether a hidden file's name holds a text.
+	e.upload("maven-releases/org/acme/lib/1.0/lib-1.0-sources.jar")
+	for _, c := range []struct{ method, path, body string }{
+		{"POST", "/-/api/content-selectors", `{"name":"mainjar","expression":"path =~ \".*/lib-1\\.0\\.jar\""}`},
+		{"POST", "/-/api/roles", `{"id":"mainjar","privileges":[{"target":"selector:mainjar","actions":["browse","read"],"repos":["maven-releases"]}]}`},
+		{"POST", "/-/api/users", `{"id":"part","password":"longenough","roles":["mainjar"]}`},
+	} {
+		if st, b := uiCall(e, c.method, c.path, c.body); st >= 300 {
+			t.Fatalf("%s %s: %d %s", c.method, c.path, st, b)
+		}
+	}
+	if st, got := as("part", v1+"/search/assets?q=sources"); st != 200 || len(got) != 0 {
+		t.Fatalf("q on a hidden file: %d %q", st, got)
+	}
+	if st, got := as("part", v1+"/search/assets?q=lib-1.0.jar&group=org.acme"); st != 200 || !slices.Equal(got, []string{"<nil>/org/acme/lib/1.0/lib-1.0.jar"}) {
+		t.Fatalf("q on a visible file: %d %q", st, got)
+	}
+	if st, got := as("admin0", v1+"/search/assets?q=sources"); st != 401 || len(got) != 0 {
+		t.Fatalf("unknown user: %d %q", st, got)
+	}
 }

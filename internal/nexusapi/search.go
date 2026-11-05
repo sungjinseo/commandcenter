@@ -85,6 +85,13 @@ func selectorPath(rp *repo.Repository, p string) string {
 	return p
 }
 
+// all reports whether the caller may list every file of rp: its access,
+// direct or through a group, does not come from content selectors alone.
+func (v *view) all(rp *repo.Repository) bool {
+	return v.h.Auth.CanAll(v.p, rp.Name, auth.Browse) ||
+		slices.ContainsFunc(v.groupsOf(rp.Name), func(g string) bool { return v.h.Auth.CanAll(v.p, g, auth.Browse) })
+}
+
 // sees reports whether the caller may list file p of rp: a selector grant
 // counts only where its expression matches the path.
 func (v *view) sees(rp *repo.Repository, p string) bool {
@@ -594,9 +601,14 @@ func (s *collector) add(group, name, version, p string) {
 	if e == nil && !s.wanted(&c) {
 		return
 	}
+	// A file the caller may not list decides nothing, not even whether q
+	// finds the component.
+	if s.keep != nil && !s.keep(s.rp, p) {
+		return
+	}
 	file := s.cr.file != nil && s.cr.file(&c, p)
 	recent := s.recent != nil && s.recent[p]
-	pass := (s.sums == nil || s.sums[p]) && (s.keep == nil || s.keep(s.rp, p)) &&
+	pass := (s.sums == nil || s.sums[p]) &&
 		!slices.ContainsFunc(s.cr.asset, func(f func(*comp, string) bool) bool { return !f(&c, p) })
 	if e == nil {
 		if !file && !recent && !pass { // nothing to remember about this file
