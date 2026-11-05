@@ -74,11 +74,12 @@ type Target struct {
 	// 401 for an image that does not exist, to not reveal which do. A
 	// cached asset is served stale instead, as for any other failure.
 	DeniedIsNotFound bool
-	// DeniedIsFailure keeps a 403 for an asset that is not cached a failure
-	// (502), not a miss: for the document that decides which group member
-	// owns a package (npm packument, PyPI project page), so that a refused
-	// internal registry fails closed instead of letting a later member's
-	// same-named package stand in (resolve.Owner).
+	// DeniedIsFailure keeps every answer but 404 and 410 for an asset that
+	// is not cached a failure (502), not a miss: for the document that
+	// decides which group member owns a package (npm packument, PyPI project
+	// page), so that an internal registry that refuses or errs (403, 400,
+	// 451, ...) fails closed instead of letting a later member's same-named
+	// package stand in (resolve.Owner).
 	DeniedIsFailure bool
 
 	// Skip, if set, tells the resolver which hosted or proxy repositories do
@@ -368,7 +369,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 
 	case status == http.StatusNotFound || status == http.StatusGone,
 		t.DeniedIsNotFound && !cached && status == http.StatusUnauthorized,
-		!cached && remoteMiss(status) && !(t.DeniedIsFailure && status == http.StatusForbidden):
+		!cached && remoteMiss(status) && !t.DeniedIsFailure:
 		// A 404 from a remote that was replaced meanwhile must not outlive the change.
 		if cerr := f.Store.Current(rp); cerr != nil {
 			return Result{}, cerr
