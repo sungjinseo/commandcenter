@@ -103,6 +103,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Helm: `postgresql.networkPolicy.enabled` (off by default) lets only the server pods and `allowFrom` peers reach the bundled PostgreSQL.
 - The Logs screen and `GET /-/api/logs` name the node whose log they show; each node keeps its own.
 - S3 blob stores without keys use an AWS role when no `AWS_ACCESS_KEY_ID` is set: EKS IRSA (web identity), EKS Pod Identity and ECS (container credentials), EC2 instance profiles (IMDSv2). Temporary keys are refreshed 5 minutes before they expire.
+- E-mail: SMTP servers that offer `AUTH LOGIN` and no `PLAIN` work; as with PLAIN, the password goes only over TLS or to localhost.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented

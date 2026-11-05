@@ -16,10 +16,12 @@ import (
 	"mime"
 	"net"
 	"net/mail"
+	"net/smtp"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,11 +37,12 @@ type captured struct {
 
 // fakeSMTP is a minimal in-process SMTP server.
 type fakeSMTP struct {
-	ln       net.Listener
-	mu       sync.Mutex
-	got      []captured
-	tlsConf  *tls.Config // non-nil: offers STARTTLS (or serves implicit TLS when implicit)
-	implicit bool
+	ln        net.Listener
+	mu        sync.Mutex
+	got       []captured
+	tlsConf   *tls.Config // non-nil: offers STARTTLS (or serves implicit TLS when implicit)
+	implicit  bool
+	loginOnly atomic.Bool // offers LOGIN instead of PLAIN
 }
 
 func newFake(t *testing.T, tc *tls.Config, implicit bool) *fakeSMTP {
@@ -88,7 +91,11 @@ func (f *fakeSMTP) serve(c net.Conn) {
 			if f.tlsConf != nil && !secure {
 				io.WriteString(c, "250-STARTTLS\r\n")
 			}
-			io.WriteString(c, "250 AUTH PLAIN\r\n")
+			if f.loginOnly.Load() {
+				io.WriteString(c, "250 AUTH LOGIN\r\n")
+			} else {
+				io.WriteString(c, "250 AUTH PLAIN\r\n")
+			}
 		case up == "STARTTLS":
 			say("220 go ahead")
 			tc := tls.Server(c, f.tlsConf)
@@ -98,6 +105,15 @@ func (f *fakeSMTP) serve(c net.Conn) {
 			c = tc
 			secure = true
 			r = bufio.NewReader(c)
+		case up == "AUTH LOGIN":
+			say("334 " + base64.StdEncoding.EncodeToString([]byte("Username:")))
+			user, _ := r.ReadString('\n')
+			say("334 " + base64.StdEncoding.EncodeToString([]byte("Password:")))
+			pass, _ := r.ReadString('\n')
+			u, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(user))
+			p, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(pass))
+			cur.auth = "login|" + string(u) + "|" + string(p)
+			say("235 ok")
 		case strings.HasPrefix(up, "AUTH PLAIN"):
 			b, _ := base64.StdEncoding.DecodeString(strings.TrimSpace(line[len("AUTH PLAIN"):]))
 			cur.auth = strings.ReplaceAll(string(b), "\x00", "|")
@@ -218,6 +234,35 @@ func selfSigned(t *testing.T) (*tls.Config, *x509.CertPool) {
 	pool := x509.NewCertPool()
 	pool.AddCert(cert)
 	return &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}, pool
+}
+
+// A server that offers LOGIN and no PLAIN gets LOGIN; the password still goes
+// only over TLS or to localhost.
+func TestSendNowLogin(t *testing.T) {
+	f := newFake(t, nil, false)
+	f.loginOnly.Store(true)
+	s := testSender(&repotest.Sink{})
+	defer s.Close()
+	cfg := meta.SMTP{Host: "127.0.0.1", Port: f.port(), Security: "none", From: "cc@example.com", Username: "u", Password: "s3cret"}
+	if err := s.SendNow(context.Background(), cfg, []string{"a@example.com"}, "subject", "body"); err != nil {
+		t.Fatal(err)
+	}
+	if m := f.messages(); len(m) != 1 || m[0].auth != "login|u|s3cret" {
+		t.Fatalf("messages = %+v", m)
+	}
+	a := loginAuth{"u", "p", "mail.example.com"}
+	if _, _, err := a.Start(&smtp.ServerInfo{Name: "mail.example.com"}); err == nil {
+		t.Fatal("LOGIN over a plain connection to another host")
+	}
+	if _, _, err := a.Start(&smtp.ServerInfo{Name: "other.example.com", TLS: true}); err == nil {
+		t.Fatal("LOGIN to the wrong host")
+	}
+	if mech, _, err := a.Start(&smtp.ServerInfo{Name: "mail.example.com", TLS: true}); err != nil || mech != "LOGIN" {
+		t.Fatalf("over TLS: %q, %v", mech, err)
+	}
+	if _, err := a.Next([]byte("Something:"), true); err == nil {
+		t.Fatal("answered an unknown challenge")
+	}
 }
 
 func TestSendNowTLSModes(t *testing.T) {

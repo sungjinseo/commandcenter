@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/mail"
 	"net/smtp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -207,7 +208,11 @@ func (s *Sender) SendNow(ctx context.Context, cfg meta.SMTP, to []string, subjec
 		}
 	}
 	if cfg.Username != "" {
-		if err := c.Auth(smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)); err != nil {
+		var auth smtp.Auth = smtp.PlainAuth("", cfg.Username, cfg.Password, cfg.Host)
+		if _, mechs := c.Extension("AUTH"); !slices.Contains(strings.Fields(strings.ToUpper(mechs)), "PLAIN") && slices.Contains(strings.Fields(strings.ToUpper(mechs)), "LOGIN") {
+			auth = loginAuth{cfg.Username, cfg.Password, cfg.Host}
+		}
+		if err := c.Auth(auth); err != nil {
 			return fmt.Errorf("auth: %w", err)
 		}
 	}
@@ -284,4 +289,31 @@ func clip(s string, n int) string {
 		cut--
 	}
 	return s[:cut]
+}
+
+// loginAuth is the LOGIN mechanism, for servers that offer no PLAIN. Like
+// smtp.PlainAuth it sends the password only over TLS or to localhost.
+type loginAuth struct{ username, password, host string }
+
+func (a loginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
+	if !server.TLS && server.Name != "localhost" && server.Name != "127.0.0.1" && server.Name != "::1" {
+		return "", nil, errors.New("unencrypted connection")
+	}
+	if server.Name != a.host {
+		return "", nil, errors.New("wrong host name")
+	}
+	return "LOGIN", nil, nil
+}
+
+func (a loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if !more {
+		return nil, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(string(fromServer))) {
+	case "username:":
+		return []byte(a.username), nil
+	case "password:":
+		return []byte(a.password), nil
+	}
+	return nil, errors.New("unexpected server challenge")
 }
