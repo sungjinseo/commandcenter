@@ -24,12 +24,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   alone unless `-update` is given, one failed object does not stop the rest, and the last line and the exit code
   summarize. Built from Nexus 3.91.1's public source and tested against a stand-in and against Command Center as
   the source, not against a running Nexus: plan with `-dry-run` first.
+- Docker: a blob can be mounted from a group or a proxy (`POST .../blobs/uploads/?mount=&from=`): an image
+  built on a base that was pulled through a group is pushed without uploading the base's layers again. A
+  blob the proxy has not cached is uploaded as before.
+
+### Changed
+- The request log's `user` and the monthly users now name the user of a Docker registry token; such
+  requests were logged without one.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
   docker component for a prerelease, because their versions join a build, a release number or a tag variant with
   `-` (`1.2.3-4.el9`, `1.2-alpine`): a policy for prereleases selected them all. Those formats have no
   prereleases now.
+- Git LFS: `git push` could not upload. The batch answer marked every object `authenticated`, so git-lfs sent
+  the upload without credentials and repeated it on the 401 without end. Objects are no longer marked, and
+  git-lfs sends its credentials.
+- Docker proxy: the tags list held only the upstream's first page (100 tags from quay.io and ghcr.io). The
+  pages are now followed and cached as one list; a list cached before is replaced at its next refresh.
+- Docker: `skopeo delete` was denied. The token endpoint now grants the scope action `*` as the pull, push
+  and delete the user may use.
 
 ## [0.4.0] - 2026-11-05
 

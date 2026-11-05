@@ -139,7 +139,11 @@ func (h *Handler) startUpload(w http.ResponseWriter, r *http.Request, rp *repo.R
 
 // mount links a blob of another image (same or another repository) into
 // rt's image when c may pull it there; done is false when it cannot be
-// mounted, which falls back to a normal upload.
+// mounted, which falls back to a normal upload. The other repository may be
+// a proxy, for what it has cached (nothing is fetched here), or a group,
+// for the member that answers for the image (walk): docker names the
+// repository it pulled a base image from, so an image built on a base that
+// came through a group is pushed without uploading the base's layers.
 func (h *Handler) mount(r *http.Request, rp *repo.Repository, rt Route, c caller, digest, from string) (bool, error) {
 	if !ValidDigest(digest) || !ValidName(from) || !h.allowed(c, from, "pull") {
 		return false, nil
@@ -150,9 +154,16 @@ func (h *Handler) mount(r *http.Request, rp *repo.Repository, rt Route, c caller
 		return false, nil
 	}
 	ctx := r.Context()
-	a, err := h.Store.DB.GetAsset(ctx, src.Name, blobKey(fromImage, digest))
+	var a meta.Asset
+	err := h.walk(ctx, src, fromImage, func(m *repo.Repository) (err error) {
+		a, err = h.Store.DB.GetAsset(ctx, m.Name, blobKey(fromImage, digest))
+		return err
+	})
+	if repo.StatusOf(err) == http.StatusNotFound {
+		return false, nil
+	}
 	if err != nil {
-		return false, offline(err)
+		return false, err
 	}
 	// Same store: the blob is there already. Another store: copy it over.
 	sums := blob.Sums{SHA256: a.BlobSHA256, SHA1: a.SHA1, MD5: a.MD5, SHA512: a.SHA512, Size: a.Size}

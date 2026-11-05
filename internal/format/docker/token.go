@@ -129,6 +129,7 @@ func accessFor(action string) (auth.Access, bool) {
 // grant intersects a requested scope with what p may do: pull needs read,
 // push add, delete delete on the Command Center repository of the name. A
 // proxy or group takes no writes, so only pull is ever granted on one. The
+// action "*" asks for all three (skopeo delete asks for nothing else). The
 // catalog scope is granted to everyone; the listing filters by privilege.
 func (h *Handler) grant(p auth.Principal, s scope) scope {
 	out := scope{Type: s.Type, Name: s.Name, Actions: []string{}}
@@ -143,7 +144,11 @@ func (h *Handler) grant(p auth.Principal, s scope) scope {
 		if rp := h.Repos.Get(repoName); rp != nil && rp.Type != "hosted" {
 			readOnly = true
 		}
-		for _, a := range s.Actions {
+		actions := s.Actions
+		if slices.Contains(actions, "*") {
+			actions = []string{"pull", "push", "delete"}
+		}
+		for _, a := range actions {
 			if acc, ok := accessFor(a); ok && h.Auth.CanPath(p, repoName, acc, image) && (a == "pull" || !readOnly) {
 				out.Actions = append(out.Actions, a)
 			}

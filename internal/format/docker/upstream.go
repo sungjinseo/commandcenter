@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +38,9 @@ func NewFetcher(store *repo.Store, maxConcurrent int) *proxy.Fetcher {
 // so later requests for the name carry the token at once. Tokens and
 // credentials never leave this transport: the Fetcher stores bodies, not
 // headers, and clients of this registry get its own tokens.
+//
+// A tags list comes back whole: the pages a registry splits it into are
+// fetched and merged here (allTags), so the Fetcher caches one document.
 type upstream struct {
 	base http.RoundTripper
 
@@ -60,6 +65,23 @@ func (u *upstream) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Context().Value(tokenRequestKey{}) != nil {
 		return u.base.RoundTrip(req)
 	}
+	if req.Method != http.MethodGet || !strings.HasSuffix(req.URL.Path, "/tags/list") {
+		return u.roundTrip(req)
+	}
+	// Never conditional: a 304 for the first page says nothing about the
+	// later ones, and would keep a list cached before pages were followed.
+	req = req.Clone(req.Context())
+	req.Header.Del("If-None-Match")
+	req.Header.Del("If-Modified-Since")
+	resp, err := u.roundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return resp, err
+	}
+	return u.allTags(req, resp)
+}
+
+// roundTrip sends req with the token flow.
+func (u *upstream) roundTrip(req *http.Request) (*http.Response, error) {
 	// Keyed by the credentials too: two repositories with different
 	// remoteAuth for one upstream never share a token.
 	creds := req.Header.Get("Authorization")
@@ -90,6 +112,80 @@ func (u *upstream) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	u.remember(scopeKey, ch.key()+"\x00"+creds, tok)
 	return u.base.RoundTrip(withBearer(req, tok.value))
+}
+
+// maxTagPages bounds the pages of one tags list.
+// ponytail: 500 pages, and the pages together are bounded by maxManifest
+// (about 200,000 tags), as the one page was; raise both for a longer list.
+const maxTagPages = 500
+
+// nextLinkRE finds the target of a Link header's rel="next" entry.
+var nextLinkRE = regexp.MustCompile(`<([^>]*)>[^<]*\brel="?next"?`)
+
+func nextLink(resp *http.Response) string {
+	if m := nextLinkRE.FindStringSubmatch(strings.Join(resp.Header.Values("Link"), ", ")); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// allTags follows the Link: rel="next" of a tags list answer (quay.io and
+// ghcr.io answer 100 tags at a time) and returns the answer with the tags
+// of every page and without the first page's validators. An answer without
+// the link is returned as it is. The pages stay on the registry's host,
+// where the request's credentials and token belong, and a page that fails
+// fails the list: a part of it is never cached as the whole.
+func (u *upstream) allTags(req *http.Request, first *http.Response) (*http.Response, error) {
+	next := nextLink(first)
+	if next == "" {
+		return first, nil
+	}
+	type list struct {
+		Name string   `json:"name"`
+		Tags []string `json:"tags"`
+	}
+	var all list
+	budget := int64(maxManifest)
+	for page, resp := 1, first; ; page++ {
+		var doc list
+		body := &io.LimitedReader{R: resp.Body, N: budget}
+		err := json.NewDecoder(body).Decode(&doc)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("upstream tags list, page %d: %w", page, err)
+		}
+		budget = body.N
+		if page == 1 {
+			all.Name = doc.Name
+		}
+		all.Tags = append(all.Tags, doc.Tags...)
+		if next == "" {
+			break
+		}
+		target, err := req.URL.Parse(next)
+		if err != nil || target.Scheme != req.URL.Scheme || target.Host != req.URL.Host {
+			return nil, fmt.Errorf("upstream tags list, page %d: the next page is on another host", page)
+		}
+		if page == maxTagPages {
+			return nil, fmt.Errorf("upstream tags list has more than %d pages", maxTagPages)
+		}
+		pageReq := req.Clone(req.Context())
+		pageReq.URL = target
+		if resp, err = u.roundTrip(pageReq); err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("upstream tags list, page %d: %s", page+1, resp.Status)
+		}
+		next = nextLink(resp)
+	}
+	body, _ := json.Marshal(all)
+	for _, k := range []string{"Link", "ETag", "Last-Modified", "Content-Length"} {
+		first.Header.Del(k)
+	}
+	first.Body, first.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+	return first, nil
 }
 
 func withBearer(req *http.Request, tok string) *http.Request {

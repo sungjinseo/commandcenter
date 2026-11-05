@@ -34,6 +34,8 @@ type fakeRegistry struct {
 	denied    map[string]bool         // names that are 401 even with a token
 	status    int                     // when set, every registry request answers it
 	corrupt   bool                    // blobs come back altered
+	pageSize  int                     // when set, tags come sorted, this many at a time, with a next link
+	nextBase  string                  // prefix of the next link's target ("": relative)
 	accept    string                  // the last Accept header of a manifest request
 	authSeen  []string                // Authorization values of registry requests
 }
@@ -132,6 +134,14 @@ func (fr *fakeRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		fr.served[r.URL.Path]++
 		sort.Sort(sort.Reverse(sort.StringSlice(tags))) // unsorted on purpose
+		if fr.pageSize > 0 {
+			sort.Strings(tags)
+			tags = tags[sort.SearchStrings(tags, r.URL.Query().Get("last")+"\x00"):]
+			if len(tags) > fr.pageSize {
+				tags = tags[:fr.pageSize]
+				w.Header().Set("Link", fmt.Sprintf(`<%s/v2/%s/tags/list?n=%d&last=%s>; rel="next"`, fr.nextBase, name, fr.pageSize, tags[len(tags)-1]))
+			}
+		}
 		writeJSON(w, 200, map[string]any{"name": name, "tags": tags})
 	default:
 		fail(404, CodeUnsupported)
@@ -442,6 +452,71 @@ func TestProxyTagsAndWrites(t *testing.T) {
 	e.check(resp, b, 200, "")
 	if string(bytes.TrimSpace(b)) != `{"repositories":["hub/app"]}` {
 		t.Fatalf("catalog: %s", b)
+	}
+}
+
+// A registry that answers its tags a page at a time (quay.io and ghcr.io:
+// 100) is followed to the end: crane ls, skopeo list-tags and helm's lookup
+// of the newest chart version take the list they get for the whole.
+func TestProxyTagsFollowsPages(t *testing.T) {
+	fr := newFakeRegistry(t)
+	fr.bearer, fr.pageSize = true, 2
+	for _, tag := range []string{"v1", "v2", "v3", "v4", "v5"} {
+		fr.putImage("app", tag, []byte("l-"+tag))
+		fr.putImage("web", tag, []byte("l-"+tag))
+	}
+	e := newEnvWith(t, proxyOf(fr, "hub", nil))
+	resp, b := e.do("GET", "/v2/hub/app/tags/list", nil)
+	e.check(resp, b, 200, "")
+	if string(bytes.TrimSpace(b)) != `{"name":"hub/app","tags":["v1","v2","v3","v4","v5"]}` || fr.count("/v2/app/tags/list") != 3 || fr.tokens != 1 {
+		t.Fatalf("tags: %s (upstream pages %d, tokens %d)", b, fr.count("/v2/app/tags/list"), fr.tokens)
+	}
+	// cached as the one list
+	resp, b = e.do("GET", "/v2/hub/app/tags/list?n=2&last=v3", nil)
+	e.check(resp, b, 200, "")
+	if string(bytes.TrimSpace(b)) != `{"name":"hub/app","tags":["v4","v5"]}` || fr.count("/v2/app/tags/list") != 3 {
+		t.Fatalf("cached tags: %s (upstream pages %d)", b, fr.count("/v2/app/tags/list"))
+	}
+	// A next page on another host is not followed (the token stays with the
+	// registry), and the first page is not served for the list.
+	fr.set(func() { fr.nextBase = "http://other.invalid" })
+	resp, b = e.do("GET", "/v2/hub/web/tags/list", nil)
+	e.check(resp, b, 502, "")
+	fr.set(func() { fr.nextBase = "" })
+	resp, b = e.do("GET", "/v2/hub/web/tags/list", nil)
+	e.check(resp, b, 200, "")
+	if !strings.Contains(string(b), `"v5"`) {
+		t.Fatalf("tags after the failure: %s", b)
+	}
+}
+
+// docker names the repository it pulled a base image from when it pushes an
+// image built on it. A base that came through a group or a proxy is mounted
+// from what the proxy has cached, not uploaded again; nothing is fetched
+// from the remote for a mount.
+func TestMountFromGroupAndProxy(t *testing.T) {
+	fr := newFakeRegistry(t)
+	base := []byte("base layer")
+	bd := digestOf(base)
+	fr.putImage("library/base", "1", base)
+	tr := true
+	e := newEnvWith(t, proxyOf(fr, "hub", nil),
+		config.Repository{Name: "all", Format: "docker", Type: "group", Members: []string{"dh", "hub"}, AnonymousRead: &tr})
+	resp, b := e.do("POST", "/v2/dh/app/blobs/uploads/?mount="+bd+"&from=all/library/base", nil, basic("ci"))
+	e.check(resp, b, 202, "")
+	if fr.count("/v2/library/base/blobs/"+bd) != 0 {
+		t.Fatal("a mount fetched the blob from the remote")
+	}
+	resp, b = e.do("GET", "/v2/all/library/base/blobs/"+bd, nil) // the pull of the base image
+	e.check(resp, b, 200, "")
+	for target, from := range map[string]string{"dh/app": "all/library/base", "dh/tool": "hub/library/base"} {
+		resp, b = e.do("POST", "/v2/"+target+"/blobs/uploads/?mount="+bd+"&from="+from, nil, basic("ci"))
+		e.check(resp, b, 201, "")
+		resp, b = e.do("GET", "/v2/"+target+"/blobs/"+bd, nil)
+		e.check(resp, b, 200, "")
+		if !bytes.Equal(b, base) {
+			t.Fatalf("%s mounted from %s: %s", target, from, b)
+		}
 	}
 }
 

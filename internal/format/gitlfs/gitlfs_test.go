@@ -159,7 +159,7 @@ func TestBatchAndBasicTransfer(t *testing.T) {
 	}
 	for i, o := range objectsOf(out) {
 		want := e.ts.URL + "/repository/lfs/objects/" + objs[i].OID
-		if actionHref(o, "upload") != want || actionHref(o, "verify") != e.ts.URL+"/repository/lfs/objects/verify" || o["authenticated"] != true || o["size"] != float64(objs[i].Size) {
+		if actionHref(o, "upload") != want || actionHref(o, "verify") != e.ts.URL+"/repository/lfs/objects/verify" || o["size"] != float64(objs[i].Size) {
 			t.Fatalf("upload object %d: %v", i, o)
 		}
 	}
@@ -250,6 +250,48 @@ func TestBatchAndBasicTransfer(t *testing.T) {
 		if resp, body := e.do("POST", p, `{}`, as("ci")); resp.StatusCode != 501 || !strings.Contains(body, "locks are not supported") {
 			t.Fatalf("%s: %d %s", p, resp.StatusCode, body)
 		}
+	}
+}
+
+// git-lfs 3.7 pushing with credentials from its helper: the batch is
+// challenged and repeated with them; the upload first goes to the href
+// without any (git-lfs knows no access mode for that URL yet), must be
+// challenged too, and is repeated with them. An object marked
+// "authenticated" gets no credentials from git-lfs at all: it repeats the
+// upload the server answers 401 without them, with no end.
+func TestGitLFSUploadSequence(t *testing.T) {
+	e := newEnv(t, true)
+	body := "pushed by git-lfs"
+	oid := oidOf(body)
+	objs := []object{{OID: oid, Size: int64(len(body))}}
+	resp, _ := e.batch("lfs", "upload", objs)
+	if resp.StatusCode != 401 || resp.Header.Get("LFS-Authenticate") != `Basic realm="commandcenter"` {
+		t.Fatalf("batch without credentials: %d %v", resp.StatusCode, resp.Header)
+	}
+	resp, out := e.batch("lfs", "upload", objs, as("ci"))
+	if resp.StatusCode != 200 {
+		t.Fatalf("batch: %d", resp.StatusCode)
+	}
+	o := objectsOf(out)[0]
+	if v, ok := o["authenticated"]; ok && v != false {
+		t.Fatalf("object marked authenticated, though its hrefs need the client's credentials: %v", o)
+	}
+	href := strings.TrimPrefix(actionHref(o, "upload"), e.ts.URL+"/repository/")
+	resp, _ = e.do("PUT", href, body, hdr("Content-Type", "application/octet-stream"))
+	if resp.StatusCode != 401 || !strings.HasPrefix(resp.Header.Get("LFS-Authenticate")+resp.Header.Get("WWW-Authenticate"), "Basic ") {
+		t.Fatalf("upload without credentials: %d %v", resp.StatusCode, resp.Header)
+	}
+	if resp, b := e.do("PUT", href, body, as("ci"), hdr("Content-Type", "application/octet-stream")); resp.StatusCode != 200 {
+		t.Fatalf("upload: %d %s", resp.StatusCode, b)
+	}
+	verify := strings.TrimPrefix(actionHref(o, "verify"), e.ts.URL+"/repository/")
+	if resp, b := e.do("POST", verify, fmt.Sprintf(`{"oid":%q,"size":%d}`, oid, len(body)), hdr("Content-Type", MediaType)); resp.StatusCode != 200 {
+		t.Fatalf("verify: %d %s", resp.StatusCode, b)
+	}
+	// A second push of the object: the batch answers that nothing is wanted.
+	_, out = e.batch("lfs", "upload", objs, as("ci"))
+	if o := objectsOf(out)[0]; o["actions"] != nil || o["error"] != nil {
+		t.Fatalf("second upload batch: %v", o)
 	}
 }
 

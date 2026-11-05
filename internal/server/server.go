@@ -50,9 +50,12 @@ type Server struct {
 	// Docker serves the Docker/OCI registry API at /v2/ and renders its
 	// errors; nil serves none. It authenticates Bearer tokens there itself
 	// (the tokens its /v2/token issues); Basic credentials are checked here.
+	// TokenOwner names whose registry token a request carries ("" for an
+	// anonymous or invalid one), for the request log and Seen.
 	Docker interface {
 		http.Handler
 		repo.ErrorWriter
+		TokenOwner(r *http.Request) string
 	}
 
 	// TerraformDiscovery, if set, answers GET /.well-known/terraform.json,
@@ -282,6 +285,7 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 		}
 		rec := &statusRecorder{ResponseWriter: w}
 		var p auth.Principal
+		var owner string // p's, or the owner of a registry token
 		// Deferred so the request is logged even when a handler panics
 		// (http.ErrAbortHandler mid-stream); the panic still propagates.
 		defer func() {
@@ -290,7 +294,7 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 				status = http.StatusOK
 			}
 			s.Log.Info("request", "id", id, "method", r.Method, "path", logsafe.Path(r.URL.Path), "status", status,
-				"bytes", rec.bytes, "ms", time.Since(start).Milliseconds(), "user", p.Owner(), "remote", r.RemoteAddr)
+				"bytes", rec.bytes, "ms", time.Since(start).Milliseconds(), "user", owner, "remote", r.RemoteAddr)
 			if s.Requests != nil {
 				// Only names the registry knows: a scanner cannot add rows.
 				name, ok := strings.CutPrefix(r.URL.Path, "/repository/")
@@ -303,7 +307,7 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 						// ponytail: Content-Length only; a chunked upload counts 0 bytes in.
 						s.Requests(name, status, max(r.ContentLength, 0), rec.bytes, time.Since(start))
 						if s.Seen != nil {
-							s.Seen(p.Owner(), r.RemoteAddr)
+							s.Seen(owner, r.RemoteAddr)
 						}
 					}
 				}
@@ -353,6 +357,9 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			// npm sends its stale saved token with the login PUT; the password in
 			// the body is what counts there.
 			p, err = auth.Principal{}, nil
+		}
+		if owner = p.Owner(); bearer {
+			owner = s.Docker.TokenOwner(r)
 		}
 		if wait := auth.RetryAfter(rec.Header(), err); wait > 0 {
 			writeErr(rec, r, repo.Errorf(http.StatusTooManyRequests, "too many failed sign-ins; try again in %d seconds", wait))
