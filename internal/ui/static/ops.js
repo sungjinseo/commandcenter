@@ -1112,16 +1112,15 @@ async function taskForm(view, id) {
   const showRuns = async () => {
     const got = await api("tasks/" + encodeURIComponent(task.id) + "/runs");
     if (!isLive()) return;
-    put(runsBox, tbl([t("task.runAt"), t("task.lastResult"), t("task.runTook"), t("task.runNode"), actHead()],
+    put(runsBox, tbl([t("task.runAt"), t("task.runResult"), t("task.runTook"), actHead()],
       got.runs.map((x) => {
         const b = button(t("task.runLog"));
         b.classList.add("small");
         b.addEventListener("click", () => showRun(x).catch(handleError));
         return h("tr", null,
-          h("td", { class: "nowrap" }, fmtDate(x.run)),
+          h("td", null, fmtDate(x.run), x.node ? h("div", { class: "tiny muted mono" }, x.node) : null),
           h("td", null, badge(RESULTS[x.result] ? t(RESULTS[x.result][0]) : x.result, (RESULTS[x.result] || [])[1]), x.message ? h("div", { class: "tiny muted" }, x.message) : null),
           h("td", { class: "nowrap" }, fmtNum(x.durationMs) + " ms"),
-          h("td", { class: "mono tiny" }, x.node || dash),
           h("td", { class: "act" }, b));
       }), t("task.noRuns")));
   };
