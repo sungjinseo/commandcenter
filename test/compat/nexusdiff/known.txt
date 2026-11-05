@@ -1,0 +1,2 @@
+# Differences from Nexus Repository 3.76.1 that are on purpose: step<TAB>prefix of the difference<TAB>why.
+# nexusdiff fails on any difference that is not listed here.
