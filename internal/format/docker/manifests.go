@@ -220,7 +220,11 @@ func (h *Handler) deleteManifest(ctx context.Context, rp *repo.Repository, image
 		return err
 	}
 	defer unlock()
-	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
+	return h.deleteManifestLocked(ctx, rp, image, digest, actor)
+}
+
+func (h *Handler) deleteManifestLocked(ctx context.Context, rp *repo.Repository, image, digest, actor string) error {
+	err := h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		pkgs, err := tx.ListPackages(ctx, rp.Name, image)
 		if err != nil {
 			return err

@@ -1540,6 +1540,7 @@ var nexusTaskTypes = map[string]string{
 	"repository.cleanup":           "repository.cleanup",
 	"blobstore.recalculate-size":   "blobstore.metrics.reconcile",
 	"maven.purge-unused-snapshots": "repository.maven.purge-unused-snapshots",
+	"docker.gc":                    "repository.docker.gc",
 }
 
 func nexusTaskType(typ string) string {

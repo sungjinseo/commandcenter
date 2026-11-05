@@ -41,6 +41,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   staging steps, "Test connection"), `gradle.sh` (maven-publish with module metadata, sha256/sha512), `sbt.sh` and
   `nexus3-cli.sh` (its blob store, task and realm commands work; its repository and file commands need Nexus's
   Groovy script API and are refused).
+- Task `docker.gc` (Nexus `repository.docker.gc`): removes the manifests of Docker hosted repositories that no tag
+  reaches, directly or through an index, and that went unstored and unpulled for `deployOffset` hours, then the
+  layers nothing references. An image from a recent docker is an index, so deleting its tag freed almost nothing
+  before; `blobstore.compact` then gives the disk space back.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such

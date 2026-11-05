@@ -40,7 +40,7 @@ func TestVerifyBlobsTask(t *testing.T) {
 	}
 	h.put(t, "mvn-none", "b/z/1.0/z-1.0.jar", "other repository")
 	out, _ := h.run(t, TypeVerify, `{}`)
-	if out.Result != ResultOK || out.Message != "checked 4 assets in 9 repositories: 0 missing, 0 mismatched" {
+	if out.Result != ResultOK || out.Message != "checked 4 assets in 10 repositories: 0 missing, 0 mismatched" {
 		t.Fatalf("clean: %+v", out)
 	}
 

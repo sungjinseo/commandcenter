@@ -104,11 +104,12 @@ type Service struct {
 	// Rebuilders are the hosted formats whose derived index files
 	// repository.rebuild-metadata regenerates, by format (Maven uses Maven).
 	Rebuilders map[string]repo.MetadataRebuilder
-	Events     repo.EventSink // task.run and cleanup events; nil records none
-	Mail       Mailer         // failure e-mails (SendAsync never blocks); nil: none
-	Metrics    Flusher        // pending download counts, flushed before cleanup evaluates; nil: none
-	Log        *slog.Logger   // run logs go here too (and so to the log ring)
-	Vuln       *vuln.Service  // vulnerability.sync and vulnerability.scan; nil: not available
+	Docker     DockerCollector // docker.gc; nil: not available
+	Events     repo.EventSink  // task.run and cleanup events; nil records none
+	Mail       Mailer          // failure e-mails (SendAsync never blocks); nil: none
+	Metrics    Flusher         // pending download counts, flushed before cleanup evaluates; nil: none
+	Log        *slog.Logger    // run logs go here too (and so to the log ring)
+	Vuln       *vuln.Service   // vulnerability.sync and vulnerability.scan; nil: not available
 
 	Transfer *transfer.Service // repository.export and repository.import; nil: not available
 
