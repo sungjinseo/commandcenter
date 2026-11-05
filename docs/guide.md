@@ -536,7 +536,7 @@ Sonatype Nexus Repository 3의 hosted 저장소 내용을 Command Center로 복�
 
 ## Nexus REST API 호환
 
-Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, Terraform provider(`datadrivers/terraform-provider-nexus`), `nexus-cli` 같은 도구가 실제로 쓰는 엔드포인트를 `/service/rest/v1` 아래에서 같은 경로와 같은 JSON 필드 이름으로 제공합니다. 인증은 다른 경로와 같습니다(Basic 비밀번호, API 토큰, UI 세션). 저장소 관리는 admin 또는 저장소 관리 권한(`admin:` 대상), 보안·작업·blob store 조회는 admin 또는 해당 `app:` 권한("관리 기능 위임"), 컴포넌트·자산 조회와 검색은 해당 저장소(또는 그 저장소를 멤버로 둔 group)의 read 또는 browse 권한, 삭제는 delete 권한이 필요합니다. 익명으로 읽을 수 없으면 `401`(Basic 챌린지 포함), 로그인했지만 권한이 없으면 `403`, 볼 수 없는 저장소는 `404`로 답합니다. 오류 본문은 Nexus처럼 `{"id": "*", "message": "..."}`이고, 저장소 본문의 검증 오류는 `400`에 `[{"id": "...", "message": "..."}]` 배열입니다. 시간 값은 밀리초와 `+00:00`이 붙은 ISO 8601입니다. 컨텐츠 셀렉터 권한만 있는 사용자에게는 셀렉터 식에 맞는 경로의 파일만 목록과 검색에 나옵니다.
+Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, Terraform provider(`datadrivers/terraform-provider-nexus`), `nexus-cli` 같은 도구가 쓰는 엔드포인트를 `/service/rest/v1` 아래에서 같은 경로와 같은 JSON 필드 이름으로 제공합니다. Nexus의 공개 소스를 읽고 맞춘 것으로, 이 도구들을 실제로 돌려 본 것은 아니므로 옮기기 전에 쓰는 도구로 직접 시험해 보세요. 인증은 다른 경로와 같습니다(Basic 비밀번호, API 토큰, UI 세션). 저장소 관리는 admin 또는 저장소 관리 권한(`admin:` 대상), 보안·작업·blob store 조회는 admin 또는 해당 `app:` 권한("관리 기능 위임"), 컴포넌트·자산 조회와 검색은 해당 저장소(또는 그 저장소를 멤버로 둔 group)의 read 또는 browse 권한, 삭제는 delete 권한이 필요합니다. 익명으로 읽을 수 없으면 `401`(Basic 챌린지 포함), 로그인했지만 권한이 없으면 `403`, 볼 수 없는 저장소는 `404`로 답합니다. 오류 본문은 Nexus처럼 `{"id": "*", "message": "..."}`이고, 저장소 본문의 검증 오류는 `400`에 `[{"id": "...", "message": "..."}]` 배열입니다. 시간 값은 밀리초와 `+00:00`이 붙은 ISO 8601입니다. 컨텐츠 셀렉터 권한만 있는 사용자에게는 셀렉터 식에 맞는 경로의 파일만 목록과 검색에 나옵니다.
 
 | 엔드포인트 | 지원 |
 |---|---|

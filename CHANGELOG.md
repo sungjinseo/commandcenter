@@ -16,8 +16,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `assetN.classifier`, `assetN.extension`), raw (`directory`, `assetN.filename`), apt, npm, pypi, nuget,
   rubygems, helm, yum (`directory`, `asset.filename`) and r (`asset.pathId`), plus conda, composer and
   terraform modules. Each file goes through the format's own upload (same privileges, write policy,
-  validation, events and metadata); 204 on success, 400 validation lists as Nexus answers. Works with
-  `curl -F`, Jenkins `nexusPublisher` and `nexus3-cli`.
+  validation, events and metadata); 204 on success, 400 validation lists as Nexus answers. Tested with
+  `curl -F`; Jenkins `nexusPublisher` and `nexus3-cli` send the same fields but have not been run against it.
 - `GET /service/rest/v1/formats/upload-specs` and `/formats/{format}/upload-specs`: the fields each
   format's component upload takes.
 - Nexus API: S3 blob stores (`POST /v1/blobstores/s3` 201, `GET`/`PUT /v1/blobstores/s3/{name}`, secret
