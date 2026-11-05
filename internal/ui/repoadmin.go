@@ -74,6 +74,9 @@ type repoRequest struct {
 	NegativeCacheTTL       string   `json:"negativeCacheTTL"`
 	Members                []string `json:"members"`
 	WriteMember            string   `json:"writeMember"`
+	// MergeMembers (npm and pypi groups): answer a package from every
+	// member that has it, merged, instead of the first one alone.
+	MergeMembers bool `json:"mergeMembers"`
 	// RoutingRule names the proxy's routing rule; "" is none.
 	RoutingRule   string `json:"routingRule"`
 	VersionPolicy string `json:"versionPolicy"`
@@ -159,6 +162,7 @@ type repoConfigResponse struct {
 	NegativeCacheTTL     string            `json:"negativeCacheTTL"`
 	Members              []string          `json:"members"`
 	WriteMember          string            `json:"writeMember"`
+	MergeMembers         bool              `json:"mergeMembers,omitempty"`
 	RoutingRule          string            `json:"routingRule"`
 	VersionPolicy        string            `json:"versionPolicy"`
 	WritePolicy          string            `json:"writePolicy"`
@@ -246,6 +250,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 		NegativeCacheTTL:     d.NegativeCacheTTL.Text(),
 		Members:              append([]string{}, d.Members...),
 		WriteMember:          d.WriteMember,
+		MergeMembers:         d.MergeMembers,
 		RoutingRule:          d.RoutingRule,
 		VersionPolicy:        d.VersionPolicy,
 		WritePolicy:          d.WritePolicy,
@@ -297,7 +302,7 @@ func repoConfigJSON(d config.Repository) repoConfigResponse {
 func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error) {
 	d := config.Repository{
 		Name: b.Name, Format: b.Format, Type: b.Type, Remote: b.Remote,
-		Members: b.Members, WriteMember: b.WriteMember, RoutingRule: b.RoutingRule,
+		Members: b.Members, WriteMember: b.WriteMember, MergeMembers: b.MergeMembers, RoutingRule: b.RoutingRule,
 		VersionPolicy: b.VersionPolicy, WritePolicy: b.WritePolicy, Depth: b.Depth,
 		AnonymousRead: b.AnonymousRead, Online: b.Online,
 		BlobStore:    b.BlobStore,

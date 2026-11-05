@@ -87,6 +87,7 @@ repositories:
     type: group
     members: [npm-hosted, npm-proxy]
     writeMember: npm-hosted
+    # mergeMembers: true              # Nexus처럼 모든 멤버의 패키지 문서를 합침(기본: 패키지를 가진 첫 멤버만. 의존성 혼동 방지)
   - name: pypi-proxy
     format: pypi
     type: proxy

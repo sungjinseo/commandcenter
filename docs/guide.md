@@ -984,6 +984,7 @@ commandcenter config apply -config /etc/commandcenter/config.yaml -f cc.yaml -pr
 | `routingRule` | proxy | 없음 | 이 proxy에 적용할 라우팅 규칙 이름 하나. 없는 이름은 400이고 hosted·group에는 쓸 수 없습니다("라우팅 규칙" 참고). |
 | `members` | group | 필수 | 멤버 저장소 이름 목록. 순서대로 조회하며 같은 포맷이어야 하고 순환할 수 없습니다. |
 | `writeMember` | group | 없음 | 업로드를 받을 hosted 멤버(`members`에 포함되어야 함). 없으면 group에 쓰기는 405. |
+| `mergeMembers` | npm·pypi group | `false` | 켜면 패키지를 가진 모든 멤버의 문서를 합쳐서 답합니다(Nexus의 group 동작). 끄면(기본값) 패키지를 가진 첫 멤버만 답하므로, 공개 저장소의 같은 이름 패키지가 내부 패키지를 대신하거나 버전을 끼워 넣지 못합니다(의존성 혼동 방지). Nexus에서 옮긴 group이 hosted의 패치 버전과 공개 버전을 함께 내주던 경우에만 켜세요. |
 | `versionPolicy` | Maven hosted, proxy | `release`(hosted) | `release`, `snapshot`, `mixed`. Maven에서만 쓸 수 있습니다. 업로드뿐 아니라 읽기에도 적용되어, 정책에 맞지 않는 경로의 GET·HEAD는 404이고 proxy는 원격에 묻지 않습니다("Maven 클라이언트 설정"의 동작 메모 참고). |
 | `layoutPolicy` | Maven hosted, proxy | `strict` | `strict`는 Maven 경로(아티팩트, 메타데이터, 체크섬, 서명, `archetype-catalog.xml`, `.meta/prefixes.txt`)만 저장하고 가져옵니다. `permissive`는 그 밖의 경로(`KEYS`, `docs/readme.txt` 등)도 저장하거나 원격에서 가져옵니다. 어느 쪽이든 `.index/`와 `.meta/` 아래 경로는 받지 않습니다. 기존 저장소는 모두 `strict`이며 이전과 같이 동작합니다. 편집할 때 생략하면 유지합니다. Nexus 호환 API의 `maven.layoutPolicy`(`STRICT`/`PERMISSIVE`)와 같습니다. |
 | `depth` | yum hosted | `0` | `repodata/` 위치: `0`은 저장소 루트에 하나, `1`은 첫 디렉터리마다("Yum 설정" 참고). |

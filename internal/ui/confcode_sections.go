@@ -456,7 +456,7 @@ func repoRequestOf(d config.Repository) repoRequest {
 	config.ApplyRepositoryDefaults(&d)
 	b := repoRequest{Name: d.Name, Format: d.Format, Type: d.Type, Remote: d.Remote,
 		MetadataMaxAge: d.MetadataMaxAge.Text(), ContentMaxAge: d.ContentMaxAge.Text(), NegativeCacheTTL: d.NegativeCacheTTL.Text(),
-		Members: slices.Clone(d.Members), WriteMember: d.WriteMember, RoutingRule: d.RoutingRule,
+		Members: slices.Clone(d.Members), WriteMember: d.WriteMember, MergeMembers: d.MergeMembers, RoutingRule: d.RoutingRule,
 		VersionPolicy: d.VersionPolicy, WritePolicy: d.WritePolicy, Depth: d.Depth, BlobStore: d.BlobStore,
 		Distribution: d.Distribution, Component: d.Component, SigningKey: d.SigningKey, GPGPublicKey: d.GPGPublicKey,
 		Flat: d.Flat, EnforceDistribution: d.EnforceDistribution,

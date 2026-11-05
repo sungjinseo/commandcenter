@@ -634,3 +634,21 @@ func TestAptSettings(t *testing.T) {
 		t.Fatalf("apt list: %v", err)
 	}
 }
+
+// mergeMembers is a setting of npm and PyPI groups only.
+func TestValidateDefinitionMergeMembers(t *testing.T) {
+	const want = "mergeMembers is only valid for npm and pypi groups"
+	for _, r := range []Repository{
+		{Name: "a", Format: "npm", Type: "hosted", MergeMembers: true},
+		{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, MergeMembers: true},
+	} {
+		if err := ValidateDefinition(r); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s %s: %v", r.Format, r.Type, err)
+		}
+	}
+	for _, format := range []string{"npm", "pypi"} {
+		if err := ValidateDefinition(Repository{Name: "g", Format: format, Type: "group", Members: []string{"h"}, MergeMembers: true}); err != nil {
+			t.Errorf("%s group: %v", format, err)
+		}
+	}
+}

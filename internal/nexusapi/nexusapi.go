@@ -596,6 +596,7 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 	}
 	if cur != nil {
 		out["anonymousRead"], out["depth"], out["gpgPublicKey"] = cur.AnonymousRead, cur.Depth, cur.GPGPublicKey
+		out["mergeMembers"] = cur.MergeMembers
 		out["contentDisposition"] = cur.ContentDisposition
 	}
 	switch {
