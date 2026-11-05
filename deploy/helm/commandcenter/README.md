@@ -115,6 +115,7 @@ kubectl -n registry exec commandcenter-postgresql-0 -- pg_dump -U commandcenter 
 | `replicaCount` | `1` | Above 1: active-active pods on PostgreSQL and a ReadWriteMany volume ([High availability](#high-availability)) |
 | `database.existingSecret` | `""` | Secret with the URL of an external PostgreSQL (key `url`); empty uses the bundled one ([Database](#database)) |
 | `postgresql.enabled` | `true` | The bundled single-pod PostgreSQL, while `database.existingSecret` is empty |
+| `postgresql.networkPolicy.enabled`, `allowFrom` | `false`, `[]` | Lets only the server pods and these NetworkPolicy peers reach the bundled PostgreSQL. Needs a CNI that enforces NetworkPolicy; host-network pods are not stopped by one |
 | `postgresql.persistence.storageClass`, `size` | default class, `8Gi` | The bundled PostgreSQL's volume: block storage |
 | `persistence.storageClass`, `size` | default class, `50Gi` | Blobs; ReadWriteMany with `replicaCount` above 1 |
 | `resources.limits.memory`, `goMemLimit` | `128Mi`, `80MiB` | Raise them together; GOMEMLIMIT about 60-65 % of the limit |

@@ -306,7 +306,7 @@ export function logsCard(isLive, criteria = new URLSearchParams()) {
       put(box, logs.length ? logs.map((r) => h("div", { class: logClass(r.level) },
         fmtDate(r.time) + " " + r.level + " " + r.message + (r.attrs ? " " + r.attrs : ""))) : h("div", null, t("logs.none")));
       box.scrollTop = 0;
-      count.textContent = t("logs.count", { n: fmtNum(logs.length) });
+      count.textContent = t("logs.count", { n: fmtNum(logs.length) }) + (d.node ? " · " + t("logs.node", { node: d.node }) : "");
       if (filtered) {
         const text = logs.slice().reverse().map((r) => [r.time, r.level, r.message, r.attrs].filter(Boolean).join(" ").replace(/[\r\n]/g, " ")).join("\n");
         downloadURL = URL.createObjectURL(new Blob([text ? text + "\n" : ""], { type: "text/plain;charset=utf-8" }));

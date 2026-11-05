@@ -599,6 +599,22 @@
           "pattern": "^[a-z_][a-z0-9_]{0,62}$",
           "description": "Role name; it goes into the URL unescaped"
         },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "allowFrom": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              },
+              "description": "NetworkPolicy peers that may reach the database, besides the server pods"
+            }
+          }
+        },
         "podSecurityContext": {
           "type": "object"
         },

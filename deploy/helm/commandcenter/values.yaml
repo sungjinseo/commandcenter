@@ -83,6 +83,13 @@ postgresql:
     pullPolicy: IfNotPresent
   database: commandcenter
   username: commandcenter
+  # A NetworkPolicy that lets only this release's server pods, and allowFrom (NetworkPolicy peers,
+  # for a backup pod, say), reach the database; everything else in the cluster is refused. Needs a
+  # CNI that enforces NetworkPolicy, and pods on the host network are not stopped by one.
+  # "kubectl exec" into the database pod, as the guide's pg_dump does, is not affected.
+  networkPolicy:
+    enabled: false
+    allowFrom: []
   # The image's postgres user (uid 70 on Alpine). OpenShift's restricted-v2 SCC assigns the user
   # and groups itself: set runAsUser, runAsGroup and fsGroup to null there.
   podSecurityContext:

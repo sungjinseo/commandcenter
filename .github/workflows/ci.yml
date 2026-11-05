@@ -130,6 +130,7 @@ jobs:
           extraVolumes: [{name: blobs, persistentVolumeClaim: {claimName: commandcenter-blobs}}]
           extraVolumeMounts: [{name: blobs, mountPath: /blobs}]
           postgresql:
+            networkPolicy: {enabled: true, allowFrom: [{podSelector: {matchLabels: {app: backup}}}]}
             image: {digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
             persistence: {storageClass: "-", size: 20Gi, annotations: {example.com/backup: "true"}}
           EOF

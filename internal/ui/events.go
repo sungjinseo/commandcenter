@@ -133,7 +133,8 @@ func (u *UI) listLogs(w http.ResponseWriter, r *http.Request) {
 			out = append(out, row{rec.Time.UTC().Format(time.RFC3339Nano), rec.Level.String(), rec.Msg, rec.Attrs})
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"logs": out})
+	// The ring is this node's: with several nodes, say whose log this is.
+	writeJSON(w, http.StatusOK, map[string]any{"logs": out, "node": u.DB.NodeID()})
 }
 
 // GET /-/api/logs/download (admin): the ring as a text file, oldest first, so

@@ -139,4 +139,28 @@ spec:
         resources:
           requests:
             storage: {{ $pg.persistence.size }}
+{{- if $pg.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "commandcenter.postgresql.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "commandcenter.postgresql.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "commandcenter.selectorLabels" . | nindent 14 }}
+        {{- with $pg.networkPolicy.allowFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: 5432
+{{- end }}
 {{- end }}
