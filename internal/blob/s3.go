@@ -144,7 +144,8 @@ const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b785
 type s3 struct {
 	cfg                           S3Config
 	accessKey, secretKey, session string
-	base                          *url.URL // scheme://host, with /<bucket> for path style
+	creds                         *s3CredSource // an AWS role's temporary keys, in place of those three
+	base                          *url.URL      // scheme://host, with /<bucket> for path style
 	client                        *http.Client
 	now                           func() time.Time
 	failover                      []*s3 // replicas open and stat read from while this one is unavailable
@@ -184,7 +185,9 @@ func newS3(cfg S3Config) (*s3, error) {
 	if be.accessKey == "" {
 		be.accessKey, be.secretKey, be.session = os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN")
 		if be.accessKey == "" || be.secretKey == "" {
-			return nil, errors.New("no S3 credentials: set accessKey and secretKey, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY")
+			if be.creds = ambientS3Creds(cfg, be.now); be.creds == nil {
+				return nil, errors.New("no S3 credentials: set accessKey and secretKey, or AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, or run with an AWS role (IRSA, Pod Identity, an instance profile)")
+			}
 		}
 	}
 	u := cfg.endpointURL()
@@ -256,7 +259,15 @@ func (s *s3) request(method, key string, q url.Values, hdr map[string]string, bo
 	for k, v := range hdr {
 		r.Header.Set(k, v)
 	}
-	SignV4(r, s.accessKey, s.secretKey, s.session, s.cfg.Region, payloadHash, s.now())
+	access, secret, session := s.accessKey, s.secretKey, s.session
+	if s.creds != nil {
+		c, err := s.creds.get()
+		if err != nil {
+			return nil, fmt.Errorf("S3 credentials: %w", err)
+		}
+		access, secret, session = c.access, c.secret, c.session
+	}
+	SignV4(r, access, secret, session, s.cfg.Region, payloadHash, s.now())
 	return r, nil
 }
 

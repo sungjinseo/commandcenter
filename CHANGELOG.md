@@ -102,6 +102,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Task run history: each task keeps its last 50 runs, up to 30 days, with the result, duration, node and log, shown on the task's page and served by `GET /-/api/tasks/{id}/runs` and `GET /-/api/tasks/{id}/runs/{run}`. Before, only the last run's log was kept.
 - Helm: `postgresql.networkPolicy.enabled` (off by default) lets only the server pods and `allowFrom` peers reach the bundled PostgreSQL.
 - The Logs screen and `GET /-/api/logs` name the node whose log they show; each node keeps its own.
+- S3 blob stores without keys use an AWS role when no `AWS_ACCESS_KEY_ID` is set: EKS IRSA (web identity), EKS Pod Identity and ECS (container credentials), EC2 instance profiles (IMDSv2). Temporary keys are refreshed 5 minutes before they expire.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
