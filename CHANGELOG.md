@@ -8,6 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `commandcenter import-nexus -config` makes a Nexus Repository 3 server's configuration on Command Center before it
+  copies content (`-config-only`: the configuration alone): blob stores, cleanup policies, routing rules, content
+  selectors, repositories (hosted, proxy, then groups in member order, with their format settings), privileges,
+  roles, local users, anonymous access, the first LDAP server, the realm order, e-mail, the scheduled tasks that
+  have an equivalent and the outbound HTTP proxy. It reads Nexus's REST API as an administrator (cleanup policies
+  from the web UI's internal resource, task schedules and HTTP settings through ExtDirect) and writes through the
+  Nexus-compatible API. What Nexus does not hand out (remote passwords and tokens, S3 secret keys, the LDAP bind,
+  SMTP and proxy passwords, apt signing keys with a passphrase) is never made up: the object is made without it
+  and a `needs manual action:` line says what to enter. New users get a random password, written to
+  `-passwords-out FILE` (mode 0600) or kept nowhere. A target with no user but its administrator gets Nexus's
+  rule that a privilege, not a sign-in, lets someone read (`authenticatedRead` off); a target in use keeps its
+  setting. `-dry-run` prints the plan, a second run changes nothing, what exists and differs is reported and left
+  alone unless `-update` is given, one failed object does not stop the rest, and the last line and the exit code
+  summarize. Built from Nexus 3.91.1's public source and tested against a stand-in and against Command Center as
+  the source, not against a running Nexus: plan with `-dry-run` first.
+
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
   docker component for a prerelease, because their versions join a build, a release number or a tag variant with

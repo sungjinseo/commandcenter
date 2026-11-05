@@ -502,10 +502,60 @@ Docker의 기본 중지 대기 시간은 10초라서, 그 안에 끝나지 않�
 
 ## Nexus에서 이전하기
 
-Sonatype Nexus Repository 3의 hosted 저장소 내용을 Command Center로 복사할 때는 `commandcenter import-nexus` 서브커맨드를 씁니다. Nexus의 REST API(v1)로 컴포넌트 목록을 읽고, 포맷마다 Command Center가 원래 받는 업로드 방식(Maven PUT, npm publish, PyPI 업로드, raw PUT, helm PUT, apt PUT, docker blob/manifest 업로드)으로 그대로 올리므로 서버의 검증이 모두 적용됩니다. 서버 쪽에 추가 설정은 없습니다.
+Sonatype Nexus Repository 3에서 Command Center로 옮길 때는 `commandcenter import-nexus` 서브커맨드를 씁니다. `-config`를 주면 Nexus의 설정(blob store, cleanup 정책, 라우팅 규칙, 컨텐츠 셀렉터, 저장소, 권한, 역할, 로컬 사용자, 익명 접근, LDAP, realm, 이메일, 예약 작업, HTTP 프록시)을 REST API로 읽어 Command Center에 같은 이름으로 만들고, 이어서 hosted 저장소의 내용을 복사합니다. `-config` 없이 실행하면 이전처럼 내용만 복사합니다. 내용은 Nexus의 REST API(v1)로 컴포넌트 목록을 읽고, 포맷마다 Command Center가 원래 받는 업로드 방식(Maven PUT, npm publish, PyPI 업로드, raw PUT, helm PUT, apt PUT, docker blob/manifest 업로드)으로 그대로 올리므로 서버의 검증이 모두 적용됩니다. 서버 쪽에 추가 설정은 없습니다.
 
-1. **준비.** Nexus에 읽기 권한이 있는 사용자와 비밀번호, Command Center에 대상 저장소 쓰기 권한이 있는 사용자와 API 토큰(`commandcenter token create`, Basic 비밀번호 자리에 씁니다)을 준비합니다. 비밀번호와 토큰은 파일(첫 줄)이나 환경 변수 `NEXUS_PASSWORD`, `COMMANDCENTER_TOKEN`로 넘깁니다. 명령줄 인자나 URL(`http://user:pw@...`)에는 넣을 수 없고, 출력에도 찍히지 않습니다. 도구를 실행하는 곳에서 두 서버에 모두 접속할 수 있어야 합니다. 사설망 주소의 Nexus도 됩니다.
-2. **대상 저장소를 먼저 만들기.** Command Center에 같은 포맷의 hosted 저장소를 먼저 만듭니다. Nexus 포맷과의 대응은 maven2→maven, npm→npm, pypi→pypi, raw→raw, helm→helm, apt→apt, docker→docker입니다. 이름이 같을 필요는 없고 `-repo <Nexus 저장소>=<Command Center 저장소>`로 짝을 지어 줍니다. 이름이 같으면 `-repo <이름>`만 써도 됩니다. Maven 저장소는 `versionPolicy`(release/snapshot)를 Nexus 쪽과 맞춰 두세요. 정책에 맞지 않는 버전은 업로드가 거부되어 오류로 집계됩니다.
+1. **준비.** Nexus에 읽기 권한이 있는 사용자와 비밀번호, Command Center에 대상 저장소 쓰기 권한이 있는 사용자와 API 토큰(`commandcenter token create`, Basic 비밀번호 자리에 씁니다)을 준비합니다. 비밀번호와 토큰은 파일(첫 줄)이나 환경 변수 `NEXUS_PASSWORD`, `COMMANDCENTER_TOKEN`로 넘깁니다. 명령줄 인자나 URL(`http://user:pw@...`)에는 넣을 수 없고, 출력에도 찍히지 않습니다. 도구를 실행하는 곳에서 두 서버에 모두 접속할 수 있어야 합니다. 사설망 주소의 Nexus도 됩니다. `-config`를 쓸 때는 두 사용자가 모두 관리자여야 합니다. Nexus 사용자는 설정을 읽을 수 있는 관리자(`nx-admin`)여야 하고, Command Center 사용자는 관리자이며 `-to-token-file`(또는 `COMMANDCENTER_TOKEN`)에 API 토큰이 아니라 그 관리자의 **비밀번호**를 넣어야 합니다. 설정을 바꾸는 API는 토큰으로 호출할 수 없습니다. 토큰을 주면 계획(`-dry-run`)은 나오지만 실제 실행에서는 모든 줄이 `HTTP 403: this action requires a password or session login`으로 실패합니다.
+2. **설정 옮기기(`-config`), 또는 대상 저장소를 직접 만들기.** `-config`를 주면 내용을 복사하기 전에 Nexus의 설정을 읽어 Command Center에 같은 이름으로 만듭니다. `-config`만 주면 설정을 만든 뒤 모든 hosted 저장소의 내용을 복사하고(`-all`과 같습니다), `-repo`를 함께 주면 그 저장소의 내용만 복사하며, `-config-only`는 설정만 만들고 내용은 복사하지 않습니다. `-config`를 쓰지 않으려면 이전처럼 같은 포맷의 hosted 저장소를 직접 만든 뒤 `-repo <Nexus 저장소>=<Command Center 저장소>`로 짝을 지어 줍니다(이름이 같으면 `-repo <이름>`). 내용을 복사할 수 있는 포맷은 maven2→maven, npm, pypi, raw, helm, apt, docker이고, Maven 저장소는 `versionPolicy`(release/snapshot)가 Nexus 쪽과 같아야 합니다. 정책에 맞지 않는 버전은 업로드가 거부되어 오류로 집계됩니다.
+
+   설정은 아래 순서(의존 순서)로 옮깁니다.
+
+   | 대상 | 옮기는 값과 방식 |
+   |---|---|
+   | Blob store | 이름을 그대로 씁니다. **file** store는 Nexus 서버의 경로를 쓰지 않고 Command Center의 기본 위치(`<dataDir>/blobstores/<이름>`)에 만들며 소프트 쿼터를 옮깁니다. 다른 경로에 두려면 실행하기 전에 그 이름의 store를 직접 만들어 두세요. 이미 있는 store는 그대로 씁니다. **S3** store는 비밀 키를 읽을 수 없으므로, access key가 있는 store는 만들지 않고 수동 조치로 남깁니다. 같은 이름으로 직접 만든 뒤 다시 실행하면 그 store를 쓰는 저장소까지 만들어집니다. access key가 없는(서버의 IAM 역할을 쓰는) S3 store는 같은 버킷·region·prefix·endpoint로 만듭니다. Azure·Google store도 수동 조치입니다. **그룹**은 멤버를 먼저 만든 뒤 같은 멤버 순서와 fill policy로 만듭니다. store를 만들지 못한 저장소는 다른 store로 옮기지 않고 `skipped (its blob store … is missing on the target)`로 둡니다. |
+   | Cleanup 정책 | 이름, 메모, 포맷, 기준(`criteriaLastBlobUpdated`, `criteriaLastDownloaded`, `criteriaReleaseType`, `criteriaAssetRegex`, `retain`, `sortBy`). Command Center에 없는 포맷의 정책은 건너뜁니다. |
+   | 라우팅 규칙 | 이름, 설명, 모드, matcher. |
+   | 컨텐츠 셀렉터 | 이름, 설명, 식(CSEL). JEXL 셀렉터는 건너뜁니다. 식에 `/v2/`가 있으면 Docker 경로가 다르다는 것을 알려 줍니다("사용자, 역할, 권한 옮기기" 참고). |
+   | 저장소 | hosted, proxy, group 순서이고 그룹 안의 그룹은 안쪽부터 만들며 멤버 순서를 지킵니다. 옮기는 값: online, blob store, hosted의 `writePolicy`와 `strictContentTypeValidation`, cleanup 정책, proxy의 원격 URL·`contentMaxAge`·`metadataMaxAge`·negative cache·`blocked`·`autoBlock`·연결 설정(`httpClient.connection`)·라우팅 규칙·복제(replication) 설정, group의 멤버와 `writableMember`, Maven의 `versionPolicy`·`layoutPolicy`·`contentDisposition`, raw의 `contentDisposition`, apt의 `distribution`(proxy는 `flat`·`enforceDistribution`도), yum의 `repodataDepth`, NuGet proxy의 `nugetVersion`, cargo·terraform·swift의 `requireAuthentication`. Command Center에 없는 포맷(bower 등)의 저장소는 `skipped`입니다. |
+   | 권한 | Nexus에서 직접 만든 권한(application, wildcard, repository-view, repository-admin, repository-content-selector). 내장 권한은 Command Center에 같은 이름으로 있습니다. script 권한과, 옮기지 못한 저장소·셀렉터·포맷을 가리키는 권한은 건너뜁니다. |
+   | 역할 | 포함된 역할을 먼저 만듭니다. 대상에 없는 권한(`nx-capabilities-all` 등)은 역할에서 빼고 그 이름을 줄 끝에 적습니다. 역할이 Nexus보다 넓어지는 일은 없습니다. `nx-admin`은 Command Center의 내장 admin 역할입니다. |
+   | 로컬 사용자 | ID, 이름, 이메일, 상태, 역할. 비밀번호는 무작위로 정합니다(아래). `anonymous` 사용자는 건너뜁니다. |
+   | 익명 접근 | Nexus의 anonymous 사용자가 모든 저장소를 읽을 수 있을 때만 전역 익명 읽기를 켭니다. |
+   | LDAP | Nexus의 첫 번째 LDAP 서버를 Command Center의 LDAP 설정으로 옮깁니다(주소, 사용자 기준 DN, 필터, 속성, 그룹→역할 매핑). |
+   | Realm | Nexus에서 켜진 realm을 그 순서대로 앞에 두고, 대상에서 켜져 있던 realm은 뒤에 그대로 둡니다. 끄는 realm은 없습니다. |
+   | 이메일 | SMTP 서버, 포트, 사용자, 보내는 주소, TLS 방식. Nexus에서 이메일이 꺼져 있으면 옮기지 않습니다. |
+   | 예약 작업 | Command Center에 같은 종류가 있는 작업(`blobstore.compact`, `repository.cleanup`, `repository.maven.remove-snapshots`, `repository.maven.purge-unused-snapshots`, `repository.maven.rebuild-metadata`, `repository.apt.rebuild.metadata`, `blobstore.delete-temp-files`, `blobstore.metrics.reconcile` 등)을 이름, 일정, 속성, 알림 주소와 함께 만듭니다. 같은 종류와 이름의 작업이 이미 있으면 일정과 속성은 비교하지 않고 그대로 둡니다. cron 일정은 Command Center 서버의 시간대로 실행됩니다. |
+   | HTTP 설정 | User-Agent 접미사, 타임아웃, 재시도 횟수, 프록시의 호스트·포트·제외 호스트. Command Center는 HTTP와 HTTPS에 프록시 하나를 쓰므로 Nexus의 HTTP 프록시를 옮기고(HTTP 프록시가 없으면 HTTPS 프록시), HTTPS 프록시가 다르면 줄 끝에 알려 줍니다. |
+
+   설정은 Command Center의 Nexus 호환 API(`/service/rest/v1`)로 쓰므로 검증 규칙이 "Nexus REST API 호환"에 적힌 것과 같고, 그 API에 쓰기가 없는 LDAP 서버와 HTTP 설정만 `/-/api`로 씁니다. Nexus에서는 REST API(v1)를 읽되, REST 리소스가 없는 것은 Nexus 웹 UI가 쓰는 엔드포인트로 읽습니다. cleanup 정책은 `/service/rest/internal/cleanup-policies`, 예약 작업의 일정과 속성, HTTP 설정은 `/service/extdirect`입니다. 이 기능은 Nexus 3.91.1의 공개 소스에 있는 응답 모양에 맞춰 만들었고 실제 Nexus 서버로는 시험하지 못했으므로, 먼저 `-dry-run`으로 계획을 확인하세요.
+
+   **옮기지 못하는 차이.** Command Center가 지킬 수 없는 값은 버리고 그 저장소의 줄 끝에 이유를 적습니다. Docker 저장소의 커넥터 포트(`httpPort`, `httpsPort`)와 subdomain은 옮기지 않습니다. Command Center는 모든 Docker 저장소를 서버 주소의 `/<저장소>/<이미지>`로 제공하기 때문이며("Docker 설정"), 그 줄에 이미지를 복사할 때 쓸 `-repo <이름> -docker-from <주소>:<포트>`도 함께 나옵니다. Docker V1 API, `forceBasicAuth: false`, latest 태그만 다시 올리게 하는 정책(`latestPolicy`), foreign layer 캐시, yum의 `deployPolicy: PERMISSIVE`(깊이 1 이상)와 yum 메타데이터 서명, 원격 저장소·프록시의 NTLM 인증, 이메일 제목 접두어도 같습니다. NuGet V2 원격 proxy처럼 Command Center가 거부하는 저장소는 `error:` 줄에 서버가 돌려준 이유가 나오고 나머지는 계속 진행됩니다.
+
+   **읽을 수 없는 비밀값.** Nexus는 비밀번호, 토큰, 키를 API로 내주지 않습니다. `import-nexus`는 이런 값을 지어내지 않습니다. 비밀값 없이 만들어도 안전한 객체는 비밀값 없이 만들고, 끝에 `needs manual action:` 줄로 무엇을 넣어야 하는지 하나씩 알려 줍니다.
+
+   - **proxy의 원격 비밀번호·베어러 토큰**: proxy를 인증 정보 없이 만듭니다(사용자 이름만 넣으면 빈 비밀번호가 원격으로 나가기 때문입니다). 저장소 화면에서 사용자 이름과 비밀번호(또는 토큰)를 넣으세요.
+   - **S3 비밀 키, Azure·Google 자격 증명**: 위 표의 Blob store 참고.
+   - **LDAP bind 비밀번호**: Command Center는 비밀번호 없는 bind DN을 받지 않으므로 bind DN과 비밀번호 없이 만듭니다. 넣기 전까지는 디렉터리를 익명으로 검색합니다. Realm 화면의 LDAP 설정에 bind DN(수동 조치 줄에 나옵니다)과 비밀번호를 넣으세요.
+   - **SMTP 비밀번호, HTTP 프록시의 사용자·비밀번호**: 이메일 설정과 일반 설정의 HTTP 항목에 넣으세요.
+   - **apt 서명 키**: Nexus가 hosted apt 저장소의 서명 키를 돌려주고 그 키에 passphrase가 없으면 새 저장소에 그 키를 넣습니다(줄 끝에 `with its apt signing key`). passphrase가 걸린 키는 옮길 수 없으므로 저장소를 서명 없이 만들고 수동 조치로 남깁니다. 키와 passphrase를 넣기 전까지 그 저장소의 메타데이터는 서명되지 않습니다.
+   - **사용자 비밀번호**: Nexus는 비밀번호 해시를 내주지 않으므로 새로 만든 사용자에게는 무작위 비밀번호를 정합니다. `-passwords-out <파일>`을 주면 `사용자ID<탭>비밀번호` 형식으로 그 파일(권한 0600, 이어 쓰기)에 적고, 주지 않으면 어디에도 남기지 않으므로 관리자가 사용자마다 비밀번호를 다시 정해야 합니다. 비밀번호는 화면에 출력하지 않습니다. 파일의 비밀번호는 사용자에게 전달한 뒤 바꾸게 하고 파일은 지우세요.
+
+   수동 조치 줄은 대상의 상태를 보고 만들기 때문에 값을 넣은 뒤 다시 실행하면 사라집니다. 예외가 둘 있습니다. 사용자 비밀번호 안내는 그 사용자를 만든 실행에서 한 번만 나오므로 첫 실행의 출력을 보관하세요. 익명 접근을 저장소별로 옮기라는 안내는 Nexus 쪽 설정을 보고 만들므로 계속 나옵니다.
+
+   **출력과 종료 코드.** 객체마다 `config<탭>종류<탭>이름<탭>상태` 한 줄을 출력하고, 옮기지 못한 차이가 있으면 줄 끝에 붙입니다. 상태는 `created`, `updated`, `unchanged`, `differs: <다른 필드> (left as it is; -update changes it)`, `skipped (<이유>)`, `error: <서버가 돌려준 이유>`이고, `-dry-run`에서는 `would create`, `would update`입니다. 한 객체가 실패해도 나머지는 계속하며, 실패한 객체에 기대는 객체는 `skipped`가 됩니다. `-config`에서는 그 뒤에 내용 복사의 줄과 요약이 나오고, 맨 끝에 수동 조치 줄들과 `configuration: 31 created, 2 updated, 12 unchanged, 1 differ, 3 skipped, 0 failed, 5 need manual action` 한 줄이 나옵니다. 설정이든 내용이든 실패가 하나라도 있으면 종료 코드는 1입니다. `-dry-run`은 두 서버를 읽기만 하고 아무것도 쓰지 않습니다. 다만 ID 규칙처럼 Command Center가 저장할 때 거부하는 것은 계획에 나오지 않고 실제 실행의 `error:` 줄로 나옵니다.
+
+   **다시 실행과 `-update`.** 몇 번을 실행해도 결과가 같습니다. 대상에 이미 있고 Nexus와 같은 객체는 `unchanged`이고, 이미 있는데 다른 객체는 `differs`로 알려 주기만 하고 그대로 둡니다. `-update`를 주면 그런 객체를 Nexus의 값으로 바꿉니다. 이때도 손으로 넣은 원격 인증 정보, LDAP bind, 프록시 인증 정보는 지우지 않고, realm을 끄거나 LDAP 그룹 매핑을 지우지도 않습니다. 익명 접근, LDAP, realm, 이메일, HTTP 설정처럼 항상 있는 설정은 대상이 기본값 그대로일 때만 `-update` 없이 설정하고, 관리자가 이미 바꿔 둔 설정은 `differs`로 둡니다.
+
+   ```bash
+   echo -n '<nexus 관리자 비밀번호>' > nexus.pw; echo -n '<cc 관리자 비밀번호>' > cc.pw; chmod 600 nexus.pw cc.pw
+   # 계획만 보기
+   commandcenter import-nexus -from https://nexus.example.com -from-user admin -from-password-file nexus.pw \
+     -to https://cc.example.com -to-user admin -to-token-file cc.pw -config-only -dry-run
+   # 설정을 만들고 모든 hosted 저장소의 내용을 복사
+   commandcenter import-nexus -from https://nexus.example.com -from-user admin -from-password-file nexus.pw \
+     -to https://cc.example.com -to-user admin -to-token-file cc.pw -config -passwords-out passwords.txt
+   ```
+
+   **`-config`가 옮기지 않는 것.** capability(웹훅, Default Role realm의 역할, 감사 등), 사용자 토큰과 API 키(NuGet API 키, npm 토큰), SAML·Crowd·OAuth2·RUT 설정(해당 realm이 Nexus에서 켜져 있으면 수동 조치 줄이 나옵니다), 디렉터리 사용자에게 따로 준 역할, SSL 신뢰 저장소의 인증서("SSL 인증서(신뢰 저장소)"에서 추가하세요. 사설 CA를 쓰는 원격 저장소·LDAPS·SMTP는 인증서를 넣기 전까지 연결되지 않습니다), 태그, 스크립트, Nexus의 두 번째 이후 LDAP 서버.
 3. **먼저 확인(dry run).**
 
    ```bash
@@ -518,16 +568,19 @@ Sonatype Nexus Repository 3의 hosted 저장소 내용을 Command Center로 복�
    컴포넌트마다 한 줄(`저장소 포맷 이름 버전 파일수 바이트 상태`)과 저장소별 요약을 출력합니다. dry run은 아무것도 쓰지 않고 `would copy`로 표시합니다.
 4. **복사.** `-dry-run`을 빼고 같은 명령을 실행합니다. `-all`을 주면 Nexus의 모든 hosted 저장소를 같은 이름의 Command Center 저장소로 복사합니다. `-concurrency`(기본 4)는 동시에 옮기는 컴포넌트 수입니다. 자체 서명 인증서는 `-ca <PEM>`으로 신뢰시키고, 테스트 환경에서만 `-insecure`를 쓰세요. 오류가 하나라도 있으면 종료 코드가 1이고 마지막 줄에 개수가 나옵니다. 각 줄의 `error:` 메시지는 Command Center 서버가 돌려준 이유(예: POM 좌표 불일치, PEP 440이 아닌 버전)이므로 그 파일만 손보면 됩니다.
 
-**복사되는 것과 되지 않는 것.** hosted 저장소의 컴포넌트와 파일만 복사합니다. Maven은 pom/jar/sources/javadoc/asc 등 파일 전부를 경로 그대로 올리고, 체크섬 파일과 `maven-metadata.xml`은 Command Center가 다시 만들므로 건너뜁니다. npm은 tarball의 package.json으로 publish 문서를 만들어 올리고, 버전을 다 옮긴 뒤 Nexus의 dist-tags(`latest` 등)를 그대로 설정합니다. PyPI는 wheel/sdist 파일을 twine이 보내는 형식으로 올리며, 메타데이터는 서버가 파일 안의 METADATA/PKG-INFO에서 읽습니다. helm은 `<이름>-<버전>.tgz`만 올립니다(`.prov`는 제외). apt는 `.deb`를 Nexus의 pool 경로로 올리고 서버가 control 파일을 읽어 자기 pool 경로에 둔 뒤 `dists/`를 만듭니다. hosted가 Nexus 경로로도 답하므로 다시 실행할 때 이미 옮긴 패키지는 `skipped`가 됩니다. 대상 저장소의 `distribution`을 Nexus 쪽과 맞춰 두세요. 다음은 복사하지 **않습니다**. proxy·group 저장소(목록에 `skipped`로 표시되고 Command Center에서 새로 만들면 됩니다), go와 cargo 등 지원하지 않는 포맷(마찬가지로 `skipped`), 사용자·역할·권한, cleanup 정책, 예약 작업, 라우팅 규칙, 다운로드 수 같은 통계. 사용자와 역할은 아래 "사용자, 역할, 권한 옮기기"를 보세요.
+**복사되는 것과 되지 않는 것.** hosted 저장소의 컴포넌트와 파일만 복사합니다. Maven은 pom/jar/sources/javadoc/asc 등 파일 전부를 경로 그대로 올리고, 체크섬 파일과 `maven-metadata.xml`은 Command Center가 다시 만들므로 건너뜁니다. npm은 tarball의 package.json으로 publish 문서를 만들어 올리고, 버전을 다 옮긴 뒤 Nexus의 dist-tags(`latest` 등)를 그대로 설정합니다. PyPI는 wheel/sdist 파일을 twine이 보내는 형식으로 올리며, 메타데이터는 서버가 파일 안의 METADATA/PKG-INFO에서 읽습니다. helm은 `<이름>-<버전>.tgz`만 올립니다(`.prov`는 제외). apt는 `.deb`를 Nexus의 pool 경로로 올리고 서버가 control 파일을 읽어 자기 pool 경로에 둔 뒤 `dists/`를 만듭니다. hosted가 Nexus 경로로도 답하므로 다시 실행할 때 이미 옮긴 패키지는 `skipped`가 됩니다. 대상 저장소의 `distribution`을 Nexus 쪽과 맞춰 두세요. 내용 복사는 hosted 저장소만 합니다. proxy·group 저장소의 정의와 사용자·역할·권한, cleanup 정책, 라우팅 규칙, 예약 작업 같은 설정은 `-config`가 옮깁니다(2단계). proxy에 캐시된 파일, 내용 복사를 지원하지 않는 포맷(go, cargo 등)의 파일, 다운로드 수 같은 통계는 옮기지 않습니다. 목록에는 `skipped`로 표시됩니다.
 
-**사용자, 역할, 권한 옮기기.** `import-nexus`는 사용자·역할·권한을 옮기지 않지만, Nexus의 보안 REST API(`/service/rest/v1/security/...`, "Nexus REST API 호환")를 그대로 받으므로 Nexus에서 쓰던 스크립트나 Terraform(`datadrivers/terraform-provider-nexus`의 `nexus_security_user`, `nexus_security_role`, `nexus_privilege_*`, `nexus_security_realms`, `nexus_security_anonymous`)을 Command Center 주소로 다시 실행하면 됩니다. 관리자 쓰기이므로 토큰이 아니라 비밀번호로 인증하세요. 알아 둘 차이:
+**사용자, 역할, 권한 옮기기.** `-config`가 권한, 역할, 로컬 사용자, 익명 접근, LDAP, realm을 옮깁니다. Command Center는 Nexus의 보안 REST API(`/service/rest/v1/security/...`, "Nexus REST API 호환")도 그대로 받으므로 Nexus에서 쓰던 스크립트나 Terraform(`datadrivers/terraform-provider-nexus`의 `nexus_security_user`, `nexus_security_role`, `nexus_privilege_*`, `nexus_security_realms`, `nexus_security_anonymous`)을 Command Center 주소로 다시 실행해도 됩니다. 관리자 쓰기이므로 토큰이 아니라 비밀번호로 인증하세요. 어느 방법이든 알아 둘 차이는 다음과 같습니다.
 
 - **edit의 뜻이 다릅니다.** Nexus는 모든 PUT에 `edit`를 요구하고 `add`는 POST에만 씁니다. Command Center는 새 파일 PUT에 `add`, 덮어쓰기에 `add`와 `edit`를 요구합니다. 그래서 Nexus 호환 API로 들어온 저장소 권한(`repository-view`, `repository-content-selector`, 역할의 `nx-repository-view-…-edit`, wildcard `nexus:repository-view:…:edit`)의 `edit`는 **`add`와 `edit`로 바꿔 저장**합니다. `READ, EDIT`만 있던 Nexus CI 역할도 새 아티팩트를 계속 배포할 수 있습니다. 읽을 때는 Nexus API가 쓴 그대로(`EDIT`) 돌려주므로 Terraform에 차이가 생기지 않습니다. 웹 UI나 `/-/api/roles`로 직접 만드는 권한은 이렇게 바꾸지 않습니다.
-- **wildcard 권한**은 Command Center에 같은 뜻이 있는 모양만 받습니다: `nexus:*`(관리자, 내장 `admin` 역할을 포함), `nexus:repository-view:<포맷>:<저장소>:<동작>`과 `nexus:repository-admin:…`(쉼표로 여러 값, 빠진 부분은 `*`), `nexus:<도메인>:<동작>`("관리 기능 위임"의 도메인과 `metrics`). 그 밖의 식은 400과 함께 쓸 수 있는 모양을 알려 줍니다. application 권한도 그 도메인만 받고, `ALL`은 Command Center가 위임하는 동작 전부를 뜻합니다(예: `nx-settings-all`은 설정 보기만 줍니다).
-- **ID 규칙이 더 엄격합니다.** 사용자 ID는 영문자·숫자로 시작하는 64자 이하의 영문자, 숫자, `.`, `_`, `@`, `-`이고, 역할 ID는 저장소 이름 규칙을 따르며, 대소문자만 다른 ID는 만들 수 없습니다. 맞지 않는 ID는 400에 규칙이 나오므로 그 ID만 바꿔 옮기세요. 이메일은 비워 둘 수 있습니다.
-- **비밀번호 해시는 옮길 수 없습니다.** REST API는 해시를 내주지 않고 Command Center는 bcrypt만 받으므로 로컬 사용자는 비밀번호를 새로 정해야 합니다.
-- **읽기 기본값**: Command Center는 `authenticatedRead`(로그인한 사용자는 모두 읽기)가 기본으로 켜져 있습니다. Nexus처럼 권한이 있어야만 읽게 하려면 끄세요("읽기 권한").
-- **익명 사용자**는 역할이 있는 사용자가 아니라 전역·저장소별 `anonymousRead`이며 쓰기는 항상 거부됩니다. Nexus에서 익명 사용자에게 준 역할(일부 포맷만 등)은 저장소별 `anonymousRead`로 옮기세요. browse만 주는 익명 접근은 없습니다.
+- **wildcard 권한**은 Command Center에 같은 뜻이 있는 모양만 받습니다: `nexus:*`(관리자, 내장 `admin` 역할을 포함), `nexus:repository-view:<포맷>:<저장소>:<동작>`과 `nexus:repository-admin:…`(쉼표로 여러 값, 빠진 부분은 `*`), `nexus:<도메인>:<동작>`("관리 기능 위임"의 도메인과 `metrics`). 그 밖의 식은 400과 함께 쓸 수 있는 모양을 알려 줍니다. application 권한도 그 도메인만 받고, `ALL`은 Command Center가 위임하는 동작 전부를 뜻합니다(예: `nx-settings-all`은 설정 보기만 줍니다). `-config`에서는 받지 않는 식의 권한이 `error:` 줄로 나오고, 그 권한을 가진 역할은 그 권한 없이 만들어집니다.
+- **대상에 없는 권한은 역할에서 뺍니다.** Nexus의 내장 권한 가운데 Command Center에 없는 것(`nx-capabilities-*`, `nx-analytics-all` 등)과 옮기지 못한 권한은 역할에서 빼고 그 이름을 역할의 줄 끝에 적습니다. 역할이 Nexus에서보다 많은 것을 허용하게 되는 일은 없습니다.
+- **ID 규칙이 더 엄격합니다.** 사용자 ID는 영문자·숫자로 시작하는 64자 이하의 영문자, 숫자, `.`, `_`, `@`, `-`이고, 역할 ID는 저장소 이름 규칙을 따르며, 대소문자만 다른 ID는 만들 수 없습니다. 맞지 않는 ID는 400에 규칙이 나오므로 그 ID만 바꿔 옮기세요. 이메일은 비워 둘 수 있습니다. `-config`에서는 그런 ID가 `error:` 줄로 나오므로 Nexus에서 ID를 바꾸거나 Command Center에 직접 만든 뒤 다시 실행하세요.
+- **비밀번호 해시는 옮길 수 없습니다.** REST API는 해시를 내주지 않고 Command Center는 bcrypt만 받으므로 로컬 사용자는 비밀번호를 새로 정해야 합니다. `-config`는 무작위 비밀번호로 사용자를 만들고 `-passwords-out` 파일에만 적습니다(2단계). 상태는 `locked`가 `disabled`, `changepassword`가 `active`로 바뀝니다.
+- **읽기 기본값**: Command Center는 `authenticatedRead`(로그인한 사용자는 모두 읽기)가 기본으로 켜져 있고, Nexus는 권한이 있어야만 읽습니다("읽기 권한"). `-config`는 대상에 실행하는 관리자 말고 다른 로컬 사용자가 없으면(새로 만든 서버) 이 설정을 꺼서 옮긴 역할이 읽기를 정하게 합니다(`setting authenticatedRead updated` 줄). 이미 사용자가 있는 서버에서는 그 사용자들의 읽기가 막힐 수 있으므로 바꾸지 않고 수동 조치 줄로 알려 줍니다.
+- **익명 사용자**는 역할이 있는 사용자가 아니라 전역·저장소별 `anonymousRead`이며 쓰기는 항상 거부됩니다. `-config`는 Nexus의 anonymous 사용자가 역할을 통해 모든 저장소를 읽을 수 있을 때(`nx-repository-view-*-*-read`, `nx-repository-view-*-*-*`, `nx-all`)만 전역 익명 읽기를 켭니다. 일부 저장소만 읽게 해 둔 경우에는 접근이 넓어지지 않도록 전역 스위치를 켜지 않고 수동 조치로 남기므로, 그 저장소들에 저장소별 `anonymousRead`를 켜세요. browse만 주는 익명 접근은 없습니다.
+- **LDAP**: Command Center의 LDAP 서버는 하나이므로 Nexus의 첫 번째 서버만 옮기고 나머지는 `skipped`로 알려 줍니다. 사용자 기준 DN은 Nexus의 `userBaseDn`과 `searchBase`를 이은 값이고, 필터는 `userObjectClass`, `userIdAttribute`, `userLdapFilter`로 만듭니다(예: `(&(objectClass=inetOrgPerson)(uid={user})(employeeType=engineer))`). Nexus에서 LDAP 그룹을 역할로 쓰고 있었다면(`ldapGroupsAsRoles`) 옮긴 역할마다 "같은 이름의 그룹 → 그 역할" 매핑을 만들어 Nexus와 같이 동작하게 합니다. 다만 `nx-admin`(관리자) 매핑은 만들지 않으니, 관리자 그룹은 전체 DN으로 직접 매핑하세요("그룹 매핑"). Command Center는 사용자의 `memberOf` 같은 속성에서 그룹을 읽으므로 Nexus의 static 그룹(그룹 객체가 멤버를 가진 방식)은 디렉터리가 그 속성을 채워 줘야 합니다. bind DN과 비밀번호는 2단계의 설명대로 직접 넣습니다.
+- **Realm**: 켜는 것과 순서만 옮기고 끄지는 않습니다. Command Center의 `token` realm(API 토큰)은 Nexus에 대응하는 realm이 하나로 정해지지 않으므로 Nexus에 토큰 realm이 없어도 그대로 둡니다. LDAP realm은 LDAP 서버를 옮긴 경우에만 켜고, SAML·Crowd·OAuth2·RUT realm은 Command Center에서 먼저 설정해야 하므로 수동 조치로 남깁니다.
 - **Docker 셀렉터**: Command Center의 Docker 셀렉터 `path`는 이미지 이름입니다. Nexus의 Docker 셀렉터가 `/v2/…` 경로를 썼다면 이미지 이름 기준으로 고쳐 쓰세요.
 
 **Docker.** Nexus의 docker hosted 저장소는 REST API가 아니라 저장소마다 따로 연 커넥터 포트(예: 8082)의 레지스트리 API로 읽어야 합니다. `-docker-from http://nexus.example.com:8082`로 그 저장소의 커넥터 주소를 주고, docker 저장소는 한 번에 하나씩 옮깁니다(`-repo docker-hosted -docker-from ...`). 주지 않으면 docker 저장소는 `skipped`로 표시됩니다. 이미지의 태그마다 매니페스트를 읽어 blob 중 대상에 없는 것만 올리고, 멀티 플랫폼 이미지(index)는 하위 매니페스트를 먼저 올린 뒤 태그를 붙입니다. 대상에서는 `docker pull cc.example.com/<저장소>/<이미지>:<태그>`로 받습니다("Docker 설정").

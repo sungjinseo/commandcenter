@@ -31,8 +31,8 @@ import (
 )
 
 const importUsage = "usage: commandcenter import-nexus -from NEXUS_URL -from-user NAME -from-password-file FILE -to CC_URL -to-user NAME " +
-	"-to-token-file FILE (-repo NEXUS_REPO=CC_REPO ... | -all) [-docker-from URL] [-dry-run] [-concurrency N] [-skip-existing=false] " +
-	"[-insecure] [-ca PEM] (NEXUS_PASSWORD and COMMANDCENTER_TOKEN stand in for the files)"
+	"-to-token-file FILE (-repo NEXUS_REPO=CC_REPO ... | -all | -config | -config-only) [-update] [-passwords-out FILE] [-docker-from URL] " +
+	"[-dry-run] [-concurrency N] [-skip-existing=false] [-insecure] [-ca PEM] (NEXUS_PASSWORD and COMMANDCENTER_TOKEN stand in for the files)"
 
 // nexusFormats maps a Nexus format to the Command Center format the import
 // writes with; other formats are reported as unsupported.
@@ -75,6 +75,10 @@ type importer struct {
 	fromAuth, toAuth     string // Authorization header values; never printed
 	dryRun, skipExisting bool
 	concurrency          int
+	// targetHas reports, after -config, whether Command Center has the
+	// Nexus repository of that name (in a dry run: would have it); nil
+	// without -config.
+	targetHas func(name string) bool
 
 	mu  sync.Mutex
 	out io.Writer
@@ -115,6 +119,12 @@ func importNexus(args []string, stdout io.Writer) error {
 	dockerFrom := fs.String("docker-from", "", "base URL of the docker connector (its own port) of the docker repository being copied")
 	all := fs.Bool("all", false, "copy every hosted repository into the Command Center repository of the same name")
 	dryRun := fs.Bool("dry-run", false, "list what would be copied; write nothing")
+	cfg := fs.Bool("config", false, "first make the Nexus configuration on Command Center (blob stores, policies, repositories, roles, users, settings), "+
+		"then copy the content: every hosted repository unless -repo names some. Both users must be administrators, "+
+		"and -to-token-file must hold the password: an API token may not change the configuration")
+	cfgOnly := fs.Bool("config-only", false, "make the configuration and copy no content")
+	update := fs.Bool("update", false, "with -config: change what Command Center has when it differs from Nexus (default: report it and leave it)")
+	pwOut := fs.String("passwords-out", "", "with -config: file (mode 0600) that receives the random passwords of the users made; without it nobody learns them")
 	conc := fs.Int("concurrency", 4, "components copied at once")
 	skip := fs.Bool("skip-existing", true, "skip what the target already has (resumable)")
 	insecure := fs.Bool("insecure", false, "do not verify TLS certificates")
@@ -137,8 +147,16 @@ func importNexus(args []string, stdout io.Writer) error {
 	if *from == "" || *to == "" {
 		return errors.New("-from and -to are required; " + importUsage)
 	}
-	if len(maps) == 0 && !*all {
-		return errors.New("-repo or -all is required; " + importUsage)
+	config := *cfg || *cfgOnly
+	switch {
+	case *cfgOnly && (len(maps) > 0 || *all):
+		return errors.New("-config-only copies no content: leave out -repo and -all, or use -config")
+	case !config && (*update || *pwOut != ""):
+		return errors.New("-update and -passwords-out go with -config or -config-only")
+	case *cfg && len(maps) == 0:
+		*all = true
+	case len(maps) == 0 && !*all && !config:
+		return errors.New("-repo, -all or -config is required; " + importUsage)
 	}
 	im := &importer{dryRun: *dryRun, skipExisting: *skip, concurrency: max(*conc, 1), out: stdout}
 	var err error
@@ -166,7 +184,27 @@ func importNexus(args []string, stdout io.Writer) error {
 		}
 		im.dockerSrc = proxy.NewClientFor(im.dockerFrom, tlsCfg)
 	}
-	return im.run(context.Background(), maps, *all)
+	ctx := context.Background()
+	var mig *migration
+	if config {
+		if mig, err = im.migrateConfig(ctx, *update, *pwOut); err != nil {
+			return err
+		}
+		if repos := mig.have["repository"]; repos != nil { // nil: the repositories could not be read
+			im.targetHas = func(name string) bool { return repos[name] }
+		}
+	}
+	failed := 0
+	if !*cfgOnly {
+		failed, err = im.run(ctx, maps, *all)
+	}
+	if mig != nil {
+		failed += mig.finish()
+	}
+	if err == nil && failed > 0 {
+		err = fmt.Errorf("%d errors (see above)", failed)
+	}
+	return err
 }
 
 // parseBase parses a server base URL. Credentials belong in the flags, where
@@ -245,10 +283,12 @@ func (im *importer) report(repo, format, name, version string, r result) {
 	im.printf("%s\t%s\t%s\t%s\t%d\t%d\t%s\n", repo, format, name, version, r.files, r.bytes, status)
 }
 
-func (im *importer) run(ctx context.Context, maps []repoMap, all bool) error {
+// run copies the content and returns how many copies failed; the error is
+// one that stopped it.
+func (im *importer) run(ctx context.Context, maps []repoMap, all bool) (int, error) {
 	repos, err := im.nexusRepos(ctx)
 	if err != nil {
-		return fmt.Errorf("list Nexus repositories: %w", err)
+		return 0, fmt.Errorf("list Nexus repositories: %w", err)
 	}
 	byName := map[string]nexusRepo{}
 	for _, r := range repos {
@@ -276,6 +316,9 @@ func (im *importer) run(ctx context.Context, maps []repoMap, all bool) error {
 		case format == "docker" && im.dockerFrom == nil:
 			im.printf("%s: skipped (docker needs -docker-from with the repository's connector URL)\n", m.nexus)
 			continue
+		case im.targetHas != nil && !im.targetHas(m.cc) && m.nexus == m.cc:
+			im.printf("%s: skipped (Command Center has no such repository: see its configuration line)\n", m.nexus)
+			continue
 		}
 		t, err := im.copyRepo(ctx, m, format)
 		if err != nil {
@@ -292,10 +335,7 @@ func (im *importer) run(ctx context.Context, maps []repoMap, all bool) error {
 	if im.dryRun {
 		im.printf("dry run: nothing was written\n")
 	}
-	if failed > 0 {
-		return fmt.Errorf("%d errors (see above)", failed)
-	}
-	return nil
+	return failed, nil
 }
 
 // copyRepo copies the components of one repository, concurrency at a time.
