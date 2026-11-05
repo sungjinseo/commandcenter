@@ -157,6 +157,8 @@ var apiDocs = []openapi.Route{
 	{Pattern: "GET /-/api/tasks/{id}", Summary: "One task with its last run", Tag: "tasks", Auth: docAdmin, Reply: "Task"},
 	{Pattern: "PUT /-/api/tasks/{id}", Summary: "Updates a task", Tag: "tasks", Auth: docAdminUI, Request: "TaskRequest", Reply: "Task"},
 	{Pattern: "DELETE /-/api/tasks/{id}", Summary: "Deletes a task", Tag: "tasks", Auth: docAdminUI, Replies: map[int]string{204: "deleted"}},
+	{Pattern: "GET /-/api/tasks/{id}/runs", Summary: "A task's stored runs, newest first, without logs (the last 50, none older than 30 days)", Tag: "tasks", Auth: docAdmin, Reply: "TaskRunList"},
+	{Pattern: "GET /-/api/tasks/{id}/runs/{run}", Summary: "One stored run with its log", Tag: "tasks", Auth: docAdmin, Reply: "TaskRun"},
 	{Pattern: "POST /-/api/tasks/{id}/run", Summary: "Runs a task now; while another task runs it is queued and the scheduler starts it after that run ({started, queued})", Tag: "tasks", Auth: docAdminUI, Replies: map[int]string{202: "started or queued", 409: "Error"}},
 	{Pattern: "POST /-/api/tasks/{id}/stop", Summary: "Stops a running task", Tag: "tasks", Auth: docAdminUI, Replies: map[int]string{202: "stopping"}},
 	{Pattern: "GET /-/api/webhooks", Summary: "Webhooks", Tag: "webhooks", Auth: docAdmin, Reply: "WebhookList"},

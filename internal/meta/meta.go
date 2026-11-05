@@ -140,15 +140,21 @@ type querier interface {
 //	   build ignores them: it grants a nested role's privileges to nobody
 //	   and skips the new "app:" and "admin:" privilege targets, so beside
 //	   this one a user can only have less access, never more.
-const schemaVersion = 8
+//	9: task_runs, the history of task runs (tasks.go): expand-only, a new table
+//	   an older build never reads. Its runs are missing from the history, and
+//	   deleting a task there still removes the task's history (the foreign key
+//	   cascades in the database). compat stays 7: 0.3.0 is schema 7, so it can
+//	   keep running through a rolling upgrade to the next release.
+const schemaVersion = 9
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
 // build upgraded, stamped in schema_version.compat. A change older builds
 // can ignore ("expand-only": new tables, or new columns with defaults, and
-// no new meaning for stored values) sets it to schemaVersion-1, so the
-// previous release still runs on the upgraded database: a rolling upgrade,
-// or a one-release rollback. Any other change sets it to schemaVersion. The
-// rule (N/N-1):
+// no new meaning for stored values) leaves it where it is, or at
+// schemaVersion-1 if that is older, so the previous release still runs on the
+// upgraded database, however many expand-only versions lie between: a rolling
+// upgrade, or a one-release rollback. Any other change sets it to
+// schemaVersion. The rule (N/N-1):
 //
 //   - Open refuses a database whose version and compat are both above
 //     schemaVersion;

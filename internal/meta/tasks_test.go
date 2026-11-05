@@ -154,3 +154,44 @@ func TestRecordTaskRunKeepsNextRun(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 }
+
+// A run joins the task's history, which keeps the last taskRunsKept runs, none
+// older than taskRunsMaxAge, and goes with the task.
+func TestTaskRunHistory(t *testing.T) {
+	db, _ := openTestDB(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Millisecond)
+	if err := db.CreateTask(ctx, Task{ID: "t1", Name: "one", Type: "blobstore.compact", Schedule: "manual", Params: "{}", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-taskRunsMaxAge - time.Hour)
+	if err := db.RecordTaskRun(ctx, "t1", TaskRun{Run: old, Result: "OK", Log: "old log"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := db.GetTaskRun(ctx, "t1", old.UnixMilli()); err != nil || got.Log != "old log" || got.Result != "OK" || got.Node != db.NodeID() {
+		t.Fatalf("stored run = %+v, %v", got, err)
+	}
+	for i := range taskRunsKept + 3 {
+		r := TaskRun{Run: now.Add(time.Duration(i) * time.Second), Result: "Failed", DurationMs: int64(i), Message: "boom", Log: "log", Removed: 2, Bytes: 3}
+		if err := db.RecordTaskRun(ctx, "t1", r, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, err := db.ListTaskRuns(ctx, "t1")
+	if err != nil || len(runs) != taskRunsKept {
+		t.Fatalf("%d runs, %v", len(runs), err)
+	}
+	newest := runs[0]
+	if newest.DurationMs != taskRunsKept+2 || newest.Log != "" || newest.Message != "boom" || newest.Removed != 2 || newest.Bytes != 3 || runs[taskRunsKept-1].DurationMs != 3 {
+		t.Fatalf("newest %+v, oldest %+v", newest, runs[taskRunsKept-1])
+	}
+	if _, err := db.GetTaskRun(ctx, "t1", old.UnixMilli()); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the expired run: %v", err)
+	}
+	if err := db.DeleteTask(ctx, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if runs, err := db.ListTaskRuns(ctx, "t1"); err != nil || len(runs) != 0 {
+		t.Fatalf("after delete: %d runs, %v", len(runs), err)
+	}
+}

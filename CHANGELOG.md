@@ -99,6 +99,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   delete for hosted repositories (`DELETE /-/api/repositories/{name}/folder?path=`).
 - `GET /service/rest/repository/browse/<repo>/<dir>/`: Nexus's HTML directory listing.
 - Web UI for the wave 6 server features: a schedule editor that reads and keeps cron, multi-day weekly and monthly (`last`) schedules (one it cannot read is kept verbatim), task notification condition and queued run-now, the new task types and their parameters, ordered cleanup policies on a repository, Maven layout policy, proxy connection settings, negative cache toggle and "Invalidate cache", apt signing key passphrase and apt proxy `distribution`/`flat`/`enforceDistribution`, Raw folder delete, SNAPSHOT builds as separate components in browse and search, the password policy, unavailable blob stores, role display name, contained roles and the `app:`/`admin:` targets, Nexus-format webhooks, and an Activity screen (Admin → Support → Activity). Delegated administrators see only the screens their privileges reach, read-only where they may not edit.
+- Task run history: each task keeps its last 50 runs, up to 30 days, with the result, duration, node and log, shown on the task's page and served by `GET /-/api/tasks/{id}/runs` and `GET /-/api/tasks/{id}/runs/{run}`. Before, only the last run's log was kept.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -226,6 +227,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   revalidate after `metadataMaxAge`; before, they were cached forever. An existing signing key with a
   valid signing subkey now signs with that subkey, as gpg would (the subkey is already in `public.key`).
   Raw Content-Type changes only for new uploads.
+- Database schema 9, compat 7 (expand-only, so 0.3.0 nodes still keep running during a rolling upgrade): the new `task_runs` table. An older node's runs are missing from the history.
 
 ## [0.3.0] - 2026-10-30
 

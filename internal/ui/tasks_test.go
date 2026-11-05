@@ -2,10 +2,13 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"commandcenter/internal/meta"
 	"commandcenter/internal/repo/repotest"
 	"commandcenter/internal/tasks"
 )
@@ -186,4 +189,33 @@ func TestGCWhileTaskRunsIsConflict(t *testing.T) {
 	if m := r.json(t); m["error"] != "a task is already running" || m["running"] != tasks.SeedID {
 		t.Fatalf("409 body: %s", r.body)
 	}
+}
+
+func TestTaskRunHistoryServed(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	r := e.admin(t, "POST", "/-/api/tasks", `{"name":"H","type":"blobstore.compact","schedule":"manual"}`)
+	wantStatus(t, r, http.StatusCreated)
+	id, _ := r.json(t)["id"].(string)
+	wantStatus(t, e.admin(t, "GET", "/-/api/tasks/"+id+"/runs/1", ""), http.StatusNotFound)
+	at := time.Date(2026, 11, 5, 3, 0, 0, 0, time.UTC)
+	if err := e.db.RecordTaskRun(context.Background(), id, meta.TaskRun{Run: at, Result: "Failed", DurationMs: 7, Message: "boom", Log: "the log"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	r = e.admin(t, "GET", "/-/api/tasks/"+id+"/runs", "")
+	wantStatus(t, r, http.StatusOK)
+	runs, _ := r.json(t)["runs"].([]any)
+	if len(runs) != 1 || strings.Contains(r.body, "the log") {
+		t.Fatalf("runs: %s", r.body)
+	}
+	x := runs[0].(map[string]any)
+	if x["result"] != "Failed" || x["message"] != "boom" || x["durationMs"] != float64(7) || x["id"] != float64(at.UnixMilli()) {
+		t.Fatalf("run: %s", r.body)
+	}
+	r = e.admin(t, "GET", fmt.Sprintf("/-/api/tasks/%s/runs/%d", id, at.UnixMilli()), "")
+	wantStatus(t, r, http.StatusOK)
+	if r.json(t)["log"] != "the log" {
+		t.Fatalf("run with log: %s", r.body)
+	}
+	wantStatus(t, e.admin(t, "GET", "/-/api/tasks/nope/runs", ""), http.StatusNotFound)
+	wantStatus(t, e.admin(t, "GET", "/-/api/tasks/"+id+"/runs/x", ""), http.StatusNotFound)
 }

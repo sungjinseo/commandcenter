@@ -416,10 +416,13 @@ func TestSchemaCompat(t *testing.T) {
 		{8, 7, "webhooks.payload_format, events.ip and node, tasks.notify_on, queued_by and queued_at; proxy negativeCacheTTL -1 now never expires, stored -1 rewritten to 0s " +
 			"(no negative caching, as before): expand-only, an older build ignores the new columns and keys (failure mails only, queued runs wait for a newer leader), " +
 			"reads 0s and -1 as no negative caching and never matches a nexus webhook's event names; also component_tags rows of Maven SNAPSHOT builds copied from their X-SNAPSHOT components and the scope of existing maven.purge-snapshots tasks, once; also roles.name, roles.roles (nested roles), roles.nexus and users.last_name: an older build ignores nested roles and the new privilege targets, so beside this one a user can only have less access"},
+		{9, 7, "task_runs: expand-only, a new table an older build never reads, so 0.3.0 (schema 7) still runs beside it"},
 	}
 	for i, d := range decisions {
-		if d.version != i+1 || d.compat < d.version-1 || d.compat > d.version || d.note == "" {
-			t.Errorf("decision %+v: want version %d, compat version or version-1, and a note", d, i+1)
+		// Expand-only keeps the previous decision's compat (or version-1).
+		kept := i > 0 && d.compat == decisions[i-1].compat
+		if d.version != i+1 || (d.compat != d.version && d.compat != d.version-1 && !kept) || d.note == "" {
+			t.Errorf("decision %+v: want version %d, compat version, version-1 or the previous compat, and a note", d, i+1)
 		}
 	}
 	if last := decisions[len(decisions)-1]; last.version != schemaVersion || last.compat != schemaCompat {

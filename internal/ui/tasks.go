@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -21,6 +22,8 @@ func (u *UI) taskRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/tasks/{id}", u.getTask)
 	mux.HandleFunc("PUT /-/api/tasks/{id}", u.updateTask)
 	mux.HandleFunc("DELETE /-/api/tasks/{id}", u.deleteTask)
+	mux.HandleFunc("GET /-/api/tasks/{id}/runs", u.listTaskRuns)
+	mux.HandleFunc("GET /-/api/tasks/{id}/runs/{run}", u.getTaskRun)
 	mux.HandleFunc("POST /-/api/tasks/{id}/run", u.runTask)
 	mux.HandleFunc("POST /-/api/tasks/{id}/stop", u.stopTask)
 	mux.HandleFunc("POST /-/api/gc", u.runGC)
@@ -150,6 +153,68 @@ func (u *UI) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, u.toTaskJSON(t, u.Tasks.Running(), true))
+}
+
+// taskRunJSON is one run of a task's history; id names it in the run's URL.
+type taskRunJSON struct {
+	ID         int64   `json:"id"`
+	Run        string  `json:"run"`
+	Result     string  `json:"result"`
+	DurationMs int64   `json:"durationMs"`
+	Message    string  `json:"message"`
+	Removed    int64   `json:"removed"`
+	Bytes      int64   `json:"bytes"`
+	Node       string  `json:"node"`
+	Log        *string `json:"log,omitempty"` // GET /-/api/tasks/{id}/runs/{run} only
+}
+
+func toTaskRunJSON(x meta.TaskRun) taskRunJSON {
+	return taskRunJSON{ID: x.Run.UnixMilli(), Run: rfc3339(x.Run), Result: x.Result, DurationMs: x.DurationMs,
+		Message: x.Message, Removed: x.Removed, Bytes: x.Bytes, Node: x.Node}
+}
+
+func (u *UI) listTaskRuns(w http.ResponseWriter, r *http.Request) {
+	if _, ok := u.requireApp(w, r, "tasks", meta.ActionRead); !ok || !u.tasksAvailable(w) {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := u.Tasks.Get(r.Context(), id); err != nil {
+		u.writeTaskError(w, r, err)
+		return
+	}
+	runs, err := u.DB.ListTaskRuns(r.Context(), id)
+	if err != nil {
+		u.writeTaskError(w, r, err)
+		return
+	}
+	out := make([]taskRunJSON, len(runs))
+	for i, x := range runs {
+		out[i] = toTaskRunJSON(x)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": out})
+}
+
+func (u *UI) getTaskRun(w http.ResponseWriter, r *http.Request) {
+	if _, ok := u.requireApp(w, r, "tasks", meta.ActionRead); !ok || !u.tasksAvailable(w) {
+		return
+	}
+	at, err := strconv.ParseInt(r.PathValue("run"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	x, err := u.DB.GetTaskRun(r.Context(), r.PathValue("id"), at)
+	if errors.Is(err, meta.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if err != nil {
+		u.writeTaskError(w, r, err)
+		return
+	}
+	out := toTaskRunJSON(x)
+	out.Log = &x.Log
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (u *UI) createTask(w http.ResponseWriter, r *http.Request) {

@@ -1075,6 +1075,8 @@ async function taskForm(view, id) {
   // Summary, last run log, run now and delete.
   const summary = h("div", null);
   const logBox = h("div", null);
+  const logNote = h("p", { class: "tiny muted" });
+  const runsBox = h("div", null);
   const run = h("button", { type: "button", class: "btn primary" }, t("task.run"));
   const stop = button(t("task.stop"), "danger");
   const msg = h("p", { class: "task-msg", role: "status" });
@@ -1100,7 +1102,34 @@ async function taskForm(view, id) {
     run.disabled = task.status === "Running" || !!task.queued;
     stop.hidden = task.status !== "Running" || !can("tasks", "run");
   };
-  const showLog = () => put(logBox, logLines(task.lastLog));
+  // showRun puts one stored run's log where the last run's log is.
+  const showRun = async (x) => {
+    const got = await api("tasks/" + encodeURIComponent(task.id) + "/runs/" + x.id);
+    if (!isLive()) return;
+    logNote.textContent = t("task.runLogOf", { when: fmtDate(x.run) });
+    put(logBox, logLines(got.log));
+  };
+  const showRuns = async () => {
+    const got = await api("tasks/" + encodeURIComponent(task.id) + "/runs");
+    if (!isLive()) return;
+    put(runsBox, tbl([t("task.runAt"), t("task.lastResult"), t("task.runTook"), t("task.runNode"), actHead()],
+      got.runs.map((x) => {
+        const b = button(t("task.runLog"));
+        b.classList.add("small");
+        b.addEventListener("click", () => showRun(x).catch(handleError));
+        return h("tr", null,
+          h("td", { class: "nowrap" }, fmtDate(x.run)),
+          h("td", null, badge(RESULTS[x.result] ? t(RESULTS[x.result][0]) : x.result, (RESULTS[x.result] || [])[1]), x.message ? h("div", { class: "tiny muted" }, x.message) : null),
+          h("td", { class: "nowrap" }, fmtNum(x.durationMs) + " ms"),
+          h("td", { class: "mono tiny" }, x.node || dash),
+          h("td", { class: "act" }, b));
+      }), t("task.noRuns")));
+  };
+  const showLog = () => {
+    logNote.textContent = "";
+    put(logBox, logLines(task.lastLog));
+    showRuns().catch(handleError);
+  };
   let timer = 0;
   state.leaving.push(() => clearTimeout(timer));
   const sleep = (ms) => new Promise((res) => { timer = setTimeout(res, ms); });
@@ -1214,7 +1243,8 @@ async function taskForm(view, id) {
       h("div", { class: "stack" }, settings),
       h("div", { class: "stack" },
         card(t("task.summary"), t("task.summarySub"), [summary, msg]),
-        card(t("task.logTitle"), t("task.logSub"), logBox))));
+        card(t("task.logTitle"), t("task.logSub"), [logNote, logBox]),
+        card(t("task.runsTitle"), t("task.runsSub"), runsBox))));
   if (task.status === "Running") track(null); // a run started elsewhere: follow it to its end
 }
 

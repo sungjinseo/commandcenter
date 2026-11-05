@@ -42,7 +42,16 @@ type TaskRun struct {
 	DurationMs     int64
 	Message, Log   string
 	Removed, Bytes int64
+	Node           string // the node that ran it; filled when read back
 }
+
+// A task's history keeps its last taskRunsKept runs, none older than
+// taskRunsMaxAge (Nexus keeps task logs for 30 days). A run's log is capped
+// (tasks.MaxLogBytes), so a task holds a few MiB at the very most.
+const (
+	taskRunsKept   = 50
+	taskRunsMaxAge = 30 * 24 * time.Hour
+)
 
 // MaxTasks is how many tasks may exist: CreateTask refuses more
 // (ErrTaskLimit). A variable so tests can lower it.
@@ -212,8 +221,51 @@ func (d *DB) RecordTaskRun(ctx context.Context, id string, r TaskRun, next func(
 		res, err := tx.q.ExecContext(ctx, `UPDATE tasks SET last_run = ?, last_result = ?, last_duration_ms = ?, last_message = ?,
   last_log = ?, last_removed = ?, last_bytes = ?, next_run = ? WHERE id = ?`,
 			toMs(r.Run), r.Result, r.DurationMs, r.Message, r.Log, r.Removed, r.Bytes, toMs(nextRun), id)
-		return affected(res, err)
+		if err := affected(res, err); err != nil {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `INSERT INTO task_runs(task_id, run_at, result, duration_ms, message, log, removed, bytes, node)
+VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(task_id, run_at) DO NOTHING`,
+			id, toMs(r.Run), r.Result, r.DurationMs, r.Message, r.Log, r.Removed, r.Bytes, d.NodeID()); err != nil {
+			return err
+		}
+		_, err = tx.q.ExecContext(ctx, `DELETE FROM task_runs WHERE task_id = ? AND (run_at < ? OR run_at NOT IN
+  (SELECT run_at FROM task_runs WHERE task_id = ? ORDER BY run_at DESC LIMIT ?))`,
+			id, toMs(r.Run.Add(-taskRunsMaxAge)), id, taskRunsKept)
+		return err
 	})
+}
+
+// ListTaskRuns returns the task's stored runs, newest first, without logs.
+func (d *DB) ListTaskRuns(ctx context.Context, id string) ([]TaskRun, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT run_at, result, duration_ms, message, removed, bytes, node
+FROM task_runs WHERE task_id = ? ORDER BY run_at DESC`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TaskRun{}
+	for rows.Next() {
+		var r TaskRun
+		var at int64
+		if err := rows.Scan(&at, &r.Result, &r.DurationMs, &r.Message, &r.Removed, &r.Bytes, &r.Node); err != nil {
+			return nil, err
+		}
+		r.Run = fromMs(at)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// GetTaskRun returns the run of the task at runAt (milliseconds) with its log.
+func (d *DB) GetTaskRun(ctx context.Context, id string, runAt int64) (TaskRun, error) {
+	r := TaskRun{Run: fromMs(runAt)}
+	err := d.sql.QueryRowContext(ctx, `SELECT result, duration_ms, message, log, removed, bytes, node
+FROM task_runs WHERE task_id = ? AND run_at = ?`, id, runAt).Scan(&r.Result, &r.DurationMs, &r.Message, &r.Log, &r.Removed, &r.Bytes, &r.Node)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TaskRun{}, ErrNotFound
+	}
+	return r, err
 }
 
 // DeleteTask removes the task; ErrNotFound if there is none.
