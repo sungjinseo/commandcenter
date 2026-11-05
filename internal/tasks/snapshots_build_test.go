@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -136,6 +137,24 @@ func TestPurgeSnapshotBuilds(t *testing.T) {
 		if out.Removed != 1 || h.builds(t) != v[0]+" "+v[2] || !strings.Contains(tk.LastLog, "not used for 10 days") {
 			t.Fatalf("%+v: %s\n%s", out, h.builds(t), tk.LastLog)
 		}
+		// The task stores what it was given: an update that names no
+		// parameters keeps them, and the form reads lastUsed back.
+		if tk.Params != `{"repository":"mvn-none","lastUsed":10}` {
+			t.Fatalf("stored params %s", tk.Params)
+		}
+		up, err := h.s.Update(ctx, tk.ID, Def{Name: "renamed"})
+		if err != nil || up.Params != tk.Params || up.Name != "renamed" {
+			t.Fatalf("update without params: %+v, %v", up, err)
+		}
+		// Parameters in another shape never run as "every build".
+		up.Params = `{"repository":"mvn-none","scope":"build","minimumRetained":0,"snapshotRetentionDays":0,"lastDownloadedDays":10,"unused":true}`
+		if err := h.db.UpdateTask(ctx, up); err != nil {
+			t.Fatal(err)
+		}
+		before := h.builds(t)
+		if out, err := h.s.RunNow(tk.ID, "admin"); err != nil || out.Result != ResultFailed || h.builds(t) != before {
+			t.Fatalf("foreign params: %+v, %v: %s", out, err, h.builds(t))
+		}
 		for params, want := range map[string]string{
 			`{"repository":"mvn-none","lastUsed":0}`:  "params.lastUsed must be at least 1",
 			`{"repository":"mvn-proxy","lastUsed":1}`: "takes a Maven hosted repository or group",
@@ -145,4 +164,40 @@ func TestPurgeSnapshotBuilds(t *testing.T) {
 			}
 		}
 	})
+}
+
+// An update that names no scope keeps the task's scope: a task stamped
+// "version" on the upgrade, or stored before the parameter existed, does
+// not turn into "build" through a client that does not know it.
+func TestPurgeScopeKeptOnUpdate(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.seedBuilds(t, 5)
+	scope := func(tk meta.Task) string {
+		var p struct{ Scope string }
+		if err := json.Unmarshal([]byte(tk.Params), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p.Scope
+	}
+	tk := h.create(t, Def{Name: "p", Type: TypePurge, Schedule: "manual", Params: json.RawMessage(`{"repository":"mvn-none","scope":"version"}`)})
+	up, err := h.s.Update(ctx, tk.ID, Def{Params: json.RawMessage(`{"repository":"mvn-none","minimumRetained":3}`)})
+	if err != nil || scope(up) != ScopeVersion || !strings.Contains(up.Params, `"minimumRetained":3`) {
+		t.Fatalf("update without scope: %s, %v", up.Params, err)
+	}
+	if up, err = h.s.Update(ctx, tk.ID, Def{Params: json.RawMessage(`{"repository":"mvn-none","scope":"build"}`)}); err != nil || scope(up) != ScopeBuild {
+		t.Fatalf("update naming build: %s, %v", up.Params, err)
+	}
+	// Stored before the parameter existed (and not yet stamped): version.
+	up.Params = `{"repository":"mvn-none","minimumRetained":1,"snapshotRetentionDays":30}`
+	if err := h.db.UpdateTask(ctx, up); err != nil {
+		t.Fatal(err)
+	}
+	if up, err = h.s.Update(ctx, tk.ID, Def{Params: json.RawMessage(`{"repository":"mvn-none"}`)}); err != nil || scope(up) != ScopeVersion {
+		t.Fatalf("task without a stored scope: %s, %v", up.Params, err)
+	}
+	// A new task without a scope gets build, as before.
+	if tk := h.create(t, Def{Name: "n", Type: TypePurge, Schedule: "manual", Params: json.RawMessage(`{"repository":"mvn-none"}`)}); scope(tk) != ScopeBuild {
+		t.Fatalf("new task: %s", tk.Params)
+	}
 }

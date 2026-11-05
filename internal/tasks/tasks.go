@@ -496,6 +496,9 @@ func (s *Service) apply(t *meta.Task, d Def, prev *meta.Task) error {
 	if !ok {
 		errs = append(errs, fmt.Sprintf("unknown type %q: use %s", t.Type, strings.Join(Types(), ", ")))
 	} else {
+		if prev != nil && t.Type == TypePurge {
+			d.Params = keepScope(d.Params, prev.Params)
+		}
 		params, perrs := def.params(s, d.Params, false)
 		if len(perrs) > 0 || prev == nil || params != prev.Params {
 			params, perrs = def.params(s, d.Params, true)

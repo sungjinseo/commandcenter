@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -133,9 +134,21 @@ func purgeParamsOf(s *Service, raw json.RawMessage, check bool) (string, []strin
 	return encodeParams(p), nil
 }
 
-// mavenPurgeUnusedParamsOf maps maven.purge-unused-snapshots (Nexus's "Maven -
-// Delete unused SNAPSHOT") to purgeParams: every build, whatever its
-// age, that was not used for lastUsed days.
+// unusedParams are maven.purge-unused-snapshots's (Nexus's "Maven - Delete
+// unused SNAPSHOT"), stored as given: the task's form and an update that
+// names no parameters read them back.
+type unusedParams struct {
+	Repository string `json:"repository"`
+	LastUsed   int    `json:"lastUsed"`
+	Preview    bool   `json:"preview,omitempty"`
+}
+
+// purge is the purge u runs: every build, whatever its age, that was not
+// used for lastUsed days.
+func (u unusedParams) purge() purgeParams {
+	return purgeParams{Repository: u.Repository, Scope: ScopeBuild, LastDownloadedDays: u.LastUsed, Preview: u.Preview, Unused: true}
+}
+
 func mavenPurgeUnusedParamsOf(s *Service, raw json.RawMessage, check bool) (string, []string) {
 	var in struct {
 		Repository string `json:"repository"`
@@ -145,17 +158,39 @@ func mavenPurgeUnusedParamsOf(s *Service, raw json.RawMessage, check bool) (stri
 	if err := decodeParams(raw, &in); err != nil {
 		return "", []string{err.Error()}
 	}
-	p := purgeParams{Repository: in.Repository, Scope: ScopeBuild, MinimumRetained: 0, LastDownloadedDays: 1, Preview: in.Preview, Unused: true}
+	u := unusedParams{Repository: in.Repository, LastUsed: 1, Preview: in.Preview}
 	if in.LastUsed != nil {
-		p.LastDownloadedDays = *in.LastUsed
+		u.LastUsed = *in.LastUsed
 	}
-	if p.LastDownloadedDays < 1 {
+	if u.LastUsed < 1 {
 		return "", []string{"params.lastUsed must be at least 1"}
 	}
-	if errs := s.checkPurgeRepo(p, check); len(errs) > 0 {
+	if errs := s.checkPurgeRepo(u.purge(), check); len(errs) > 0 {
 		return "", errs
 	}
-	return encodeParams(p), nil
+	return encodeParams(u), nil
+}
+
+// keepScope returns the parameters params of an update to a
+// maven.purge-snapshots task with the scope the task has (stored), when
+// they name none: a client that predates the parameter (a script, Nexus's
+// task API, an older configuration document) must not turn a task stamped
+// "version" into "build", which removes other things.
+func keepScope(params json.RawMessage, stored string) json.RawMessage {
+	var in, cur map[string]json.RawMessage
+	if json.Unmarshal(params, &in) != nil || json.Unmarshal([]byte(stored), &cur) != nil || in == nil {
+		return params
+	}
+	if _, named := in["scope"]; named {
+		return params
+	}
+	scope, ok := cur["scope"]
+	if !ok {
+		scope = json.RawMessage(`"` + ScopeVersion + `"`) // stored without one: a task from before the parameter
+	}
+	in["scope"] = scope
+	b, _ := json.Marshal(in)
+	return b
 }
 
 // checkPurgeRepo checks the repository a purge names.
@@ -315,7 +350,14 @@ type purgeCounts struct {
 
 func runPurge(ctx context.Context, s *Service, t meta.Task, actor string, log *RunLog) (summary, error) {
 	var p purgeParams
-	if err := json.Unmarshal([]byte(t.Params), &p); err != nil {
+	if t.Type == TypeMavenPurgeUnused {
+		// Read strictly: without a lastUsed the purge would take every build.
+		var u unusedParams
+		if err := decodeParams(json.RawMessage(t.Params), &u); err != nil || u.LastUsed < 1 {
+			return summary{msg: "invalid params"}, fmt.Errorf("decode params: %v", cmp.Or(err, errors.New("lastUsed is not set")))
+		}
+		p = u.purge()
+	} else if err := json.Unmarshal([]byte(t.Params), &p); err != nil {
 		return summary{msg: "invalid params"}, fmt.Errorf("decode params: %w", err)
 	}
 	if p.Scope == "" {
