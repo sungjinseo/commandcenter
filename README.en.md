@@ -91,12 +91,12 @@ Known limits per format are listed under [limitations](docs/guide.md#제한-사�
 
 ## Quick start
 
-Release images live at `ghcr.io/sungjinseo/commandcenter`. Replace `0.3.0` below with the [latest release](https://github.com/sungjinseo/commandcenter/releases).
+Release images live at `ghcr.io/sungjinseo/commandcenter`. Replace `0.4.0` below with the [latest release](https://github.com/sungjinseo/commandcenter/releases).
 
 Create the admin password hash first (8 characters or more).
 
 ```bash
-docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.3.0 hash-password
+docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.4.0 hash-password
 ```
 
 ### Kubernetes (Helm)
@@ -114,7 +114,7 @@ postgresql:
 ```
 
 ```bash
-helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.3.0 \
+helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.4.0 \
   --namespace commandcenter --create-namespace -f my-values.yaml --wait
 helm test commandcenter -n commandcenter
 ```
@@ -123,23 +123,23 @@ Ingress/HTTPRoute, TLS, PostgreSQL, the secret key, backups and upgrades are in 
 
 ### Kubernetes without Helm (one YAML file)
 
-Clusters that do not use Helm take the manifest attached to every release (`commandcenter-v0.3.0.yaml`, with the image pinned to that release). It is the same file as [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml) in the repository.
+Clusters that do not use Helm take the manifest attached to every release (`commandcenter-v0.4.0.yaml`, with the image pinned to that release). It is the same file as [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml) in the repository.
 
 ```bash
-curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.3.0/commandcenter-v0.3.0.yaml
+curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.4.0/commandcenter-v0.4.0.yaml
 # fill in baseURL, passwordHash, the PostgreSQL password and storageClassName in the file, then
 kubectl create namespace commandcenter
-kubectl apply -n commandcenter -f commandcenter-v0.3.0.yaml
+kubectl apply -n commandcenter -f commandcenter-v0.4.0.yaml
 ```
 
-It holds a PostgreSQL StatefulSet and its password Secret, a one-pod Command Center StatefulSet, the `config.yaml` ConfigMap, a PVC and a Service; add an Ingress or Gateway the way your cluster does it. The chart is also attached as a file (`commandcenter-helm-chart-0.3.0.tgz`) for places that cannot pull OCI charts: `helm install commandcenter ./commandcenter-helm-chart-0.3.0.tgz -f my-values.yaml`.
+It holds a PostgreSQL StatefulSet and its password Secret, a one-pod Command Center StatefulSet, the `config.yaml` ConfigMap, a PVC and a Service; add an Ingress or Gateway the way your cluster does it. The chart is also attached as a file (`commandcenter-helm-chart-0.4.0.tgz`) for places that cannot pull OCI charts: `helm install commandcenter ./commandcenter-helm-chart-0.4.0.tgz -f my-values.yaml`.
 
 ### Docker compose
 
 ```bash
-git clone --depth 1 --branch v0.3.0 https://github.com/sungjinseo/commandcenter.git
+git clone --depth 1 --branch v0.4.0 https://github.com/sungjinseo/commandcenter.git
 cd commandcenter
-echo COMMANDCENTER_VERSION=0.3.0 >> .env
+echo COMMANDCENTER_VERSION=0.4.0 >> .env
 echo POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') >> .env
 cp config.example.yaml config.yaml     # put the hash in passwordHash
 docker compose up -d                   # PostgreSQL and Command Center

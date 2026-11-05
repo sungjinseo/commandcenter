@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-05
+
 ### Added
 - Nexus component upload API: `POST /service/rest/v1/components?repository=` takes Nexus's multipart
   fields for maven2 (`groupId`, `artifactId`, `version`, `generate-pom`, `packaging`, `assetN`,
@@ -29,11 +31,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `httpClient.authentication` of type `bearerToken`.
 - System information: `system-environment`, `system-network` and `system-properties` sections.
 - Nexus API search: `md5`/`sha1`/`sha256`/`sha512`, `prerelease`, `last_updated`/`lastBlobUpdated`, the
-  `g:a:v[:ext[:classifier]]` form of `q`, space-separated alternatives and quotes in every value, `?` as a
-  wildcard, full attribute names (`attributes.maven2.*`, `assets.attributes.*`), and the format a `maven.*`,
-  `npm.*` or `docker.*` parameter implies.
-- Nexus API `repository=` takes several names, `*`/`?` wildcards and groups (searched through their members,
-  downloads through the group); `GET /v1/components` and `/v1/assets` on a group list its members' content.
+  `g:a:v[:ext[:classifier]]` form of `q`, space-separated alternatives and quotes in every value, `?` as
+  a wildcard, full attribute names (`attributes.maven2.*`, `assets.attributes.*`), and the format a
+  `maven.*`, `npm.*` or `docker.*` parameter implies.
+- Nexus API `repository=` takes several names, `*`/`?` wildcards and groups (searched through their
+  members, downloads through the group); `GET /v1/components` and `/v1/assets` on a group list its
+  members' content.
 - `DELETE /service/rest/v1/assets/{id}` for every format: a proxy's cached copy, a Maven file (metadata
   rebuilt), or a hosted file that is a whole component; 400 for part of a larger component.
 - `GET /service/rest/v1/tasks?type=` filters by Nexus or Command Center task type id.
@@ -56,12 +59,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Cleanup: a repository can have several cleanup policies (`cleanupPolicies`, Nexus `policyNames`); each
   applies on its own. A policy may have `pathPattern` as its only criterion, as in Nexus.
 - Tasks: `cron:<Quartz expression>` schedules; weekly on several days; monthly on days 1-31 and `last`.
-- Tasks: `notifyOn: success_failure` also mails finished runs (Nexus `notificationCondition: SUCCESS_FAILURE`).
-- Tasks: run now while another task runs is queued (202 `queued: true`); the leader starts it after that run.
+- Tasks: `notifyOn: success_failure` also mails finished runs (Nexus `notificationCondition:
+  SUCCESS_FAILURE`).
+- Tasks: run now while another task runs is queued (202 `queued: true`); the leader starts it after that
+  run.
 - Tasks: new databases get a nightly `cleanup-service` task (01:00); upgraded databases do not.
 - Tasks: `repository.cleanup` limits `maxComponents`/`scanAssets`; config `taskRunTimeoutHours`.
 - Tasks: `repository.purge-unused` deletes proxy components not downloaded for `lastUsed` days.
-- Tasks: `olderThanDays` for `blobstore.delete-temp-files`; `resetProxyMetadata` (apt proxies) for rebuilds.
+- Tasks: `olderThanDays` for `blobstore.delete-temp-files`; `resetProxyMetadata` (apt proxies) for
+  rebuilds.
 - Nexus API: task ids `repository.apt.rebuild.metadata`, `blobstore.metrics.reconcile`,
   `repository.purge-unused`; `(All Blob Stores)` and `blobsOlderThan` 0; 400 with a reason for
   publish-dotindex and other ids Command Center has no use for.
@@ -98,12 +104,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Raw: a directory answers its `index.html`/`index.htm` in hosted, proxy and group repositories; folder
   delete for hosted repositories (`DELETE /-/api/repositories/{name}/folder?path=`).
 - `GET /service/rest/repository/browse/<repo>/<dir>/`: Nexus's HTML directory listing.
-- Web UI for the wave 6 server features: a schedule editor that reads and keeps cron, multi-day weekly and monthly (`last`) schedules (one it cannot read is kept verbatim), task notification condition and queued run-now, the new task types and their parameters, ordered cleanup policies on a repository, Maven layout policy, proxy connection settings, negative cache toggle and "Invalidate cache", apt signing key passphrase and apt proxy `distribution`/`flat`/`enforceDistribution`, Raw folder delete, SNAPSHOT builds as separate components in browse and search, the password policy, unavailable blob stores, role display name, contained roles and the `app:`/`admin:` targets, Nexus-format webhooks, and an Activity screen (Admin → Support → Activity). Delegated administrators see only the screens their privileges reach, read-only where they may not edit.
-- Task run history: each task keeps its last 50 runs, up to 30 days, with the result, duration, node and log, shown on the task's page and served by `GET /-/api/tasks/{id}/runs` and `GET /-/api/tasks/{id}/runs/{run}`. Before, only the last run's log was kept.
-- Helm: `postgresql.networkPolicy.enabled` (off by default) lets only the server pods and `allowFrom` peers reach the bundled PostgreSQL.
+- Web UI for all of this: a schedule editor that reads and keeps cron, multi-day weekly and monthly
+  (`last`) schedules (one it cannot read is kept verbatim), task notification condition and queued
+  run-now, the new task types and their parameters, ordered cleanup policies on a repository, Maven
+  layout policy, proxy connection settings, negative cache toggle and "Invalidate cache", apt signing
+  key passphrase and apt proxy `distribution`/`flat`/`enforceDistribution`, Raw folder delete, SNAPSHOT
+  builds as separate components in browse and search, the password policy, unavailable blob stores, role
+  display name, contained roles and the `app:`/`admin:` targets, Nexus-format webhooks, and an Activity
+  screen (Admin → Support → Activity). Delegated administrators see only the screens their privileges
+  reach, read-only where they may not edit.
+- Task run history: each task keeps its last 50 runs, up to 30 days, with the result, duration, node and
+  log, shown on the task's page and served by `GET /-/api/tasks/{id}/runs` and `GET
+  /-/api/tasks/{id}/runs/{run}`. Before, only the last run's log was kept.
+- Helm: `postgresql.networkPolicy.enabled` (off by default) lets only the server pods and `allowFrom`
+  peers reach the bundled PostgreSQL.
 - The Logs screen and `GET /-/api/logs` name the node whose log they show; each node keeps its own.
-- S3 blob stores without keys use an AWS role when no `AWS_ACCESS_KEY_ID` is set: EKS IRSA (web identity), EKS Pod Identity and ECS (container credentials), EC2 instance profiles (IMDSv2). Temporary keys are refreshed 5 minutes before they expire.
-- E-mail: SMTP servers that offer `AUTH LOGIN` and no `PLAIN` work; as with PLAIN, the password goes only over TLS or to localhost.
+- S3 blob stores without keys use an AWS role when no `AWS_ACCESS_KEY_ID` is set: EKS IRSA (web
+  identity), EKS Pod Identity and ECS (container credentials), EC2 instance profiles (IMDSv2). Temporary
+  keys are refreshed 5 minutes before they expire.
+- E-mail: SMTP servers that offer `AUTH LOGIN` and no `PLAIN` work; as with PLAIN, the password goes
+  only over TLS or to localhost.
 
 ### Changed
 - APT hosted `POST /` takes the package as the raw request body, as Nexus does (its documented
@@ -118,21 +138,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lists only stored sums. Pull replication accepts both forms.
 - Nexus API listings and search follow browse or read on the repository or a group containing it; a
   content-selector-only user lists and searches only the paths the selector matches.
-- Nexus API `sort=version` orders by each format's version rules (Maven `1.0-beta` before `1.0`); an unknown
-  `sort` or `direction`, a bad `prerelease` or `last_updated` answers 400.
+- Nexus API `sort=version` orders by each format's version rules (Maven `1.0-beta` before `1.0`); an
+  unknown `sort` or `direction`, a bad `prerelease` or `last_updated` answers 400.
 - Activity keeps 10 000 uploads, deletes and failed sign-ins and, separately, 10 000 other events.
 - `repo.delete` events name the repository's format/type; `repository.deleted` payloads carry them.
 - A remote 4xx other than 401/402/407/429 for an uncached asset is a negative-cached 404, so groups move
   on past S3/CloudFront 403s (npm packuments and PyPI pages keep failing closed).
 - Durations `"0"`/`"0s"` mean zero: max age 0 revalidates every request, negativeCacheTTL 0 records no
-  misses. negativeCacheTTL `-1` never expires; stored `-1` is migrated to `0s` (schema 8). TTL, enabled
+  misses. negativeCacheTTL `-1` never expires; stored `-1` is migrated to `0s`. TTL, enabled
   switch or credential changes clear the negative cache.
 - Routing rules written through the Nexus API match the whole path (stored as `^(?:m)$`).
 - A blob store that fails to open no longer stops the node: its repositories answer 503 and status
   checks name it; it is retried every few seconds.
 - Auto-block counts only the remote's own host and resets when remote access settings change.
 - HTTP settings: timeouts up to 3600 s; nonProxyHosts takes Java-style `*` globs.
-- Cleanup: age counts from when content was last written (ages, never-downloaded fallback, retain by date).
+- Cleanup: age counts from when content was last written (ages, never-downloaded fallback, retain by
+  date).
 - Tasks: run now of another task no longer answers 409 while a task runs; it is queued instead.
 - Nexus API: `blobstore.recalculate-size` tasks are listed as `blobstore.metrics.reconcile`.
 - Maven: each timestamped SNAPSHOT build is a component (version `1.0-yyyyMMdd.HHmmss-N`, base version
@@ -184,9 +205,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deleting a plugin's last version drops its prefix.
 - Nexus API: updating an apt repository reset a custom component to `main`.
 - APT: a `dists/` change in the same second as the previous one could answer 304 to apt.
-- Nexus search and component listing no longer load every component of the searched repositories into memory: a search keeps only the page it answers and at most four scans run at once. Eight concurrent searches on 100 000 components used to OOM-kill a default 128 MiB pod; 16 on a million components now stay near 70 MiB. A search takes about 1 s per million files.
+- Nexus search and component listing no longer load every component of the searched repositories into
+  memory: a search keeps only the page it answers and at most four scans run at once. Eight concurrent
+  searches on 100 000 components used to OOM-kill a default 128 MiB pod; 16 on a million components now
+  stay near 70 MiB. A search takes about 1 s per million files.
 
 ### Upgrade notes
+- Database schema 9, compat 7, expand-only: a rolling upgrade from 0.3.0 works, and 0.3.0 still runs on
+  the upgraded database, so going back only takes its image (the data written meanwhile that it does not
+  understand, such as nested roles, is ignored there). New tables and columns: `task_runs` (an older
+  node's runs are missing from the history), `webhooks.payload_format` (existing webhooks become
+  `commandcenter`, their payloads unchanged), `events.ip`, `events.node`, `tasks.notify_on`,
+  `queued_by`, `queued_at`, `roles.name`, `roles.roles`, `roles.nexus` and `users.last_name`.
+- While 0.3.0 and this version run side by side: older nodes deliver nothing to `nexus` webhooks or to
+  aliases they do not know; an older leader leaves queued runs waiting until a new node leads; older
+  nodes mail failures only; an older node ignores nested roles and the new `app:`/`admin:` targets, so
+  its users get less access, never more; and an older node that saves a repository with several cleanup
+  policies keeps only the first. Create nested roles and delegated privileges, and edit such
+  repositories, after the rollout.
 - Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by
   1048576; a GET now returns the stored bytes. Soft quotas never refuse writes. Bodies accepted
   silently before can now get 400 (docker connector ports, `v1Enabled:true`, `nugetVersion:V2`,
@@ -197,41 +233,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   start the listing again. `DELETE /v1/assets/{id}` now deletes non-raw files it used to refuse.
   Browse-only users and users granted only a group now see those repositories' content in the Nexus API;
   selector-only users see less than before.
-- Database schema 8, compat 7 (expand-only: 0.3.0 nodes keep running during a rolling upgrade). It adds
-  `webhooks.payload_format` (existing webhooks become `commandcenter`, their payloads unchanged) and
-  `events.ip`, `events.node`. During the rollout older nodes deliver nothing to `nexus` webhooks or to
-  aliases they do not know. Webhooks subscribed to `*` now also receive `auth.*` events.
-- Schema 8 also rewrites stored proxy `negativeCacheTTL: "-1"` to `"0s"`, keeping what it did ("no
+- Webhooks subscribed to `*` now also receive `auth.*` events.
+- The upgrade rewrites stored proxy `negativeCacheTTL: "-1"` to `"0s"`, keeping what it did ("no
   negative caching"); set `-1` again after the upgrade for never-expiring misses. `"0s"` in the native API
   and config.yaml now means zero rather than the default. Remote 403/400/405 for uncached assets are now a
   cached 404 instead of an uncached 502, so 502 rates in monitoring drop. A Terraform re-apply of a
   routing rule through the Nexus API changes it to whole-path matching. Saving a nonProxyHosts entry
   with a middle `*` is now refused.
-- Schema 8 also adds `tasks.notify_on`, `queued_by`, `queued_at`. During the rollout an older leader
-  leaves queued runs waiting until a new node leads, older nodes mail failures only, and an older node
-  that saves a repository with several policies keeps only the first: don't edit such repositories until
-  every node runs this version. No cleanup task is added on upgrade: create a `repository.cleanup` task if
+- No cleanup task is added on upgrade: create a `repository.cleanup` task if
   repositories with policies should be cleaned nightly. Cleanup ages now start at the last write, so age
   criteria delete the same or fewer components. Run now no longer refuses while another task runs:
   scripts that relied on the 409 now get 202 with `queued: true`.
-- Schema 8 also copies each tag of a Maven `X-SNAPSHOT` component to the timestamped builds under it and
+- The upgrade copies each tag of a Maven `X-SNAPSHOT` component to the timestamped builds under it and
   stamps existing `maven.purge-snapshots` tasks with `scope: version` (their old behaviour). Cleanup
   policies now age SNAPSHOT builds individually: old builds inside an active SNAPSHOT can be deleted by
   `componentAgeDays`/`lastDownloadedDays` (as in Nexus); `exclude.versionPattern: .*-SNAPSHOT` still
   protects them, and `retain` counts base versions. Run a cleanup preview after upgrading. Component
   counts, delete events and webhooks are per build. Proxies and groups with a version policy no longer
   serve, or ask upstream for, the other kind.
-- Schema 8 also adds the columns `roles.name`, `roles.roles`, `roles.nexus` and
-  `users.last_name`. A rolling upgrade from 0.3.0 works; an older node beside a new one ignores nested
-  roles and the new `app:`/`admin:` targets, so its users get less access, never more, until every node
-  runs the new version. Create nested roles and delegated privileges after the rollout.
 - Scripts that read `GET /service/rest/v1/security/roles` for `admin` or `target:action` privilege
   strings must use `nx-admin` and privilege names.
 - Existing apt proxies: cached files other than `.deb`/`.udeb` outside `dists/` (flat remotes) now
   revalidate after `metadataMaxAge`; before, they were cached forever. An existing signing key with a
   valid signing subkey now signs with that subkey, as gpg would (the subkey is already in `public.key`).
   Raw Content-Type changes only for new uploads.
-- Database schema 9, compat 7 (expand-only, so 0.3.0 nodes still keep running during a rolling upgrade): the new `task_runs` table. An older node's runs are missing from the history.
 
 ## [0.3.0] - 2026-10-30
 
@@ -1511,6 +1536,7 @@ blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
   checked at once; the others wait with their body already stored.
 
 [Unreleased]: https://github.com/sungjinseo/commandcenter/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/sungjinseo/commandcenter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sungjinseo/commandcenter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sungjinseo/commandcenter/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/sungjinseo/commandcenter/compare/v0.1.0...v0.1.1

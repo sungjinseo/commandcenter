@@ -91,12 +91,12 @@
 
 ## 빠른 시작
 
-릴리스 이미지는 `ghcr.io/sungjinseo/commandcenter`입니다. 아래의 `0.3.0`은 [최신 릴리스](https://github.com/sungjinseo/commandcenter/releases) 버전으로 바꾸세요.
+릴리스 이미지는 `ghcr.io/sungjinseo/commandcenter`입니다. 아래의 `0.4.0`은 [최신 릴리스](https://github.com/sungjinseo/commandcenter/releases) 버전으로 바꾸세요.
 
 먼저 관리자 비밀번호 해시를 만듭니다(8자 이상).
 
 ```bash
-docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.3.0 hash-password
+docker run --rm -i ghcr.io/sungjinseo/commandcenter:0.4.0 hash-password
 ```
 
 ### Kubernetes (Helm)
@@ -114,7 +114,7 @@ postgresql:
 ```
 
 ```bash
-helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.3.0 \
+helm install commandcenter oci://ghcr.io/sungjinseo/charts/commandcenter --version 0.4.0 \
   --namespace commandcenter --create-namespace -f my-values.yaml --wait
 helm test commandcenter -n commandcenter
 ```
@@ -123,23 +123,23 @@ Ingress/HTTPRoute, TLS, PostgreSQL, 비밀값 키, 백업과 업그레이드는 
 
 ### Kubernetes (Helm 없이, YAML 하나)
 
-Helm을 쓰지 않는 클러스터에는 릴리스마다 붙는 매니페스트 파일(`commandcenter-v0.3.0.yaml`, 이미지가 그 릴리스로 고정됨)을 씁니다. 저장소의 [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml)과 같은 내용입니다.
+Helm을 쓰지 않는 클러스터에는 릴리스마다 붙는 매니페스트 파일(`commandcenter-v0.4.0.yaml`, 이미지가 그 릴리스로 고정됨)을 씁니다. 저장소의 [deploy/kubernetes/commandcenter.yaml](deploy/kubernetes/commandcenter.yaml)과 같은 내용입니다.
 
 ```bash
-curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.3.0/commandcenter-v0.3.0.yaml
+curl -LO https://github.com/sungjinseo/commandcenter/releases/download/v0.4.0/commandcenter-v0.4.0.yaml
 # 파일 안의 baseURL, passwordHash, PostgreSQL 비밀번호, storageClassName을 채운 뒤
 kubectl create namespace commandcenter
-kubectl apply -n commandcenter -f commandcenter-v0.3.0.yaml
+kubectl apply -n commandcenter -f commandcenter-v0.4.0.yaml
 ```
 
-PostgreSQL StatefulSet과 비밀번호 Secret, 파드 하나짜리 Command Center StatefulSet, ConfigMap의 `config.yaml`, PVC, Service가 들어 있습니다. Ingress나 Gateway는 클러스터 방식대로 붙입니다. 차트 파일(`commandcenter-helm-chart-0.3.0.tgz`)도 릴리스에 있어 OCI 레지스트리를 못 쓰는 곳에서는 `helm install commandcenter ./commandcenter-helm-chart-0.3.0.tgz -f my-values.yaml`로 설치합니다.
+PostgreSQL StatefulSet과 비밀번호 Secret, 파드 하나짜리 Command Center StatefulSet, ConfigMap의 `config.yaml`, PVC, Service가 들어 있습니다. Ingress나 Gateway는 클러스터 방식대로 붙입니다. 차트 파일(`commandcenter-helm-chart-0.4.0.tgz`)도 릴리스에 있어 OCI 레지스트리를 못 쓰는 곳에서는 `helm install commandcenter ./commandcenter-helm-chart-0.4.0.tgz -f my-values.yaml`로 설치합니다.
 
 ### Docker compose
 
 ```bash
-git clone --depth 1 --branch v0.3.0 https://github.com/sungjinseo/commandcenter.git
+git clone --depth 1 --branch v0.4.0 https://github.com/sungjinseo/commandcenter.git
 cd commandcenter
-echo COMMANDCENTER_VERSION=0.3.0 >> .env
+echo COMMANDCENTER_VERSION=0.4.0 >> .env
 echo POSTGRES_PASSWORD=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n') >> .env
 cp config.example.yaml config.yaml     # passwordHash 자리에 해시를 넣습니다
 docker compose up -d                   # PostgreSQL과 Command Center
