@@ -42,7 +42,7 @@ func TestFetchRoutingRuleBlocksBeforeRemoteAndCache(t *testing.T) {
 	if _, err := f.Fetch(ctx, rp, "org/cached.jar", Content); !errors.Is(err, repo.ErrNotFound) || rm.hits.Load() != hits {
 		t.Fatalf("cached but blocked: %v hits=%d", err, rm.hits.Load()-hits)
 	}
-	// The path a rule sees: the remote path, or an absolute URL's path.
+	// The path a rule sees: the remote path, an absolute URL's path, or the Route.
 	for _, c := range []struct {
 		t    Target
 		want string
@@ -50,6 +50,8 @@ func TestFetchRoutingRuleBlocksBeforeRemoteAndCache(t *testing.T) {
 		{Target{Key: "k", Remote: "org/a.jar"}, "/org/a.jar"},
 		{Target{Key: "k", Remote: "/org/a.jar"}, "/org/a.jar"},
 		{Target{Key: "k", URL: "https://cdn.example/files/x.tgz?sig=1"}, "/files/x.tgz"},
+		// A file whose upstream URL lies elsewhere is routed by its request path.
+		{Target{Key: "k", URL: "https://files.example/packages/aa/bb/x-1.0.tar.gz", Route: "packages/x/1.0/x-1.0.tar.gz"}, "/packages/x/1.0/x-1.0.tar.gz"},
 	} {
 		if got := routePath(c.t); got != c.want {
 			t.Errorf("routePath(%+v) = %q, want %q", c.t, got, c.want)

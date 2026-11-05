@@ -2,6 +2,7 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -63,6 +64,12 @@ type Target struct {
 	Remote string
 	URL    string
 	Header http.Header
+	// Route, if set, is the path the proxy's routing rule sees instead of
+	// the remote path: the request path within the repository, for a file
+	// whose upstream URL lies elsewhere (a PyPI file on another host, a
+	// chart or archive URL taken from an index), where the administrator's
+	// rule cannot know the upstream path.
+	Route string
 	// SHA256 is the expected content sha256 (hex); a mismatching download is rejected and not cached.
 	SHA256 string
 	// NotHTML marks an asset that is never a web page: a text/html answer
@@ -171,10 +178,10 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 	}
 }
 
-// routePath is the path a routing rule sees for t: the remote path, or the
-// path of an absolute URL, with one leading "/".
+// routePath is the path a routing rule sees for t: its Route, else the
+// remote path or the path of an absolute URL, with one leading "/".
 func routePath(t Target) string {
-	p := t.Remote
+	p := cmp.Or(t.Route, t.Remote)
 	if p == "" && t.URL != "" {
 		if u, err := url.Parse(t.URL); err == nil {
 			p = u.Path
