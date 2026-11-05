@@ -17,6 +17,7 @@ import (
 
 	"commandcenter/internal/auth"
 	"commandcenter/internal/cleanup"
+	"commandcenter/internal/component"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -90,29 +91,6 @@ func (v *view) sees(rp *repo.Repository, p string) bool {
 	p = selectorPath(rp, p)
 	return v.h.Auth.CanPath(v.p, rp.Name, auth.Browse, p) ||
 		slices.ContainsFunc(v.groupsOf(rp.Name), func(g string) bool { return v.h.Auth.CanPath(v.p, g, auth.Browse, p) })
-}
-
-// visible returns c with only the files the caller sees, nil if none.
-func (v *view) visible(c *comp) *comp {
-	rp := v.h.Repos.Get(c.repo)
-	if rp == nil {
-		return nil
-	}
-	var keep []string
-	for _, p := range c.paths {
-		if v.sees(rp, p) {
-			keep = append(keep, p)
-		}
-	}
-	switch len(keep) {
-	case 0:
-		return nil
-	case len(c.paths):
-		return c
-	}
-	out := *c
-	out.paths = keep
-	return &out
 }
 
 // searchRepos resolves a search's repository parameter: names separated
@@ -272,7 +250,8 @@ var gavRE = regexp.MustCompile(`^([^\s:]+):([^\s:]+)(?::([^\s:]+))?(?::([^\s:]+)
 // of its files. Parameters Command Center does not know are ignored, as
 // Nexus ignores them.
 type criteria struct {
-	comp   []func(c *comp) bool           // all must hold
+	comp   []func(c *comp) bool           // all must hold, on any one of the component's files
+	file   func(c *comp, p string) bool   // some file of the component must pass (q and its dependency form)
 	asset  []func(c *comp, p string) bool // asset parameters: they cut a component's files
 	sums   map[string]string              // asset checksums (md5, sha1, sha256, sha512), matched in the database
 	since  time.Time                      // some file modified at or after it
@@ -321,9 +300,7 @@ func parseCriteria(q url.Values) (criteria, error) {
 			cr.gav(m)
 		} else if alts := splitValue(v); len(alts) > 0 {
 			t := newTerm(alts, false)
-			cr.comp = append(cr.comp, func(c *comp) bool {
-				return t.matches(append([]string{c.group, c.name, c.version}, c.paths...)...)
-			})
+			cr.file = func(c *comp, p string) bool { return t.matches(c.group, c.name, c.version, p) }
 		}
 	}
 	for _, s := range sumNames {
@@ -385,12 +362,10 @@ func (cr *criteria) gav(m []string) {
 	}
 	if m[4] != "" || m[5] != "" {
 		ext, cl := literal(m[4]), literal(m[5])
-		cr.comp = append(cr.comp, func(c *comp) bool {
-			return slices.ContainsFunc(c.paths, func(p string) bool {
-				fc, fe := fileParts(c, p)
-				return (m[4] == "" || ext.matches(fe)) && (m[5] == "" || cl.matches(fc))
-			})
-		})
+		cr.file = func(c *comp, p string) bool {
+			fc, fe := fileParts(c, p)
+			return (m[4] == "" || ext.matches(fe)) && (m[5] == "" || cl.matches(fc))
+		}
 	}
 }
 
@@ -478,34 +453,6 @@ func fileParts(c *comp, p string) (classifier, ext string) {
 	return "", strings.TrimPrefix(path.Ext(p), ".")
 }
 
-// matches returns c when it matches cr, with its files cut by the asset
-// parameters and, when given, to sums (the files with the checksums); nil
-// when it does not match or no file is left.
-func (cr criteria) matches(c *comp, sums map[string]bool) *comp {
-	for _, f := range cr.comp {
-		if !f(c) {
-			return nil
-		}
-	}
-	if len(cr.asset) == 0 && sums == nil {
-		return c
-	}
-	out := *c
-	out.paths = nil
-	for _, p := range c.paths {
-		if sums != nil && !sums[p] {
-			continue
-		}
-		if !slices.ContainsFunc(cr.asset, func(f func(*comp, string) bool) bool { return !f(c, p) }) {
-			out.paths = append(out.paths, p)
-		}
-	}
-	if len(out.paths) == 0 {
-		return nil
-	}
-	return &out
-}
-
 // compare orders components by the sort field (Nexus's default direction:
 // descending for version), then by repository and key, a total order: a
 // continuation token, the last item's id, finds its place even after that
@@ -567,7 +514,7 @@ func (h *Handler) after(items []*comp, cr criteria, token string) ([]*comp, bool
 // searched runs the request's search: the matching components of the
 // repositories it selects that the caller may list, in the requested
 // order, each with the files the caller sees and its download repository.
-func (h *Handler) searched(w http.ResponseWriter, r *http.Request) ([]*comp, criteria, bool) {
+func (h *Handler) searched(w http.ResponseWriter, r *http.Request, win window) ([]*comp, criteria, bool) {
 	q := r.URL.Query()
 	p := principal(r)
 	cr, err := parseCriteria(q)
@@ -586,66 +533,179 @@ func (h *Handler) searched(w http.ResponseWriter, r *http.Request) ([]*comp, cri
 		writeMessage(w, http.StatusNotFound, "repository not found")
 		return nil, cr, false
 	}
-	comps, err := h.find(r.Context(), repos, cr, q.Get("tag"))
+	comps, err := h.find(r.Context(), repos, cr, q.Get("tag"), win, v.sees)
 	if err != nil {
 		h.fail(w, err)
 		return nil, cr, false
 	}
-	out := comps[:0]
 	for _, c := range comps {
-		if c = v.visible(c); c != nil {
-			c.via = via[c.repo]
-			out = append(out, c)
-		}
+		c.via = via[c.repo]
 	}
-	return out, cr, true
+	return comps, cr, true
 }
 
-// find runs a search in repos (groups skipped): the components that match
-// cr and the tag, in cr's order.
-func (h *Handler) find(ctx context.Context, repos []*repo.Repository, cr criteria, tag string) ([]*comp, error) {
+// window is how much of a search a request can use, which is what a search
+// keeps in memory however many components the repositories hold: the first
+// limit components (0: all of them) in the search's order after after, and
+// after itself with atToken. prefix narrows the scan to the paths under it.
+type window struct {
+	limit   int
+	after   *comp
+	atToken bool
+	prefix  string
+}
+
+// pageWindow is the window of a page of components after token.
+func (h *Handler) pageWindow(token string) window {
+	win := window{limit: pageSize + 1}
+	if tok, ok := h.tokenComp(token); token != "" && ok {
+		win.after = &tok
+	}
+	return win
+}
+
+// held is a component a search has seen and may still answer with.
+type held struct {
+	*comp
+	file, recent bool // a file passed cr.file, a file was modified since cr.since
+	picked       bool
+}
+
+// collector picks a search's result from a repository's files, in any order.
+// A component qualifies once its files passed every test; among those, the
+// best limit stay. Whatever ranks behind them can never come back, so it is
+// dropped at once: memory follows the page, not the repository.
+type collector struct {
+	cr     criteria
+	win    window
+	keep   func(*repo.Repository, string) bool // the caller sees this file; nil: all
+	tagged map[meta.ComponentKey]bool
+	rp     *repo.Repository
+	sums   map[string]bool
+	recent map[string]bool
+	open   map[string]*held
+	best   []*held // qualified, sorted by cr once a limit applies
+}
+
+func (s *collector) add(group, name, version, p string) {
+	c := comp{repo: s.rp.Name, format: s.rp.Format, group: group, name: name, version: version, paths: []string{p}}
+	k := c.key()
+	e := s.open[k]
+	if e == nil && !s.wanted(&c) {
+		return
+	}
+	file := s.cr.file != nil && s.cr.file(&c, p)
+	recent := s.recent != nil && s.recent[p]
+	pass := (s.sums == nil || s.sums[p]) && (s.keep == nil || s.keep(s.rp, p)) &&
+		!slices.ContainsFunc(s.cr.asset, func(f func(*comp, string) bool) bool { return !f(&c, p) })
+	if e == nil {
+		if !file && !recent && !pass { // nothing to remember about this file
+			return
+		}
+		x := c
+		x.paths = nil
+		e = &held{comp: &x, file: s.cr.file == nil, recent: s.recent == nil}
+		s.open[k] = e
+	}
+	e.file, e.recent = e.file || file, e.recent || recent
+	if pass {
+		e.paths = append(e.paths, p)
+	}
+	if !e.picked && e.file && e.recent && len(e.paths) > 0 {
+		s.pick(e)
+	}
+}
+
+// wanted reports whether a component not held yet can be in the result.
+func (s *collector) wanted(c *comp) bool {
+	if a := s.win.after; a != nil {
+		if d := s.cr.compare(c, a); d < 0 || (d == 0 && !s.win.atToken) {
+			return false
+		}
+	}
+	if n := len(s.best); s.win.limit > 0 && n == s.win.limit && s.cr.compare(c, s.best[n-1].comp) > 0 {
+		return false
+	}
+	if s.tagged != nil && !s.tagged[c.metaKey()] {
+		return false
+	}
+	return !slices.ContainsFunc(s.cr.comp, func(f func(*comp) bool) bool { return !f(c) })
+}
+
+func (s *collector) pick(e *held) {
+	e.picked = true
+	if s.win.limit == 0 {
+		s.best = append(s.best, e)
+		return
+	}
+	i, _ := slices.BinarySearchFunc(s.best, e, func(a, b *held) int { return s.cr.compare(a.comp, b.comp) })
+	s.best = slices.Insert(s.best, i, e)
+	if n := len(s.best); n > s.win.limit {
+		delete(s.open, s.best[n-1].key())
+		s.best = s.best[:n-1]
+	}
+}
+
+// searchSem bounds the repository scans running at once: each is cheap to
+// hold but streams every path, and 128 at once outrun the garbage collector
+// in the 128 MiB a default install has (measured on 300 000 files).
+var searchSem = make(chan struct{}, 4)
+
+// find runs a search in repos (groups skipped): the components in win that
+// match cr and the tag, in cr's order, with the files that pass and keep.
+func (h *Handler) find(ctx context.Context, repos []*repo.Repository, cr criteria, tag string, win window, keep func(*repo.Repository, string) bool) ([]*comp, error) {
 	tagged, err := h.tagged(ctx, tag)
 	if err != nil {
 		return nil, err
 	}
-	var out []*comp
+	select {
+	case searchSem <- struct{}{}:
+		defer func() { <-searchSem }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	s := &collector{cr: cr, win: win, keep: keep, tagged: tagged, open: map[string]*held{}}
 	for _, rp := range repos {
 		if rp.Type == "group" || (cr.format != "" && rp.Format != cr.format) || (tagged != nil && !tagged[meta.ComponentKey{Repo: rp.Name}]) {
 			continue
 		}
-		var sums, recent map[string]bool
+		s.rp, s.sums, s.recent = rp, nil, nil
 		if cr.sums != nil {
-			if sums, err = h.DB.AssetPathsWhere(ctx, rp.Name, cr.sums, time.Time{}); err != nil {
+			if s.sums, err = h.DB.AssetPathsWhere(ctx, rp.Name, cr.sums, time.Time{}); err != nil {
 				return nil, err
 			}
 		}
 		if !cr.since.IsZero() {
-			if recent, err = h.DB.AssetPathsWhere(ctx, rp.Name, nil, cr.since); err != nil {
+			if s.recent, err = h.DB.AssetPathsWhere(ctx, rp.Name, nil, cr.since); err != nil {
 				return nil, err
 			}
 		}
-		if (sums != nil && len(sums) == 0) || (recent != nil && len(recent) == 0) {
+		if (s.sums != nil && len(s.sums) == 0) || (s.recent != nil && len(s.recent) == 0) {
 			continue
 		}
-		comps, err := h.components(ctx, rp)
-		if err != nil {
+		if err := h.walkComponents(ctx, rp, win.prefix, s.add); err != nil {
 			return nil, err
 		}
-		for _, c := range comps {
-			if (tagged != nil && !tagged[c.metaKey()]) || (recent != nil && !slices.ContainsFunc(c.paths, func(p string) bool { return recent[p] })) {
-				continue
-			}
-			if m := cr.matches(c, sums); m != nil {
-				out = append(out, m)
-			}
-		}
 	}
-	slices.SortFunc(out, cr.compare)
+	if win.limit == 0 {
+		slices.SortFunc(s.best, func(a, b *held) int { return cr.compare(a.comp, b.comp) })
+	}
+	out := make([]*comp, len(s.best))
+	for i, e := range s.best {
+		if e.format == "maven" { // the main file first, so search/assets/download finds it before a classified one
+			slices.SortStableFunc(e.paths, func(a, b string) int {
+				ca, _, _ := component.MavenFileParts(path.Base(a), e.name, e.version)
+				cb, _, _ := component.MavenFileParts(path.Base(b), e.name, e.version)
+				return cmpBool(ca != "", cb != "")
+			})
+		}
+		out[i] = e.comp
+	}
 	return out, nil
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {
-	comps, cr, ok := h.searched(w, r)
+	comps, cr, ok := h.searched(w, r, h.pageWindow(r.URL.Query().Get("continuationToken")))
 	if !ok {
 		return
 	}
@@ -696,7 +756,12 @@ func (h *Handler) asset(ctx context.Context, x hit) (meta.Asset, bool, error) {
 }
 
 func (h *Handler) searchAssets(w http.ResponseWriter, r *http.Request) {
-	comps, cr, ok := h.searched(w, r)
+	// The token's own component may have no file left to give, the others
+	// at least one each, and one more tells that another page follows.
+	cid, _, _ := strings.Cut(r.URL.Query().Get("continuationToken"), ".")
+	win := h.pageWindow(cid)
+	win.limit, win.atToken = pageSize+2, true
+	comps, cr, ok := h.searched(w, r, win)
 	if !ok {
 		return
 	}
@@ -728,7 +793,7 @@ func (h *Handler) searchAssets(w http.ResponseWriter, r *http.Request) {
 // with a sort, which picks the first (sort=version&direction=desc: the
 // newest), as Nexus does.
 func (h *Handler) searchDownload(w http.ResponseWriter, r *http.Request) {
-	comps, cr, ok := h.searched(w, r)
+	comps, cr, ok := h.searched(w, r, window{limit: pageSize})
 	if !ok {
 		return
 	}

@@ -179,6 +179,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   deleting a plugin's last version drops its prefix.
 - Nexus API: updating an apt repository reset a custom component to `main`.
 - APT: a `dists/` change in the same second as the previous one could answer 304 to apt.
+- Nexus search and component listing no longer load every component of the searched repositories into memory: a search keeps only the page it answers and at most four scans run at once. Eight concurrent searches on 100 000 components used to OOM-kill a default 128 MiB pod; 16 on a million components now stay near 70 MiB. A search takes about 1 s per million files.
 
 ### Upgrade notes
 - Terraform and scripts that send `softQuota.limit` in MB (the old reading) must multiply it by

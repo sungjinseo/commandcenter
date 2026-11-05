@@ -805,60 +805,34 @@ func parseAssetID(id string) (repoName, p string, ok bool) {
 	return repoName, p, ok && p != ""
 }
 
-// components derives every component of rp, ordered by group, name and
-// version. ponytail: a whole-repository scan of paths per request (the ids
-// alone, not the rows); index the derivation if listing huge repositories
-// gets slow.
-func (h *Handler) components(ctx context.Context, rp *repo.Repository) ([]*comp, error) {
-	byKey := map[string]*comp{}
-	add := func(group, name, version, p string) {
-		c := &comp{repo: rp.Name, format: rp.Format, group: group, name: name, version: version}
-		k := c.key()
-		if x := byKey[k]; x != nil {
-			c = x
-		} else {
-			byKey[k] = c
-		}
-		c.paths = append(c.paths, p)
-	}
+// walkComponents calls fn with each file of rp under prefix and the component
+// it belongs to, in no useful order. ponytail: a scan of the paths per search
+// (the ids alone, not the rows), about 1 s per million files; index the
+// derivation if searching huge repositories gets slow.
+func (h *Handler) walkComponents(ctx context.Context, rp *repo.Repository, prefix string, fn func(group, name, version, p string)) error {
 	if rp.Format == "docker" {
 		// An image's tags: Nexus names a docker component image:tag, while
 		// the package rows hold digests.
 		names, err := h.DB.ListPackageNames(ctx, rp.Name)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, image := range names {
 			tags, err := h.DB.ListDistTags(ctx, rp.Name, image)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			for _, t := range tags {
-				add("", image, t.Tag, image+"/manifests/"+t.Version)
+				fn("", image, t.Tag, image+"/manifests/"+t.Version)
 			}
 		}
-	} else if err := h.DB.WalkAssetPaths(ctx, rp.Name, "", func(p string) {
+		return nil
+	}
+	return h.DB.WalkAssetPaths(ctx, rp.Name, prefix, func(p string) {
 		if group, name, version, ok := component.DeriveAsset(rp.Format, p); ok {
-			add(group, name, version, p)
+			fn(group, name, version, p)
 		}
-	}); err != nil {
-		return nil, err
-	}
-	out := make([]*comp, 0, len(byKey))
-	for _, c := range byKey {
-		if c.format == "maven" { // the main file first, so search/assets/download finds it before a classified one
-			slices.SortStableFunc(c.paths, func(a, b string) int {
-				ca, _, _ := component.MavenFileParts(path.Base(a), c.name, c.version)
-				cb, _, _ := component.MavenFileParts(path.Base(b), c.name, c.version)
-				return cmpBool(ca != "", cb != "")
-			})
-		}
-		out = append(out, c)
-	}
-	slices.SortFunc(out, func(a, b *comp) int {
-		return strings.Compare(a.key(), b.key())
 	})
-	return out, nil
 }
 
 // cmpBool orders false before true.
@@ -985,31 +959,23 @@ func (h *Handler) listComponents(w http.ResponseWriter, r *http.Request) {
 	if rp == nil {
 		return
 	}
-	v := h.viewOf(r)
-	members := resolve.Leaves(rp)
-	var comps []*comp
-	for _, m := range members {
-		cs, err := h.components(r.Context(), m)
-		if err != nil {
-			h.fail(w, err)
-			return
-		}
-		for _, c := range cs {
-			if c = v.visible(c); c != nil {
-				if rp.Type == "group" {
-					c.via = rp.Name
-				}
-				comps = append(comps, c)
-			}
-		}
-	}
 	token := r.URL.Query().Get("continuationToken")
+	members := resolve.Leaves(rp)
 	if tok, ok := parseCompID(token); token != "" && (!ok || !slices.ContainsFunc(members, func(m *repo.Repository) bool { return m.Name == tok.repo })) {
 		writeMessage(w, http.StatusBadRequest, "invalid continuationToken")
 		return
 	}
 	var cr criteria // repository and key order
-	slices.SortFunc(comps, cr.compare)
+	comps, err := h.find(r.Context(), members, cr, "", h.pageWindow(token), h.viewOf(r).sees)
+	if err != nil {
+		h.fail(w, err)
+		return
+	}
+	if rp.Type == "group" {
+		for _, c := range comps {
+			c.via = rp.Name
+		}
+	}
 	h.writeComponentPage(w, r, comps, cr, token)
 }
 
@@ -1056,16 +1022,19 @@ func (h *Handler) findComponent(w http.ResponseWriter, r *http.Request) (*repo.R
 	if rp == nil {
 		return nil, nil
 	}
-	comps, err := h.components(r.Context(), rp)
+	k := want.key()
+	cr := criteria{comp: []func(*comp) bool{func(c *comp) bool { return c.key() == k }}}
+	win := window{limit: 1}
+	if rp.Format == "maven" { // the id holds the stored spelling, so the scan can skip to its files
+		win.prefix = strings.ReplaceAll(want.group, ".", "/") + "/" + want.name + "/"
+	}
+	comps, err := h.find(r.Context(), []*repo.Repository{rp}, cr, "", win, h.viewOf(r).sees)
 	if err != nil {
 		h.fail(w, err)
 		return nil, nil
 	}
-	k := want.key()
-	if i := slices.IndexFunc(comps, func(c *comp) bool { return c.key() == k }); i >= 0 {
-		if c := h.viewOf(r).visible(comps[i]); c != nil {
-			return rp, c
-		}
+	if len(comps) > 0 {
+		return rp, comps[0]
 	}
 	writeMessage(w, http.StatusNotFound, "component not found")
 	return nil, nil

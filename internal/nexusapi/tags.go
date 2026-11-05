@@ -59,7 +59,7 @@ func (h *Handler) Find(ctx context.Context, repos []*repo.Repository, q url.Valu
 	if err != nil {
 		return nil, repo.Errorf(http.StatusBadRequest, "%v", err)
 	}
-	comps, err := h.find(ctx, repos, cr, q.Get("tag"))
+	comps, err := h.find(ctx, repos, cr, q.Get("tag"), window{}, nil)
 	if err != nil {
 		return nil, err
 	}
