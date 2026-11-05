@@ -421,38 +421,69 @@ func namePrefix(format, p, group, name string) string {
 	return ""
 }
 
-// rankVersions sets rank and ranked on every component: its place among
-// the versions of its group and name, newest first. Versions that compare
-// equal share the place of the first of them.
+// rankVersions sets rank and ranked on every component: the place of its
+// version among the versions of its group and name, newest first, and how
+// many places there are. retain counts places: the builds of one Maven
+// SNAPSHOT share the place of their base version (by date: of its newest
+// build), and versions that compare equal share one.
 func rankVersions(format, sortBy string, comps map[compKey]*compAgg) {
 	type nameKey struct{ group, name string }
-	byName := map[nameKey][]compKey{}
-	for k := range comps {
-		byName[nameKey{k.group, k.name}] = append(byName[nameKey{k.group, k.name}], k)
+	type version struct {
+		v       string
+		written time.Time // of its newest component; an unknown time ranks oldest
+		keys    []compKey
+	}
+	byName := map[nameKey]map[string]*version{}
+	for k, c := range comps {
+		v := k.version
+		if format == "maven" {
+			v = component.MavenBaseVersion(v)
+		}
+		n := nameKey{k.group, k.name}
+		if byName[n] == nil {
+			byName[n] = map[string]*version{}
+		}
+		x := byName[n][v]
+		if x == nil {
+			x = &version{v: v}
+			byName[n][v] = x
+		}
+		x.keys = append(x.keys, k)
+		if c.written.After(x.written) {
+			x.written = c.written
+		}
 	}
 	byDate := sortBy == "date" || !HasVersionOrder(format)
-	newer := func(a, b compKey) int { // > 0: a is newer
+	newer := func(a, b *version) int { // > 0: a is newer
 		if byDate {
-			return comps[a].written.Compare(comps[b].written) // an unknown time ranks oldest
+			return a.written.Compare(b.written)
 		}
-		if format == "maven" { // the builds of a SNAPSHOT share its place, as its base version
-			return CompareVersions(format, component.MavenBaseVersion(a.version), component.MavenBaseVersion(b.version))
-		}
-		return CompareVersions(format, a.version, b.version)
+		return CompareVersions(format, a.v, b.v)
 	}
-	for _, keys := range byName {
-		sort.Slice(keys, func(i, j int) bool {
-			if c := newer(keys[i], keys[j]); c != 0 {
+	for _, versions := range byName {
+		vs := make([]*version, 0, len(versions))
+		for _, x := range versions {
+			vs = append(vs, x)
+		}
+		sort.Slice(vs, func(i, j int) bool {
+			if c := newer(vs[i], vs[j]); c != 0 {
 				return c > 0
 			}
-			return keys[i].version < keys[j].version
+			return vs[i].v < vs[j].v
 		})
-		rank := 1
-		for i, k := range keys {
-			if i > 0 && newer(keys[i-1], k) != 0 {
-				rank = i + 1
+		rank := 0
+		for i, x := range vs {
+			if i == 0 || newer(vs[i-1], x) != 0 {
+				rank++
 			}
-			comps[k].rank, comps[k].ranked = rank, len(keys)
+			for _, k := range x.keys {
+				comps[k].rank = rank
+			}
+		}
+		for _, x := range vs {
+			for _, k := range x.keys {
+				comps[k].ranked = rank
+			}
 		}
 	}
 }
