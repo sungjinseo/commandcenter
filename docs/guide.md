@@ -589,7 +589,7 @@ Sonatype Nexus Repository 3에서 Command Center로 옮길 때는 `commandcenter
 
 ## Nexus REST API 호환
 
-Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, Terraform provider(`datadrivers/terraform-provider-nexus`), `nexus-cli` 같은 도구가 쓰는 엔드포인트를 `/service/rest/v1` 아래에서 같은 경로와 같은 JSON 필드 이름으로 제공합니다. Nexus의 공개 소스를 읽고 맞춘 것으로, 이 도구들을 실제로 돌려 본 것은 아니므로 옮기기 전에 쓰는 도구로 직접 시험해 보세요. 인증은 다른 경로와 같습니다(Basic 비밀번호, API 토큰, UI 세션). 저장소 관리는 admin 또는 저장소 관리 권한(`admin:` 대상), 보안·작업·blob store 조회는 admin 또는 해당 `app:` 권한("관리 기능 위임"), 컴포넌트·자산 조회와 검색은 해당 저장소(또는 그 저장소를 멤버로 둔 group)의 read 또는 browse 권한, 삭제는 delete 권한이 필요합니다. 익명으로 읽을 수 없으면 `401`(Basic 챌린지 포함), 로그인했지만 권한이 없으면 `403`, 볼 수 없는 저장소는 `404`로 답합니다. 오류 본문은 Nexus처럼 `{"id": "*", "message": "..."}`이고, 저장소 본문의 검증 오류는 `400`에 `[{"id": "...", "message": "..."}]` 배열입니다. 시간 값은 밀리초와 `+00:00`이 붙은 ISO 8601입니다. 컨텐츠 셀렉터 권한만 있는 사용자에게는 셀렉터 식에 맞는 경로의 파일만 목록과 검색에 나옵니다.
+Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, Terraform provider(`datadrivers/terraform-provider-nexus`), `nexus-cli` 같은 도구가 쓰는 엔드포인트를 `/service/rest/v1` 아래에서 같은 경로와 같은 JSON 필드 이름으로 제공합니다. Nexus의 공개 소스를 읽고 맞췄으며, Jenkins의 `nexus-artifact-uploader`와 Nexus Platform 플러그인, nexus3-cli, Gradle, Maven, sbt는 실제로 돌려 확인했습니다(아래 "도구별 호환성" 참고). 그 밖의 도구는 옮기기 전에 직접 시험해 보세요. 인증은 다른 경로와 같습니다(Basic 비밀번호, API 토큰, UI 세션). 저장소 관리는 admin 또는 저장소 관리 권한(`admin:` 대상), 보안·작업·blob store 조회는 admin 또는 해당 `app:` 권한("관리 기능 위임"), 컴포넌트·자산 조회와 검색은 해당 저장소(또는 그 저장소를 멤버로 둔 group)의 read 또는 browse 권한, 삭제는 delete 권한이 필요합니다. 익명으로 읽을 수 없으면 `401`(Basic 챌린지 포함), 로그인했지만 권한이 없으면 `403`, 볼 수 없는 저장소는 `404`로 답합니다. 오류 본문은 Nexus처럼 `{"id": "*", "message": "..."}`이고, 저장소 본문의 검증 오류는 `400`에 `[{"id": "...", "message": "..."}]` 배열입니다. 시간 값은 밀리초와 `+00:00`이 붙은 ISO 8601입니다. 컨텐츠 셀렉터 권한만 있는 사용자에게는 셀렉터 식에 맞는 경로의 파일만 목록과 검색에 나옵니다.
 
 | 엔드포인트 | 지원 |
 |---|---|
@@ -612,8 +612,10 @@ Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, T
 | `GET/POST /cleanup-policies`, `GET/PUT/DELETE /cleanup-policies/{name}` | admin. `name`, `notes`, `format`(`maven2`, 전체는 `*`), `criteriaLastBlobUpdated`(일), `criteriaLastDownloaded`(일), `criteriaReleaseType`(`RELEASES`/`PRERELEASES`), `criteriaAssetRegex`, `retain`, `sortBy`(`version`/`date`). PUT은 204이며 Nexus에 없는 `namePattern`과 `exclude`는 유지합니다 |
 | `GET /tasks`, `POST /tasks` → 201, `GET/PUT/DELETE /tasks/{id}`, `POST /tasks/{id}/run`, `POST /tasks/{id}/stop` | 조회는 admin 또는 `tasks` `read`, 실행·중지는 `tasks` `run`, 나머지는 admin. Nexus의 TaskTemplateXO(`type`, `name`, `enabled`, `alertEmail`, `notificationCondition`은 `FAILURE` 또는 `SUCCESS_FAILURE`, `frequency`, `properties`). 종류는 `blobstore.compact`, `repository.cleanup`, `repository.maven.rebuild-metadata`, `repository.maven.remove-snapshots`, `repository.maven.purge-unused-snapshots`, `blobstore.delete-temp-files`와 Command Center 고유 id이며, 모르는 종류는 400에 지원 목록을 알려 줍니다. `frequency.schedule`은 manual, once, hourly, daily, weekly(`recurringDays` 하나, 1=일요일…7=토요일), monthly(1–28일 하나), cron(`0 M H * * ?`, `0 M * * * ?`, `0 M H ? * MON`, `0 M H D * ?` 형태)이고, `startDate`(밀리초)와 `timeZoneOffset`의 시각을 서버 시간대의 예약으로 바꿉니다. `?type=`(Nexus 또는 Command Center의 종류 id)로 거를 수 있습니다 |
 | `GET/PUT /security/user-tokens`, `DELETE /security/user-tokens`, `GET /security/user-tokens/tokens`, `GET/POST/DELETE /security/users/{userId}/{realm}/user-token` | admin. 사용자 토큰 설정(`protectContent`가 `required`), 전체 무효화, 목록, 사용자별 조회·발급·삭제("사용자 토큰" 참고) |
-| `GET/POST /tags`, `GET/PUT/DELETE /tags/{name}`, `POST/DELETE /tags/associate/{tagName}`, `POST /staging/move/{destination}`, `POST /staging/delete` | 태그 만들기·수정·삭제는 admin, 연결과 스테이징은 관련 저장소의 권한. 대상은 검색과 같은 파라미터로 고르고, `GET /search?tag=`는 태그로 거르며 컴포넌트에 `tags`가 붙습니다("태그와 스테이징" 참고) |
+| `GET/POST /tags`, `GET/PUT/DELETE /tags/{name}`, `POST/DELETE /tags/associate/{tagName}`, `POST /staging/move/{destination}`, `POST /staging/delete` | 태그 만들기·수정·삭제는 admin, 연결과 스테이징은 관련 저장소의 권한. 대상은 검색과 같은 파라미터로 고르고, `GET /search?tag=`는 태그로 거르며 컴포넌트에 `tags`가 붙습니다("태그와 스테이징" 참고). 스테이징 요청에 `repository` 없이 `tag`만 주면 그 태그가 붙은 컴포넌트가 있는 모든 저장소가 대상입니다 |
 | `GET /service/rest/atlas/system-information` | admin. `nexus-status`, `nexus-node`, `nexus-configuration`, `nexus-properties`, `system-time`, `system-runtime`(고루틴, 메모리, GOMAXPROCS), `system-filestores`(blob store와 남은 공간), `system-environment`, `system-network`, `system-properties`(Go 빌드 정보). 지원 번들과 같은 API 화면에서 만들므로 비밀번호·키·DB URL은 들어 있지 않습니다 |
+| `GET /service/rest/wonderland/status` | 로그인한 사용자. Sonatype 클라이언트 라이브러리(Jenkins Nexus Platform 플러그인의 "Test connection")가 가장 먼저 읽는 에디션과 버전입니다. Nexus처럼 `Accept`가 없으면 XML(`<status><edition>PRO</edition><version>3.91.1-04</version></status>`), `Accept: application/json`이면 JSON으로 답합니다. 버전은 Command Center의 버전이 아니라 이 API가 따르는 Nexus 릴리스이고, `PRO`는 태그·스테이징 같은 Pro 엔드포인트를 제공한다는 뜻입니다 |
+| `GET /script`, `POST /script`, `/script/{name}`, `POST /script/{name}/run` | 로그인한 사용자. 스크립트 API는 없습니다(Groovy 스크립트는 서버 안에서 임의의 코드를 실행합니다). 스크립트 생성을 끈 Nexus(3.21.2부터 기본값)처럼 목록은 `[]`, 생성은 `410`, 이름을 지정한 요청(조회·수정·삭제·실행)은 `404`이며, 메시지에 이유가 들어 있습니다 |
 | `GET /service/rest/swagger.json` | 인증 없음. `GET /-/api/openapi.json`과 같은 OpenAPI 3.0 문서("OpenAPI 문서" 참고) |
 | `GET /service/rest/repository/browse/<저장소>/<디렉터리>/` | 해당 저장소의 browse 권한. Nexus의 HTML 디렉터리 목록입니다. 끝에 `/`가 없으면 303으로 붙여 주고, 루트(`/service/rest/repository/browse/`)는 볼 수 있는 저장소 목록, group은 멤버의 트리를 합쳐 보여 줍니다. 없는 저장소나 경로는 404 페이지이고, 한 번에 1000개까지 보여 줍니다 |
 | `GET/PUT/DELETE /email`, `POST /email/verify` | admin. SMTP 설정과 같은 값입니다. `sslOnConnectEnabled`는 `tls`, `startTlsEnabled`와 `startTlsRequired`를 함께 켜면 `starttls`입니다. 평문으로 내려가는 STARTTLS, 서버 신원 검사를 끈 TLS, `subjectPrefix`는 400입니다. 비밀번호는 돌려주지 않습니다. verify는 본문의 주소로 테스트 메일을 보내고 `{success, reason}`으로 답합니다 |
@@ -680,17 +682,17 @@ Nexus와 다른 점:
 - `search/assets/download`는 자산이 둘 이상이면 Nexus처럼 `400`으로 거절하며, `sort`를 주면 정렬 뒤 첫 번째로 보냅니다(`sort=version&direction=desc`가 최신). `sort=version`의 기본 방향은 desc입니다. `repository`가 group이면 멤버의 파일을 group URL로 보냅니다.
 - group으로 나열·검색한 항목의 `repository`와 `id`는 Nexus와 달리 멤버의 것이라 `GET`·`DELETE /components/{id}`에 그대로 쓸 수 있습니다.
 - 컴포넌트 목록과 검색은 요청마다 저장소의 자산 경로를 모두 읽어 파생하므로 자산이 수십만 개인 저장소에서는 한 페이지에 수 초가 걸릴 수 있습니다. 전체 목록에 `continuationToken`으로 이어 받습니다.
-- 스크립트 API(`/v1/script`)는 없습니다(임의 코드 실행). 모르는 경로는 JSON `404`입니다.
+- 스크립트 API(`/v1/script`)는 없습니다(임의 코드 실행). 그 경로는 목록이 `[]`, 생성이 `410`, 이름을 지정한 요청이 `404`이며 메시지에 이유가 들어 있습니다(위 표 참고). 모르는 경로는 JSON `404`입니다.
 
 구성 API도 지원합니다. `GET /service/rest/v1/configuration`(헤더 `X-Nexus-Migration-Protocol-Version: 1` 필요)은 구성 문서를 비밀값 없이 JSON으로 내보냅니다. `PUT /service/rest/v1/configuration`은 Nexus처럼 기존 설정을 덮어쓰지 않고 없는 객체만 만듭니다. Nexus는 문서 모양을 공개하지 않으므로 문서는 Command Center의 구성 문서입니다("구성 코드화" 참고).
 
 ### 컴포넌트 업로드 API
 
-`POST /service/rest/v1/components?repository=<저장소>`는 Nexus의 컴포넌트 업로드와 같은 multipart/form-data 본문을 받습니다. 필드 이름은 `<포맷>.<필드>`(컴포넌트 필드), `<포맷>.asset[N]`(파일), `<포맷>.asset[N].<필드>`(그 파일의 필드)이며, 포맷 접두어는 생략해도 됩니다. 값이 빈 필드는 없는 것으로 봅니다. 각 파일은 그 포맷의 클라이언트가 보내는 요청(Maven PUT, npm publish, twine 업로드, gem push 등)으로 바뀌어 저장소 경로에서 처리됩니다. 그래서 권한 검사, `writePolicy`, 잠금, 검증, 활동 이벤트와 웹훅, 메타데이터 재생성이 네이티브 업로드와 같습니다. 성공하면 `204`입니다. Jenkins `nexusPublisher`(Nexus Platform 플러그인)와 `nexus3-cli` 같은 도구도 같은 필드를 보내므로 그대로 쓸 수 있습니다.
+`POST /service/rest/v1/components?repository=<저장소>`는 Nexus의 컴포넌트 업로드와 같은 multipart/form-data 본문을 받습니다. 필드 이름은 `<포맷>.<필드>`(컴포넌트 필드), `<포맷>.asset[N]`(파일), `<포맷>.asset[N].<필드>`(그 파일의 필드)이며, 포맷 접두어는 생략해도 됩니다. 값이 빈 필드는 없는 것으로 봅니다. 각 파일은 그 포맷의 클라이언트가 보내는 요청(Maven PUT, npm publish, twine 업로드, gem push 등)으로 바뀌어 저장소 경로에서 처리됩니다. 그래서 권한 검사, `writePolicy`, 잠금, 검증, 활동 이벤트와 웹훅, 메타데이터 재생성이 네이티브 업로드와 같습니다. 성공하면 `204`입니다. Jenkins `nexusPublisher`(Nexus Platform 플러그인)는 이 API로 올리며 실제로 돌려 확인했습니다. 플러그인은 파일 파트 이름을 포맷 접두어 없이 `asset0`, `asset1`로 보내고, POM 파일을 함께 올리면 좌표 필드를 보내지 않습니다. `nexus3-cli`는 업로드 전에 Nexus의 스크립트 API로 저장소를 조회하므로 쓸 수 없습니다("도구별 호환성" 참고).
 
 | 포맷 | 필드 | 저장 위치 |
 |---|---|---|
-| maven2 | `groupId`, `artifactId`, `version`, `generate-pom`(선택, `true`/`on`), `packaging`(선택), `assetN`, `assetN.extension`, `assetN.classifier`(선택) | `g/r/o/u/p/<artifactId>/<version>/<artifactId>-<version>[-<classifier>].<extension>`. 분류자 없는 `pom` 파일을 함께 보내면 좌표를 그 POM에서 읽고(부모의 groupId·version, `${속성}` 치환 포함) 필드는 무시합니다. `generate-pom`은 POM 파일이 없을 때만 최소 POM을 만듭니다(`packaging`이 없으면 분류자 없는 파일의 확장자). POM을 먼저 저장하고, GA의 `maven-metadata.xml`과 체크섬은 파일마다 갱신됩니다. versionPolicy가 SNAPSHOT인 저장소는 거부합니다(`mvn deploy`를 쓰세요). |
+| maven2 | `groupId`, `artifactId`, `version`, `generate-pom`(선택, `true`/`on`), `packaging`(선택), `assetN`, `assetN.extension`, `assetN.classifier`(선택), `tag`(선택) | `g/r/o/u/p/<artifactId>/<version>/<artifactId>-<version>[-<classifier>].<extension>`. 분류자 없는 `pom` 파일을 함께 보내면 좌표를 그 POM에서 읽고(부모의 groupId·version, `${속성}` 치환 포함) 필드는 무시합니다. `generate-pom`은 POM 파일이 없을 때만 최소 POM을 만듭니다(`packaging`이 없으면 분류자 없는 파일의 확장자). POM을 먼저 저장하고, GA의 `maven-metadata.xml`과 체크섬은 파일마다 갱신됩니다. versionPolicy가 SNAPSHOT인 저장소는 거부합니다(`mvn deploy`를 쓰세요). `tag`를 주면 올린 컴포넌트에 그 태그를 붙입니다. 태그가 이미 있어야 하고(없으면 `id`가 `tag`인 400), 저장소에 read와 edit 권한이 있어야 합니다(없으면 403). 두 조건은 파일을 저장하기 전에 확인합니다. `tag`는 maven2 업로드만 받습니다. |
 | raw | `directory`, `assetN`, `assetN.filename` | `<directory>/<filename>`(겹친 `/`와 앞뒤 `/`는 지웁니다). 파일 여러 개 |
 | apt | `asset` | 패키지의 pool 경로 |
 | npm | `asset`(`npm pack`의 .tgz) | `package.json`의 이름·버전으로 publish하고 `latest` 태그를 붙입니다 |
@@ -726,6 +728,24 @@ curl http://localhost:8081/service/rest/v1/formats/upload-specs
 - 모든 파일을 먼저 검사합니다(경로, 버전 정책, 권한). 저장은 파일 하나씩이므로 저장 도중 실패하면 앞서 저장된 파일은 남습니다(Nexus와 같습니다).
 - 받은 파일은 처리하는 동안 `dataDir`에 임시로 두었다가 지웁니다.
 - Nexus와 달리 `generate-pom`과 POM 파일을 함께 보내면 올린 POM을 씁니다. conda, composer, terraform은 Nexus에 없는 Command Center 확장입니다.
+
+### 도구별 호환성
+
+아래 도구는 `test/compat/`의 스크립트로 실제 도구를 공식 이미지에서 돌려 확인한 결과입니다(`bash test/compat/jenkins.sh` 등, Docker 필요).
+
+| 도구(확인한 버전) | 되는 것 | 안 되는 것과 주의할 점 |
+|---|---|---|
+| Jenkins `nexus-artifact-uploader` 2.16 (`nexusArtifactUploader`, `nexusVersion: 'nexus3'`) | 릴리스와 SNAPSHOT 게시. `nexusUrl`에는 `호스트:포트`만, `repository`에는 저장소 이름을 적습니다 | 같은 릴리스 버전을 다시 올리면 `writePolicy: allow_once`(기본값)에서 `400`으로 실패합니다. Nexus의 "Disable redeploy"와 같습니다 |
+| Jenkins Nexus Platform 플러그인 `nexus-jenkins-plugin` 3.14.431 | 전역 설정의 "Nexus Repository Manager 3.x Server"와 "Test connection", `nexusPublisher`(POM을 함께 올리거나 좌표로 POM 생성, `tagName`), `createTag`, `associateTag`, `moveComponents`, `deleteComponents` | `nexusPublisher`는 Nexus와 마찬가지로 SNAPSHOT 저장소에 올리지 못합니다(`nexusArtifactUploader`나 `mvn deploy`를 쓰세요). 태그를 만드는 `createTag`와, 없는 태그를 `tagName`으로 주는 `nexusPublisher`는 관리자 계정이 필요합니다. 태그를 관리자가 미리 만들어 두면 배포 계정으로도 `tagName`을 쓸 수 있습니다 |
+| Gradle 9.8 `maven-publish` | 릴리스와 SNAPSHOT 게시, Gradle 모듈 메타데이터(`.module`), `.sha256`·`.sha512`, group 저장소를 통한 해석 | HTTP 주소에는 Gradle 쪽에 `allowInsecureProtocol = true`가 필요합니다 |
+| Maven 3.9 `deploy:deploy-file` | 릴리스(POM 생성 또는 `-DpomFile`, `-Dsources`), SNAPSHOT | |
+| sbt 1.13 `publish` | 릴리스와 SNAPSHOT 게시, group 저장소를 통한 해석 | 자격 증명의 realm이 `commandcenter`여야 합니다(아래) |
+| nexus3-cli 4.2.1 | `login`, `blobstore list/show/create/delete`, `task list/show/run/stop`, `security realm available/active/activate`, `script list` | `repository list/show/create/delete`, `list`, `upload`, `download`, `delete`, `cleanup-policy`, `script create/run/delete`는 Nexus의 Groovy 스크립트 API가 있어야 동작하므로 쓸 수 없고, `Command Center has no script API …` 메시지로 실패합니다. 저장소와 파일은 REST API(`/service/rest/v1/repositories`, `/components`, `/search/assets`, `/assets/{id}`)나 `curl`로 다루세요 |
+
+- **sbt와 Ivy의 realm.** sbt와 Ivy는 서버가 `WWW-Authenticate`로 알려 주는 realm과 호스트로 자격 증명을 찾습니다. Command Center의 realm은 `commandcenter`이므로 Nexus에서 쓰던 `realm=Sonatype Nexus Repository Manager`를 `realm=commandcenter`로 바꿔야 합니다(`~/.sbt/.credentials` 또는 `Credentials("commandcenter", "<호스트>", "<사용자>", "<비밀번호>")`). 바꾸지 않으면 sbt가 `Unable to find credentials for [commandcenter @ <호스트>]`를 출력하고 `401`로 실패합니다.
+- **nexus3-cli 설치.** Python 3.12 이상에서는 `pip install nexus3-cli 'setuptools<81'`로 설치합니다(nexus3-cli가 쓰는 `pkg_resources`가 setuptools 81에서 빠졌습니다). Command Center는 `Server` 헤더를 보내지 않으므로 명령마다 `Invalid semver string; skipping version capability check` 경고가 나오지만 동작에는 영향이 없습니다(`PYTHONWARNINGS=ignore`로 숨길 수 있습니다).
+- **Nexus Platform 플러그인의 출처.** 이 플러그인은 Jenkins 업데이트 센터 목록에 더 이상 없고, Jenkins 아카이브의 마지막 버전이 3.14.431입니다(`jenkins-plugin-cli --plugins nexus-jenkins-plugin:3.14.431.v37ca_dc788b_b_1`). Sonatype이 직접 배포하는 더 새로운 버전은 확인하지 않았습니다.
+- **거절 사유.** Nexus는 거절 사유를 HTTP 상태 줄에 넣지만 Command Center는 표준 문구(`400 Bad Request`)를 보내고 사유는 응답 본문에 넣습니다. Maven·Gradle·Jenkins 로그에는 상태 코드만 나오므로, 사유는 `curl`로 같은 요청을 보내 응답 본문에서 확인하세요(예: 이미 있는 릴리스 버전은 `repository "maven-releases" does not allow updating assets: …`).
 
 ## 웹 UI
 
@@ -825,6 +845,10 @@ hosted 저장소에 `delete` 권한이 있으면 잘못 올라간 버전을 바�
 태그는 이름과 자유 속성(JSON 객체)을 가진 라벨이며 컴포넌트(저장소·그룹·이름·버전)에 붙습니다(`/-/api/tags`, Nexus 호환 `/service/rest/v1/tags`). 태그 만들기·수정·삭제는 관리자만 할 수 있고, 컴포넌트에 붙이거나 떼려면(`POST`·`DELETE /service/rest/v1/tags/associate/<태그>?<검색 조건>`) 관련된 모든 저장소에 edit 권한이 있어야 합니다. 대상은 Nexus 검색 API와 같은 매개변수(repository, format, group, name, version, q, tag, maven.* 등, `*` 와일드카드)로 고르며, 검색 결과와 정확히 같은 컴포넌트가 선택됩니다. 웹 UI·API·Cleanup·스테이징으로 컴포넌트를 지우거나 태그를 지우면 연결도 함께 사라집니다. 검색은 `tag=`로 걸러 낼 수 있고 각 컴포넌트에 `tags`가 표시됩니다.
 
 스테이징 이동(`POST /service/rest/v1/staging/move/<대상>?repository=<원본>&tag=<태그>`, 또는 `POST /-/api/staging/move?destination=<대상>&repository=<원본>&…`)은 같은 포맷의 hosted 저장소 사이에서 컴포넌트를 옮깁니다. 컴포넌트마다 행과 파일을 대상에 복사하고(두 저장소의 blob store가 다를 때만 바이트를 복사하고 sha256을 확인합니다) 대상의 메타데이터(maven-metadata.xml, npm 패키지 문서, helm index.yaml, yum repodata 등)를 다시 만든 뒤, 원본에서는 포맷의 삭제 기능으로 지웁니다. 태그도 함께 옮겨집니다. 원본에는 읽기와 삭제 권한, 대상에는 추가 권한이 필요하고, 대상의 writePolicy가 allow일 때 기존 버전을 덮어쓰려면 edit 권한도 필요합니다. 컴포넌트마다 따로 처리하므로, 실패한 컴포넌트는 원본에 그대로 남고 응답에 사유가 표시되며(HTTP 409, 나머지는 옮겨집니다). 지원 포맷은 maven, npm, raw, pypi, nuget, helm, yum이며 docker 등 나머지는 400으로 거부합니다. `POST /service/rest/v1/staging/delete?repository=<저장소>&...`는 고른 컴포넌트를 삭제합니다(delete 권한). 한 요청은 최대 5000개 컴포넌트를 처리하며, repository 외에 tag나 검색 조건이 하나 이상 있어야 합니다. 활동 이벤트는 `tag.*`, `staging.move`, `staging.delete`입니다.
+
+`repository`를 빼고 `tag`만 주면(`POST /service/rest/v1/staging/move/<대상>?tag=<태그>`, `POST /service/rest/v1/staging/delete?tag=<태그>`) Nexus처럼 그 태그가 붙은 컴포넌트가 있는 저장소 전체가 대상입니다. Jenkins Nexus Platform 플러그인의 `moveComponents`와 `deleteComponents`가 이렇게 보냅니다. 이동은 읽을 수 있는 hosted 저장소 가운데 대상과 포맷이 같은 것(대상 자신은 제외)에서만 옮기므로, 한 빌드가 Maven과 npm 컴포넌트에 같은 태그를 붙였다면 대상마다 한 번씩 호출하면 됩니다. 삭제는 읽을 수 있는 모든 저장소에서 지웁니다. 해당 저장소 가운데 하나라도 delete 권한이 없으면 아무것도 바꾸지 않고 `403`으로 거절합니다. 이 형태는 Nexus 호환 경로에서만 되고 `/-/api/staging/*`는 계속 `repository`가 필요합니다.
+
+컴포넌트 업로드 API의 `maven2.tag`로 올리면서 바로 태그를 붙일 수도 있습니다("컴포넌트 업로드 API" 참고). Jenkins `nexusPublisher`의 `tagName`이 이 필드입니다.
 
 - npm은 옮긴 버전의 게시 시각을 그대로 두고, 대상의 `latest`만 갱신합니다(다른 dist-tag는 옮기지 않습니다). PyPI와 npm은 writePolicy와 관계없이 이미 있는 버전을 덮어쓰지 않습니다.
 - 프로토콜 클라이언트로 지운 컴포넌트(`npm unpublish`, Maven·raw `DELETE`, docker 매니페스트 `DELETE`)는 태그 연결이 남으므로, 같은 버전을 다시 올리면 태그가 다시 붙습니다.
@@ -1800,6 +1824,29 @@ Maven 동작 메모:
 - 쓰기 정책이 `allow_once`여도 `.asc` 서명 파일은 다시 올릴 수 있습니다(다시 서명할 때나, 파일과 서명 사이에서 실패한 배포를 다시 할 때). 이미 있는 서명을 덮어쓰려면 다른 덮어쓰기처럼 Edit 권한이 필요합니다. 서명은 `application/pgp-signature`로 내려갑니다.
 - hosted 저장소의 `archetype-catalog.xml`(`mvn archetype:generate`가 읽는 목록)은 서버가 만듭니다. `<packaging>maven-archetype</packaging>`인 POM이 올라오거나 스테이징으로 들어오면 그 GA와 기준 버전을 더하고, 그 버전의 파일이 모두 지워지면 뺍니다. 아키타입이 하나도 없으면 404입니다. group은 멤버들의 카탈로그를 합쳐(GAV 중복 제거, groupId·artifactId·버전 순 정렬, `repository` 항목 제거) 돌려주며, 카탈로그가 있는 멤버가 하나뿐이면 그 문서를 그대로 줍니다. proxy는 원격의 카탈로그를 받습니다.
 - 플러그인 그룹 문서(groupId 디렉터리의 `maven-metadata.xml`의 `<plugins>`)는 `mvn deploy`가 올린 항목을 합칩니다. 플러그인 GA의 마지막 버전을 지우면 그 플러그인의 항목이 빠져, 지운 플러그인을 접두어(`mvn <접두어>:<goal>`)로 찾지 않습니다. `repository.rebuild-metadata`는 `<packaging>maven-plugin</packaging>`인 POM과 그 JAR의 `META-INF/maven/plugin.xml`(`goalPrefix`, 없으면 Maven 규칙대로 artifactId에서 `maven`·`plugin`을 뺀 이름)으로 항목을 다시 계산합니다. 올린 항목은 그 GA에 버전이 남아 있는 한 그대로 두고, 버전이 없는 GA의 항목은 지웁니다. 그래서 가져오기나 스테이징으로 G 문서 없이 들어온 플러그인도 이 작업 뒤에는 접두어로 찾을 수 있습니다.
+
+Gradle(`maven-publish`)과 sbt도 같은 저장소 주소를 씁니다.
+
+```groovy
+// build.gradle
+publishing {
+    publications { maven(MavenPublication) { from components.java } }
+    repositories {
+        maven {
+            url = version.endsWith('-SNAPSHOT') ? 'https://repo.example.com/repository/maven-snapshots/' : 'https://repo.example.com/repository/maven-releases/'
+            credentials { username = 'ci'; password = System.getenv('REPO_PASSWORD') }
+        }
+    }
+}
+```
+
+```scala
+// build.sbt: realm은 반드시 "commandcenter"
+publishTo := Some("commandcenter" at "https://repo.example.com/repository/" + (if (isSnapshot.value) "maven-snapshots" else "maven-releases") + "/")
+credentials += Credentials("commandcenter", "repo.example.com", "ci", sys.env("REPO_PASSWORD"))
+```
+
+Gradle은 `.module` 파일과 `.sha256`·`.sha512` 체크섬 파일도 올리며 모두 저장됩니다. sbt는 `maven-metadata.xml`을 올리지 않지만 Command Center가 만들어 제공합니다.
 
 ### npm 클라이언트 설정
 

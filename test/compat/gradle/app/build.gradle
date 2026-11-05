@@ -1,0 +1,19 @@
+// The build that resolves the library through the group repository.
+plugins { id 'application' }
+repositories {
+    maven {
+        url = 'http://commandcenter:8081/repository/maven-public/'
+        allowInsecureProtocol = true
+    }
+}
+dependencies { implementation "com.example.gradle:greeter:${providers.gradleProperty('libVersion').get()}" }
+configurations.configureEach { resolutionStrategy.cacheChangingModulesFor 0, 'seconds' }
+application { mainClass = 'app.Main' }
+// The variant the dependency resolved to: runtimeElements comes from its
+// .module file, runtime from its POM alone.
+tasks.register('variants') {
+    def root = configurations.runtimeClasspath.incoming.resolutionResult.rootComponent
+    doLast {
+        root.get().dependencies.each { println "VARIANT ${it.selected.id} ${it.resolvedVariant.displayName}" }
+    }
+}

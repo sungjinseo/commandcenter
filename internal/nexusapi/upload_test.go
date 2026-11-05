@@ -382,7 +382,7 @@ func TestUploadSpecs(t *testing.T) {
 		}
 	}
 	mvn := byFormat["maven2"]
-	if !mvn.MultipleUpload || names(mvn.ComponentFields) != "groupId,artifactId,version,generate-pom,packaging" ||
+	if !mvn.MultipleUpload || names(mvn.ComponentFields) != "groupId,artifactId,version,generate-pom,packaging,tag" ||
 		names(mvn.AssetFields) != "classifier,extension,asset" || mvn.ComponentFields[3].Type != "BOOLEAN" || !mvn.ComponentFields[3].Optional {
 		t.Fatalf("maven2 spec: %+v", mvn)
 	}
@@ -410,9 +410,9 @@ func TestUploadSpecs(t *testing.T) {
 	}
 }
 
-// Maven (maven-12): curl -F with generate-pom, then the layout of
-// Jenkins's nexusPublisher (component fields after the files, blank
-// classifiers, a POM asset, text parts with a charset), then refusals.
+// Maven (maven-12): curl -F with generate-pom, then the fields in another
+// order (component fields after the files, blank classifiers, a POM asset,
+// text parts with a charset), then refusals.
 func TestUploadMaven(t *testing.T) {
 	e := startUploads(t)
 	jar := zipOf("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
@@ -445,8 +445,8 @@ func TestUploadMaven(t *testing.T) {
 		t.Fatalf("search: %+v", page)
 	}
 
-	// nexusPublisher: the component attributes, then each asset with its
-	// extension and an empty classifier; text parts declare a charset.
+	// Each asset with its extension and an empty classifier, then the
+	// component's fields; text parts declare a charset.
 	text := func(name, value string) part {
 		p := fld(name, value)
 		p.hdr = textproto.MIMEHeader{"Content-Type": {"text/plain; charset=ISO-8859-1"}}
@@ -498,6 +498,90 @@ func TestUploadMaven(t *testing.T) {
 	e.wantUpload(204, "ci", "maven-mixed", fld("maven2.groupId", "g"), fld("maven2.artifactId", "s"), fld("maven2.version", "1.0-SNAPSHOT"),
 		fil("maven2.asset1", "s.jar", jar), fld("maven2.asset1.extension", "jar"))
 	e.body("/repository/maven-mixed/g/s/1.0-SNAPSHOT/s-1.0-SNAPSHOT.jar")
+}
+
+// The forms of Jenkins's nexusPublisher step (Nexus Platform plugin
+// 3.14.431, nexus-platform-api 3.49.4-01), as test/compat/jenkins.sh makes
+// it send them: file parts named asset0, asset1 without the format, with
+// the workspace path as filename; text parts with a charset and a transfer
+// encoding. Beside a POM asset the coordinates are left out; without one
+// generate-pom is true. Its tagName comes as maven2.tag.
+func TestUploadMavenNexusPublisher(t *testing.T) {
+	e := startUploads(t)
+	jar := zipOf("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\n")
+	text := func(name, value string) part {
+		p := fld(name, value)
+		p.hdr = textproto.MIMEHeader{"Content-Type": {"text/plain; charset=ISO-8859-1"}, "Content-Transfer-Encoding": {"8bit"}}
+		return p
+	}
+	file := func(name, filename string, data []byte) part {
+		p := fil(name, "/var/jenkins_home/workspace/publisher/"+filename, data)
+		p.hdr = textproto.MIMEHeader{"Content-Transfer-Encoding": {"binary"}}
+		return p
+	}
+	const dir = "/repository/maven-releases/com/example/"
+
+	// mavenCoordinate and two assets, no POM among them.
+	e.wantUpload(204, "ci", "maven-releases",
+		text("maven2.version", "1.0.0"), text("maven2.packaging", "jar"), text("maven2.groupId", "com.example"),
+		text("maven2.generate-pom", "true"), text("maven2.artifactId", "nopom"),
+		file("asset0", "hello.jar", jar), text("maven2.asset0.extension", "jar"),
+		file("asset1", "hello-sources.jar", jar), text("maven2.asset1.classifier", "sources"), text("maven2.asset1.extension", "jar"))
+	if b := e.body(dir + "nopom/1.0.0/nopom-1.0.0.jar"); b != string(jar) {
+		t.Fatalf("jar: %q", b)
+	}
+	e.body(dir + "nopom/1.0.0/nopom-1.0.0-sources.jar")
+	if p := e.body(dir + "nopom/1.0.0/nopom-1.0.0.pom"); !strings.Contains(p, "<artifactId>nopom</artifactId>") || !strings.Contains(p, "<packaging>jar</packaging>") {
+		t.Fatalf("generated pom: %s", p)
+	}
+
+	// A POM among the assets names the coordinates; the step sends none.
+	pom := simplePOM("com.example", "withpom", "1.0.0")
+	e.wantUpload(204, "ci", "maven-releases", text("maven2.packaging", "jar"),
+		file("asset0", "hello.jar", jar), text("maven2.asset0.extension", "jar"),
+		file("asset1", "hello.pom", []byte(pom)), text("maven2.asset1.extension", "pom"))
+	e.body(dir + "withpom/1.0.0/withpom-1.0.0.jar")
+	if p := e.body(dir + "withpom/1.0.0/withpom-1.0.0.pom"); p != pom {
+		t.Fatalf("uploaded pom: %s", p)
+	}
+
+	// tagName: the step makes sure the tag exists, then sends it along.
+	tagged := func(version string) []part {
+		return []part{text("maven2.version", version), text("maven2.packaging", "jar"), text("maven2.groupId", "com.example"),
+			text("maven2.generate-pom", "true"), text("maven2.artifactId", "tagged"),
+			file("asset0", "hello.jar", jar), text("maven2.asset0.extension", "jar"), text("maven2.tag", "build-7")}
+	}
+	e.wantInvalid("tag", "does not exist", "ci", "maven-releases", tagged("1.0.0")...)
+	e.missing(dir + "tagged/1.0.0/tagged-1.0.0.jar")
+	e.want("POST", v1+"/tags", "admin", `{"name":"build-7","attributes":{"job":"publisher"}}`, 200)
+	e.want("GET", v1+"/tags/build-7", "ci", "", 200)
+	e.wantUpload(204, "ci", "maven-releases", tagged("1.0.0")...)
+	e.wantUpload(204, "ci", "maven-releases", tagged("1.0.1")...)
+	var page struct {
+		Items []struct {
+			Name, Version string
+			Tags          []string
+		}
+	}
+	e.get(v1+"/search?tag=build-7&sort=version&direction=asc", "ci", &page)
+	if len(page.Items) != 2 || page.Items[0].Name != "tagged" || page.Items[0].Version != "1.0.0" || page.Items[1].Version != "1.0.1" ||
+		strings.Join(page.Items[0].Tags, ",") != "build-7" {
+		t.Fatalf("search by tag: %+v", page)
+	}
+	// Only Maven's upload takes a tag; who may add but not edit cannot tag,
+	// and nothing is stored.
+	e.wantInvalid("tag", "unknown component field", "ci", "raw-files",
+		fld("raw.directory", "d"), fil("raw.asset1", "a.txt", []byte("a")), fld("raw.asset1.filename", "a.txt"), fld("raw.tag", "build-7"))
+	if st, b := e.ui("POST", "/-/api/roles", `{"id":"adder","privileges":[{"target":"repo:maven-releases","actions":["read","add"]}]}`); st != 201 {
+		t.Fatalf("role: %d %s", st, b)
+	}
+	if st, b := e.ui("PUT", "/-/api/users/viewer", `{"roles":["adder"]}`); st != 200 {
+		t.Fatalf("user: %d %s", st, b)
+	}
+	if st, b := e.uploadForm("viewer", "maven-releases", tagged("1.0.2")...); st != 403 || !strings.Contains(string(b), "needs read and edit") {
+		t.Fatalf("tag without edit: %d %s", st, b)
+	}
+	e.missing(dir + "tagged/1.0.2/tagged-1.0.2.jar")
 }
 
 // Raw (aptraw-05, rest-01) and the refusals every format shares.

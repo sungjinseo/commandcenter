@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/component"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
@@ -109,6 +110,7 @@ var uploadSpecs = map[string]*uploadSpec{
 			str("version", "Version; read from the POM when a POM asset is given. Not for SNAPSHOT repositories", false),
 			{Name: "generate-pom", Type: "BOOLEAN", Description: "Also store a minimal POM of the coordinates (ignored when a POM asset is given)", Optional: true},
 			str("packaging", "Packaging of the generated POM (default: the extension of the asset without classifier)", true),
+			str("tag", "Tag to associate the component with; it must exist", true),
 		},
 		Asset: []uploadField{str("classifier", "Classifier", true), str("extension", "Extension, such as jar or pom", false), fileField}},
 	"raw": {Format: "raw", Multiple: true, plan: planRaw,
@@ -218,6 +220,10 @@ func (h *Handler) uploadComponent(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		writes, err = spec.plan(r.Context(), rp, u)
 	}
+	tag := u.fields["tag"]
+	if err == nil && tag != "" {
+		err = h.checkTag(r, rp, tag)
+	}
 	for _, wr := range writes {
 		if c, ok := wr.body.(io.Closer); ok {
 			defer c.Close() // stops an encoding that was not read to its end
@@ -238,7 +244,36 @@ func (h *Handler) uploadComponent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if tag != "" {
+		g, name, v, _ := component.DeriveAsset(rp.Format, writes[0].path)
+		q := url.Values{"repository": {rp.Name}, "group": {g}, "name": {name}, "version": {v}}
+		if status, body := h.call(r, http.MethodPost, "/-/api/tags/"+url.PathEscape(tag)+"/associate?"+q.Encode(), nil); status != http.StatusOK {
+			writeUIError(w, status, body)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// checkTag refuses an upload's tag (Nexus Pro's <format>.tag, which
+// Jenkins's nexusPublisher sends for its tagName) before anything is
+// stored: the tag must exist and the caller hold what associating it with
+// a component of rp needs (read and edit). The upload's component gets the
+// tag through the UI's association once its files are stored.
+// ponytail: Maven only, the one format whose spec lists the field; a
+// format whose upload does not name its files' paths needs its component
+// from the format first.
+func (h *Handler) checkTag(r *http.Request, rp *repo.Repository, tag string) error {
+	p := principal(r)
+	switch status, _ := h.call(r, http.MethodGet, "/-/api/tags/"+url.PathEscape(tag), nil); {
+	case status == http.StatusNotFound:
+		return refuse("tag", "tag %q does not exist: create it first (POST %s/tags)", tag, Prefix)
+	case status != http.StatusOK:
+		return repo.Errorf(status, "tag %q could not be read", tag)
+	case !h.Auth.Can(p, rp.Name, auth.Read) || !h.Auth.CanPath(p, rp.Name, auth.Edit, ""):
+		return repo.Errorf(http.StatusForbidden, "user %q needs read and edit in %q to tag a component", p.User, rp.Name)
+	}
+	return nil
 }
 
 // writeUploadError answers a refused form: a 400 as the validation list,

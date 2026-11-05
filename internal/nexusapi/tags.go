@@ -3,10 +3,14 @@ package nexusapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
+	"strconv"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -169,8 +173,7 @@ func (h *Handler) stagingMove(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	q.Set("destination", r.PathValue("destination"))
-	status, body := h.call(r, http.MethodPost, "/-/api/staging/move?"+q.Encode(), nil)
-	passThrough(w, status, body)
+	h.staged(w, r, "/-/api/staging/move", q, "Move", "components moved")
 }
 
 // POST /v1/staging/delete?repository=<name>&<search parameters>.
@@ -178,6 +181,80 @@ func (h *Handler) stagingDelete(w http.ResponseWriter, r *http.Request) {
 	if !h.signedIn(w, r) {
 		return
 	}
-	status, body := h.call(r, http.MethodPost, "/-/api/staging/delete?"+r.URL.RawQuery, nil)
-	passThrough(w, status, body)
+	q := r.URL.Query()
+	q.Del("destination") // a move's
+	h.staged(w, r, "/-/api/staging/delete", q, "Delete", "components deleted")
+}
+
+// staged runs a staging request through the UI's. One that names a tag
+// and no repository, which is all Jenkins's moveComponents and
+// deleteComponents send, is for every repository, as in Nexus: it runs for
+// each repository the caller may read that holds a component with the tag
+// (a move: the hosted ones of the destination's format, without the
+// destination), and the answers are merged, done being the name of their
+// list of components handled. Lacking delete in one of them refuses the
+// request before anything changes; a later refusal (a repository that
+// went offline) is answered as it is, after the repositories before it.
+func (h *Handler) staged(w http.ResponseWriter, r *http.Request, path string, q url.Values, verb, done string) {
+	tag := q.Get("tag")
+	if q.Get("repository") != "" || tag == "" {
+		status, body := h.call(r, http.MethodPost, path+"?"+q.Encode(), nil)
+		passThrough(w, status, body)
+		return
+	}
+	p := principal(r)
+	data := map[string]any{}
+	var dst *repo.Repository
+	if name := q.Get("destination"); q.Has("destination") {
+		if dst = h.readable(p, name); dst == nil {
+			writeMessage(w, http.StatusNotFound, "repository "+strconv.Quote(name)+" not found")
+			return
+		}
+		data["destination"] = name
+	}
+	keys, err := h.DB.TagMembers(r.Context(), tag)
+	if err != nil {
+		writeMessage(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	var sources []string
+	for _, k := range keys {
+		rp := h.Repos.Get(k.Repo)
+		switch {
+		case rp == nil || slices.Contains(sources, k.Repo) || !h.Auth.Can(p, k.Repo, auth.Read):
+		case dst != nil && (rp.Type != "hosted" || rp.Format != dst.Format || rp.Name == dst.Name):
+		case !h.Auth.CanPath(p, k.Repo, auth.Delete, ""):
+			writeMessage(w, http.StatusForbidden, fmt.Sprintf("user %q may not delete in %q", p.User, k.Repo))
+			return
+		default:
+			sources = append(sources, k.Repo)
+		}
+	}
+	lists := map[string][]json.RawMessage{done: {}, "components failed": {}}
+	status := http.StatusOK
+	for _, name := range sources {
+		q.Set("repository", name)
+		st, body := h.call(r, http.MethodPost, path+"?"+q.Encode(), nil)
+		var res struct {
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		if json.Unmarshal(body, &res); res.Data == nil {
+			writeUIError(w, st, body)
+			return
+		}
+		for k := range lists {
+			var items []json.RawMessage
+			json.Unmarshal(res.Data[k], &items)
+			lists[k] = append(lists[k], items...)
+		}
+		status = max(status, st)
+	}
+	msg := verb + " Successful"
+	if n := len(lists["components failed"]); n > 0 {
+		msg = fmt.Sprintf("%s failed for %d of %d components", verb, n, n+len(lists[done]))
+	}
+	for k, l := range lists {
+		data[k] = l
+	}
+	writeJSON(w, status, map[string]any{"status": status, "message": msg, "data": data})
 }

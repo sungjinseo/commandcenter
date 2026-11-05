@@ -433,6 +433,65 @@ func TestStagingMoveMaven(t *testing.T) {
 	e.want(201, "POST", "/-/api/webhooks", "admin", `{"name":"h","url":"http://127.0.0.1:1/hook","events":["staging.move","staging.delete"]}`)
 }
 
+// Jenkins's moveComponents and deleteComponents steps (Nexus Platform plugin
+// 3.14.431) send the tag and nothing else: POST staging/move/<destination>
+// ?tag=<tag> and POST staging/delete?tag=<tag>. As in Nexus that is every
+// repository holding the tag.
+func TestStagingByTagAlone(t *testing.T) {
+	e := newStagingEnv(t)
+	e.putMaven("maven-staging", "org.example", "app", "1.0", "jar-1.0")
+	e.putMaven("maven-staging", "org.example", "app", "1.1", "jar-1.1")
+	e.want(201, "PUT", "/repository/npm-staging/demo", "ci", npmPublish("demo", "1.0.0"))
+	e.want(201, "PUT", "/repository/raw-a/docs/a.txt", "ci", "alpha")
+	e.want(201, "POST", "/-/api/tags", "admin", `{"name":"build-7"}`)
+	e.want(200, "POST", "/-/api/tags/build-7/associate?repository=maven-staging&version=1.0", "ci", "")
+	e.want(200, "POST", "/-/api/tags/build-7/associate?repository=npm-staging&name=demo", "ci", "")
+	e.want(200, "POST", "/-/api/tags/build-7/associate?repository=raw-a&name=docs/a.txt", "ci", "")
+
+	// dev reads everything but deletes in maven-staging only: a request that
+	// would reach another repository is refused before anything changes.
+	e.want(201, "POST", "/-/api/roles", "admin", `{"id":"stager","privileges":[{"target":"*","actions":["read"]},`+
+		`{"target":"repo:maven-staging","actions":["delete"]},{"target":"repo:maven-releases","actions":["add"]}]}`)
+	e.want(200, "PUT", "/-/api/users/dev", "admin", `{"roles":["stager"]}`)
+	if st, b := e.do("POST", "/service/rest/v1/staging/delete?tag=build-7", "dev", ""); st != 403 || !strings.Contains(b, "may not delete") {
+		t.Fatalf("delete without the privilege everywhere: %d %s", st, b)
+	}
+	e.want(200, "GET", "/repository/maven-staging/org/example/app/1.0/app-1.0.jar", "ci", "")
+	e.want(404, "POST", "/service/rest/v1/staging/move/nope?tag=build-7", "ci", "")
+	e.want(400, "POST", "/service/rest/v1/staging/move/maven-releases", "ci", "") // neither a repository nor a tag
+
+	// The move takes what is of the destination's format; the rest stays.
+	res := e.json(200, "POST", "/service/rest/v1/staging/move/maven-releases?tag=build-7", "dev", "")
+	if res["message"] != "Move Successful" || res["status"].(float64) != 200 || res["data"].(map[string]any)["destination"] != "maven-releases" ||
+		!eq(moved(res, "components moved"), "org.example:app:1.0") || !eq(moved(res, "components failed")) {
+		t.Fatalf("move: %v", res)
+	}
+	e.want(200, "GET", "/repository/maven-releases/org/example/app/1.0/app-1.0.jar", "ci", "")
+	e.want(404, "GET", "/repository/maven-staging/org/example/app/1.0/app-1.0.jar", "ci", "")
+	e.want(200, "GET", "/repository/maven-staging/org/example/app/1.1/app-1.1.jar", "ci", "")
+	e.want(200, "GET", "/repository/npm-staging/demo/-/demo-1.0.0.tgz", "ci", "")
+	// Again: what the tag holds of that format is in the destination now.
+	res = e.json(200, "POST", "/service/rest/v1/staging/move/maven-releases?tag=build-7", "ci", "")
+	if !eq(moved(res, "components moved")) {
+		t.Fatalf("second move: %v", res)
+	}
+
+	// The delete is for every repository; an unknown tag selects nothing.
+	res = e.json(200, "POST", "/service/rest/v1/staging/delete?tag=nope", "ci", "")
+	if res["message"] != "Delete Successful" || !eq(moved(res, "components deleted")) {
+		t.Fatalf("delete by an unknown tag: %v", res)
+	}
+	res = e.json(200, "POST", "/service/rest/v1/staging/delete?tag=build-7", "ci", "")
+	if res["message"] != "Delete Successful" || !eq(moved(res, "components deleted"), "org.example:app:1.0", ":demo:1.0.0", ":docs/a.txt:") ||
+		!eq(moved(res, "components failed")) {
+		t.Fatalf("delete: %v", res)
+	}
+	e.want(404, "GET", "/repository/maven-releases/org/example/app/1.0/app-1.0.jar", "ci", "")
+	e.want(404, "GET", "/repository/npm-staging/demo/-/demo-1.0.0.tgz", "ci", "")
+	e.want(404, "GET", "/repository/raw-a/docs/a.txt", "ci", "")
+	e.want(200, "GET", "/repository/maven-staging/org/example/app/1.1/app-1.1.jar", "ci", "")
+}
+
 func TestStagingMoveNpmRawPypiNugetHelmYum(t *testing.T) {
 	e := newStagingEnv(t)
 	packument := func(repoName string) map[string]any {

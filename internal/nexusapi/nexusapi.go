@@ -116,6 +116,7 @@ func (h *Handler) init() {
 	h.configRoutes(m, p)
 	h.repoAPIRoutes(m, p)
 	h.cacheRoutes(m, p)
+	h.clientRoutes(m, p)
 	// BrowsePrefix, outside the prefix too (the server routes it here)
 	m.HandleFunc("GET /service/rest/repository/browse/", h.browseHTML)
 	h.mux = m

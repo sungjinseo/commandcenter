@@ -27,10 +27,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Docker: a blob can be mounted from a group or a proxy (`POST .../blobs/uploads/?mount=&from=`): an image
   built on a base that was pulled through a group is pushed without uploading the base's layers again. A
   blob the proxy has not cached is uploaded as before.
+- `GET /service/rest/wonderland/status`: the Nexus edition and version the API answers as (XML, or JSON for
+  `Accept: application/json`), for signed-in callers. Sonatype's client library reads it first, so "Test
+  connection" of a Nexus Repository Manager 3.x server in Jenkins (Nexus Platform plugin) now succeeds.
+- Component upload API: `maven2.tag` associates the uploaded component with an existing tag (read and edit on the
+  repository; a missing tag is a 400 before anything is stored). Jenkins `nexusPublisher` sends its `tagName`
+  this way. `GET /formats/upload-specs` lists the field.
+- Nexus API: `POST /staging/move/{destination}?tag=` and `POST /staging/delete?tag=` without `repository` act on
+  every repository that holds the tag (a move: the hosted ones of the destination's format), as Jenkins
+  `moveComponents` and `deleteComponents` call them. Lacking delete in one of them refuses the request first.
+- `test/compat/`: end-to-end checks with the real tools in their official images: `jenkins.sh` (Jenkins LTS with
+  nexus-artifact-uploader and the Nexus Platform plugin: `nexusArtifactUploader`, `nexusPublisher`, the tag and
+  staging steps, "Test connection"), `gradle.sh` (maven-publish with module metadata, sha256/sha512), `sbt.sh` and
+  `nexus3-cli.sh` (its blob store, task and realm commands work; its repository and file commands need Nexus's
+  Groovy script API and are refused).
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
   requests were logged without one.
+- The script API paths (`/service/rest/v1/script`, `/script/{name}`, `/script/{name}/run`) answer as a Nexus
+  with script creation turned off and say why there is no script API (200 `[]`, 410, 404), instead of a bare
+  404 `not found`; anonymous callers get 401. nexus3-cli's repository and file commands, which need that API,
+  now fail with this message.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -54,7 +72,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rubygems, helm, yum (`directory`, `asset.filename`) and r (`asset.pathId`), plus conda, composer and
   terraform modules. Each file goes through the format's own upload (same privileges, write policy,
   validation, events and metadata); 204 on success, 400 validation lists as Nexus answers. Tested with
-  `curl -F`; Jenkins `nexusPublisher` and `nexus3-cli` send the same fields but have not been run against it.
+  `curl -F` and Jenkins `nexusPublisher`.
 - `GET /service/rest/v1/formats/upload-specs` and `/formats/{format}/upload-specs`: the fields each
   format's component upload takes.
 - Nexus API: S3 blob stores (`POST /v1/blobstores/s3` 201, `GET`/`PUT /v1/blobstores/s3/{name}`, secret
