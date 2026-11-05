@@ -2479,7 +2479,7 @@ curl -s http://localhost:8081/-/api/openapi.json | jq '.paths | keys | length'
 |---|---|
 | `componentAgeDays` | 컴포넌트 내용이 마지막으로 쓰인 시각(에셋마다 생성 시각과 수정 시각 중 나중 것, 그중 가장 새로운 것. 다시 배포하거나 proxy가 바뀐 내용을 받아 오면 바뀜)이 N일보다 오래되었다. 0이면 사용 안 함. |
 | `lastDownloadedDays` | 컴포넌트의 가장 최근 다운로드가 N일보다 오래되었다. 한 번도 받지 않았으면 내용이 마지막으로 쓰인 시각을 씁니다. 0이면 사용 안 함. |
-| `releaseType` | `any`, `release`, `prerelease`(SNAPSHOT과 그 타임스탬프 빌드, 또는 semver 프리릴리스). |
+| `releaseType` | `any`, `release`, `prerelease`(SNAPSHOT과 그 타임스탬프 빌드, 또는 semver 프리릴리스). conda·R·yum·apt·docker에는 프리릴리스가 없습니다: 버전의 `-` 뒤가 빌드, 릴리스 번호, 태그 변형(`1.2-alpine`)이므로 모두 release로 봅니다. |
 | `namePattern` | `group:name`에 맞추는 RE2 정규식(선택, 200자 이하). |
 
 - 두 기간, `retain`(아래), `pathPattern` 중 **하나 이상**은 정해야 하며(`pathPattern`만 정하면 경로가 맞는 에셋이 있는 컴포넌트를 모두 지웁니다, Nexus와 같음), 정한 기준은 모두 **AND**로 결합합니다. 모든 기준을 만족하는 컴포넌트만 후보입니다.

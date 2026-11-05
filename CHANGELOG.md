@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+- Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
+  docker component for a prerelease, because their versions join a build, a release number or a tag variant with
+  `-` (`1.2.3-4.el9`, `1.2-alpine`): a policy for prereleases selected them all. Those formats have no
+  prereleases now.
+
 ## [0.4.0] - 2026-11-05
 
 ### Added

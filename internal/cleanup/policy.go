@@ -177,9 +177,16 @@ func FormatMatches(policyFormat, repoFormat string) bool {
 // Prerelease reports whether a component version is a prerelease: a Maven
 // SNAPSHOT, a PEP 440 pre- or development release for PyPI, a semver
 // prerelease otherwise (Go pseudo-versions included). Versions that do not
-// parse count as releases.
+// parse count as releases, and formats whose versions join something else
+// with "-" have none.
 func Prerelease(format, version string) bool {
 	switch format {
+	case "conda", "r", "yum", "apt", "docker":
+		// <version>-<build> (conda), 1.84.0-0 (R), <version>-<release> (RPM),
+		// the Debian revision, an image tag such as 1.2-alpine: read as
+		// semver, nearly every one would be a prerelease and a policy for
+		// prereleases would select them all.
+		return false
 	case "maven": // a SNAPSHOT build (1.0-20261014.120000-3) too
 		return strings.HasSuffix(component.MavenBaseVersion(version), "-SNAPSHOT")
 	case "pypi":
