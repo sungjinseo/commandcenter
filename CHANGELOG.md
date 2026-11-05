@@ -62,6 +62,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pages are now followed and cached as one list; a list cached before is replaced at its next refresh.
 - Docker: `skopeo delete` was denied. The token endpoint now grants the scope action `*` as the pull, push
   and delete the user may use.
+- A client repeating refused uploads on many connections could get a 128 MiB container OOM-killed in seconds, without
+  credentials: what it sent stays in the kernel's socket buffers for the 500 ms a refused connection is kept, and
+  those count against the container, outside GOMEMLIMIT. The connection limit now follows the container's memory
+  (limit minus GOMEMLIMIT, 160 KiB a connection, at most 1024): 307 in the default 128 MiB. `test/load/flood.sh`
+  proves it.
 
 ## [0.4.0] - 2026-11-05
 

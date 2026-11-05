@@ -386,7 +386,7 @@ kubectl apply -n <네임스페이스> -f deploy/kubernetes/commandcenter.yaml
 - **`baseURL`은 `https://` 주소**: 일반 설정의 `baseURL`을 클라이언트가 실제로 접속하는 주소와 똑같이 맞춥니다. npm·Cargo 응답의 다운로드 URL, PyPI 파일 링크의 경로 앞부분, 세션 쿠키의 이름·`Secure` 플래그(https면 `__Host-cc_session`)가 이 값으로 정해집니다. 서버는 `X-Forwarded-Proto`, `X-Forwarded-Host` 같은 헤더를 보지 않습니다.
 - **브라우저의 교차 출처 쓰기 차단**: 다른 사이트의 페이지가 보낸 쓰기 요청(업로드, 삭제, API 변경)은 403으로 거부합니다. 브라우저가 기억한 Basic 인증 정보가 그런 요청에 실려 가도 업로드되지 않게 하기 위해서입니다. `Sec-Fetch-Site`나 `Origin` 헤더를 보내지 않는 명령줄 클라이언트는 영향이 없습니다. 웹 UI는 HTTPS라면 브라우저가 `Sec-Fetch-Site: same-origin`을 보내므로 늘 통과합니다. 평문 HTTP에서는 `Origin`을 `Host`와 비교하는데, 프록시가 `Host`를 바꾸면(nginx 기본값) 둘이 어긋나므로 `baseURL`의 출처(스킴, 호스트, 포트)와 같은 `Origin`도 허용합니다. `baseURL`이 실제 주소와 다르면 이때 웹 UI의 업로드가 403이 됩니다.
 - **8081은 프록시만**: compose라면 `ports: ["127.0.0.1:8081:8081"]`처럼 프록시가 있는 호스트에만 열거나, 프록시와 같은 Docker 네트워크에서만 노출하세요. 그러지 않으면 프록시의 TLS와 제한을 건너뛰는 평문 경로가 남습니다.
-- **프록시에서 제한할 것**: 서버도 동시 연결을 1024개로 제한하고, 자리가 차면 요청 사이에 쉬고 있는 연결이나 1초 넘게 헤더를 다 보내지 않은 연결부터 닫아 새 연결을 받으며, 멈춘 본문을 끊습니다("메모리 설정", "업로드" 참고). 그러나 요청을 처리 중인 연결은 닫지 않습니다. 응답을 받아 가지 않고 붙들고 있는 연결처럼 처리 중인 연결이 자리를 모두 차지하면 다른 클라이언트는 기다려야 하므로, 외부에 노출한다면 연결 수와 본문 수신·응답 전송 시간 제한은 앞단에서 거세요.
+- **프록시에서 제한할 것**: 서버도 동시 연결을 1024개로 제한하고(컨테이너 메모리 한도가 작으면 더 적게: 한도에서 `GOMEMLIMIT`을 뺀 나머지를 연결당 160 KiB로 나눈 값이며, 기본 구성인 128 MiB·80 MiB에서는 307개입니다. 거절된 업로드처럼 읽지 않은 데이터는 커널 소켓 버퍼에 남고 이 메모리도 컨테이너 한도에 들어가기 때문입니다), 자리가 차면 요청 사이에 쉬고 있는 연결이나 1초 넘게 헤더를 다 보내지 않은 연결부터 닫아 새 연결을 받으며, 멈춘 본문을 끊습니다("메모리 설정", "업로드" 참고). 그러나 요청을 처리 중인 연결은 닫지 않습니다. 응답을 받아 가지 않고 붙들고 있는 연결처럼 처리 중인 연결이 자리를 모두 차지하면 다른 클라이언트는 기다려야 하므로, 외부에 노출한다면 연결 수와 본문 수신·응답 전송 시간 제한은 앞단에서 거세요.
   - 요청 본문 크기: `maxUploadMiB`(기본 1024 MiB) 이상으로 둡니다. 작으면 큰 업로드가 프록시에서 413으로 끊깁니다.
   - 본문 수신 타임아웃: 본문이 일정 시간(예: 60초) 동안 한 바이트도 오지 않으면 끊습니다. 느려도 계속 오는 업로드는 끊기지 않습니다.
   - 응답 전송 타임아웃: 클라이언트가 일정 시간(예: 60초) 동안 응답을 받아 가지 않으면 끊습니다. 서버 자체에는 이 제한이 없습니다(nginx는 `send_timeout`, 기본 60초).
@@ -2922,15 +2922,23 @@ main에 push하거나 PR을 열면 GitHub Actions(`.github/workflows/ci.yml`)가
 scripts/go.sh test ./...      # 단위·통합 테스트(PostgreSQL 컨테이너 commandcenter-test-pg를 함께 띄웁니다)
 scripts/go.sh vet ./...
 
-test/e2e.sh                   # 스모크 테스트(포맷 5개, UI, LDAP, 메일)와 부하 테스트를 모두 실행하고 요약 출력
+test/e2e.sh                   # 스모크 테스트(포맷별 실제 클라이언트, 설정 이전, UI, LDAP, 메일)와 부하 테스트를 모두 실행하고 요약 출력
 
 test/smoke/maven-smoke.sh     # 실제 클라이언트로 포맷별 E2E
 test/smoke/npm-smoke.sh
 test/smoke/pypi-smoke.sh
 test/smoke/go-smoke.sh
 test/smoke/cargo-smoke.sh
+test/smoke/docker-smoke.sh    # docker, crane, skopeo, kaniko, oras, helm, regctl, OCI conformance
+test/smoke/gitlfs-smoke.sh    # git, git-lfs
+test/smoke/import-config-smoke.sh # import-nexus -config: 두 서버의 설정이 같아지는지
+test/compat/jenkins.sh        # 실제 도구: Jenkins, Gradle, sbt, nexus3-cli
+test/compat/gradle.sh
+test/compat/sbt.sh
+test/compat/nexus3-cli.sh
 
 test/load/load.sh             # 128 MiB 컨테이너 메모리 부하 테스트
+test/load/flood.sh            # 128 MiB 컨테이너에 거절되는 업로드를 쏟아부어도 죽지 않는지 확인
 ```
 
 기여 절차와 코드 규칙은 [CONTRIBUTING.md](../CONTRIBUTING.md)에 있습니다.
