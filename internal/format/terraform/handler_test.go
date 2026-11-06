@@ -764,12 +764,11 @@ func TestGroup(t *testing.T) {
 	if w := e.do("GET", "tf-all", "v1/providers/acme/nope/versions", nil); w.Code != 404 {
 		t.Fatalf("unknown in group: %d", w.Code)
 	}
-	// An offline member is skipped.
+	// An offline member ahead: a later one does not stand in for it.
 	off := false
 	e.repos["tf-hosted"].Online = &off
-	decode(t, e.do("GET", "tf-all", "v1/modules/acme/demo/aws/versions", nil), &mv)
-	if mv.list() != "9.0.0" {
-		t.Fatalf("offline member: %+v", mv)
+	if w := e.do("GET", "tf-all", "v1/modules/acme/demo/aws/versions", nil); w.Code != 503 {
+		t.Fatalf("offline member: %d %s", w.Code, w.Body)
 	}
 }
 

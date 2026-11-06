@@ -763,3 +763,35 @@ func TestDeleteComponent(t *testing.T) {
 		t.Fatal("incomplete component: want an error")
 	}
 }
+
+// The upstream index decides who owns a chart in a group: what a member's
+// remote refuses, or a page, or what is no index (YAML or JSON without an
+// apiVersion), fails closed. Its 404 does too, and always did: it is the
+// repository's one document. Nothing is recorded, so the next correct answer
+// counts at once.
+func TestUpstreamIndexRefusedFailsClosed(t *testing.T) {
+	e := newEnv(t)
+	rm := repotest.NewRemote(t)
+	e.repos = repotest.With(e.repos, repotest.ProxyOn("internal", "helm", rm.URL+"/"), repotest.GroupOf("g", "helm", "internal", "helm-proxy"))
+	for _, a := range repotest.Refusals {
+		rm.Set("/index.yaml", a)
+		if w := e.do("GET", "g", "index.yaml", nil); w.Code < 500 {
+			t.Errorf("%d %s %.30q: the group's index: %d %.100s", a.Status, a.ContentType, a.Body, w.Code, w.Body)
+		}
+		if w := e.do("GET", "g", "other-1.0.0.tgz", nil); w.Code < 500 {
+			t.Errorf("%d %s %.30q: the later member's chart: %d", a.Status, a.ContentType, a.Body, w.Code)
+		}
+		if w := e.do("GET", "internal", "index.yaml", nil); w.Code != 502 {
+			t.Errorf("%d %s %.30q: the proxy's index: %d", a.Status, a.ContentType, a.Body, w.Code)
+		}
+	}
+	rm.Set("/index.yaml", repotest.Answer{ContentType: "application/x-yaml", Body: "apiVersion: v1\nentries:\n  demo:\n  - name: demo\n    version: 1.0.0\n    urls:\n    - demo-1.0.0.tgz\n"})
+	if ix := index(t, e.do("GET", "internal", "index.yaml", nil)); len(ix.Entries["demo"]) != 1 {
+		t.Fatalf("the next correct answer: %v", ix.Entries)
+	}
+	rm.Set("/index.yaml", repotest.Answer{Status: 404})
+	e.now = e.now.Add(2 * time.Hour)
+	if ix := index(t, e.do("GET", "internal", "index.yaml", nil)); len(ix.Entries["demo"]) != 1 {
+		t.Fatalf("a cached index and a 404: %v", ix.Entries)
+	}
+}

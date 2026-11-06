@@ -97,6 +97,47 @@ func (r *Repository) MembersOffline() bool {
 	return true
 }
 
+// MemberOffline is a group's answer when its offline member m may own what was
+// asked: taking a repository offline must not change who owns a name, so no
+// later member stands in for it (dependency confusion).
+func MemberOffline(m *Repository) error {
+	return Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+}
+
+// OfflineAhead returns MemberOffline of the first offline member of r that has
+// an online one behind it, nested groups in place: for what a group answers as
+// a whole, an index of whose a name is, or path by path, where a later member
+// would answer for it. nil with mergeMembers, which leaves such a member out,
+// and when no member follows it: nothing it owns is handed on.
+func (r *Repository) OfflineAhead() error {
+	if r.MergeMembers {
+		return nil
+	}
+	var off *Repository
+	var behind func(*Repository) bool
+	behind = func(g *Repository) bool {
+		for _, m := range g.MemberRepos {
+			switch {
+			case !m.IsOnline():
+				if off == nil {
+					off = m
+				}
+			case m.Type == "group":
+				if behind(m) {
+					return true
+				}
+			case off != nil:
+				return true
+			}
+		}
+		return false
+	}
+	if behind(r) {
+		return MemberOffline(off)
+	}
+	return nil
+}
+
 // Handler serves requests for every repository of one format.
 // path is the part of the URL after /repository/{name}/, unescaped.
 type Handler interface {

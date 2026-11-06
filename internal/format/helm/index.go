@@ -374,6 +374,9 @@ func (h *Handler) indexAsset(ctx context.Context, rp *repo.Repository) (proxy.Re
 		}
 		srcs, stale = []meta.Asset{res.Asset}, res.Stale
 	case "group":
+		if err := rp.OfflineAhead(); err != nil {
+			return proxy.Result{}, err
+		}
 		for _, m := range rp.OnlineMembers() {
 			res, err := h.indexAsset(ctx, m)
 			if errors.Is(err, repo.ErrNotFound) && m.Type == "hosted" {
@@ -421,11 +424,13 @@ func (h *Handler) indexAsset(ctx context.Context, rp *repo.Repository) (proxy.Re
 	return proxy.Result{Asset: a, Stale: stale}, err
 }
 
-// fetchUpstream returns a proxy's cached upstream index. An answer that is no
-// index does not replace a good one for metadataMaxAge (proxy.Target.Check);
-// reading it leaves its table for upstreamFor, once per change of the index.
+// fetchUpstream returns a proxy's cached upstream index, which decides who owns
+// a chart in a group (owns). An answer that is no index does not replace a good
+// one for metadataMaxAge and fails closed, as does what a remote refuses
+// (proxy.Target.Check, DeniedIsFailure); reading it leaves its table for
+// upstreamFor, once per change of the index.
 func (h *Handler) fetchUpstream(ctx context.Context, rp *repo.Repository) (proxy.Result, error) {
-	return h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: upstreamKey, Remote: indexKey, NotHTML: true,
+	return h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: upstreamKey, Remote: indexKey, DeniedIsFailure: true,
 		Check: func(_ context.Context, _ io.ReadSeeker, s blob.Sums) (blob.Sums, error) {
 			_, err := h.parseUpstream(rp, meta.Asset{Repo: rp.Name, BlobSHA256: s.SHA256}, io.Discard)
 			return s, err
@@ -453,6 +458,9 @@ func (h *Handler) parseUpstream(rp *repo.Repository, a meta.Asset, w io.Writer) 
 		werr = iw.add(name, e)
 		return werr
 	})
+	if err == nil && hdr.APIVersion == "" { // what helm itself refuses: YAML, or JSON, that is no index
+		err = errors.New("no apiVersion")
+	}
 	if err == nil {
 		generated := hdr.Generated
 		if generated.IsZero() {
@@ -506,7 +514,10 @@ func (h *Handler) owns(ctx context.Context, rp *repo.Repository, name string) (b
 		}
 		return up.names[name], nil
 	}
-	for _, m := range rp.OnlineMembers() {
+	for _, m := range rp.MemberRepos {
+		if !m.IsOnline() { // it may have the chart
+			return false, repo.MemberOffline(m)
+		}
 		if ok, err := h.owns(ctx, m, name); ok || err != nil {
 			return ok, err
 		}

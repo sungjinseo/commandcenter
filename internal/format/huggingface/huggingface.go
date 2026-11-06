@@ -344,7 +344,7 @@ func (h *Handler) readDoc(a meta.Asset) ([]byte, error) {
 // built from the remote as the Fetcher builds Remote's (p unescaped: a
 // file path in tree/ may hold "%", "#" or "?").
 func apiTarget(rp *repo.Repository, p, query string) proxy.Target {
-	t := proxy.Target{Key: p, Remote: p, NotHTML: true, DeniedIsNotFound: true, Header: http.Header{"Accept": {"application/json"}}}
+	t := proxy.Target{Key: p, Remote: p, NotHTML: true, DeniedIsNotFound: true, Header: http.Header{"Accept": {"application/json"}}, Check: proxy.JSONDocument()}
 	if query != "" {
 		u := *rp.RemoteURL
 		u.Path, u.RawPath, u.RawQuery = rp.RemoteURL.Path+p, "", query

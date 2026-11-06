@@ -103,17 +103,27 @@ func (t *Tx) DeleteAsset(ctx context.Context, repo, path string) (int64, error) 
 // DeleteUnusedAssets removes those of the assets paths of repo that were not
 // downloaded, checked or written since before, and returns how many went and
 // their size: one statement, as every other writer waits for this transaction.
-func (t *Tx) DeleteUnusedAssets(ctx context.Context, repo string, paths []string, before time.Time) (n, size int64, err error) {
+// A path for which filesOf gives a prefix stays while an asset has that prefix;
+// under the write lock no such asset commits unseen before this one does.
+func (t *Tx) DeleteUnusedAssets(ctx context.Context, repo string, paths []string, before time.Time, filesOf func(string) (string, bool)) (n, size int64, err error) {
 	if len(paths) == 0 {
 		return 0, 0, nil
 	}
 	ms := toMs(before)
-	args := []any{repo}
+	args := make([]any, 0, 3*len(paths)+5)
 	for _, p := range paths {
-		args = append(args, p)
+		var lo, hi any
+		if prefix, ok := filesOf(p); ok {
+			if upper, ok := prefixUpper(prefix); ok {
+				lo, hi = prefix, upper
+			}
+		}
+		args = append(args, p, lo, hi)
 	}
-	rows, err := t.q.QueryContext(ctx, `DELETE FROM assets WHERE repo = ? AND path IN (?`+strings.Repeat(", ?", len(paths)-1)+`)
-  AND last_downloaded < ? AND checked_at < ? AND created_at < ? AND last_modified < ? RETURNING path, size`, append(args, ms, ms, ms, ms)...)
+	rows, err := t.q.QueryContext(ctx, `DELETE FROM assets a USING (VALUES (?::text, ?::text, ?::text)`+strings.Repeat(`, (?::text, ?::text, ?::text)`, len(paths)-1)+`) AS v(path, lo, hi)
+WHERE a.repo = ? AND a.path = v.path AND a.last_downloaded < ? AND a.checked_at < ? AND a.created_at < ? AND a.last_modified < ?
+  AND (v.lo IS NULL OR NOT EXISTS (SELECT 1 FROM assets f WHERE f.repo = a.repo AND f.path >= v.lo AND f.path < v.hi))
+RETURNING a.path, a.size`, append(args, repo, ms, ms, ms, ms)...)
 	if err != nil {
 		return 0, 0, err
 	}

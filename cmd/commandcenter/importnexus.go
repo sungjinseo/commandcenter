@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -19,15 +20,22 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
 
+	"commandcenter/internal/component"
+	"commandcenter/internal/format/gitlfs"
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/proxy"
+	"commandcenter/internal/repo"
 )
 
 const importUsage = "usage: commandcenter import-nexus -from NEXUS_URL -from-user NAME -from-password-file FILE -to CC_URL -to-user NAME " +
@@ -36,7 +44,19 @@ const importUsage = "usage: commandcenter import-nexus -from NEXUS_URL -from-use
 
 // nexusFormats maps a Nexus format to the Command Center format the import
 // writes with; other formats are reported as unsupported.
-var nexusFormats = map[string]string{"maven2": "maven", "npm": "npm", "pypi": "pypi", "raw": "raw", "helm": "helm", "docker": "docker", "apt": "apt"}
+var nexusFormats = map[string]string{"maven2": "maven", "npm": "npm", "pypi": "pypi", "raw": "raw", "helm": "helm", "docker": "docker", "apt": "apt",
+	"yum": "yum", "nuget": "nuget", "rubygems": "rubygems", "r": "r", "gitlfs": "gitlfs", "go": "go", "conda": "conda"}
+
+// notCopied are the hosted formats both servers have whose content is not
+// copied, and what to do instead: no public source says how a current Nexus
+// lays them out, and a layout is not guessed. Their components are listed
+// and each reported with this reason.
+var notCopied = map[string]string{
+	"conan":     "not copied: no public source says how a current Nexus lays out hosted Conan; move it with the client (conan download, then conan upload)",
+	"cargo":     "not copied: no public source says how a current Nexus lays out hosted Cargo; publish it again with cargo publish",
+	"terraform": "not copied: no public source says how a current Nexus lays out hosted Terraform; upload it again (see the guide's Terraform section)",
+	"swift":     "not copied: no public source says how a current Nexus lays out hosted Swift; publish it again with swift package-registry publish",
+}
 
 // Nexus REST API v1 documents, the fields the import reads.
 type nexusRepo struct {
@@ -46,11 +66,13 @@ type nexusRepo struct {
 }
 
 type nexusAsset struct {
-	DownloadURL string `json:"downloadUrl"`
-	Path        string `json:"path"`
-	ContentType string `json:"contentType"`
-	FileSize    int64  `json:"fileSize"` // Nexus 3.47+; 0 before (dry-run sizes only)
-	Checksum    struct {
+	DownloadURL  string `json:"downloadUrl"`
+	Path         string `json:"path"`
+	ContentType  string `json:"contentType"`
+	FileSize     int64  `json:"fileSize"` // Nexus 3.47+; 0 before (dry-run sizes only)
+	BlobCreated  string `json:"blobCreated"`
+	LastModified string `json:"lastModified"`
+	Checksum     struct {
 		SHA1   string `json:"sha1"`
 		SHA256 string `json:"sha256"`
 		MD5    string `json:"md5"`
@@ -58,6 +80,7 @@ type nexusAsset struct {
 }
 
 type nexusComponent struct {
+	Group   string       `json:"group"`
 	Name    string       `json:"name"`
 	Version string       `json:"version"`
 	Assets  []nexusAsset `json:"assets"`
@@ -75,12 +98,17 @@ type importer struct {
 	fromAuth, toAuth     string // Authorization header values; never printed
 	dryRun, skipExisting bool
 	concurrency          int
+	// statesTime says the target takes publish times from this user
+	// (/-/api/me): uploads then state the time Nexus has.
+	statesTime bool
+	undated    *atomic.Int64 // files sent with no time, as Nexus reported none that reads as one
 	// targetHas reports, after -config, whether Command Center has the
 	// Nexus repository of that name (in a dry run: would have it); nil
 	// without -config.
 	targetHas func(name string) bool
+	mig       *migration // nil without -config
 
-	mu  sync.Mutex
+	mu  *sync.Mutex
 	out io.Writer
 }
 
@@ -158,7 +186,7 @@ func importNexus(args []string, stdout io.Writer) error {
 	case len(maps) == 0 && !*all && !config:
 		return errors.New("-repo, -all or -config is required; " + importUsage)
 	}
-	im := &importer{dryRun: *dryRun, skipExisting: *skip, concurrency: max(*conc, 1), out: stdout}
+	im := &importer{dryRun: *dryRun, skipExisting: *skip, concurrency: max(*conc, 1), undated: &atomic.Int64{}, mu: &sync.Mutex{}, out: stdout}
 	var err error
 	if im.from, err = parseBase(*from); err != nil {
 		return fmt.Errorf("-from: %w", err)
@@ -184,18 +212,30 @@ func importNexus(args []string, stdout io.Writer) error {
 		}
 		im.dockerSrc = proxy.NewClientFor(im.dockerFrom, tlsCfg)
 	}
-	ctx := context.Background()
+	// An interrupt ends the copy and still closes what it opened; a second
+	// one kills the tool, and the next run closes it (openMarker).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	context.AfterFunc(ctx, stop)
 	var mig *migration
 	if config {
 		if mig, err = im.migrateConfig(ctx, *update, *pwOut); err != nil {
 			return err
 		}
+		im.mig = mig
 		if repos := mig.have["repository"]; repos != nil { // nil: the repositories could not be read
 			im.targetHas = func(name string) bool { return repos[name] }
 		}
 	}
 	failed := 0
 	if !*cfgOnly {
+		var me struct {
+			StatesPublishTime bool `json:"statesPublishTime"`
+		}
+		// A failure says no; the uploads then report what is wrong.
+		if im.call(ctx, im.dst, im.toAuth, http.MethodGet, im.to.String()+native+"/me", nil, nil, &me) == nil {
+			im.statesTime = me.StatesPublishTime
+		}
 		failed, err = im.run(ctx, maps, *all)
 	}
 	if mig != nil {
@@ -280,7 +320,7 @@ func (im *importer) report(repo, format, name, version string, r result) {
 	case im.dryRun:
 		status = "would copy"
 	}
-	im.printf("%s\t%s\t%s\t%s\t%d\t%d\t%s\n", repo, format, name, version, r.files, r.bytes, status)
+	im.printf("%s\t%s\t%s\t%s\t%d\t%d\t%s\n", repo, format, name, version, r.files, r.bytes, strings.ReplaceAll(status, "\n", "; "))
 }
 
 // run copies the content and returns how many copies failed; the error is
@@ -300,8 +340,16 @@ func (im *importer) run(ctx context.Context, maps []repoMap, all bool) (int, err
 	failed := 0
 	var summary []string
 	for _, m := range maps {
+		if ctx.Err() != nil {
+			im.printf("interrupted: the repositories from %s on were not copied\n", m.nexus)
+			failed++
+			break
+		}
 		r, ok := byName[m.nexus]
 		format := nexusFormats[r.Format]
+		if notCopied[r.Format] != "" {
+			format = r.Format
+		}
 		switch {
 		case !ok:
 			im.printf("%s: error: not found on the Nexus server\n", m.nexus)
@@ -319,8 +367,12 @@ func (im *importer) run(ctx context.Context, maps []repoMap, all bool) (int, err
 		case im.targetHas != nil && !im.targetHas(m.cc) && m.nexus == m.cc:
 			im.printf("%s: skipped (Command Center has no such repository: see its configuration line)\n", m.nexus)
 			continue
+		case im.mig != nil && im.mig.sourceOffline[m.nexus]:
+			im.printf("%s: error: it is offline on the Nexus server, which serves no file of it: put it online there, run again with -update, then take it offline on both\n", m.nexus)
+			failed++
+			continue
 		}
-		t, err := im.copyRepo(ctx, m, format)
+		t, err := im.copySealed(ctx, m, format)
 		if err != nil {
 			im.printf("%s: error: %v\n", m.nexus, err)
 			failed++
@@ -332,10 +384,57 @@ func (im *importer) run(ctx context.Context, maps []repoMap, all bool) (int, err
 	for _, s := range summary {
 		im.printf("  %s\n", s)
 	}
+	if im.statesTime {
+		im.printf("publish times: kept for every format that records one (docker has none)")
+		if n := im.undated.Load(); n > 0 {
+			im.printf("; %d files carry the time of this copy: Nexus reports none for them", n)
+		}
+		im.printf("\n")
+	} else {
+		im.printf("publish times: NOT kept: -to-user is not an administrator signed in with a password, so every version carries the time of this copy " +
+			"(yarn 4 refuses a version younger than a day by default, and cleanup's age rules count from today)\n")
+	}
 	if im.dryRun {
 		im.printf("dry run: nothing was written\n")
 	}
 	return failed, nil
+}
+
+// copySealed copies a repository the target has read-only as Nexus does
+// (seal), or simply copies. Such a repository stands closed from the moment
+// it is made and is opened for its own copy alone, when a dry pass finds
+// something missing, so that a run has at most one open at a time and a run
+// with nothing to do opens none. A marker on the target, set before it
+// opens and removed once it is closed, lets the next run finish what a
+// killed one left open.
+func (im *importer) copySealed(ctx context.Context, m repoMap, format string) (tally, error) {
+	var s *seal
+	if im.mig != nil && m.nexus == m.cc {
+		s = im.mig.seals[m.cc]
+	}
+	if s == nil {
+		return im.copyRepo(ctx, m, format)
+	}
+	if im.dryRun {
+		im.mig.line("repository", m.cc, "would stay read-only but for its copy (as Nexus has it)", nil)
+		return im.copyRepo(ctx, m, format)
+	}
+	if !s.open {
+		probe := *im
+		probe.dryRun, probe.out = true, io.Discard
+		t, err := probe.copyRepo(ctx, m, format)
+		if err != nil || t.copied == 0 {
+			return im.copyRepo(ctx, m, format) // nothing to copy: it stays closed, and the lines say what is there
+		}
+		if err := im.mig.open(m.cc, s); err != nil {
+			im.mig.n.failed++
+			im.mig.line("repository", m.cc, "error: not opened for its copy: "+err.Error(), nil)
+			return im.copyRepo(ctx, m, format) // the refusals say the rest
+		}
+	}
+	t, err := im.copyRepo(ctx, m, format)
+	im.mig.close(m.cc, s)
+	return t, err
 }
 
 // copyRepo copies the components of one repository, concurrency at a time.
@@ -345,8 +444,8 @@ func (im *importer) copyRepo(ctx context.Context, m repoMap, format string) (tal
 		t        tally
 		wg       sync.WaitGroup
 		sem      = make(chan struct{}, im.concurrency)
-		packages = map[string]bool{} // npm: dist-tags are copied once the versions are there
-		images   = map[string]bool{} // docker: every tag is read from the connector
+		packages = map[string][]nexusComponent{} // npm: a package at a time, its document read once
+		images   = map[string]bool{}             // docker: every tag is read from the connector
 	)
 	emit := func(name, version string, r result) {
 		im.report(m.nexus, format, name, version, r)
@@ -354,25 +453,36 @@ func (im *importer) copyRepo(ctx context.Context, m repoMap, format string) (tal
 		t.add(r)
 		mu.Unlock()
 	}
-	work := func(name, version string, fn func() result) {
+	run := func(fn func()) {
 		wg.Add(1)
 		sem <- struct{}{}
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			emit(name, version, fn())
+			fn()
 		}()
 	}
-	err := im.components(ctx, m.nexus, func(c nexusComponent) {
+	work := func(name, version string, fn func() result) {
+		run(func() { emit(name, version, fn()) })
+	}
+	list := im.components
+	if format == "gitlfs" {
+		list = im.lfsObjects
+	}
+	err := list(ctx, m.nexus, func(c nexusComponent) {
 		switch format {
 		case "docker":
 			images[c.Name] = true
 			return
 		case "npm":
-			packages[c.Name] = true
+			packages[npmName(c)] = append(packages[npmName(c)], c)
+			return
 		}
 		work(c.Name, c.Version, func() result { return im.copyComponent(ctx, m, format, c) })
 	})
+	if err == nil && format == "yum" {
+		err = im.yumGroups(ctx, m, work)
+	}
 	wg.Wait()
 	if err != nil {
 		return t, err
@@ -387,33 +497,53 @@ func (im *importer) copyRepo(ctx context.Context, m repoMap, format string) (tal
 			work(image, tag, func() result { return im.copyDockerTag(ctx, m.cc, image, tag) })
 		}
 	}
-	wg.Wait()
 	for _, name := range sortedKeys(packages) {
-		if im.dryRun {
-			break
-		}
-		if err := im.copyDistTags(ctx, m, name); err != nil {
-			im.printf("%s\tnpm\t%s\tdist-tags\t0\t0\terror: %v\n", m.nexus, name, err)
-			t.errors++
-		}
+		run(func() {
+			im.copyNpmPackage(ctx, m, name, packages[name], emit, func(err error) {
+				im.printf("%s\tnpm\t%s\tdist-tags\t0\t0\terror: %v\n", m.nexus, name, err)
+				mu.Lock()
+				t.errors++
+				mu.Unlock()
+			})
+		})
 	}
+	wg.Wait()
 	return t, nil
 }
 
 func (im *importer) copyComponent(ctx context.Context, m repoMap, format string, c nexusComponent) (r result) {
+	suffix := func(ext ...string) func(string) bool {
+		return func(p string) bool { return hasSuffix(p, ext...) }
+	}
 	switch format {
 	case "maven":
-		r.err = im.copyMaven(ctx, m, c, &r)
-	case "npm":
-		r.err = im.copyNpm(ctx, m, c, &r)
+		r.err = im.copySame(ctx, m, c, &r, func(p string) bool { // checksums and metadata: Command Center makes its own
+			return !strings.HasPrefix(path.Base(p), "maven-metadata.xml") && !hasSuffix(p, ".sha1", ".md5", ".sha256", ".sha512")
+		})
 	case "pypi":
 		r.err = im.copyPypi(ctx, m, c, &r)
 	case "raw":
-		r.err = im.copyRaw(ctx, m, c, &r)
+		r.err = im.copySame(ctx, m, c, &r, suffix(""))
 	case "helm":
 		r.err = im.copyHelm(ctx, m, c, &r)
 	case "apt":
 		r.err = im.copyApt(ctx, m, c, &r)
+	case "yum": // repodata/ is the server's to make
+		r.err = im.copySame(ctx, m, c, &r, func(p string) bool { return strings.HasSuffix(p, ".rpm") && !strings.Contains("/"+p, "/repodata/") })
+	case "r": // so are the PACKAGES files, which have no component
+		r.err = im.copySame(ctx, m, c, &r, suffix(".tar.gz", ".tgz", ".zip"))
+	case "conda": // and repodata.json
+		r.err = im.copySame(ctx, m, c, &r, suffix(".conda", ".tar.bz2"))
+	case "nuget":
+		r.err = im.copyNuGet(ctx, m, c, &r)
+	case "rubygems":
+		r.err = im.copyGem(ctx, m, c, &r)
+	case "go":
+		r.err = im.copyGo(ctx, m, c, &r)
+	case "gitlfs":
+		r.err = im.copyLFS(ctx, m, c, &r)
+	default:
+		r.err = errors.New(notCopied[format])
 	}
 	return r
 }
@@ -430,25 +560,39 @@ func (im *importer) nexusRepos(ctx context.Context) ([]nexusRepo, error) {
 	return repos, err
 }
 
-// components calls fn for every component of the Nexus repository, page by page.
-func (im *importer) components(ctx context.Context, repo string, fn func(nexusComponent)) error {
+// listAll calls fn for every item of a paged list of the Nexus repository.
+func listAll[T any](ctx context.Context, im *importer, p, repo string, fn func(T)) error {
 	q := url.Values{"repository": {repo}}
 	for {
 		var page struct {
-			Items             []nexusComponent `json:"items"`
-			ContinuationToken string           `json:"continuationToken"`
+			Items             []T    `json:"items"`
+			ContinuationToken string `json:"continuationToken"`
 		}
-		if err := im.getJSON(ctx, im.src, im.fromAuth, im.source("/service/rest/v1/components", q), &page); err != nil {
-			return fmt.Errorf("list components: %w", err)
+		if err := im.getJSON(ctx, im.src, im.fromAuth, im.source(p, q), &page); err != nil {
+			return fmt.Errorf("list %s: %w", path.Base(p), err)
 		}
-		for _, c := range page.Items {
-			fn(c)
+		for _, it := range page.Items {
+			fn(it)
 		}
 		if page.ContinuationToken == "" {
 			return nil
 		}
 		q.Set("continuationToken", page.ContinuationToken)
 	}
+}
+
+// components calls fn for every component of the Nexus repository.
+func (im *importer) components(ctx context.Context, repo string, fn func(nexusComponent)) error {
+	return listAll(ctx, im, "/service/rest/v1/components", repo, fn)
+}
+
+// lfsObjects calls fn for every file of a Git LFS repository, each as a
+// component: the listing of assets has them whether or not Nexus makes them
+// components, which no public source says.
+func (im *importer) lfsObjects(ctx context.Context, repo string, fn func(nexusComponent)) error {
+	return listAll(ctx, im, "/service/rest/v1/assets", repo, func(a nexusAsset) {
+		fn(nexusComponent{Name: path.Base(a.Path), Assets: []nexusAsset{a}})
+	})
 }
 
 // source is a URL under -from; target one under -to.
@@ -539,10 +683,26 @@ func (im *importer) exists(ctx context.Context, p string, hdr http.Header) (bool
 	return true, nil
 }
 
-// send makes a write request to the target. The status is returned for 2xx
-// and 409 (already there, which allow_once answers); anything else is an
-// error naming the status.
-func (im *importer) send(ctx context.Context, method, u string, body io.Reader, length int64, contentType string) (int, error) {
+// duplicate reports whether a refused upload says the target has it already,
+// each format in its own way. Any other refusal, a 409 among them (a chart
+// of another name at that file name, a .mod that differs from its zip), is
+// content the target does not take, and reported as such.
+func duplicate(status int, msg string) bool {
+	switch status {
+	case http.StatusConflict: // helm, apt, yum, r, nuget, rubygems, conda, go
+		return strings.Contains(msg, "already exists")
+	case http.StatusBadRequest: // pypi; maven and raw under allow_once
+		return strings.Contains(msg, "File already exists") || strings.Contains(msg, "does not allow updating assets")
+	case http.StatusForbidden: // npm
+		return strings.Contains(msg, "cannot publish over the previously published version")
+	}
+	return false
+}
+
+// send makes a write request to the target, stating the publish time when
+// published is set. The status is returned for 2xx and, as 409, for what the
+// target has already (duplicate); anything else is an error naming the status.
+func (im *importer) send(ctx context.Context, method, u string, body io.Reader, length int64, contentType, published string) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
 		return 0, err
@@ -554,16 +714,40 @@ func (im *importer) send(ctx context.Context, method, u string, body io.Reader, 
 	if im.toAuth != "" {
 		req.Header.Set("Authorization", im.toAuth)
 	}
+	if published != "" {
+		req.Header.Set(repo.PublishTimeHeader, published)
+	}
 	resp, err := im.dst.Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 && resp.StatusCode != http.StatusConflict {
-		return resp.StatusCode, newStatusError(resp)
+	if resp.StatusCode/100 != 2 {
+		err := apiError(resp)
+		var se *statusError
+		if errors.As(err, &se) && duplicate(se.status, se.body) {
+			return http.StatusConflict, nil
+		}
+		return resp.StatusCode, err
 	}
 	io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode, nil
+}
+
+// published is the publish time an upload states: the first of times that is
+// a time, Nexus's own record of the version before its file's dates. A
+// target that takes none from this user is sent none.
+func (im *importer) published(times ...string) string {
+	if !im.statesTime {
+		return ""
+	}
+	for _, t := range times {
+		if _, err := time.Parse(time.RFC3339, t); err == nil {
+			return t
+		}
+	}
+	im.undated.Add(1)
+	return ""
 }
 
 // fetch downloads u to a temporary file, checks it against the sha256 Nexus
@@ -603,8 +787,14 @@ func discard(f *os.File) {
 
 // copyFile copies one asset to the target path dst with a PUT of the file.
 func (im *importer) copyFile(ctx context.Context, m repoMap, a nexusAsset, dst string, r *result) error {
+	return im.copyTo(ctx, m, a, dst, http.MethodPut, dst, r)
+}
+
+// copyTo copies one asset by sending the file with method to dst, unless the
+// target has the path probe already.
+func (im *importer) copyTo(ctx context.Context, m repoMap, a nexusAsset, probe, method, dst string, r *result) error {
 	if im.skipExisting {
-		ok, err := im.exists(ctx, dst, nil)
+		ok, err := im.exists(ctx, probe, nil)
 		if err != nil {
 			return err
 		}
@@ -623,7 +813,7 @@ func (im *importer) copyFile(ctx context.Context, m repoMap, a nexusAsset, dst s
 		return err
 	}
 	defer discard(f)
-	status, err := im.send(ctx, http.MethodPut, im.target(dst, nil), f, size, a.ContentType)
+	status, err := im.send(ctx, method, im.target(dst, nil), f, size, a.ContentType, im.published(a.BlobCreated, a.LastModified))
 	if err != nil {
 		return err
 	}
@@ -636,47 +826,181 @@ func (im *importer) copyFile(ctx context.Context, m repoMap, a nexusAsset, dst s
 	return nil
 }
 
-// Formats.
+// Formats. A file that fails does not stop the others of its component: the
+// component's line names every one that failed.
 
-// copyMaven PUTs every file of the component at its path. Checksum files and
-// maven-metadata.xml are left out: Command Center generates them.
-func (im *importer) copyMaven(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
+// copySame PUTs each file keep takes to the path Nexus has it at, the path
+// the format's clients use on both servers.
+func (im *importer) copySame(ctx context.Context, m repoMap, c nexusComponent, r *result, keep func(p string) bool) error {
+	var errs []error
+	kept := 0
 	for _, a := range c.Assets {
 		p := strings.TrimPrefix(a.Path, "/")
-		base := path.Base(p)
-		if strings.HasPrefix(base, "maven-metadata.xml") || hasSuffix(p, ".sha1", ".md5", ".sha256", ".sha512") {
+		if !keep(p) {
 			continue
 		}
+		kept++
 		if err := im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+p, r); err != nil {
-			return fmt.Errorf("%s: %w", base, err)
+			errs = append(errs, fmt.Errorf("%s: %w", path.Base(p), err))
 		}
 	}
-	return nil
-}
-
-func (im *importer) copyRaw(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
-	for _, a := range c.Assets {
-		p := strings.TrimPrefix(a.Path, "/")
-		if err := im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+p, r); err != nil {
-			return fmt.Errorf("%s: %w", path.Base(p), err)
-		}
+	if kept == 0 {
+		return errNoFile(c)
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
-// copyHelm PUTs the chart archive as <name>-<version>.tgz; .prov and other
-// sidecars have no upload in Command Center.
+// errNoFile says a component's files are none the format's upload takes.
+func errNoFile(c nexusComponent) error {
+	return fmt.Errorf("none of its %d files is one this format uploads", len(c.Assets))
+}
+
+// copyHelm PUTs the chart as <name>-<version>.tgz, whatever file name Nexus
+// stored it under, and then its provenance file: the target checks that one
+// against the chart, and a pair that does not match leaves the chart there
+// and is reported.
 func (im *importer) copyHelm(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
-	for _, a := range c.Assets {
-		if !strings.HasSuffix(a.Path, ".tgz") {
-			continue
-		}
-		file := path.Base(a.Path)
-		if err := im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+file, r); err != nil {
-			return fmt.Errorf("%s: %w", file, err)
+	file := c.Name + "-" + c.Version + ".tgz"
+	var errs []error
+	copied := 0
+	for _, ext := range []string{".tgz", ".prov"} {
+		for _, a := range c.Assets {
+			if !strings.HasSuffix(a.Path, ext) {
+				continue
+			}
+			copied++
+			name := file
+			if ext == ".prov" {
+				name += ".prov"
+			}
+			if err := im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+name, r); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", name, err))
+			}
 		}
 	}
-	return nil
+	if copied == 0 {
+		return errNoFile(c)
+	}
+	return errors.Join(errs...)
+}
+
+// copyNuGet pushes the package as the body of the publish URL: the server
+// reads its id and version from the .nuspec inside, so its path on Nexus
+// does not matter. No public source says what that path is: the .nupkg, or
+// else a component's only file (the server refuses anything else). A symbol
+// package is not sent: as a body it would be taken for a package.
+func (im *importer) copyNuGet(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
+	var pkg *nexusAsset
+	for i := range c.Assets {
+		if strings.HasSuffix(strings.ToLower(c.Assets[i].Path), ".nupkg") {
+			pkg = &c.Assets[i]
+		}
+	}
+	switch {
+	case pkg != nil:
+	case len(c.Assets) == 1 && !strings.HasSuffix(strings.ToLower(c.Assets[0].Path), ".snupkg"):
+		pkg = &c.Assets[0]
+	case len(c.Assets) == 1:
+		return errors.New("symbol packages (.snupkg) are not supported")
+	default:
+		return errNoFile(c)
+	}
+	id, version := strings.ToLower(c.Name), strings.ToLower(c.Version)
+	probe := "/repository/" + m.cc + "/v3-flatcontainer/" + id + "/" + version + "/" + id + "." + version + ".nupkg"
+	return im.copyTo(ctx, m, *pkg, probe, http.MethodPut, "/repository/"+m.cc+"/api/v2/package", r)
+}
+
+// copyGem pushes each .gem as `gem push` does; the server makes the indexes
+// and the gemspecs.
+func (im *importer) copyGem(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
+	var errs []error
+	copied := 0
+	for _, a := range c.Assets {
+		if !strings.HasSuffix(a.Path, ".gem") {
+			continue
+		}
+		copied++
+		file := path.Base(a.Path)
+		if err := im.copyTo(ctx, m, a, "/repository/"+m.cc+"/gems/"+file, http.MethodPost, "/repository/"+m.cc+"/api/v1/gems", r); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", file, err))
+		}
+	}
+	if copied == 0 {
+		return errNoFile(c)
+	}
+	return errors.Join(errs...)
+}
+
+// yumGroups copies the package group files of a yum repository, the one
+// thing in repodata/ somebody uploaded: they are in no component. A group file
+// in a repodata/ only under another name (repomd.xml may name it so) is not
+// guessed at, and reported.
+func (im *importer) yumGroups(ctx context.Context, m repoMap, work func(name, version string, fn func() result)) error {
+	named, other := map[string]bool{}, map[string]string{}
+	err := listAll(ctx, im, "/service/rest/v1/assets", m.nexus, func(a nexusAsset) {
+		p := strings.TrimPrefix(a.Path, "/")
+		switch {
+		case component.YumComps(p):
+			named[path.Dir(p)] = true
+			work(p, "", func() (r result) {
+				r.err = im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+p, &r)
+				return r
+			})
+		case path.Base(path.Dir(p)) == "repodata" && hasSuffix(p, "comps.xml", "comps.xml.gz"):
+			other[path.Dir(p)] = p
+		}
+	})
+	for _, dir := range sortedKeys(other) {
+		if !named[dir] {
+			work(other[dir], "", func() result {
+				return result{err: errors.New("not copied: a package group file under another name than comps.xml; upload it to " + dir + "/comps.xml")}
+			})
+		}
+	}
+	return err
+}
+
+// copyGo PUTs each version's .zip, after its .info, which Nexus makes on
+// read: it holds the time go shows, and a zip that comes first would get one
+// from the server. The .mod is not sent: the server derives it from the zip,
+// and one that differs is refused.
+func (im *importer) copyGo(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
+	var errs []error
+	copied := 0
+	for _, a := range c.Assets {
+		stem, ok := strings.CutSuffix(strings.TrimPrefix(a.Path, "/"), ".zip")
+		if !ok {
+			continue
+		}
+		copied++
+		info := nexusAsset{Path: stem + ".info", BlobCreated: a.BlobCreated, LastModified: a.LastModified}
+		var se *statusError
+		err := im.copyFile(ctx, m, info, "/repository/"+m.cc+"/"+info.Path, r)
+		if err != nil && !(errors.As(err, &se) && se.method == http.MethodGet && se.status == http.StatusNotFound) {
+			errs = append(errs, fmt.Errorf("%s: %w", path.Base(info.Path), err))
+		}
+		if err := im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+stem+".zip", r); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", path.Base(stem)+".zip", err))
+		}
+	}
+	if copied == 0 {
+		return errNoFile(c)
+	}
+	return errors.Join(errs...)
+}
+
+// copyLFS PUTs a Git LFS object under its oid, the sha256 of its content,
+// which the server checks: as Nexus reports it, or as the file is named.
+func (im *importer) copyLFS(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
+	a := c.Assets[0]
+	oid := strings.ToLower(a.Checksum.SHA256)
+	if !gitlfs.ValidOID(oid) {
+		oid = path.Base(a.Path)
+	}
+	if !gitlfs.ValidOID(oid) {
+		return fmt.Errorf("%s: its sha256 is not reported and its name is not one", a.Path)
+	}
+	return im.copyFile(ctx, m, a, "/repository/"+m.cc+"/info/lfs/objects/"+oid, r)
 }
 
 // copyApt PUTs each package to the path Nexus has it at
@@ -685,92 +1009,245 @@ func (im *importer) copyHelm(ctx context.Context, m repoMap, c nexusComponent, r
 // apt repository answers the Nexus path too, so -skip-existing finds what
 // an earlier run copied.
 func (im *importer) copyApt(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
+	var errs []error
+	copied := 0
 	for _, a := range c.Assets {
 		p := strings.TrimPrefix(a.Path, "/")
 		if !strings.HasSuffix(p, ".deb") {
 			continue
 		}
+		copied++
 		if !strings.HasPrefix(p, "pool/") {
 			p = "pool/" + path.Base(p)
 		}
 		if err := im.copyFile(ctx, m, a, "/repository/"+m.cc+"/"+p, r); err != nil {
-			return fmt.Errorf("%s: %w", path.Base(p), err)
+			errs = append(errs, fmt.Errorf("%s: %w", path.Base(p), err))
 		}
 	}
-	return nil
+	if copied == 0 {
+		return errNoFile(c)
+	}
+	return errors.Join(errs...)
 }
 
-// copyPypi uploads each file as twine does: a multipart form with the
-// metadata fields first and the file as "content". Command Center reads
-// the file's own METADATA/PKG-INFO, so only name and version are sent.
+// maxPypiSignature is what the target takes as a gpg_signature.
+const maxPypiSignature = 64 << 10
+
+// copyPypi uploads each file of the component, with its signature when
+// Nexus holds one: `<file>.asc` is another asset of the component, and an
+// upload is the only moment the target takes it. Its core metadata sidecar
+// is the server's to make.
 func (im *importer) copyPypi(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
 	project := pypi.Normalize(c.Name)
+	sigs := map[string]nexusAsset{}
+	for _, a := range c.Assets {
+		if file, ok := strings.CutSuffix(path.Base(a.Path), ".asc"); ok {
+			sigs[file] = a
+		}
+	}
+	var errs []error
+	copied := 0
 	for _, a := range c.Assets {
 		file := path.Base(a.Path)
-		if im.skipExisting {
-			ok, err := im.exists(ctx, "/repository/"+m.cc+"/packages/"+project+"/"+file, nil)
-			if err != nil {
-				return fmt.Errorf("%s: %w", file, err)
-			}
-			if ok {
-				r.skipped++
-				continue
-			}
-		}
-		if im.dryRun {
-			r.files++
-			r.bytes += a.FileSize
+		if hasSuffix(file, ".asc", ".metadata") {
 			continue
 		}
-		f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, a), a.Checksum.SHA256)
-		if err != nil {
-			return fmt.Errorf("%s: %w", file, err)
+		copied++
+		sig, signed := sigs[file]
+		delete(sigs, file)
+		if err := im.copyPypiFile(ctx, m, c, a, sig, signed, project, r); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", file, err))
 		}
-		fields := [][2]string{{":action", "file_upload"}, {"protocol_version", "1"}, {"name", c.Name}, {"version", c.Version},
-			{"filetype", map[bool]string{true: "bdist_wheel", false: "sdist"}[strings.HasSuffix(file, ".whl")]},
-			{"sha256_digest", a.Checksum.SHA256}, {"md5_digest", a.Checksum.MD5}}
-		pr, pw := io.Pipe()
-		mw := multipart.NewWriter(pw)
-		go func() {
-			defer discard(f)
-			pw.CloseWithError(func() error {
-				for _, kv := range fields {
-					if kv[1] == "" {
-						continue
-					}
-					if err := mw.WriteField(kv[0], kv[1]); err != nil {
-						return err
-					}
+	}
+	for _, file := range sortedKeys(sigs) {
+		errs = append(errs, fmt.Errorf("%s.asc: its file is not in this component", file))
+	}
+	if copied == 0 && len(errs) == 0 {
+		return errNoFile(c)
+	}
+	return errors.Join(errs...)
+}
+
+// copyPypiFile uploads one file as twine does: a multipart form with the
+// metadata fields first and the file as "content". Command Center reads the
+// file's own METADATA/PKG-INFO, so only name and version are sent. A signature
+// the target would refuse is left out, and reported: the file goes without it.
+func (im *importer) copyPypiFile(ctx context.Context, m repoMap, c nexusComponent, a, sig nexusAsset, signed bool, project string, r *result) error {
+	file := path.Base(a.Path)
+	base := "/repository/" + m.cc + "/packages/" + project + "/" + file
+	if im.skipExisting {
+		ok, err := im.exists(ctx, base, nil)
+		if err != nil {
+			return err
+		}
+		if ok {
+			r.skipped++
+			if signed {
+				if has, err := im.exists(ctx, base+".asc", nil); err == nil && !has {
+					return errors.New("the target has the file without its signature, which can be added only by replacing the file (writePolicy allow, -skip-existing=false)")
 				}
-				part, err := mw.CreateFormFile("content", file)
+			}
+			return nil
+		}
+	}
+	if im.dryRun {
+		if err := pypi.CheckUpload(c.Name, c.Version, file); err != nil {
+			return fmt.Errorf("would be refused: %w", err)
+		}
+		r.files++
+		r.bytes += a.FileSize
+		return nil
+	}
+	var signature []byte
+	var left error
+	if signed {
+		f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, sig), sig.Checksum.SHA256)
+		if err != nil { // not without it: a later run could not add it
+			return fmt.Errorf("its signature: %w", err)
+		}
+		defer discard(f)
+		if size > maxPypiSignature {
+			left = fmt.Errorf("left out %s.asc: over %d KiB", file, maxPypiSignature>>10)
+		} else if signature, err = io.ReadAll(f); err != nil {
+			return fmt.Errorf("its signature: %w", err)
+		} else if !bytes.HasPrefix(bytes.TrimSpace(signature), []byte("-----BEGIN PGP SIGNATURE-----")) {
+			signature, left = nil, fmt.Errorf("left out %s.asc: not an ASCII-armored signature", file)
+		}
+	}
+	f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, a), a.Checksum.SHA256)
+	if err != nil {
+		return err
+	}
+	fields := [][2]string{{":action", "file_upload"}, {"protocol_version", "1"}, {"name", c.Name}, {"version", c.Version},
+		{"filetype", map[bool]string{true: "bdist_wheel", false: "sdist"}[strings.HasSuffix(file, ".whl")]},
+		{"sha256_digest", a.Checksum.SHA256}, {"md5_digest", a.Checksum.MD5}}
+	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
+	go func() {
+		defer discard(f)
+		pw.CloseWithError(func() error {
+			for _, kv := range fields {
+				if kv[1] == "" {
+					continue
+				}
+				if err := mw.WriteField(kv[0], kv[1]); err != nil {
+					return err
+				}
+			}
+			if signature != nil {
+				part, err := mw.CreateFormFile("gpg_signature", file+".asc")
+				if err == nil {
+					_, err = part.Write(signature)
+				}
 				if err != nil {
 					return err
 				}
-				if _, err := io.Copy(part, f); err != nil {
-					return err
+			}
+			part, err := mw.CreateFormFile("content", file)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(part, f); err != nil {
+				return err
+			}
+			return mw.Close()
+		}())
+	}()
+	status, err := im.send(ctx, http.MethodPost, im.target("/repository/"+m.cc+"/", nil), pr, -1, mw.FormDataContentType(), im.published(a.BlobCreated, a.LastModified))
+	pr.Close()
+	if err != nil {
+		return err
+	}
+	if status == http.StatusConflict {
+		r.skipped++
+		return left
+	}
+	r.files++
+	r.bytes += size
+	return left
+}
+
+// npmName is a component's package name: Nexus has a scope in its group,
+// without the "@".
+func npmName(c nexusComponent) string {
+	if c.Group != "" {
+		return "@" + strings.TrimPrefix(c.Group, "@") + "/" + c.Name
+	}
+	return c.Name
+}
+
+// npmDocument is what the import reads of a package's document on Nexus.
+type npmDocument struct {
+	DistTags map[string]string         `json:"dist-tags"`
+	Versions map[string]map[string]any `json:"versions"`
+	Time     map[string]string         `json:"time"`
+}
+
+// copyNpmPackage copies the versions of one package, each with what was
+// published of it in the Nexus document, then its dist-tags. A document that
+// cannot be read leaves each version what its tarball says, and no tags
+// (tagErr says so). In a dry run it names what the target's publish would
+// refuse, as far as that shows without the tarball.
+func (im *importer) copyNpmPackage(ctx context.Context, m repoMap, name string, comps []nexusComponent, emit func(name, version string, r result), tagErr func(error)) {
+	var doc npmDocument
+	docErr := im.getJSON(ctx, im.src, im.fromAuth, im.source("/repository/"+m.nexus+"/"+name, nil), &doc)
+	known := true // a name the target has is not checked as a new one
+	if im.dryRun && npm.CheckNewName(name) != nil {
+		known, _ = im.exists(ctx, "/repository/"+m.cc+"/"+name, nil)
+	}
+	for _, c := range comps {
+		var r result
+		if im.dryRun {
+			r.err = npmRefusal(name, c.Version, known)
+		}
+		if r.err == nil {
+			r.err = im.copyNpm(ctx, m, name, c, doc, &r)
+		}
+		emit(name, c.Version, r)
+	}
+	switch {
+	case docErr != nil:
+		tagErr(fmt.Errorf("its document cannot be read, so versions carry what their tarballs say and it has no tags: %w", docErr))
+	case im.dryRun:
+		for _, tag := range sortedKeys(doc.DistTags) {
+			if err := npm.CheckNewTag(tag); err != nil {
+				var stored map[string]string // what the target has is not checked again
+				im.getJSON(ctx, im.dst, im.toAuth, im.target("/repository/"+m.cc+"/-/package/"+name+"/dist-tags", nil), &stored)
+				if _, ok := stored[tag]; !ok {
+					tagErr(fmt.Errorf("tag %s would be refused: %w", tag, err))
 				}
-				return mw.Close()
-			}())
-		}()
-		status, err := im.send(ctx, http.MethodPost, im.target("/repository/"+m.cc+"/", nil), pr, -1, mw.FormDataContentType())
-		pr.Close()
-		if err != nil {
-			return fmt.Errorf("%s: %w", file, err)
+			}
 		}
-		if status == http.StatusConflict {
-			r.skipped++
-			continue
+	default:
+		for _, tag := range sortedKeys(doc.DistTags) {
+			b, _ := json.Marshal(doc.DistTags[tag])
+			u := im.target("/repository/"+m.cc+"/-/package/"+name+"/dist-tags/"+tag, nil)
+			if _, err := im.send(ctx, http.MethodPut, u, bytes.NewReader(b), int64(len(b)), "application/json", ""); err != nil {
+				tagErr(fmt.Errorf("tag %s: %w", tag, err))
+			}
 		}
-		r.files++
-		r.bytes += size
+	}
+}
+
+// npmRefusal is why the target's publish would refuse this version, as far
+// as that shows without its tarball; nil for none.
+func npmRefusal(name, version string, known bool) error {
+	err := npm.CheckVersion(version)
+	if !known {
+		err = cmp.Or(npm.CheckNewName(name), err)
+	}
+	if err != nil {
+		return fmt.Errorf("would be refused: %w", err)
 	}
 	return nil
 }
 
 // copyNpm publishes the version as npm does: a document whose version
-// manifest is the tarball's package.json and whose _attachments entry
-// carries the tarball in base64, streamed from the temporary file.
-func (im *importer) copyNpm(ctx context.Context, m repoMap, c nexusComponent, r *result) error {
+// manifest is what Nexus has for it (else its tarball's package.json) and
+// whose _attachments entry carries the tarball in base64, streamed from the
+// temporary file. The server sets dist's tarball, shasum and integrity
+// again, after checking the ones sent against the file.
+func (im *importer) copyNpm(ctx context.Context, m repoMap, name string, c nexusComponent, doc npmDocument, r *result) error {
 	var tgz *nexusAsset
 	for i := range c.Assets {
 		if strings.HasSuffix(c.Assets[i].Path, ".tgz") {
@@ -780,7 +1257,7 @@ func (im *importer) copyNpm(ctx context.Context, m repoMap, c nexusComponent, r 
 	if tgz == nil {
 		return errors.New("no tarball asset")
 	}
-	name, version := c.Name, c.Version
+	version := c.Version
 	if im.skipExisting {
 		ok, err := im.exists(ctx, "/repository/"+m.cc+"/"+name+"/"+version, nil)
 		if err != nil {
@@ -801,19 +1278,26 @@ func (im *importer) copyNpm(ctx context.Context, m repoMap, c nexusComponent, r 
 		return err
 	}
 	defer discard(f)
-	pkg, err := packageJSON(f)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return err
+	pkg := doc.Versions[version]
+	if pkg == nil {
+		if pkg, err = packageJSON(f); err != nil {
+			return err
+		}
+		pkg["name"], pkg["version"] = name, version
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
 	}
 	file := npm.TarballFile(name, version)
-	dist := map[string]any{"tarball": im.target("/repository/"+m.cc+"/"+name+"/-/"+file, nil)}
-	if tgz.Checksum.SHA1 != "" {
-		dist["shasum"] = tgz.Checksum.SHA1
+	dist, _ := pkg["dist"].(map[string]any)
+	if dist == nil {
+		dist = map[string]any{}
+		if tgz.Checksum.SHA1 != "" {
+			dist["shasum"] = tgz.Checksum.SHA1
+		}
 	}
-	pkg["name"], pkg["version"], pkg["dist"] = name, version, dist
+	dist["tarball"] = im.target("/repository/"+m.cc+"/"+name+"/-/"+file, nil)
+	pkg["dist"] = dist
 	head, err := json.Marshal(map[string]any{"_id": name, "name": name, "versions": map[string]any{version: pkg}})
 	if err != nil {
 		return err
@@ -834,7 +1318,7 @@ func (im *importer) copyNpm(ctx context.Context, m repoMap, c nexusComponent, r 
 	defer pr.Close()
 	body := io.MultiReader(strings.NewReader(prefix), pr, strings.NewReader(suffix))
 	length := int64(len(prefix)) + int64(base64.StdEncoding.EncodedLen(int(size))) + int64(len(suffix))
-	status, err := im.send(ctx, http.MethodPut, im.target("/repository/"+m.cc+"/"+name, nil), body, length, "application/json")
+	status, err := im.send(ctx, http.MethodPut, im.target("/repository/"+m.cc+"/"+name, nil), body, length, "application/json", im.published(doc.Time[version], tgz.BlobCreated, tgz.LastModified))
 	if err != nil {
 		return err
 	}
@@ -876,25 +1360,6 @@ func packageJSON(f io.Reader) (map[string]any, error) {
 		}
 		return pkg, nil
 	}
-}
-
-// copyDistTags sets the package's dist-tags on the target as the Nexus
-// packument has them, once every version is there.
-func (im *importer) copyDistTags(ctx context.Context, m repoMap, name string) error {
-	var doc struct {
-		DistTags map[string]string `json:"dist-tags"`
-	}
-	if err := im.getJSON(ctx, im.src, im.fromAuth, im.source("/repository/"+m.nexus+"/"+name, nil), &doc); err != nil {
-		return err
-	}
-	for _, tag := range sortedKeys(doc.DistTags) {
-		b, _ := json.Marshal(doc.DistTags[tag])
-		u := im.target("/repository/"+m.cc+"/-/package/"+name+"/dist-tags/"+tag, nil)
-		if _, err := im.send(ctx, http.MethodPut, u, bytes.NewReader(b), int64(len(b)), "application/json"); err != nil {
-			return fmt.Errorf("tag %s: %w", tag, err)
-		}
-	}
-	return nil
 }
 
 // Docker: the Nexus docker connector (-docker-from) is read with the
@@ -1016,13 +1481,12 @@ func (im *importer) copyManifest(ctx context.Context, cc, image, ref string, bod
 		return nil
 	}
 	u := im.target("/v2/"+cc+"/"+image+"/manifests/"+ref, nil)
-	status, err := im.send(ctx, http.MethodPut, u, bytes.NewReader(body), int64(len(body)), ct)
+	status, err := im.send(ctx, http.MethodPut, u, bytes.NewReader(body), int64(len(body)), ct, "")
 	if err != nil {
 		return fmt.Errorf("manifest %s: %w", ref, err)
 	}
-	if status == http.StatusConflict { // the tag is held by another manifest (allow_once)
-		r.skipped++
-		return nil
+	if status == http.StatusConflict { // same bytes get a 201: this tag is another manifest's (allow_once)
+		return fmt.Errorf("manifest %s: the tag is another manifest's on the target", ref)
 	}
 	r.files++
 	r.bytes += int64(len(body))
@@ -1051,7 +1515,7 @@ func (im *importer) copyBlob(ctx context.Context, cc, image, digest string, size
 	}
 	defer resp.Body.Close()
 	u := im.target("/v2/"+cc+"/"+image+"/blobs/uploads/", url.Values{"digest": {digest}})
-	if _, err := im.send(ctx, http.MethodPost, u, resp.Body, resp.ContentLength, "application/octet-stream"); err != nil {
+	if _, err := im.send(ctx, http.MethodPost, u, resp.Body, resp.ContentLength, "application/octet-stream", ""); err != nil {
 		return fmt.Errorf("blob %s: %w", digest, err)
 	}
 	r.files++

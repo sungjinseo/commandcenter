@@ -267,7 +267,7 @@ func (h *Handler) put(r *http.Request, rp *repo.Repository, p string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := h.Store.Put(ctx, rp.Name, p, ct, body); err != nil {
+	if _, err := h.Store.Put(ctx, rp.Name, p, ct, body, repo.Published(ctx)); err != nil {
 		return err
 	}
 	h.Store.Emit(r, "upload", rp.Name, p, "")

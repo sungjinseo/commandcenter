@@ -939,10 +939,20 @@ func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[s
 			attrs = map[string]string{"name": name, "version": version}
 		}
 	}
+	// A file a client reads under another path than the one it is stored at.
+	served := listed
+	switch rp.Format {
+	case "nuget":
+		served = "v3-flatcontainer/" + a.Path
+	case "gitlfs":
+		if oid, ok := component.SplitLFS(a.Path); ok {
+			served = "info/lfs/objects/" + oid
+		}
+	}
 	return map[string]any{
 		"id":           assetID(rp.Name, a.Path),
 		"path":         "/" + listed,
-		"downloadUrl":  h.repoURL(cmp.Or(via, rp.Name)) + "/" + escapePath(listed),
+		"downloadUrl":  h.repoURL(cmp.Or(via, rp.Name)) + "/" + escapePath(served),
 		"repository":   rp.Name,
 		"format":       nexusFormat(rp.Format),
 		"checksum":     sums,

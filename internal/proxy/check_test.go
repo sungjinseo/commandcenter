@@ -178,3 +178,48 @@ func TestFetchFlightPerURL(t *testing.T) {
 		t.Fatalf("hits = %d, want 2", rm.hits.Load())
 	}
 }
+
+// JSONDocument tells a document from what a remote says instead, as a
+// stream. With keys it reads no further than the first of them.
+func TestJSONDocument(t *testing.T) {
+	for _, c := range []struct {
+		body string
+		keys []string
+		ok   bool
+	}{
+		{`{"a":[1,{"b":null}],"c":"d"}`, nil, true},
+		{`["a"]`, nil, true},
+		{"\xef\xbb\xbf{\"a\":1}", nil, true},
+		{`{"n":1e999}`, nil, true},
+		{"<!DOCTYPE html><html>Sign in</html>", nil, false},
+		{"Sign in", nil, false},
+		{"", nil, false},
+		{`"a string"`, nil, false},
+		{`123`, nil, false},
+		{`{"a":1`, nil, false},
+		{`{"a":1} and more`, nil, false},
+		{strings.Repeat("[", jsonCheckDepth+1), nil, false},
+		{`{"a":1,"versions":[]}`, []string{"versions"}, true},
+		{`{"modules":[]}`, []string{"versions", "modules"}, true},
+		{`{"a":{"versions":[]},"b":[{"versions":1}],"versions":2}`, []string{"versions"}, true},
+		{`{"versions":[] <html>`, []string{"versions"}, true}, // no further than the key
+		{`{"error":"maintenance"}`, []string{"versions"}, false},
+		{`{"a":{"versions":[]}}`, []string{"versions"}, false},
+		{`{"a":"versions"}`, []string{"versions"}, false},
+		{`["versions"]`, []string{"versions"}, false},
+		{"<html>", []string{"versions"}, false},
+	} {
+		_, err := JSONDocument(c.keys...)(ctx, strings.NewReader(c.body), blob.Sums{})
+		if (err == nil) != c.ok {
+			t.Errorf("%.40q with %v: %v", c.body, c.keys, err)
+		}
+	}
+	// A document past what is read is not judged by what it was not read of.
+	long := `{"a":"` + strings.Repeat("x", jsonCheckMax) + `"}`
+	if _, err := JSONDocument()(ctx, strings.NewReader(long), blob.Sums{}); err != nil {
+		t.Errorf("a long document: %v", err)
+	}
+	if _, err := JSONDocument("versions")(ctx, strings.NewReader(`{"versions":[`+strings.Repeat(`"1",`, jsonCheckMax)), blob.Sums{}); err != nil {
+		t.Errorf("a key at the start of a long document: %v", err)
+	}
+}

@@ -120,7 +120,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	var info *blob.Sums
 	if rt.Kind != KindInfo {
 		if _, err := h.Store.Get(ctx, rp.Name, infoKey); errors.Is(err, repo.ErrNotFound) {
-			doc, _ := json.Marshal(map[string]string{"Version": version, "Time": h.Now().UTC().Format(time.RFC3339)})
+			doc, _ := json.Marshal(map[string]string{"Version": version, "Time": repo.PublishedAt(ctx, h.Now()).UTC().Format(time.RFC3339)})
 			s, err := h.Store.WriteBlob(rp.Name, bytes.NewReader(doc), nil)
 			if err != nil {
 				return err
@@ -157,16 +157,16 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	}
 
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, key, contentType(rt.Kind), sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, key, contentType(rt.Kind), sums)); err != nil {
 			return err
 		}
 		if mod != nil {
-			if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, assetKey(rt.Module, rt.Version+".mod"), contentType(KindMod), *mod)); err != nil {
+			if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, assetKey(rt.Module, rt.Version+".mod"), contentType(KindMod), *mod)); err != nil {
 				return err
 			}
 		}
 		if info != nil {
-			return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, infoKey, contentType(KindInfo), *info))
+			return tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, infoKey, contentType(KindInfo), *info))
 		}
 		return nil
 	})

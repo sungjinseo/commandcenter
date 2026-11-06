@@ -130,7 +130,7 @@ func (h *Handler) store(ctx context.Context, rp *repo.Repository, body io.Reader
 	if wantFile != "" && !sameFile(file, wantFile) {
 		return "", "", badChart("file name %q does not match chart %s version %s (%s)", wantFile, name, version, file)
 	}
-	now := h.Now().UTC()
+	now := repo.PublishedAt(ctx, h.Now()).UTC()
 	e["created"], e["digest"], e["urls"] = now.Format(time.RFC3339Nano), sums.SHA256, []string{file}
 	attrs, err := json.Marshal(e)
 	if err != nil {
@@ -168,7 +168,7 @@ func (h *Handler) store(ctx context.Context, rp *repo.Repository, body io.Reader
 				return err
 			}
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, file, ctChart, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, file, ctChart, sums)); err != nil {
 			return err
 		}
 		return h.rebuildIndex(ctx, tx, rp)
@@ -214,7 +214,7 @@ func (h *Handler) storeProv(ctx context.Context, rp *repo.Repository, prov []byt
 		case err != nil && !errors.Is(err, meta.ErrNotFound):
 			return err
 		}
-		return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, provKey(file), ctProv, sums))
+		return tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, provKey(file), ctProv, sums))
 	})
 }
 

@@ -19,15 +19,21 @@ import (
 // maxDoc bounds an upstream JSON document read back from the cache.
 const maxDoc = 16 << 20
 
-// fetchDoc fetches a document of rp's remote (remote is the path under
-// the registry root, or an absolute URL) into key and reads it.
-func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, remote, accept string) (doc, error) {
-	t := proxy.Target{Key: key, Header: http.Header{"Accept": {accept}}, NotHTML: true}
+// docTarget is the fetch of a JSON document of rp's remote (remote is the path
+// under the registry root, or an absolute URL) into key, which holds one of
+// keys at its top level.
+func docTarget(key, remote, accept string, keys ...string) proxy.Target {
+	t := proxy.Target{Key: key, Header: http.Header{"Accept": {accept}}, NotHTML: true, Check: proxy.JSONDocument(keys...)}
 	if strings.Contains(remote, "://") {
 		t.URL = remote
 	} else {
 		t.Remote = remote
 	}
+	return t
+}
+
+// fetchDoc fetches t and reads it.
+func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, t proxy.Target) (doc, error) {
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if err != nil {
 		return doc{}, err
@@ -55,9 +61,13 @@ func (h *Handler) readDoc(a meta.Asset) ([]byte, error) {
 
 // proxyList serves the upstream release list with every release URL
 // rewritten to serving, so SwiftPM never reaches past the proxy. The
-// upstream's other keys of a release (problem) are kept.
+// upstream's other keys of a release (problem) are kept. The list decides who
+// owns the package in a group (has): what a remote refuses or answers with
+// what is no such list fails closed.
 func (h *Handler) proxyList(ctx context.Context, serving, rp *repo.Repository, rt Route) (doc, []string, error) {
-	d, err := h.fetchDoc(ctx, rp, strings.ToLower(rt.Scope+"/"+rt.Name)+"/"+releasesFile, rt.Scope+"/"+rt.Name, ctRegistry+"+json")
+	t := docTarget(strings.ToLower(rt.Scope+"/"+rt.Name)+"/"+releasesFile, rt.Scope+"/"+rt.Name, ctRegistry+"+json", "releases")
+	t.NotHTML, t.DeniedIsFailure = false, true
+	d, err := h.fetchDoc(ctx, rp, t)
 	if errors.Is(err, repo.ErrNotFound) {
 		return doc{}, nil, notFoundPackage(rt)
 	}
@@ -87,7 +97,7 @@ func (h *Handler) proxyList(ctx context.Context, serving, rp *repo.Repository, r
 // proxyRelease passes the upstream release metadata through (it carries
 // no URLs), cached for metadataMaxAge.
 func (h *Handler) proxyRelease(ctx context.Context, rp *repo.Repository, rt Route) (doc, error) {
-	d, err := h.fetchDoc(ctx, rp, versionDir(rt.Scope, rt.Name, rt.Version)+releaseFile, rt.Scope+"/"+rt.Name+"/"+rt.Version, ctRegistry+"+json")
+	d, err := h.fetchDoc(ctx, rp, docTarget(versionDir(rt.Scope, rt.Name, rt.Version)+releaseFile, rt.Scope+"/"+rt.Name+"/"+rt.Version, ctRegistry+"+json", "id", "version", "resources"))
 	if errors.Is(err, repo.ErrNotFound) {
 		return doc{}, notFoundRelease(rt)
 	}
@@ -145,7 +155,7 @@ func (h *Handler) proxyArchive(ctx context.Context, rp *repo.Repository, rt Rout
 // a key made of the URL, for metadataMaxAge). A 404 is no identifiers.
 func (h *Handler) proxyIdentifiers(ctx context.Context, rp *repo.Repository, u string) ([]string, proxy.Result, error) {
 	sum := sha256.Sum256([]byte(normalizeURL(u)))
-	d, err := h.fetchDoc(ctx, rp, "identifiers/"+hex.EncodeToString(sum[:8])+".json", rp.RemoteURL.String()+"identifiers?url="+url.QueryEscape(u), ctRegistry+"+json")
+	d, err := h.fetchDoc(ctx, rp, docTarget("identifiers/"+hex.EncodeToString(sum[:8])+".json", rp.RemoteURL.String()+"identifiers?url="+url.QueryEscape(u), ctRegistry+"+json", "identifiers"))
 	if errors.Is(err, repo.ErrNotFound) {
 		return nil, d.res, nil
 	}

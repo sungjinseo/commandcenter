@@ -178,6 +178,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `groupOfUniqueNames` and `posixGroup`, and the `userOneLevel` and `groupsAsRoles` check boxes.
 - Web UI: a proxy's form has the `strictContentTypeValidation` switch ("Do not cache remote files whose first
   bytes contradict their name").
+- `import-nexus` copies hosted yum (with `repodata/comps.xml` and `comps.xml.gz`), NuGet, RubyGems,
+  R, Git LFS, Go and Conda repositories. Hosted Conan, Cargo, Terraform and Swift repositories are
+  listed and reported one component per line with what to do instead: no public source says how a
+  current Nexus lays them out.
+- `import-nexus` copies scoped npm packages and publishes the manifest Nexus has (`deprecated`,
+  `gitHead`, ...), sends a PyPI `.asc` with its file as `gpg_signature`, and uploads a Helm `.prov`
+  after its chart, whatever name Nexus stored the chart under.
+- An administrator signed in with a password or session may state an upload's original publish time
+  with the header `X-Command-Center-Publish-Time` (RFC 3339, not in the future). npm `time.<version>`,
+  Helm `created`, PyPI `upload_time`, NuGet `published`, yum `<time file>`, Go `.info` and the file's
+  dates carry it; generated documents keep their real time. Anyone else, API tokens included, gets
+  403 and nothing is stored; a format that records no time (cargo, ...) gets 400, and docker's `/v2/`
+  does not read it. The event says `publishTime=`. `import-nexus` uses it, so yarn 4's age gate does not refuse imported versions
+  for a day, and says so plainly when it cannot. `GET /-/api/me` answers `statesPublishTime`.
+- `import-nexus -dry-run` names what npm and PyPI would refuse, as far as that shows without a
+  download.
+- `import-nexus -config` carries `docker.forceBasicAuth`: a docker repository without anonymous pull
+  in Nexus, by that flag or by a Docker Bearer Token realm that is off, has its anonymous read off
+  after the move. The end of the run says how many.
+- `import-nexus -config` prints a manual action for each npm, PyPI, R, Conda and yum group: Nexus
+  merges them, and `mergeMembers` stays off until the operator turns it on.
+- `import-nexus -config` carries Nexus's LDAP static groups along with `ldapGroupsAsRoles`.
+- `test/smoke/import-content-smoke.sh`: every format copied between two servers, then installed from
+  the target with its real client.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -289,6 +313,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   502 and is not cached, a cached page keeps answering, and a group's next member no longer stands in. It was a 404.
 - `Fetcher.Request` honours a blocked remote and counts for auto-block: a blocked Terraform proxy no longer asks the
   remote's module download endpoint and uses the answer it kept.
+- `import-nexus -config`: a repository Nexus has read-only (DENY) stands closed from the start and is
+  opened for its own copy alone, when something is missing. A marker tag `import-nexus-open.<repo>`
+  lets the next run close what a killed one left open, without `-update`; an interrupt closes it
+  itself. A repository offline on Nexus gets one line instead of a failure per file.
+- `import-nexus`: a file that fails no longer stops the other files of its component.
+- `import-nexus`: a re-run counts what the target has as skipped whatever the format answers (409,
+  PyPI's 400, Maven's and raw's 400, npm's 403); a 409 that is no duplicate, and a docker tag held by
+  another manifest, are failures now, where they counted as skipped.
+- Cleanup's `lastDownloadedDays` and snapshot purges count a never-downloaded file from when its row
+  was written if that is later than its dates, so that an import with stated times is not selected
+  on the first run.
+- Composer, NuGet, RubyGems, Swift, Terraform, Conan, Cargo, R and conda proxies: only the remote's 404 and 410 count as
+  "not here" for the document that decides who owns a package in a group (`p2/<name>.json`, a flat container
+  `index.json`, `info/<name>`, a release list, `versions`, a recipe's `latest`, a Cargo index file, `PACKAGES`,
+  `repodata.json`, `current_repodata.json`, `channeldata.json`). Any other 4xx, and a 200 that is no such document (a
+  sign-in page, an error text, a JSON error), is a 502, is not cached, and leaves no negative record; a group no longer
+  passes to the next member, so a refused internal registry cannot hand a name to a public member (dependency
+  confusion), as npm and PyPI already did. A cached copy keeps answering with `Warning: 110`.
+- A group without `mergeMembers` no longer lets an offline member's names go to a later member: taking a repository
+  offline does not change who owns a name. Composer, NuGet, RubyGems, Swift, Terraform, Conan, Cargo, Helm and Docker
+  answer 503 `group member "<name>" is offline` for what no member ahead of it has, as npm and PyPI do. R, conda, yum and
+  a Helm group's `index.yaml` answer 503 when an online member follows the offline one; with none after it, or with
+  `mergeMembers`, it is left out as before. APT answers 503 for an offline hosted member's distribution. Lists and
+  searches still answer from the online members. Maven, Go, raw and p2 groups still skip an offline member.
+- `repository.purge-unused` keeps the cached files of R, conda, yum and APT proxies another group member follows, as it
+  does for the other formats whose first member answers: deleting them could hand the name or path to that member.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -408,6 +458,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Go `.zip` stayed until an admin deleted it).
 - apt proxy: a Release fetched with no copy before it expires the metadata beside it.
 - npm audit passes the request's query string to the remote.
+- The REST `downloadUrl` of NuGet and Git LFS files is where a client reads them; it was a 404.
+- Helm proxy: an answer that parses but has no `apiVersion` (JSON, a YAML error document) was read as an empty index, so a
+  group passed every chart to the next member; a page or a refused index left a negative record for `negativeCacheTTL`.
+- What is no JSON, or not the JSON it should be, no longer replaces a good copy for `metadataMaxAge`, during which each
+  read was a 502: Composer's root, metadata and search, NuGet's service index, registration, search and vulnerability
+  files, Swift, Terraform's discovery, version lists and downloads, Conan's documents, CocoaPods podspecs, Hugging Face
+  listings, Docker manifests and tag lists, the PyPI JSON API, Go `.info` and `@latest`, Cargo's `config.json`.
+- `repository.purge-unused`: a tarball or file fetched after a run chose its package document, and before the delete,
+  now keeps the document.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -497,6 +556,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **PyPI**: a remote that answers 200 with an empty HTML page for projects it does not have now fails a group it stands ahead of with 502, instead of passing to the next member. No index I know of does that (pypi.org, Nexus, Artifactory, devpi, pypiserver answer 404, by memory; only pypi.org was run). The log says `not the page of project`. Reorder the group or fix the remote.
 - Pages and documents cached wrongly by older builds stay until their `metadataMaxAge`; a tarball or `.zip` of a sign-in page cached by an older build stays until deleted, as before.
 - Rolling upgrade: nothing to migrate. An older node still stores and undoes for npm, so while both run, a new node can read what an old node is about to undo; that ends with the rollout. `Used` writes through the existing counters.
+- **`import-nexus -config` run again on a target from an earlier version:** every docker repository with `forceBasicAuth: true` in Nexus (Nexus's default) that the earlier run made now shows `differs: docker.forceBasicAuth` and a manual action. They allow anonymous pull if the global is on. `-update` closes them.
+- **New lines on every `-config` run** for groups that merge in Nexus, until `mergeMembers` is on.
+- **A tag `import-nexus-open.<repo>`** appears in Tags while a read-only repository is open for its copy. If one stays, a run was killed: the next run deals with it.
+- **`lastDownloadedDays`:** a proxied file never downloaded counts from its last check by the same rule. That only keeps something longer.
+- **`GET /-/api/me`** has one more field. **`downloadUrl`** of NuGet and Git LFS files changes to one that works.
+- Mixed versions: an older node ignores the header, so a stated time is lost on it silently. Import after every node runs this version. An older target answers `/-/api/me` without the field, so the importer sends none and says so.
+- A remote that answers 403 for a missing key (S3 read without `s3:ListBucket`, CloudFront in front of it) now gets a 502
+  for each such document it lacks, on a proxy outside a group too, and a group stops there. Make it answer 404, or send it
+  only its names with a routing rule. For conda that includes a `current_repodata.json` or `channeldata.json` it never
+  built, for R a `bin/...` directory it does not have.
+- A member kept offline in a group now stops public packages through that group too, unless it is the last member. Take
+  it out of the group if it stays offline for long.
+- Negative records from before the upgrade stay until `negativeCacheTTL` ends, so a refused name can still pass to the
+  next member for that long (with `"-1"` until the proxy's settings are saved with another value). During a rolling
+  upgrade older nodes keep writing such records and skipping offline members.
+- Documents an older build cached wrongly stay until `metadataMaxAge`.
 
 ## [0.4.0] - 2026-11-05
 

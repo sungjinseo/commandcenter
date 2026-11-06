@@ -175,10 +175,10 @@ func TestProxyIndexAndDownload(t *testing.T) {
 	}
 }
 
-// A sign-in page answered with 200 is no index file: not found and not cached.
+// A sign-in page answered with 200 is no index file: a failure, and not cached.
 func TestProxyDoesNotCacheWebPages(t *testing.T) {
 	e := newEnv(t)
-	if w := e.do("GET", "cargo-proxy", "si/gn/signin", nil); w.Code != 404 {
+	if w := e.do("GET", "cargo-proxy", "si/gn/signin", nil); w.Code != 502 {
 		t.Fatalf("index: %d %s", w.Code, w.Body.String())
 	}
 	if _, err := e.h.Store.Get(context.Background(), "cargo-proxy", indexKey("si/gn/signin")); repo.StatusOf(err) != 404 {

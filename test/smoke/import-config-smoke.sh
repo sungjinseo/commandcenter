@@ -15,8 +15,8 @@ export MSYS_NO_PATHCONV=1
 cd "$(dirname "$0")/../.."
 root="$(pwd -W 2>/dev/null || pwd)"
 work="test/smoke/.work-import-$$"
-net=commandcenter-import-smoke-$$
-name=commandcenter-import-smoke-$$
+name="${SMOKE_NAME:-commandcenter-import-smoke-$$}"
+net="$name"
 . test/postgres.sh
 pa=$((20000 + $$ % 20000))
 pb=$((pa + 1))
@@ -25,7 +25,7 @@ b=http://127.0.0.1:$pb
 v=/service/rest/v1
 
 cleanup() {
-  docker rm -f -v "$name-a" "$name-b" "$name-run" "$name-pg" >/dev/null 2>&1 || true # -v: their anonymous data volumes too
+  docker rm -f -v "$name-a" "$name-b" "$name-run" "$name-pg" "$name-hash" >/dev/null 2>&1 || true # -v: their anonymous data volumes too
   docker network rm "$net" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }
@@ -36,7 +36,7 @@ rm -rf "$work" && mkdir -p "$work/out"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 docker build -q -t commandcenter:smoke-import . >/dev/null
-hash="$(printf 'smoke-pass\n' | docker run --rm -i commandcenter:smoke-import hash-password)"
+hash="$(printf 'smoke-pass\n' | docker run --rm -i --name "$name-hash" --memory 256m commandcenter:smoke-import hash-password)"
 for s in a b; do
   cat > "$work/config-$s.yaml" <<EOF
 baseURL: "http://cc-$s:8081"

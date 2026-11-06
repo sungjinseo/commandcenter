@@ -12,6 +12,7 @@
 package r
 
 import (
+	"bufio"
 	"bytes"
 	"cmp"
 	"context"
@@ -124,6 +125,9 @@ func isMetadata(p string) bool {
 // another repository's package does not warn about this one.
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) error {
 	ctx := r.Context()
+	if err := rp.OfflineAhead(); err != nil {
+		return err
+	}
 	file, dir := doc(p)
 	if rp.Type == "group" && file != "" {
 		a, err := h.merged(ctx, rp, dir, p)
@@ -145,7 +149,11 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 	if isMetadata(p) {
 		kind = proxy.Metadata
 	}
-	res, err := h.Resolver.LookupTarget(ctx, rp, proxy.Target{Key: p, Remote: p, NotHTML: true}, kind)
+	t := proxy.Target{Key: p, Remote: p, NotHTML: true}
+	if file == "PACKAGES" || file == "PACKAGES.gz" {
+		t = indexTarget(p, p)
+	}
+	res, err := h.Resolver.LookupTarget(ctx, rp, t, kind)
 	if repo.StatusOf(err) == http.StatusNotFound && file != "" && rp.Type == "hosted" {
 		return serveEmpty(w, r, file, dir)
 	}
@@ -157,12 +165,47 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 	return nil
 }
 
+// indexTarget is the fetch of a directory's PACKAGES or PACKAGES.gz. It decides
+// whose a package name is in a group (merged): what a remote refuses or
+// answers with what is no such index fails closed.
+func indexTarget(p, route string) proxy.Target {
+	return proxy.Target{Key: p, Remote: p, Route: route, DeniedIsFailure: true, Check: func(_ context.Context, body io.ReadSeeker, s blob.Sums) (blob.Sums, error) {
+		return s, checkIndex(p, body)
+	}}
+}
+
+// checkIndex looks at the start of the index file p: gzip for PACKAGES.gz, and
+// for PACKAGES a first stanza with a Package field, or nothing at all (a
+// directory without packages).
+func checkIndex(p string, body io.Reader) error {
+	if strings.HasSuffix(p, ".gz") {
+		_, err := repo.CheckContent(p, "", body)
+		return err
+	}
+	lines := bufio.NewScanner(body)
+	empty := true
+	for lines.Scan() {
+		switch line := lines.Text(); {
+		case strings.HasPrefix(line, "Package:"):
+			return nil
+		case strings.TrimSpace(line) != "":
+			empty = false
+		case !empty:
+			return errors.New("an index whose first stanza names no package")
+		}
+	}
+	if !empty || lines.Err() != nil {
+		return errors.New("not an index of packages")
+	}
+	return nil
+}
+
 // memberIndex is leaf member m's index of dir: its PACKAGES, or PACKAGES.gz
 // when that is all it has, as a Nexus hosted repository publishes. route is
 // the request's path, which a proxy's routing rule sees.
 func (h *Handler) memberIndex(ctx context.Context, m *repo.Repository, dir, route string) (meta.Asset, error) {
 	lookup := func(file string) (proxy.Result, error) {
-		return h.Resolver.LookupTarget(ctx, m, proxy.Target{Key: dir + "/" + file, Remote: dir + "/" + file, Route: route, NotHTML: true}, proxy.Metadata)
+		return h.Resolver.LookupTarget(ctx, m, indexTarget(dir+"/"+file, route), proxy.Metadata)
 	}
 	res, err := lookup("PACKAGES")
 	if repo.StatusOf(err) == http.StatusNotFound {
@@ -310,7 +353,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if err != nil {
 		return err
 	}
-	now := h.Now().UTC()
+	now := repo.PublishedAt(ctx, h.Now()).UTC()
 	ct := ctGzip
 	if component.RExt(dir) == ".zip" {
 		ct = ctZip
@@ -335,7 +378,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		case err != nil:
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, p, ct, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, p, ct, sums)); err != nil {
 			return err
 		}
 		return h.rebuild(ctx, tx, rp, dir)

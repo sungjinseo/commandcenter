@@ -50,6 +50,7 @@ func quotedSHA(s string) string {
 }
 
 type env struct {
+	garbage  atomic.Bool // the hub answers text that is no document
 	t        *testing.T
 	ts       *httptest.Server
 	h        *Handler
@@ -103,6 +104,11 @@ func newEnv(t *testing.T) *env {
 		e.mu.Unlock()
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		main := e.main.Load().(string)
+		if e.garbage.Load() {
+			w.Header().Set("Content-Type", "text/plain")
+			io.WriteString(w, "Sign in")
+			return
+		}
 		switch {
 		case p == "api/models/org/private/revision/main" || strings.HasPrefix(p, "org/private/resolve/"):
 			if r.Header.Get("Authorization") != "Bearer tok" {

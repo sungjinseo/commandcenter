@@ -50,7 +50,7 @@ func serviceIndexURL(rp *repo.Repository) string {
 // upstreamFor reads the remote service index (cached for metadataMaxAge).
 // A remote without one is a 502: a wrong remote URL, not a missing package.
 func (h *Handler) upstreamFor(ctx context.Context, rp *repo.Repository) (upstream, proxy.Result, error) {
-	t := proxy.Target{Key: upstreamKey, URL: serviceIndexURL(rp), Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	t := proxy.Target{Key: upstreamKey, URL: serviceIndexURL(rp), Header: http.Header{"Accept": {ctJSON}}, DeniedIsFailure: true, Check: proxy.JSONDocument("resources")}
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if errors.Is(err, repo.ErrNotFound) {
 		return upstream{}, res, repo.Errorf(http.StatusBadGateway, "remote repository has no NuGet service index at %s", serviceIndexURL(rp))
@@ -130,7 +130,11 @@ func (h *Handler) readDoc(a meta.Asset) ([]byte, error) {
 
 // fetchFile fetches a metadata document of rp's remote into key, within maxDoc.
 func (h *Handler) fetchFile(ctx context.Context, rp *repo.Repository, key, url string) (proxy.Result, error) {
-	t := proxy.Target{Key: key, URL: url, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	return h.fetchTarget(ctx, rp, proxy.Target{Key: key, URL: url, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true, Check: proxy.JSONDocument()})
+}
+
+// fetchTarget is fetchFile for a target of the caller's.
+func (h *Handler) fetchTarget(ctx context.Context, rp *repo.Repository, t proxy.Target) (proxy.Result, error) {
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if err != nil {
 		return res, err
@@ -141,17 +145,9 @@ func (h *Handler) fetchFile(ctx context.Context, rp *repo.Repository, key, url s
 	return res, nil
 }
 
-// fetchDoc fetches a metadata document of rp's remote into key and reads it.
-func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url string) (doc, error) {
-	res, err := h.fetchFile(ctx, rp, key, url)
-	if err != nil {
-		return doc{}, err
-	}
-	raw, err := h.readDoc(res.Asset)
-	return doc{body: raw, res: res}, err
-}
-
-// proxyFlatIndex serves the upstream flat container index of id, as is.
+// proxyFlatIndex serves the upstream flat container index of id, as is. It
+// decides who owns id in a group (has): what a remote refuses or answers with
+// what is no such index fails closed.
 func (h *Handler) proxyFlatIndex(ctx context.Context, rp *repo.Repository, id string) (doc, error) {
 	up, _, err := h.upstreamFor(ctx, rp)
 	if err != nil {
@@ -160,7 +156,13 @@ func (h *Handler) proxyFlatIndex(ctx context.Context, rp *repo.Repository, id st
 	if up.flat == "" {
 		return doc{}, repo.Errorf(http.StatusBadGateway, "remote repository has no PackageBaseAddress resource")
 	}
-	return h.fetchDoc(ctx, rp, flatPrefix+id+"/index.json", up.flat+id+"/index.json")
+	res, err := h.fetchTarget(ctx, rp, proxy.Target{Key: flatPrefix + id + "/index.json", URL: up.flat + id + "/index.json",
+		Header: http.Header{"Accept": {ctJSON}}, DeniedIsFailure: true, Check: proxy.JSONDocument("versions")})
+	if err != nil {
+		return doc{}, err
+	}
+	raw, err := h.readDoc(res.Asset)
+	return doc{body: raw, res: res}, err
 }
 
 // proxyFlatFile serves a cached .nupkg or .nuspec, fetched from the
@@ -283,7 +285,7 @@ func (h *Handler) vulnSource(ctx context.Context, rp *repo.Repository) (*repo.Re
 		for _, m := range rp.MemberRepos {
 			if !m.IsOnline() {
 				if m.Type != "hosted" && offline == nil {
-					offline = repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+					offline = repo.MemberOffline(m)
 				}
 				continue
 			}
@@ -304,7 +306,7 @@ func (h *Handler) vulnSource(ctx context.Context, rp *repo.Repository) (*repo.Re
 // with @name, @id, @updated and comment, cached for metadataMaxAge. The
 // document is two entries on nuget.org.
 func (h *Handler) vulnEntries(ctx context.Context, src *repo.Repository, up upstream) ([]map[string]json.RawMessage, proxy.Result, error) {
-	t := proxy.Target{Key: vulnIndex, URL: up.vuln, Route: vulnIndex, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	t := proxy.Target{Key: vulnIndex, URL: up.vuln, Route: vulnIndex, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true, Check: proxy.JSONDocument()}
 	res, err := h.Fetcher.FetchTarget(ctx, src, t, proxy.Metadata)
 	if err != nil {
 		return nil, res, err
@@ -395,7 +397,7 @@ func (h *Handler) vulnPage(ctx context.Context, rp *repo.Repository, ref string)
 		return proxy.Result{}, repo.ErrNotFound
 	}
 	_, missing := h.Store.Get(ctx, src.Name, key)
-	t := proxy.Target{Key: key, URL: target, Route: key, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	t := proxy.Target{Key: key, URL: target, Route: key, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true, Check: proxy.JSONDocument()}
 	res, err := h.Fetcher.FetchTarget(ctx, src, t, proxy.Metadata)
 	if err == nil && errors.Is(missing, repo.ErrNotFound) {
 		h.dropVulnPages(ctx, src, current)

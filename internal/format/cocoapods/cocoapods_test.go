@@ -421,6 +421,32 @@ func TestPodspecIsMetadata(t *testing.T) {
 	}
 }
 
+// An answer that is no podspec does not replace the good one, which would
+// break the pod until metadataMaxAge ends.
+func TestPodspecKeepsCopy(t *testing.T) {
+	e := newEnv(t)
+	p := SpecPath("Alamofire", "5.0.0")
+	if resp, b := e.get("GET", p); resp.StatusCode != 200 {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	before, err := e.store.Get(context.Background(), "pods", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range repotest.Garbage {
+		e.specMu.Lock()
+		e.specOverride = map[string]string{p: a.Body}
+		e.specMu.Unlock()
+		e.now.Add(7200)
+		if resp, b := e.get("GET", p); resp.StatusCode != 200 {
+			t.Errorf("%.30q: %d %s, want the copy", a.Body, resp.StatusCode, b)
+		}
+		if got, _ := e.store.Get(context.Background(), "pods", p); got.BlobSHA256 != before.BlobSHA256 {
+			t.Errorf("%.30q replaced the copy", a.Body)
+		}
+	}
+}
+
 func TestArchiveExt(t *testing.T) {
 	for u, want := range map[string]string{
 		"https://x/a.zip": ".zip", "https://x/a-1.0.tar.gz": ".tar.gz", "https://x/a.tgz": ".tgz", "https://x/a.tar.bz2": ".tar.bz2",

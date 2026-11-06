@@ -448,6 +448,9 @@ func (h *Handler) native(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	req.SetPathValue("path", wr.path)
 	req.Header.Set("Content-Type", wr.ctype)
 	req.Header.Set("X-Request-Id", r.Header.Get("X-Request-Id"))
+	if v := r.Header.Get(repo.PublishTimeHeader); v != "" {
+		req.Header.Set(repo.PublishTimeHeader, v)
+	}
 	req.RemoteAddr = r.RemoteAddr
 	rec := &recorder{h: http.Header{}}
 	h.ServeRepository(rec, req)

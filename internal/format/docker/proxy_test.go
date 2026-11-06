@@ -315,6 +315,29 @@ func TestProxyRevalidation(t *testing.T) {
 	fr.set(func() { fr.status = 0 })
 }
 
+// What a tag answers that is no manifest does not replace the one cached,
+// which would stand until metadataMaxAge ends.
+func TestProxyTagKeepsCopyOfManifest(t *testing.T) {
+	fr := newFakeRegistry(t)
+	m1, _ := fr.putImage("app", "latest", []byte("l1"))
+	e := newEnvWith(t, proxyOf(fr, "hub", nil))
+	resp, b := e.do("GET", "/v2/hub/app/manifests/latest", nil)
+	e.check(resp, b, 200, "")
+	for _, body := range []string{"Sign in", `{"error":"maintenance"}`} {
+		fr.set(func() { fr.manifests["app/latest"] = fakeManifest{[]byte(body), "text/plain"} })
+		e.now = e.now.Add(48 * time.Hour)
+		resp, b = e.do("GET", "/v2/hub/app/manifests/latest", nil)
+		e.check(resp, b, 200, "")
+		if !bytes.Equal(b, m1) || !strings.Contains(resp.Header.Get("Warning"), "Stale") {
+			t.Fatalf("%q: %v %s", body, resp.Header, b)
+		}
+	}
+	// What is not cached fails.
+	fr.set(func() { fr.manifests["app/new"] = fakeManifest{[]byte("Sign in"), "text/plain"} })
+	resp, b = e.do("GET", "/v2/hub/app/manifests/new", nil)
+	e.check(resp, b, 502, "")
+}
+
 func TestProxyUpstreamAuth(t *testing.T) {
 	fr := newFakeRegistry(t)
 	fr.bearer, fr.user, fr.pw = true, "hubuser", "hubsecret"
@@ -558,7 +581,7 @@ func TestGroup(t *testing.T) {
 	e := newEnvWith(t,
 		proxyOf(fr, "hub", nil),
 		config.Repository{Name: "down", Format: "docker", Type: "hosted", Online: &f, AnonymousRead: &tr},
-		config.Repository{Name: "all", Format: "docker", Type: "group", Members: []string{"down", "dh", "hub"}, AnonymousRead: &tr},
+		config.Repository{Name: "all", Format: "docker", Type: "group", Members: []string{"dh", "hub"}, AnonymousRead: &tr},
 		config.Repository{Name: "dead", Format: "docker", Type: "group", Members: []string{"down"}, AnonymousRead: &tr},
 		config.Repository{Name: "nested", Format: "docker", Type: "group", Members: []string{"all"}, AnonymousRead: &f})
 	hostedLayer := []byte("hosted app layer")
@@ -582,7 +605,7 @@ func TestGroup(t *testing.T) {
 	if fr.count("/v2/app/manifests/v1") != 0 {
 		t.Fatal("the proxy was asked for an image the hosted member owns")
 	}
-	// an image only the proxy has: fetched through it (the offline member ahead is skipped)
+	// an image only the proxy has: fetched through it
 	resp, b = e.do("GET", "/v2/all/web/manifests/latest", nil)
 	e.check(resp, b, 200, "")
 	if !bytes.Equal(b, mWebUp) {

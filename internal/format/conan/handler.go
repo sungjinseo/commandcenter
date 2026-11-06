@@ -179,7 +179,11 @@ func (h *Handler) doc(ctx context.Context, rp *repo.Repository, rt Route) (doc, 
 	case "hosted":
 		return h.hostedDoc(ctx, rp, rt)
 	case "proxy":
-		return h.fetchDoc(ctx, rp, proxy.Target{Key: rt.v2Path(), Remote: rt.v2Path(), Header: http.Header{"Accept": {ctJSON}}, NotHTML: true})
+		t := proxy.Target{Key: rt.v2Path(), Remote: rt.v2Path(), Header: http.Header{"Accept": {ctJSON}}, NotHTML: true, Check: proxy.JSONDocument()}
+		if rt.Kind == KindLatest { // it decides who owns the recipe in a group (owner): what a remote refuses, or a page, fails closed
+			t.NotHTML, t.DeniedIsFailure, t.Check = false, true, proxy.JSONDocument("revision")
+		}
+		return h.fetchDoc(ctx, rp, t)
 	case "group":
 		owner, err := h.owner(ctx, rp, rt.Ref)
 		if err != nil {
@@ -250,7 +254,10 @@ func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, t proxy.Tar
 // That member answers alone, so a later (public) member never stands in
 // for an internal recipe.
 func (h *Handler) owner(ctx context.Context, rp *repo.Repository, ref Ref) (*repo.Repository, error) {
-	for _, m := range rp.OnlineMembers() {
+	for _, m := range rp.MemberRepos {
+		if !m.IsOnline() { // it may have the recipe
+			return nil, repo.MemberOffline(m)
+		}
 		_, err := h.doc(ctx, m, Route{Kind: KindLatest, Ref: ref})
 		if err == nil {
 			return m, nil
@@ -288,7 +295,7 @@ func (h *Handler) search(ctx context.Context, rp *repo.Repository, q string) (do
 	case "proxy":
 		sum := sha256.Sum256([]byte(q))
 		u := rp.RemoteURL.String() + "v2/conans/search?q=" + url.QueryEscape(q)
-		return h.fetchDoc(ctx, rp, proxy.Target{Key: searchPrefix + hex.EncodeToString(sum[:8]) + ".json", URL: u, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true})
+		return h.fetchDoc(ctx, rp, proxy.Target{Key: searchPrefix + hex.EncodeToString(sum[:8]) + ".json", URL: u, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true, Check: proxy.JSONDocument()})
 	case "group":
 		var results []string
 		for _, m := range rp.OnlineMembers() {

@@ -130,8 +130,14 @@ func condaSubdir(s string) bool {
 // has for people to read.
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) error {
 	ctx := r.Context()
+	if err := rp.OfflineAhead(); err != nil {
+		return err
+	}
 	kind, subdir := doc(p)
 	t := proxy.Target{Key: p, Remote: p, NotHTML: path.Base(p) != "index.html"}
+	if kind == "repodata" || kind == "channeldata" {
+		t = docTarget(p, p)
+	}
 	var res proxy.Result
 	var err error
 	switch {
@@ -197,7 +203,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if err != nil {
 		return err
 	}
-	now := h.Now().UTC()
+	now := repo.PublishedAt(ctx, h.Now()).UTC()
 	ct := ctBzip2
 	if strings.HasSuffix(p, ".conda") {
 		ct = ctZip
@@ -221,7 +227,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		case err != nil:
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, p, ct, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, p, ct, sums)); err != nil {
 			return err
 		}
 		return h.rebuild(ctx, tx, rp, subdir)

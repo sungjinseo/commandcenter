@@ -3,6 +3,8 @@ package repo
 import (
 	"context"
 	"net/http"
+	"strings"
+	"time"
 
 	"commandcenter/internal/auth"
 )
@@ -33,6 +35,9 @@ func EmitContext(ctx context.Context, sink EventSink, kind, actor, repoName, sub
 func (s *Store) Emit(r *http.Request, kind, repoName, subject, detail string) {
 	if s.Events == nil {
 		return
+	}
+	if t, ok := PublishTime(r.Context()); ok { // the audit trail of a stated time
+		detail = strings.TrimSpace(detail + " publishTime=" + t.Format(time.RFC3339))
 	}
 	EmitContext(r.Context(), s.Events, kind, auth.FromContext(r.Context()).Owner(), repoName, subject, detail)
 }

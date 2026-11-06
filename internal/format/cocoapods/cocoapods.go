@@ -161,7 +161,7 @@ func splitSpec(p string) (pod, version string, ok bool) {
 // published podspec, a deprecation for one.
 func (h *Handler) podspec(ctx context.Context, rp *repo.Repository, pod, version string) (proxy.Result, map[string]any, error) {
 	key := SpecPath(pod, version)
-	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, Remote: key, NotHTML: true}, proxy.Metadata)
+	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, Remote: key, NotHTML: true, Check: proxy.JSONDocument()}, proxy.Metadata)
 	if err != nil {
 		return res, nil, err
 	}

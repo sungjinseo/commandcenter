@@ -779,11 +779,11 @@ func TestGroup(t *testing.T) {
 	if w := e.do("PUT", "conan-proxy-first", RecipeFile(zlib, "cccc", "x.txt"), []byte("x")); w.Code != 405 {
 		t.Errorf("PUT on a group without writeMember: %d", w.Code)
 	}
-	// An offline member ahead is skipped.
+	// An offline member ahead: a later one does not stand in for it.
 	off := false
 	e.repos["conan-proxy"].Online = &off
-	if got := e.latest(t, "conan-proxy-first", zlib.dir()+"latest"); got.Revision != "bbbb" {
-		t.Errorf("offline proxy skipped: %+v", got)
+	if w := e.do("GET", "conan-proxy-first", zlib.dir()+"latest", nil); w.Code != 503 {
+		t.Errorf("offline proxy ahead: %d %s", w.Code, w.Body)
 	}
 }
 

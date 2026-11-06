@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/blob"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
@@ -138,15 +139,20 @@ func (h *Handler) source(ctx context.Context, rp *repo.Repository, name string) 
 		st, err := h.Store.DB.PackageStamp(ctx, rp.Name, name)
 		return indexSource{rp: rp, tag: st.Hash}, err == nil && st.Count > 0, err
 	case "proxy":
+		// The file decides who owns the crate in a group: what a remote refuses
+		// or answers with what is no index file fails closed.
 		path := IndexPath(name)
-		res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey(path), Remote: path, NotHTML: true}, proxy.Metadata)
+		res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey(path), Remote: path, DeniedIsFailure: true, Check: checkIndexFile}, proxy.Metadata)
 		if repo.StatusOf(err) == http.StatusNotFound {
 			return indexSource{}, false, nil
 		}
 		// An empty file lists no versions: like a 404, a group moves on.
 		return indexSource{rp: rp, res: res, tag: "proxy\x00" + res.Asset.BlobSHA256}, err == nil && res.Asset.Size > 0, err
 	case "group":
-		for _, m := range rp.OnlineMembers() {
+		for _, m := range rp.MemberRepos {
+			if !m.IsOnline() { // it may have the crate
+				return indexSource{}, false, repo.MemberOffline(m)
+			}
 			src, ok, err := h.source(ctx, m, name)
 			if err != nil {
 				return indexSource{}, false, memberFailure(rp, m, name, err)
@@ -159,6 +165,15 @@ func (h *Handler) source(ctx context.Context, rp *repo.Repository, name string) 
 		return indexSource{}, false, nil
 	}
 	return indexSource{}, false, fmt.Errorf("unknown repository type %q", rp.Type)
+}
+
+// checkIndexFile is the proxy.Target.Check of an index file: empty, as source
+// takes it, or JSON lines that name a crate. The first line tells.
+func checkIndexFile(ctx context.Context, body io.ReadSeeker, sums blob.Sums) (blob.Sums, error) {
+	if sums.Size == 0 {
+		return sums, nil
+	}
+	return proxy.JSONDocument("name")(ctx, body, sums)
 }
 
 // etagMatches implements the weak comparison of If-None-Match.
@@ -354,7 +369,10 @@ func (h *Handler) download(ctx context.Context, rp *repo.Repository, name, versi
 		}
 		return h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, URL: u, SHA256: found.Cksum}, proxy.Content)
 	case "group":
-		for _, m := range rp.OnlineMembers() {
+		for _, m := range rp.MemberRepos {
+			if !m.IsOnline() { // it may have the crate
+				return proxy.Result{}, repo.MemberOffline(m)
+			}
 			res, err := h.download(ctx, m, name, version)
 			if err == nil {
 				return res, nil
@@ -375,7 +393,7 @@ func validCksum(s string) bool {
 
 // upstreamDL returns the "dl" template from the proxy's cached upstream config.json.
 func (h *Handler) upstreamDL(ctx context.Context, rp *repo.Repository) (string, error) {
-	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey("config.json"), Remote: "config.json", NotHTML: true}, proxy.Metadata)
+	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey("config.json"), Remote: "config.json", DeniedIsFailure: true, Check: proxy.JSONDocument("dl")}, proxy.Metadata)
 	if err != nil {
 		if repo.StatusOf(err) == http.StatusNotFound {
 			return "", repo.Errorf(http.StatusBadGateway, "upstream registry has no config.json")

@@ -87,7 +87,7 @@ func (r *Resolver) Owner(ctx context.Context, rp *repo.Repository, t proxy.Targe
 	}
 	for _, m := range rp.MemberRepos {
 		if !m.IsOnline() {
-			return nil, proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+			return nil, proxy.Result{}, repo.MemberOffline(m)
 		}
 		owner, res, err := r.Owner(ctx, m, t, kind)
 		if err == nil {
@@ -117,7 +117,7 @@ func (r *Resolver) OwnerFile(ctx context.Context, rp *repo.Repository, file, doc
 	}
 	for i, m := range rp.MemberRepos {
 		if !m.IsOnline() {
-			return proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+			return proxy.Result{}, repo.MemberOffline(m)
 		}
 		res, err := r.OwnerFile(ctx, m, file, doc)
 		if err == nil {

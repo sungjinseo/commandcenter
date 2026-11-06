@@ -268,7 +268,13 @@ func addAsset(comps map[compKey]*compAgg, format string, a meta.ScanAsset) bool 
 	}
 	used := a.LastDownloaded
 	if used.IsZero() {
+		// Never downloaded here. An import states a publish time but brings
+		// no downloads, so the rule counts from when the row came: what was
+		// used yesterday on the old server is not selected on the first run.
 		used = written
+		if a.Checked.After(used) {
+			used = a.Checked
+		}
 	}
 	if used.After(c.lastUsed) {
 		c.lastUsed = used

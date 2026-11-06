@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -111,9 +112,27 @@ type migration struct {
 	// authenticatedRead could take away.
 	fresh     bool
 	ldapReady bool // the target has an LDAP server to turn the realm on for
-	manual    []string
-	n         struct{ created, updated, unchanged, differ, skipped, failed int }
+	// seals are the hosted repositories the target has read-only as Nexus
+	// has them, by name; sourceOffline the hosted ones Nexus serves no file of.
+	seals         map[string]*seal
+	sourceOffline map[string]bool
+	dockerRealm   *bool // dockerRealmOn, once it was asked
+	dockerOff     int   // docker repositories without anonymous pull, as in Nexus
+	manual        []string
+	n             struct{ created, updated, unchanged, differ, skipped, failed int }
 }
+
+// seal is how a read-only repository is closed again after its copy opened
+// it (importer.copySealed).
+type seal struct {
+	update *request // the repository as Nexus has it
+	open   bool     // an earlier run left it open
+}
+
+// openMarker is the tag on the target that says a run opened the repository
+// for its copy: there before it opens, gone once it is closed, whatever
+// happens to the run in between. A repository has no field of its own for it.
+func openMarker(name string) string { return nx + "/tags/import-nexus-open." + name }
 
 // Nexus's API prefix on both servers, and Command Center's own.
 const (
@@ -124,7 +143,8 @@ const (
 // migrateConfig runs the migration and prints a line per object. The error
 // is one that stops it before anything is read; finish prints the rest.
 func (im *importer) migrateConfig(ctx context.Context, update bool, passwordsOut string) (*migration, error) {
-	m := &migration{im: im, ctx: ctx, update: update, have: map[string]map[string]bool{}, repoFormat: map[string]string{}, formats: map[string]bool{}}
+	m := &migration{im: im, ctx: ctx, update: update, have: map[string]map[string]bool{}, repoFormat: map[string]string{}, formats: map[string]bool{},
+		seals: map[string]*seal{}, sourceOffline: map[string]bool{}}
 	for _, f := range ui.AccessFormats() {
 		m.formats[auth.NexusFormat(f)] = true
 	}
@@ -157,6 +177,11 @@ func (im *importer) migrateConfig(ctx context.Context, update bool, passwordsOut
 // finish prints the manual actions and the summary, and returns how many
 // objects failed.
 func (m *migration) finish() int {
+	for _, name := range sortedKeys(m.seals) { // what no copy reached: -config-only, another -repo
+		if s := m.seals[name]; s.open && !m.im.dryRun {
+			m.close(name, s)
+		}
+	}
 	if m.pw != nil {
 		if err := m.pw.Close(); err != nil {
 			m.n.failed++
@@ -165,6 +190,13 @@ func (m *migration) finish() int {
 	}
 	for _, a := range m.manual {
 		m.im.printf("needs manual action: %s\n", a)
+	}
+	if m.dockerOff > 0 {
+		verb := "is"
+		if m.im.dryRun {
+			verb = "would be"
+		}
+		m.im.printf("docker: anonymous pull %s off on %d repositories, because Nexus does not allow it on them\n", verb, m.dockerOff)
 	}
 	format := "configuration: %d created, %d updated, %d unchanged, %d differ, %d skipped, %d failed, %d need manual action\n"
 	if m.im.dryRun {
@@ -627,10 +659,128 @@ func (m *migration) repositories() {
 	members := func(r obj) []string { return list(sub(r, "group"), "memberNames") }
 	for _, r := range dependFirst(src, "name", members) {
 		it := m.repository(r, cur[str(r, "name")])
-		if have, _ := m.apply(it); have {
-			m.have[kind][it.name], m.repoFormat[it.name] = true, str(r, "format")
+		hosted := str(r, "type") == "hosted" && it.want != nil
+		if hosted && r["online"] == false {
+			m.sourceOffline[it.name] = true
+		}
+		// A read-only repository the target has open, with a marker: a run
+		// that was killed left it so, and this one closes it. The target
+		// counts as what this run leaves.
+		sealed := hosted && readOnly(it.want)
+		interrupted := false
+		if sealed && it.cur != nil && m.dst(http.MethodGet, openMarker(it.name), nil, nil) == nil {
+			if interrupted = !readOnly(it.cur); interrupted {
+				sub(it.cur, "storage")["writePolicy"] = sub(it.want, "storage")["writePolicy"]
+			} else if !m.im.dryRun {
+				m.dst(http.MethodDelete, openMarker(it.name), nil, nil) // closed, and the marker outlived that
+			}
+		}
+		have, did := m.apply(it)
+		if !have {
+			continue
+		}
+		m.have[kind][it.name], m.repoFormat[it.name] = true, str(r, "format")
+		if str(r, "format") == "docker" {
+			m.countDockerOff(it, did)
+		}
+		switch {
+		case !sealed:
+		case interrupted && did == "":
+			m.seals[it.name] = &seal{update: it.update, open: true}
+			m.line(kind, it.name, "an earlier run left it open: it is closed after its copy", nil)
+		case it.cur == nil || did != "" || readOnly(it.cur):
+			m.seals[it.name] = &seal{update: it.update}
+		default:
+			m.todo("repository %s: it takes uploads here and is read-only on Nexus: set its write policy to DENY, or run this with -update, if that is not your choice", it.name)
 		}
 	}
+}
+
+// mergeFormats are the formats whose groups merge in Nexus and take
+// mergeMembers here.
+var mergeFormats = map[string]bool{"npm": true, "pypi": true, "r": true, "conda": true, "yum": true}
+
+// merges reports whether the group the target has already (cur) merges.
+func (m *migration) merges(name string, cur obj) bool {
+	var cfg struct {
+		MergeMembers bool `json:"mergeMembers"`
+	}
+	return cur != nil && m.dst(http.MethodGet, native+"/repositories/"+url.PathEscape(name)+"/config", nil, &cfg) == nil && cfg.MergeMembers
+}
+
+// readOnly reports whether a repository's settings refuse every upload.
+func readOnly(r obj) bool { return strings.EqualFold(str(sub(r, "storage"), "writePolicy"), "DENY") }
+
+// always makes a request the end of a run needs, interrupted or not.
+func (m *migration) always(method, p string, body any) error {
+	return m.im.call(context.WithoutCancel(m.ctx), m.im.dst, m.im.toAuth, method, m.im.to.String()+p, uiHeader, body, nil)
+}
+
+// open lets a sealed repository take uploads for its copy, its marker first.
+func (m *migration) open(name string, s *seal) error {
+	if m.dst(http.MethodGet, openMarker(name), nil, nil) != nil {
+		attrs := obj{"repository": name, "note": "import-nexus opened this repository for its copy; the next run closes it if this one could not"}
+		if err := m.dst(http.MethodPost, nx+"/tags", obj{"name": path.Base(openMarker(name)), "attributes": attrs}, nil); err != nil {
+			return err
+		}
+	}
+	m.line("repository", name, "opening for its copy: writePolicy ALLOW_ONCE until it is closed again, read-only as Nexus has it", nil)
+	body := obj{}
+	for k, v := range s.update.body.(obj) {
+		body[k] = v
+	}
+	storage := pick(sub(body, "storage"), "blobStoreName", "strictContentTypeValidation")
+	storage["writePolicy"] = "ALLOW_ONCE"
+	body["storage"] = storage
+	if err := m.dst(s.update.method, s.update.path, body, nil); err != nil {
+		m.always(http.MethodDelete, openMarker(name), nil)
+		return err
+	}
+	return nil
+}
+
+// close puts a sealed repository back as Nexus has it. What it cannot close
+// keeps its marker and is reported, and the next run closes it.
+func (m *migration) close(name string, s *seal) {
+	err := m.always(s.update.method, s.update.path, s.update.body)
+	for try := 0; err != nil && try < 2; try++ {
+		time.Sleep(2 * time.Second)
+		err = m.always(s.update.method, s.update.path, s.update.body)
+	}
+	if err != nil {
+		m.n.failed++
+		m.line("repository", name, "error: it STILL TAKES UPLOADS, not closed: "+err.Error(), nil)
+		m.todo("repository %s: it still takes uploads and is read-only on Nexus: run this again, or set its write policy to DENY", name)
+		return
+	}
+	s.open = false
+	m.always(http.MethodDelete, openMarker(name), nil) // what stays is removed by the next run
+	m.line("repository", name, "closed: read-only, as Nexus has it", nil)
+}
+
+// dockerRealmOn reports whether Nexus's Docker Bearer Token realm is active:
+// without it anonymous pull does not work, whatever forceBasicAuth says.
+// What cannot be read counts as no: a move does not widen access.
+func (m *migration) dockerRealmOn() bool {
+	if m.dockerRealm == nil {
+		var realms []string
+		on := m.src(http.MethodGet, nx+"/security/realms/active", nil, &realms) == nil && slices.Contains(realms, "DockerToken")
+		m.dockerRealm = &on
+	}
+	return *m.dockerRealm
+}
+
+// countDockerOff counts a docker repository whose anonymous pull is off now,
+// or says that it is not though Nexus has it off.
+func (m *migration) countDockerOff(it item, did string) {
+	if sub(it.want, "docker")["forceBasicAuth"] != true {
+		return
+	}
+	if it.cur == nil || did == "updated" || sub(it.cur, "docker")["forceBasicAuth"] == true {
+		m.dockerOff++
+		return
+	}
+	m.todo("repository %s: it allows anonymous pull here and Nexus does not: run this with -update, or turn its anonymous read off", it.name)
 }
 
 // repository is the plan of one repository: the settings Command Center
@@ -721,6 +871,16 @@ func (m *migration) repository(r, cur obj) item {
 		if w := str(g, "writableMember"); w != "" {
 			want["group"].(obj)["writableMember"] = w
 		}
+		// Nexus merges these groups, and this does not by itself, for a public
+		// package must not reach an internal name unasked: the operator's call.
+		if mergeFormats[format] && !m.merges(name, cur) {
+			what := "a package"
+			if format == "yum" {
+				what = "a repodata/ path"
+			}
+			it.todo("repository %s: Nexus merges this group's members; here the first member that has %s answers alone. "+
+				"mergeMembers merges them as Nexus does, and lets a public package add versions to an internal one of the same name: turn it on in its settings if clients need that", name, what)
+		}
 	}
 	switch format {
 	case "maven2":
@@ -781,8 +941,15 @@ func (m *migration) repository(r, cur obj) item {
 		if d["v1Enabled"] == true {
 			it.note("the Docker V1 API is not served")
 		}
-		if d["forceBasicAuth"] == false {
-			it.note("anonymous pull follows the repository's anonymous read setting, not a bearer token realm")
+		// A repository without anonymous pull in Nexus has none after the
+		// move: its anonymous read is off whatever the target's global says.
+		force := d["forceBasicAuth"] != false || !m.dockerRealmOn()
+		want["docker"] = obj{"forceBasicAuth": force}
+		switch {
+		case !force:
+			it.note("anonymous pull follows the anonymous read setting, not a bearer token realm")
+		case d["forceBasicAuth"] == false:
+			it.note("anonymous pull is off: forceBasicAuth is off in Nexus, but so is its Docker Bearer Token realm")
 		}
 		if st["latestPolicy"] == true {
 			it.note("redeploying only the latest tag has no equivalent: the write policy applies to every tag")
@@ -1114,9 +1281,16 @@ func (m *migration) ldap() {
 		want["groupMappings"] = mappings
 		it.note("an LDAP group gives the role of its name, as in Nexus, but for %s: map the administrators' group by its DN yourself", builtinAdmin)
 		if strings.EqualFold(str(s, "groupType"), "static") {
-			it.note("groups are read from the user's %s attribute: Nexus's static groups (%s of %s) need the directory to fill it",
-				want["groupAttr"], str(s, "groupMemberAttribute"), str(s, "groupObjectClass"))
+			want["groupType"] = "static"
+			want["groupBaseDN"] = strings.Trim(str(s, "groupBaseDn")+","+str(s, "searchBase"), ",")
+			want["groupSubtree"] = s["groupSubtree"] == true
+			want["groupObjectClass"], want["groupIdAttr"] = str(s, "groupObjectClass"), str(s, "groupIdAttribute")
+			want["groupMemberAttr"], want["groupMemberFormat"] = str(s, "groupMemberAttribute"), str(s, "groupMemberFormat")
 		}
+	} else if strings.EqualFold(str(s, "groupType"), "static") {
+		// Nexus reads no groups then, and without a mapping here they would
+		// give nothing but a search at every sign-in.
+		it.note("its static group settings are not carried: ldapGroupsAsRoles is off, so Nexus does not read them")
 	}
 	if scheme := strings.ToUpper(str(s, "authScheme")); scheme != "" && scheme != "NONE" {
 		if dn := str(s, "authUsername"); str(cur, "bindDN") == dn && cur["bindPasswordSet"] == true {

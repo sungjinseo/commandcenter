@@ -440,6 +440,25 @@ func TestUpstreamPageWithoutFilesOfTheProject(t *testing.T) {
 	}
 }
 
+// A JSON API document that is no JSON does not replace the good one.
+func TestJSONDocumentKeepsCopy(t *testing.T) {
+	e := newEnv(t)
+	rm := repotest.NewRemote(t)
+	rm.Set("/simple/six/", repotest.Answer{ContentType: jsonType, Body: `{"files":[{"filename":"six-1.0.tar.gz","url":"/f/six-1.0.tar.gz","hashes":{}}]}`})
+	e.repos = repotest.With(e.repos, repotest.ProxyOn("internal", "pypi", rm.URL+"/"))
+	shift := time.Duration(0)
+	repotest.KeepsCopy(t, rm, "/pypi/six/json", repotest.Answer{ContentType: "application/json", Body: `{"info":{"name":"six","version":"1.0"},"urls":[],"releases":{}}`},
+		func() *httptest.ResponseRecorder { return e.do("GET", "internal", "pypi/six/json", "") },
+		func() string {
+			a, _ := e.h.Store.Get(context.Background(), "internal", "pypi/six/json")
+			return a.BlobSHA256
+		},
+		func() {
+			shift += 2 * time.Hour
+			e.h.Fetcher.Now = func() time.Time { return time.Now().Add(shift) }
+		})
+}
+
 // mergeMembers: a group lists the files of a project of every member, the first
 // member's of a file name, and serves each from the first member that has it.
 // Without it the first member that has the project answers alone.

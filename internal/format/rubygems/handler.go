@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/blob"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
@@ -260,6 +261,23 @@ func (h *Handler) fetch(ctx context.Context, rp *repo.Repository, path string, k
 	return h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: path, Remote: path, NotHTML: true}, kind)
 }
 
+// fetchInfo fetches info/<name> of rp's remote. It decides who owns name in a
+// group (has): what a remote refuses or answers with what is no such file
+// fails closed.
+func (h *Handler) fetchInfo(ctx context.Context, rp *repo.Repository, name string) (proxy.Result, error) {
+	key := infoPrefix + name
+	return h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, Remote: key, DeniedIsFailure: true, Check: checkInfo}, proxy.Metadata)
+}
+
+// checkInfo is the proxy.Target.Check of an info file, which starts with ---.
+func checkInfo(_ context.Context, body io.ReadSeeker, sums blob.Sums) (blob.Sums, error) {
+	head := make([]byte, 3)
+	if _, err := io.ReadFull(body, head); err != nil || string(head) != "---" {
+		return sums, errors.New("not a compact index info file")
+	}
+	return sums, nil
+}
+
 // fetchDoc fetches a metadata document of rp's remote and reads it.
 func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, path string) (doc, error) {
 	res, err := h.fetch(ctx, rp, path, proxy.Metadata)
@@ -458,7 +476,7 @@ func (h *Handler) info(ctx context.Context, rp *repo.Repository, name string) (d
 		}
 		return doc{body: body}, nil
 	case "proxy":
-		res, err := h.fetch(ctx, rp, infoPrefix+name, proxy.Metadata)
+		res, err := h.fetchInfo(ctx, rp, name)
 		return doc{res: res}, err
 	case "group":
 		owner, err := h.owner(ctx, rp, name)
@@ -679,11 +697,15 @@ func (h *Handler) dependencies(ctx context.Context, rp *repo.Repository, names [
 }
 
 // owner returns the member of group rp that answers for gem name: the
-// first online member, in order, that has it (hosted: a row; proxy: an
-// upstream info file; group: its own owner). That member answers alone, so
-// a later (public) member never stands in for an internal gem.
+// first member, in order, that has it (hosted: a row; proxy: an upstream info
+// file; group: its own owner). That member answers alone, so a later (public)
+// member never stands in for an internal gem, nor for an offline member, which
+// may have it.
 func (h *Handler) owner(ctx context.Context, rp *repo.Repository, name string) (*repo.Repository, error) {
-	for _, m := range rp.OnlineMembers() {
+	for _, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return nil, repo.MemberOffline(m)
+		}
 		has, err := h.has(ctx, m, name)
 		if err != nil {
 			return nil, memberFailure(rp, m, err)
@@ -702,7 +724,7 @@ func (h *Handler) has(ctx context.Context, rp *repo.Repository, name string) (bo
 		st, err := h.Store.DB.PackageStamp(ctx, rp.Name, name)
 		return st.Count > 0, err
 	case "proxy":
-		_, err = h.fetch(ctx, rp, infoPrefix+name, proxy.Metadata)
+		_, err = h.fetchInfo(ctx, rp, name)
 	case "group":
 		_, err = h.owner(ctx, rp, name)
 	default:

@@ -46,12 +46,13 @@ func keptFile(format, p string) bool {
 
 // OwnerRule reports whether a group of format answers for a package from the
 // first member that has it, alone, a proxy having it when its document is
-// cached (resolve.Owner and its like in the format packages). That document
-// outlives its remote's 404 so that a later member cannot stand in for the
-// package (dependency confusion): deleting it hands the package on.
+// cached (resolve.Owner and its like in the format packages; R and conda name
+// by name in their indexes, yum and apt path by path). That document outlives
+// its remote's 404 so that a later member cannot stand in for the package
+// (dependency confusion): deleting it hands the package on.
 func OwnerRule(format string) bool {
 	switch format {
-	case "npm", "pypi", "composer", "conan", "terraform", "rubygems", "nuget", "swift", "helm", "cargo":
+	case "npm", "pypi", "composer", "conan", "terraform", "rubygems", "nuget", "swift", "helm", "cargo", "r", "conda", "yum", "apt":
 		return true
 	}
 	return false
@@ -80,14 +81,15 @@ func FilesOf(format, p string) (string, bool) {
 
 // DeleteFiles deletes, in one transaction, those of the cached files paths of
 // proxy rp that are still unused since before: one read or fetched since it
-// was evaluated stays. The blobs are reclaimed later by the compact task.
+// was evaluated stays, and so does a document with a file cached by now
+// (FilesOf). The blobs are reclaimed later by the compact task.
 func (r *Registry) DeleteFiles(ctx context.Context, rp *repo.Repository, paths []string, before time.Time, actor string) (Result, error) {
 	if rp.Type != "proxy" {
 		return Result{}, fmt.Errorf("file delete in %s repository %q: %w", rp.Type, rp.Name, ErrNotSupported)
 	}
 	var n, size int64
 	err := r.store.Tx(ctx, rp, func(tx *meta.Tx) (err error) {
-		n, size, err = tx.DeleteUnusedAssets(ctx, rp.Name, paths, before)
+		n, size, err = tx.DeleteUnusedAssets(ctx, rp.Name, paths, before, func(p string) (string, bool) { return FilesOf(rp.Format, p) })
 		return err
 	})
 	if err != nil {

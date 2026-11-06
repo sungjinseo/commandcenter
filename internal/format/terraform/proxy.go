@@ -30,7 +30,7 @@ type services struct {
 func (h *Handler) discover(ctx context.Context, rp *repo.Repository) (services, error) {
 	u := *rp.RemoteURL
 	u.Path = "/" + discoveryPath
-	t := proxy.Target{Key: discoveryPath, URL: u.String(), Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	t := proxy.Target{Key: discoveryPath, URL: u.String(), Header: http.Header{"Accept": {ctJSON}}, DeniedIsFailure: true, Check: proxy.JSONDocument("modules.v1", "providers.v1")}
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if errors.Is(err, repo.ErrNotFound) {
 		return services{}, repo.Errorf(http.StatusBadGateway, "remote registry has no %s at %s", discoveryPath, u.String())
@@ -107,9 +107,9 @@ func (h *Handler) readDoc(a meta.Asset) ([]byte, error) {
 	return raw, nil
 }
 
-// fetchDoc fetches a JSON document of rp's remote into key and reads it.
-func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url string) (doc, error) {
-	t := proxy.Target{Key: key, URL: url, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+// fetchDoc fetches the JSON document t of rp's remote and reads it.
+func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, t proxy.Target) (doc, error) {
+	t.Header = http.Header{"Accept": {ctJSON}}
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if err != nil {
 		return doc{}, err
@@ -119,7 +119,9 @@ func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url st
 }
 
 // proxyVersions passes the upstream version list through (cached under
-// the request path for metadataMaxAge).
+// the request path for metadataMaxAge). It decides who owns the module or
+// provider in a group (has): what a remote refuses or answers with what is no
+// such list fails closed.
 func (h *Handler) proxyVersions(ctx context.Context, rp *repo.Repository, rt Route) (doc, error) {
 	u, err := h.serviceURL(ctx, rp, rt)
 	if err != nil {
@@ -129,7 +131,7 @@ func (h *Handler) proxyVersions(ctx context.Context, rp *repo.Repository, rt Rou
 	if isModule(rt.Kind) { // also a group's owner lookup for a download or an archive
 		prefix = modulesPrefix
 	}
-	return h.fetchDoc(ctx, rp, prefix+rt.Name+"/versions", u+"versions")
+	return h.fetchDoc(ctx, rp, proxy.Target{Key: prefix + rt.Name + "/versions", URL: u + "versions", DeniedIsFailure: true, Check: proxy.JSONDocument("modules", "versions")})
 }
 
 // source is a module version's upstream X-Terraform-Get, split: key is
@@ -287,7 +289,7 @@ func (h *Handler) proxyDownloadDoc(ctx context.Context, rp *repo.Repository, rt 
 	if err != nil {
 		return nil, proxy.Result{}, err
 	}
-	d, err := h.fetchDoc(ctx, rp, downloadKey(rt), u+rt.Version+"/download/"+rt.OS+"/"+rt.Arch)
+	d, err := h.fetchDoc(ctx, rp, proxy.Target{Key: downloadKey(rt), URL: u + rt.Version + "/download/" + rt.OS + "/" + rt.Arch, NotHTML: true, Check: proxy.JSONDocument()})
 	if err != nil {
 		return nil, d.res, err
 	}

@@ -75,8 +75,10 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 	}
 	// Names stored by older builds or read through proxies stay valid; only
 	// a new package needs a name npm accepts for new packages (QA L-15).
-	if len(existing) == 0 && !validNewName(name) {
-		return repo.Errorf(http.StatusBadRequest, "invalid package name %q: a new package name must be lower case and not node_modules or favicon.ico", name)
+	if len(existing) == 0 {
+		if err := CheckNewName(name); err != nil {
+			return err
+		}
 	}
 	old := map[string]meta.Package{}
 	for _, p := range existing {
@@ -106,13 +108,8 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 		if vm.Name != name {
 			return repo.Errorf(http.StatusBadRequest, "version %s: manifest name %q does not match package name %q", v, vm.Name, name)
 		}
-		if !semver.Valid(v) {
-			return repo.Errorf(http.StatusBadRequest, "invalid version %q: must be a SemVer 2.0 version such as 1.2.3 or 1.2.3-beta.1", v)
-		}
-		// npm ignores build metadata when it matches versions, so
-		// 3.0.0+a would be a second 3.0.0 that breaks installs (QA N-12).
-		if core, _, ok := strings.Cut(v, "+"); ok {
-			return repo.Errorf(http.StatusBadRequest, "invalid version %q: build metadata (+...) is not allowed; npm reads it as %s", v, core)
+		if err := CheckVersion(v); err != nil {
+			return err
 		}
 		if !hasTarball {
 			return repo.Errorf(http.StatusBadRequest, "version %s has no tarball attachment", v)
@@ -143,6 +140,14 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 		if now.UnixMilli() <= p.CreatedAt.UnixMilli() {
 			now = p.CreatedAt.Add(time.Millisecond)
 		}
+	}
+	// A stated time is taken as it is, and an import keeps the publisher its
+	// document names: the administrator stands for both. A version older than
+	// a _rev read before it came is then not protected from that client's
+	// unpublish, which is a check for stale reads, not a privilege.
+	publisher := auth.FromContext(ctx).User
+	if t, ok := repo.PublishTime(ctx); ok {
+		now, publisher = t, ""
 	}
 
 	var added []string
@@ -177,7 +182,7 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 				}
 				edited = true
 			}
-			attrs, err := withServerDist(raw, file, sums, auth.FromContext(ctx).User)
+			attrs, err := withServerDist(raw, file, sums, publisher)
 			if err != nil {
 				return err
 			}
@@ -188,7 +193,7 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 			if err != nil {
 				return err
 			}
-			if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, TarballKey(name, file), "application/octet-stream", sums)); err != nil {
+			if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, TarballKey(name, file), "application/octet-stream", sums)); err != nil {
 				return err
 			}
 			added = append(added, v)
@@ -216,8 +221,10 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 			}
 			// A tag stored by an older build comes back in every whole-
 			// document PUT (npm deprecate); only new tag names are checked.
-			if _, stored := current[tag]; !stored && !ValidTagName(tag) {
-				return invalidTag(tag)
+			if _, stored := current[tag]; !stored {
+				if err := CheckNewTag(tag); err != nil {
+					return err
+				}
 			}
 			// A tag on a version added by this document is part of the publish
 			// (`npm publish --tag x`); moving a tag to an existing version is
@@ -242,6 +249,35 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 	}
 	for _, v := range added {
 		published(v)
+	}
+	return nil
+}
+
+// CheckNewName, CheckVersion and CheckNewTag are a publish's rules for what
+// the repository does not have yet: a package name, a version, a dist-tag
+// name. Clients and import-nexus -dry-run get the same words.
+func CheckNewName(name string) error {
+	if !validNewName(name) {
+		return repo.Errorf(http.StatusBadRequest, "invalid package name %q: a new package name must be lower case and not node_modules or favicon.ico", name)
+	}
+	return nil
+}
+
+func CheckVersion(v string) error {
+	if !semver.Valid(v) {
+		return repo.Errorf(http.StatusBadRequest, "invalid version %q: must be a SemVer 2.0 version such as 1.2.3 or 1.2.3-beta.1", v)
+	}
+	// npm ignores build metadata when it matches versions, so
+	// 3.0.0+a would be a second 3.0.0 that breaks installs (QA N-12).
+	if core, _, ok := strings.Cut(v, "+"); ok {
+		return repo.Errorf(http.StatusBadRequest, "invalid version %q: build metadata (+...) is not allowed; npm reads it as %s", v, core)
+	}
+	return nil
+}
+
+func CheckNewTag(tag string) error {
+	if !ValidTagName(tag) {
+		return invalidTag(tag)
 	}
 	return nil
 }
