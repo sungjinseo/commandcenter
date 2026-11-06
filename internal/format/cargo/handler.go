@@ -139,7 +139,7 @@ func (h *Handler) source(ctx context.Context, rp *repo.Repository, name string) 
 		return indexSource{rp: rp, tag: st.Hash}, err == nil && st.Count > 0, err
 	case "proxy":
 		path := IndexPath(name)
-		res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey(path), Remote: path}, proxy.Metadata)
+		res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey(path), Remote: path, NotHTML: true}, proxy.Metadata)
 		if repo.StatusOf(err) == http.StatusNotFound {
 			return indexSource{}, false, nil
 		}
@@ -375,7 +375,7 @@ func validCksum(s string) bool {
 
 // upstreamDL returns the "dl" template from the proxy's cached upstream config.json.
 func (h *Handler) upstreamDL(ctx context.Context, rp *repo.Repository) (string, error) {
-	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey("config.json"), Remote: "config.json"}, proxy.Metadata)
+	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: indexKey("config.json"), Remote: "config.json", NotHTML: true}, proxy.Metadata)
 	if err != nil {
 		if repo.StatusOf(err) == http.StatusNotFound {
 			return "", repo.Errorf(http.StatusBadGateway, "upstream registry has no config.json")

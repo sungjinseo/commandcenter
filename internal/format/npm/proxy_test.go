@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"commandcenter/internal/config"
+	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 )
 
@@ -237,6 +238,52 @@ func TestProxyDoesNotCacheWebPages(t *testing.T) {
 	}
 	if now, err := e.h.Store.Get(ctx, "npm-odd", PackumentKey("left-pad")); err != nil || now.BlobSHA256 != cached.BlobSHA256 {
 		t.Fatalf("the cached document was replaced by the page: %+v %v", now, err)
+	}
+}
+
+// A refused answer leaves nothing behind for a crash, a webhook or the reconcile
+// journal to find: no row is written at any moment. A refresh that keeps a
+// version the remote dropped writes the merged document once, never the
+// remote's in between.
+func TestProxyStoresOnlyWhatItKeeps(t *testing.T) {
+	e := newEnv(t)
+	m, up := scriptedMember(t, e, "npm-once")
+	var commits []meta.Change
+	e.h.Store.DB.OnCommit = func(_ context.Context, _ time.Time, cs []meta.Change) { commits = append(commits, cs...) }
+	tgz := func(v string) string { return string(testTarball("p", v, []byte(v))) }
+	url := func(v string) string { return up.url + "/p/-/p-" + v + ".tgz" }
+	page := answer{ctype: "application/json", body: "<!DOCTYPE html><html><body>Sign in</body></html>"}
+
+	up.set("/p", page)
+	up.set("/p/-/p-1.0.0.tgz", page)
+	for _, path := range []string{"p", "p/-/p-1.0.0.tgz"} {
+		if w := e.do("GET", m.Name, path, "", anon); w.Code != 502 {
+			t.Fatalf("%s during the page: %d", path, w.Code)
+		}
+	}
+	if len(commits) != 0 {
+		t.Fatalf("a refused answer wrote %+v", commits)
+	}
+
+	up.set("/p", docOf("p", [3]string{"1.0.0", url("1.0.0"), tgz("1.0.0")}, [3]string{"2.0.0", url("2.0.0"), tgz("2.0.0")}))
+	up.set("/p/-/p-1.0.0.tgz", tgzAnswer(tgz("1.0.0")))
+	for _, path := range []string{"p", "p/-/p-1.0.0.tgz"} {
+		if w := e.do("GET", m.Name, path, "", anon); w.Code != 200 {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+	}
+	commits = nil
+	afterMetadataAge(e)
+	up.set("/p", docOf("p", [3]string{"2.0.0", url("2.0.0"), tgz("2.0.0")}))
+	if m := jsonBody(t, e.do("GET", m.Name, "p", "", anon)); get(m, "versions", "1.0.0") == nil {
+		t.Fatalf("the cached version went: %v", m)
+	}
+	stored, err := e.h.Store.Get(context.Background(), m.Name, PackumentKey("p"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commits) != 1 || commits[0].Op != meta.ChangePut || commits[0].Asset.SHA256 != stored.BlobSHA256 {
+		t.Fatalf("the refresh wrote %+v, want the merged document once (%s)", commits, stored.BlobSHA256)
 	}
 }
 

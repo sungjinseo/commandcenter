@@ -17,6 +17,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"commandcenter/internal/blob"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
@@ -420,8 +421,15 @@ func (h *Handler) indexAsset(ctx context.Context, rp *repo.Repository) (proxy.Re
 	return proxy.Result{Asset: a, Stale: stale}, err
 }
 
+// fetchUpstream returns a proxy's cached upstream index. An answer that is no
+// index does not replace a good one for metadataMaxAge (proxy.Target.Check);
+// reading it leaves its table for upstreamFor, once per change of the index.
 func (h *Handler) fetchUpstream(ctx context.Context, rp *repo.Repository) (proxy.Result, error) {
-	return h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: upstreamKey, Remote: indexKey, NotHTML: true}, proxy.Metadata)
+	return h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: upstreamKey, Remote: indexKey, NotHTML: true,
+		Check: func(_ context.Context, _ io.ReadSeeker, s blob.Sums) (blob.Sums, error) {
+			_, err := h.parseUpstream(rp, meta.Asset{Repo: rp.Name, BlobSHA256: s.SHA256}, io.Discard)
+			return s, err
+		}}, proxy.Metadata)
 }
 
 // parseUpstream reads a proxy's cached upstream index (a), writing the

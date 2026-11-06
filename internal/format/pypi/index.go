@@ -2,6 +2,7 @@ package pypi
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,43 @@ func parseIndex(r io.Reader, contentType string, base *url.URL, fn func(File) er
 		return parseJSONIndex(r, base, fn)
 	}
 	return parseHTMLIndex(r, base, fn)
+}
+
+// checkPage refuses what a remote answered for the page of project when it
+// is none, before it can replace one that is (proxy.Target.Check): a sign-in or
+// error page answered with 200, which has links too, would make the project
+// vanish for metadataMaxAge and hand it to a group's next member. A JSON page has
+// its files array, an HTML page a link to a file of the project. So an empty HTML
+// page counts as none: it cannot be told from a sign-in page without links.
+func checkPage(r io.Reader, base *url.URL, project string) error {
+	br := bufio.NewReader(r)
+	head, _ := br.Peek(512)
+	if t := bytes.TrimLeft(head, " \t\r\n"); len(t) > 0 && t[0] == '{' {
+		dec := json.NewDecoder(br)
+		_, err := dec.Token()
+		for err == nil && dec.More() {
+			var kt json.Token
+			if kt, err = dec.Token(); err == nil {
+				if kt == "files" {
+					return nil
+				}
+				err = skipValue(dec)
+			}
+		}
+		return fmt.Errorf("not the page of project %q: a JSON document without files", project)
+	}
+	found := false
+	parseHTMLIndex(br, base, func(f File) error { // what it cannot read has no file either
+		if !fileMatches(project, f.Filename) {
+			return nil
+		}
+		found = true
+		return errStop
+	})
+	if !found {
+		return fmt.Errorf("not the page of project %q: no file of it", project)
+	}
+	return nil
 }
 
 func parseJSONIndex(r io.Reader, base *url.URL, fn func(File) error) error {

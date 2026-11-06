@@ -28,6 +28,10 @@ type Policy struct {
 	// DownloadedOnly (not stored; the repository.purge-unused task): with
 	// LastDownloadedDays, a component never downloaded is not selected.
 	DownloadedOnly bool
+	// Files (not stored; the same task, on a proxy): a scan also lists the
+	// cached files without a component that LastDownloadedDays selects
+	// (Evaluation.Files).
+	Files bool
 }
 
 // Criteria select components; every set criterion must hold (AND), and at

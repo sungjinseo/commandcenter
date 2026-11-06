@@ -62,6 +62,12 @@ type Store struct {
 	// Downloads, if set, is told about every GET of an asset body that was
 	// served with a 2xx status (metrics.Recorder.Download).
 	Downloads func(repo, path string)
+	// Used, if set, is told about a read of a proxy's cached document, which
+	// a format may rewrite or read for itself rather than serve: its last
+	// use, not a download (metrics.Recorder.Used). A remote that fails or a
+	// metadataMaxAge that never ends leaves no other trace of it, and
+	// repository.purge-unused would take the document for unused.
+	Used func(repo, path string)
 
 	// Events, if set, receives upload and delete events from the format handlers.
 	Events EventSink

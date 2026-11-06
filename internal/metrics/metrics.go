@@ -218,7 +218,13 @@ func (r *Recorder) drop(n int64) {
 
 // Download counts one successful download of repo/path. ServeAsset reports it
 // when the 2xx headers are sent, so a transfer the client aborts still counts.
-func (r *Recorder) Download(repo, path string) {
+func (r *Recorder) Download(repo, path string) { r.addDownload(repo, path, 1) }
+
+// Used moves the last download of repo/path without counting one
+// (repo.Store.Used).
+func (r *Recorder) Used(repo, path string) { r.addDownload(repo, path, 0) }
+
+func (r *Recorder) addDownload(repo, path string, n int64) {
 	now := r.Now()
 	r.mu.Lock()
 	k := dlKey{repo, path}
@@ -228,7 +234,7 @@ func (r *Recorder) Download(repo, path string) {
 		r.drop(1)
 		return
 	}
-	v.n++
+	v.n += n
 	if now.After(v.last) {
 		v.last = now
 	}

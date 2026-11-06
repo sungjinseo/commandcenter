@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"commandcenter/internal/blob"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
@@ -430,17 +431,13 @@ func (h *Handler) proxyDist(ctx context.Context, rp *repo.Repository, rt Route) 
 	if found.URL == "" {
 		return proxy.Result{}, repo.ErrNotFound
 	}
-	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, URL: found.URL, NotHTML: true}, proxy.Content)
-	if err != nil {
-		return proxy.Result{}, err
-	}
-	if found.Shasum != "" && !strings.EqualFold(found.Shasum, res.Asset.SHA1) {
-		if err := h.Store.Delete(ctx, rp.Name, key); err != nil && !errors.Is(err, repo.ErrNotFound) {
-			return proxy.Result{}, err
-		}
-		return proxy.Result{}, repo.Errorf(http.StatusBadGateway, "upstream archive of %s %s does not match its shasum", rt.Name, rt.Version)
-	}
-	return res, nil
+	return h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, URL: found.URL, NotHTML: true,
+		Check: func(_ context.Context, _ io.ReadSeeker, s blob.Sums) (blob.Sums, error) {
+			if found.Shasum != "" && !strings.EqualFold(found.Shasum, s.SHA1) {
+				return s, repo.Errorf(http.StatusBadGateway, "upstream archive of %s %s does not match its shasum", rt.Name, rt.Version)
+			}
+			return s, nil
+		}}, proxy.Content)
 }
 
 // proxySearch forwards a search to the upstream (cached under a key made

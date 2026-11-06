@@ -2,15 +2,14 @@ package npm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"commandcenter/internal/blob"
-	"commandcenter/internal/config"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
@@ -113,60 +112,6 @@ func packumentTarget(m *repo.Repository, name string) proxy.Target {
 	return t
 }
 
-// settleTime is how long after its fetch a cached file counts as possibly
-// still being looked at (exclusive): far longer than that takes.
-const settleTime = 30 * time.Second
-
-// settled returns the cached file key of proxy m if it may be served without
-// further ado: within maxAge, and fetched so long ago that no exclusive can
-// still be looking at it. Anything else (an error too) is for exclusive.
-func (h *Handler) settled(ctx context.Context, m *repo.Repository, key string, maxAge config.Duration) (meta.Asset, bool) {
-	a, err := h.Store.Get(ctx, m.Name, key)
-	if err != nil || a.CheckedAt.IsZero() || maxAge.Off() {
-		return meta.Asset{}, false
-	}
-	f := h.Resolver.Fetcher
-	age := f.Now().Sub(a.CheckedAt)
-	if age < settleTime || maxAge != config.Never && age >= time.Duration(maxAge) {
-		return meta.Asset{}, false
-	}
-	if f.Stats != nil {
-		f.Stats.Cache(m.Name, true)
-	}
-	return a, true
-}
-
-// exclusive runs fn, which fetches the file key of proxy m and looks at what
-// came, on this node and every other alone (the lock), and once for the
-// requests of this node that want the same (flight, the flight goes on when
-// its client leaves). The fetcher stores what the remote answered before fn
-// can look at it, so a request that read the file in between would serve or
-// keep what fn then refuses: it comes here instead (settled), and waits.
-// ponytail: a crash in between leaves the file as the remote answered it, and
-// while a remote hangs a node's requests wait behind the other nodes'
-// fetches; a check inside proxy.Fetcher (before PutAsset) would need neither
-// this nor reject.
-func (h *Handler) exclusive(ctx context.Context, m *repo.Repository, key, flight string, fn func(context.Context) (proxy.Result, error)) (proxy.Result, error) {
-	ch := h.flights.DoChan(fmt.Sprintf("%s\x00%d\x00%s\x00%s", m.Name, m.Gen, key, flight), func() (any, error) {
-		ctx := context.WithoutCancel(ctx)
-		unlock, err := h.Store.Lock(ctx, "npm\x00"+m.Name+"\x00"+key)
-		if err != nil {
-			return proxy.Result{}, err
-		}
-		defer unlock()
-		return fn(ctx)
-	})
-	select {
-	case r := <-ch:
-		if r.Err != nil {
-			return proxy.Result{}, r.Err
-		}
-		return r.Val.(proxy.Result), nil
-	case <-ctx.Done():
-		return proxy.Result{}, ctx.Err()
-	}
-}
-
 // routed reports whether the routing rule of proxy m lets a request for
 // path through. The fetcher answers not found for one it refuses, cached or
 // not, which must not be read as the remote's answer.
@@ -175,100 +120,52 @@ func (h *Handler) routed(m *repo.Repository, path string) bool {
 	return allowed == nil || allowed(m, "/"+path)
 }
 
-// cached returns what proxy m holds under key, if anything: what a fetch
-// that follows may replace.
-func (h *Handler) cached(ctx context.Context, m *repo.Repository, key string) (meta.Asset, bool, error) {
-	a, err := h.Store.Get(ctx, m.Name, key)
-	if repo.StatusOf(err) == http.StatusNotFound {
-		return meta.Asset{}, false, nil
-	}
-	return a, err == nil, err
-}
-
-// reject undoes a fetch whose content is not what was asked for (a sign-in
-// or error page answered with 200): nothing of it stays cached. The copy it
-// replaced (had) is put back and served as stale, as when the remote fails;
-// without one the fetch failed (502, never the fetcher's not found for a
-// web page, Target.NotHTML: a group would then ask its next member, and the
-// miss would outlive the page). why is logged only.
-func (h *Handler) reject(ctx context.Context, m *repo.Repository, key string, prev meta.Asset, had bool, why string) (proxy.Result, error) {
-	slog.Warn("remote content refused, not cached", "repo", m.Name, "path", key, "why", why)
-	if err := h.Store.Current(m); err != nil {
-		return proxy.Result{}, err
-	}
-	if had {
-		// The row as it was: its blob is still in the store (garbage
-		// collection keeps what was referenced a moment ago).
-		if err := h.Store.DB.PutAsset(ctx, prev); err != nil {
-			return proxy.Result{}, err
-		}
-		return proxy.Result{Asset: prev, Stale: true}, nil
-	}
-	if err := h.Store.Delete(ctx, m.Name, key); err != nil && repo.StatusOf(err) != http.StatusNotFound {
-		return proxy.Result{}, err
-	}
-	return proxy.Result{}, proxy.ErrRemote
-}
-
 // proxyDoc returns the package document of name from proxy m: the cached
-// one, refreshed from the remote when its metadata age is over. A document
-// the remote just answered is checked and completed first (refreshed).
+// one, refreshed from the remote when its metadata age is over. What the
+// remote answers is checked and completed before it is stored (checkDoc).
 func (h *Handler) proxyDoc(ctx context.Context, m *repo.Repository, name string) (proxy.Result, error) {
 	t := packumentTarget(m, name)
-	if !h.routed(m, t.Remote) {
-		return proxy.Result{}, repo.ErrNotFound
+	t.Check = func(ctx context.Context, doc io.ReadSeeker, sums blob.Sums) (blob.Sums, error) {
+		return h.checkDoc(ctx, m, name, doc, sums)
 	}
-	if a, ok := h.settled(ctx, m, t.Key, m.MetadataMaxAge); ok {
-		return proxy.Result{Asset: a}, nil
-	}
-	return h.exclusive(ctx, m, t.Key, "", func(ctx context.Context) (proxy.Result, error) {
-		prev, had, err := h.cached(ctx, m, t.Key)
-		if err != nil {
-			return proxy.Result{}, err
-		}
-		res, err := h.Resolver.Fetcher.FetchTarget(ctx, m, t, proxy.Metadata)
-		if err != nil || had && prev.BlobSHA256 == res.Asset.BlobSHA256 {
-			return res, err
-		}
-		return h.refreshed(ctx, m, name, prev, had, res)
-	})
+	return h.Resolver.Fetcher.FetchTarget(ctx, m, t, proxy.Metadata)
 }
 
-// refreshed takes the document the remote just answered for name, which the
-// fetcher stored as res in place of prev (had). It must be a package
-// document (scanDoc), or it is rejected. The versions of prev that the
-// remote no longer lists and whose tarball this proxy has cached stay
-// listed, as in Nexus: with their manifest and time entry from prev, and as
-// latest when the remote's latest is no version of the result (the remote
-// keeps a stub document of an unpublished package). The remote's other
-// dist-tags are taken as they are. The result is stored under the remote's
-// validators, so a 304 keeps it and the next change is merged with it.
-func (h *Handler) refreshed(ctx context.Context, m *repo.Repository, name string, prev meta.Asset, had bool, res proxy.Result) (proxy.Result, error) {
-	key := res.Asset.Path
-	doc, err := h.Store.Open(res.Asset)
-	if err != nil {
-		return proxy.Result{}, err
-	}
-	defer doc.Close()
+// checkDoc is the proxy.Target.Check of the document of name in proxy m. It
+// must be a package document (scanDoc), or it is refused: not
+// Target.NotHTML, whose miss would hand the package to a group's next member.
+// The versions of the cached document that the remote no longer lists and
+// whose tarball this proxy has cached stay listed, as in Nexus: with their
+// manifest and time entry from the cached document, and as latest when the
+// remote's latest is no version of the result (the remote keeps a stub
+// document of an unpublished package). The remote's other dist-tags are taken
+// as they are. The result is recorded under the remote's validators, so a 304
+// keeps it and the next change is merged with it.
+func (h *Handler) checkDoc(ctx context.Context, m *repo.Repository, name string, doc io.ReadSeeker, sums blob.Sums) (blob.Sums, error) {
 	listed := map[string]bool{}
 	if err := scanDoc(doc, func(v string, _ versionDist) { listed[v] = true }); err != nil {
-		return h.reject(ctx, m, key, prev, had, err.Error())
+		return sums, fmt.Errorf("not a package document: %w", err)
 	}
-	if !had {
-		return res, nil
+	key := PackumentKey(name)
+	prev, err := h.Store.Get(ctx, m.Name, key)
+	if repo.StatusOf(err) == http.StatusNotFound {
+		return sums, nil
+	}
+	if err != nil {
+		return sums, err
 	}
 	files := map[string]bool{} // the tarballs of name cached here
 	prefix := TarballKey(name, "")
 	if err := h.Store.DB.WalkAssetPaths(ctx, m.Name, prefix, func(p string) { files[p[len(prefix):]] = true }); err != nil {
-		return proxy.Result{}, err
+		return sums, err
 	}
 	if len(files) == 0 {
-		return res, nil
+		return sums, nil
 	}
 	old, err := h.Store.Open(prev)
 	if err != nil {
 		slog.Warn("previous npm package document unreadable; versions the remote dropped are not kept", "repo", m.Name, "path", key, "err", logsafe.Err(err))
-		return res, nil
+		return sums, nil
 	}
 	defer old.Close()
 	keep := map[string]bool{}
@@ -278,33 +175,27 @@ func (h *Handler) refreshed(ctx context.Context, m *repo.Repository, name string
 		}
 	})
 	if len(keep) == 0 {
-		return res, nil
+		return sums, nil
 	}
 	tags, err := readDistTags(doc)
 	if err != nil {
-		return proxy.Result{}, err
+		return sums, err
 	}
 	tags = withLatest(tags, listed, keep)
-	if err := h.Store.Current(m); err != nil {
-		return proxy.Result{}, err
-	}
 	pr, pw := io.Pipe()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		pw.CloseWithError(mergeDocs(pw, []io.ReadSeeker{doc, old}, tags, func(v string) bool { return keep[v] }, nil))
 	}()
-	a, err := h.Store.Put(ctx, m.Name, key, res.Asset.ContentType, pr, func(a *meta.Asset) {
-		a.LastModified, a.CheckedAt = res.Asset.LastModified, res.Asset.CheckedAt
-		a.RemoteETag, a.RemoteLastModified = res.Asset.RemoteETag, res.Asset.RemoteLastModified
-	})
+	merged, err := h.Store.WriteBlob(m.Name, pr, nil)
 	pr.Close()
 	<-done
 	if err != nil {
-		return proxy.Result{}, err
+		return sums, err
 	}
 	slog.Info("npm proxy keeps versions the remote dropped: their tarballs are cached", "repo", m.Name, "package", name, "versions", len(keep))
-	return proxy.Result{Asset: a}, nil
+	return merged, nil
 }
 
 // withLatest returns tags with latest pointing at a version of sets: tags'
@@ -343,8 +234,8 @@ func withLatest(tags []tagPair, sets ...map[string]bool) []tagPair {
 // the routing rule still sees the request path. A file name that is no
 // tarball's is the last segment of such a URL, which a lockfile written
 // through Nexus holds: it stands for the version's usual name, so that the
-// firewall and the component listings know the file. A file just fetched is
-// checked (checkTarball).
+// firewall and the component listings know the file. What the remote answers
+// is checked before it is stored (checkTarball).
 func (h *Handler) proxyTarball(ctx context.Context, m *repo.Repository, name, file string) (proxy.Result, error) {
 	if !strings.HasSuffix(file, ".tgz") {
 		doc, err := h.proxyDoc(ctx, m, name)
@@ -364,9 +255,6 @@ func (h *Handler) proxyTarball(ctx context.Context, m *repo.Repository, name, fi
 	if !h.routed(m, key) {
 		return proxy.Result{}, repo.ErrNotFound
 	}
-	if a, ok := h.settled(ctx, m, key, m.ContentMaxAge); ok {
-		return proxy.Result{Asset: a}, nil
-	}
 	t := proxy.Target{Key: key, Remote: key}
 	res, err := h.fetchTarball(ctx, m, name, file, t)
 	if err == nil {
@@ -385,28 +273,17 @@ func (h *Handler) proxyTarball(ctx context.Context, m *repo.Repository, name, fi
 	return h.fetchTarball(ctx, m, name, file, t)
 }
 
-// fetchTarball fetches the tarball file of name into proxy m as t says, and
-// checks what came (checkTarball).
+// fetchTarball fetches the tarball file of name into proxy m as t says.
 func (h *Handler) fetchTarball(ctx context.Context, m *repo.Repository, name, file string, t proxy.Target) (proxy.Result, error) {
-	return h.exclusive(ctx, m, t.Key, t.URL, func(ctx context.Context) (proxy.Result, error) {
-		prev, had, err := h.cached(ctx, m, t.Key)
-		if err != nil {
+	if t.URL != "" { // the miss at the usual place was recorded under the same key
+		if err := h.Store.DB.ClearNegative(ctx, m.Name, t.Key); err != nil {
 			return proxy.Result{}, err
 		}
-		if t.URL != "" { // the miss at the usual place was recorded under the same key
-			if err := h.Store.DB.ClearNegative(ctx, m.Name, t.Key); err != nil {
-				return proxy.Result{}, err
-			}
-		}
-		res, err := h.Resolver.Fetcher.FetchTarget(ctx, m, t, proxy.Content)
-		if err != nil || had && prev.BlobSHA256 == res.Asset.BlobSHA256 {
-			return res, err
-		}
-		if why := h.checkTarball(ctx, m, name, file, res.Asset); why != "" {
-			return h.reject(ctx, m, t.Key, prev, had, why)
-		}
-		return res, nil
-	})
+	}
+	t.Check = func(ctx context.Context, body io.ReadSeeker, sums blob.Sums) (blob.Sums, error) {
+		return sums, h.checkTarball(ctx, m, name, file, body, sums)
+	}
+	return h.Resolver.Fetcher.FetchTarget(ctx, m, t, proxy.Content)
 }
 
 // upstreamTarball returns the URL the package document of name in proxy m
@@ -443,32 +320,26 @@ func (h *Handler) distOf(doc meta.Asset, name, file string) (string, versionDist
 	return version, found, err
 }
 
-// checkTarball looks at the tarball a of name that proxy m just fetched and
-// returns why it must not be cached, "" when it may: it is no gzip file (a
-// sign-in or error page, whatever type the remote declared), or it is not
-// the file the cached package document promises (dist.shasum,
-// dist.integrity), which an npm client would refuse on every install while
-// the file stays cached. Without a cached document only the first holds.
-func (h *Handler) checkTarball(ctx context.Context, m *repo.Repository, name, file string, a meta.Asset) string {
-	f, err := h.Store.Open(a)
-	if err != nil {
-		return "" // serving it will report the store
+// checkTarball is the proxy.Target.Check of the tarball file of name in proxy
+// m, without replacing it: it is no gzip file (a sign-in or error page, whatever
+// type the remote declared), or it is not the file the cached package document
+// promises (dist.shasum, dist.integrity), which an npm client would refuse on
+// every install while the file stays cached. Without a cached document only the
+// first holds.
+func (h *Handler) checkTarball(ctx context.Context, m *repo.Repository, name, file string, body io.ReadSeeker, sums blob.Sums) error {
+	if _, err := repo.CheckContent(".tgz", "", body); err != nil {
+		return errors.New("the remote's answer is not a gzip file")
 	}
-	_, err = repo.CheckContent(".tgz", "", f)
-	f.Close()
+	doc, err := h.Store.Get(ctx, m.Name, PackumentKey(name))
 	if err != nil {
-		return "the remote's answer is not a gzip file"
-	}
-	doc, had, err := h.cached(ctx, m, PackumentKey(name))
-	if err != nil || !had {
-		return ""
+		return nil
 	}
 	_, d, err := h.distOf(doc, name, file)
 	if err != nil {
-		return ""
+		return nil
 	}
-	if verifyTarball(d.Shasum, d.Integrity, blob.Sums{SHA1: a.SHA1, SHA512: a.SHA512}) != nil {
-		return "the content does not match the checksum in the package document"
+	if verifyTarball(d.Shasum, d.Integrity, sums) != nil {
+		return errors.New("the content does not match the checksum in the package document")
 	}
-	return ""
+	return nil
 }

@@ -24,7 +24,8 @@ type Resolver struct {
 	Store   *repo.Store
 	Fetcher *proxy.Fetcher
 	// Proxy, if set, looks a target up in a proxy instead of Fetcher: for a
-	// format that checks or completes what its remote answers (npm).
+	// format whose fetch depends on the member (npm: the remote's URL of a
+	// scoped name, the check of what it answers, a tarball's second place).
 	Proxy func(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind) (proxy.Result, error)
 }
 

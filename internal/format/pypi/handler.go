@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/blob"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
@@ -201,14 +203,21 @@ func (h *Handler) project(w http.ResponseWriter, r *http.Request, rp *repo.Repos
 	return nil
 }
 
-func indexTarget(project string) proxy.Target {
+func indexTarget(rp *repo.Repository, project string) proxy.Target {
 	return proxy.Target{
 		Key:    "simple/" + project + "/index",
 		Remote: "simple/" + project + "/",
 		Header: http.Header{"Accept": {jsonType + ", text/html;q=0.1"}},
 		// A refused project page fails a group closed (proxy.Target).
 		DeniedIsFailure: true,
+		Check: func(_ context.Context, body io.ReadSeeker, s blob.Sums) (blob.Sums, error) {
+			return s, checkPage(body, projectBase(rp, project), project)
+		},
 	}
+}
+
+func projectBase(rp *repo.Repository, project string) *url.URL {
+	return rp.RemoteURL.ResolveReference(&url.URL{Path: "simple/" + project + "/"})
 }
 
 // walk calls fn for every file of project in rp; a group walks only the
@@ -249,7 +258,7 @@ func (h *Handler) walk(ctx context.Context, rp *repo.Repository, project string,
 		}
 		return nil
 	case "proxy":
-		res, err := h.Fetcher.FetchTarget(ctx, rp, indexTarget(project), proxy.Metadata)
+		res, err := h.Fetcher.FetchTarget(ctx, rp, indexTarget(rp, project), proxy.Metadata)
 		if repo.StatusOf(err) == http.StatusNotFound {
 			return nil
 		}
@@ -261,10 +270,10 @@ func (h *Handler) walk(ctx context.Context, rp *repo.Repository, project string,
 			return err
 		}
 		defer f.Close()
-		base := rp.RemoteURL.ResolveReference(&url.URL{Path: "simple/" + project + "/"})
+		base := projectBase(rp, project)
 		if !strings.Contains(res.Asset.ContentType, "json") {
-			// A sign-in or error page has links too: only links to files of the
-			// project make the page a project page (and its proxy the owner).
+			// Only the project's files: what checkPage let through may link
+			// to others, and a page an older build cached is unchecked.
 			page := fn
 			fn = func(f File) error {
 				if !fileMatches(project, f.Filename) {
@@ -418,7 +427,8 @@ func (h *Handler) file(ctx context.Context, rp *repo.Repository, project, filena
 		if !ok || found.URL == "" {
 			return proxy.Result{}, repo.ErrNotFound
 		}
-		t := proxy.Target{Key: key, URL: found.URL, Route: key, SHA256: found.SHA256}
+		// Never a web page; the sha256, where the index has one, says so already.
+		t := proxy.Target{Key: key, URL: found.URL, Route: key, SHA256: found.SHA256, NotHTML: found.SHA256 == ""}
 		if found.Filename != filename {
 			t.URL, t.SHA256, t.NotHTML = found.URL+sigExt, "", true
 		}

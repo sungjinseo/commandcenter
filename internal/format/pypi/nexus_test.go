@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -356,13 +357,27 @@ func TestRoutingRuleSeesRequestPath(t *testing.T) {
 }
 
 // A sign-in or error page answered with 200 has links, but none to a file of
-// the project: the project is not found, and a group's next member answers.
+// the project. It is refused before it can replace anything (checkPage): the
+// fetch has failed, so a group's next member does not stand in, nothing stays
+// cached, and a page cached before keeps answering. A page that lists files
+// of other projects too lists only this one's.
 func TestUpstreamPageWithoutFilesOfTheProject(t *testing.T) {
+	var internal atomic.Value
+	internal.Store(`<html><a href="/login">Sign in</a><a href="/help.tar.gz">help.tar.gz</a></html>`)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/simple/internal/":
 			w.Header().Set("Content-Type", "text/html")
-			io.WriteString(w, `<html><a href="/login">Sign in</a><a href="/help.tar.gz">help.tar.gz</a></html>`)
+			io.WriteString(w, internal.Load().(string))
+		case "/simple/nolinks/":
+			w.Header().Set("Content-Type", "text/html")
+			io.WriteString(w, `<html><body>Sign in</body></html>`)
+		case "/simple/jsonerror/":
+			w.Header().Set("Content-Type", jsonType)
+			io.WriteString(w, `{"error":"maintenance"}`)
+		case "/simple/empty/":
+			w.Header().Set("Content-Type", jsonType)
+			io.WriteString(w, `{"meta":{"api-version":"1.0"},"name":"empty","files":[]}`)
 		case "/simple/mixed/":
 			w.Header().Set("Content-Type", "text/html")
 			io.WriteString(w, `<a href="/files/other-1.0.tar.gz">other-1.0.tar.gz</a><a href="/files/Mixed-2.0.tar.gz">Mixed-2.0.tar.gz</a>`)
@@ -372,14 +387,56 @@ func TestUpstreamPageWithoutFilesOfTheProject(t *testing.T) {
 	}))
 	defer up.Close()
 	e := newEnv(t)
+	e.addRepos(t, config.Repository{Name: "py-first", Format: "pypi", Type: "group", Members: []string{"py-proxy", "py-hosted"}})
 	e.repos["py-proxy"].RemoteURL.Scheme, e.repos["py-proxy"].RemoteURL.Host = "http", strings.TrimPrefix(up.URL, "http://")
 	e.h.Fetcher = proxy.New(e.h.Store, up.Client(), 4)
-	if w := e.do("GET", "py-proxy", "simple/internal/", ""); w.Code != 404 {
-		t.Fatalf("a sign-in page: %d %s", w.Code, w.Body)
+	ctx := context.Background()
+	const own = "internal-1.0-py3-none-any.whl"
+	content := dist(t, "internal", "1.0", own)
+	ct, body := form(t, "internal", "1.0", own, content, "")
+	if w := e.upload("py-hosted", ct, body); w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	for _, c := range []struct {
+		repoName, project string
+		want              int
+	}{
+		{"py-proxy", "internal", 502}, {"py-first", "internal", 502}, // the next member has one of that name: it does not stand in
+		{"py-proxy", "nolinks", 502}, {"py-proxy", "jsonerror", 502},
+		{"py-proxy", "empty", 404}, // a project without files is a page, and nothing to list
+	} {
+		if w := e.do("GET", c.repoName, "simple/"+c.project+"/", ""); w.Code != c.want {
+			t.Fatalf("%s %s: %d %s, want %d", c.repoName, c.project, w.Code, w.Body, c.want)
+		}
+		if _, err := e.h.Store.Get(ctx, "py-proxy", "simple/"+c.project+"/index"); c.want == 502 && err == nil {
+			t.Fatalf("%s was cached", c.project)
+		}
 	}
 	page := e.do("GET", "py-proxy", "simple/mixed/", "").Body.String()
 	if strings.Count(page, "<a ") != 1 || !strings.Contains(page, "Mixed-2.0.tar.gz") {
 		t.Fatalf("mixed page: %s", page)
+	}
+
+	// The real page, served at once, and then a sign-in page at its refresh.
+	signIn := internal.Load().(string)
+	internal.Store(`<a href="/files/internal-2.0.tar.gz">internal-2.0.tar.gz</a>`)
+	if w := e.do("GET", "py-proxy", "simple/internal/", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "internal-2.0.tar.gz") {
+		t.Fatalf("the page after the sign-in pages: %d %s", w.Code, w.Body)
+	}
+	cached, err := e.h.Store.Get(ctx, "py-proxy", "simple/internal/index")
+	if err != nil {
+		t.Fatal(err)
+	}
+	internal.Store(signIn)
+	e.h.Fetcher.Now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	for _, name := range []string{"py-proxy", "py-first"} {
+		w := e.do("GET", name, "simple/internal/", "")
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "internal-2.0.tar.gz") {
+			t.Fatalf("%s during the sign-in page: %d %s", name, w.Code, w.Body)
+		}
+	}
+	if now, err := e.h.Store.Get(ctx, "py-proxy", "simple/internal/index"); err != nil || now.BlobSHA256 != cached.BlobSHA256 {
+		t.Fatalf("the sign-in page replaced the page: %+v %v", now, err)
 	}
 }
 

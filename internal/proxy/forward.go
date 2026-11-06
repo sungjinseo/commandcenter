@@ -23,7 +23,7 @@ func (f *Fetcher) Forward(ctx context.Context, rp *repo.Repository, w http.Respo
 		return ErrRemote
 	}
 	u := *rp.RemoteURL
-	u.Path, u.RawPath = rp.RemoteURL.Path+remotePath, ""
+	u.Path, u.RawPath, u.RawQuery = rp.RemoteURL.Path+remotePath, "", r.URL.RawQuery
 	body := &capReader{Reader: http.MaxBytesReader(w, r.Body, maxBody)}
 	req, err := http.NewRequestWithContext(repoContext(ctx, rp), r.Method, u.String(), body)
 	if err != nil {

@@ -46,6 +46,10 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	}
 }
 
+// target is the fetch of the file key of a module: at the same path of the
+// remote, and never a web page (a .zip would stay cached for ever).
+func target(key string) proxy.Target { return proxy.Target{Key: key, Remote: key, NotHTML: true} }
+
 // Routed reports whether path is a GOPROXY request (repo.RouteFilter); the
 // rest, the checksum database's sumdb/ paths above all, is answered without
 // asking the remote.
@@ -107,7 +111,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		}
 		return h.serveAsset(w, r, res, KindLatest)
 	}
-	res, err := h.Resolver.Lookup(ctx, rp, assetKey(rt.Module, rt.Version+ext(rt.Kind)), proxy.Content)
+	res, err := h.Resolver.LookupTarget(ctx, rp, target(assetKey(rt.Module, rt.Version+ext(rt.Kind))), proxy.Content)
 	if err != nil {
 		return err
 	}
@@ -122,16 +126,16 @@ func (h *Handler) info(ctx context.Context, rp *repo.Repository, rt Route) (prox
 	switch rp.Type {
 	case "proxy":
 		if rt.Query {
-			return h.Resolver.Fetcher.Fetch(ctx, rp, key, proxy.Metadata)
+			return h.Resolver.Fetcher.FetchTarget(ctx, rp, target(key), proxy.Metadata)
 		}
-		return h.Resolver.Lookup(ctx, rp, key, proxy.Content)
+		return h.Resolver.LookupTarget(ctx, rp, target(key), proxy.Content)
 	case "hosted":
 		if rt.Query {
 			break
 		}
 		_, err := h.Store.Get(ctx, rp.Name, assetKey(rt.Module, rt.Version+".zip"))
 		if err == nil {
-			return h.Resolver.Lookup(ctx, rp, key, proxy.Content)
+			return h.Resolver.LookupTarget(ctx, rp, target(key), proxy.Content)
 		}
 		if !errors.Is(err, repo.ErrNotFound) {
 			return proxy.Result{}, err
@@ -196,7 +200,7 @@ func (h *Handler) listVersions(ctx context.Context, rp *repo.Repository, module 
 		}
 		return sortVersions(versions), known, false, nil
 	case "proxy":
-		res, err := h.Resolver.Fetcher.Fetch(ctx, rp, assetKey(module, "list"), proxy.Metadata)
+		res, err := h.Resolver.Fetcher.FetchTarget(ctx, rp, target(assetKey(module, "list")), proxy.Metadata)
 		if repo.StatusOf(err) == http.StatusNotFound {
 			return nil, false, false, nil
 		}
@@ -265,7 +269,7 @@ func (h *Handler) latest(ctx context.Context, rp *repo.Repository, module string
 		return proxy.Result{}, err
 	}
 	if v := pickLatest(versions); v != "" {
-		return h.Resolver.Lookup(ctx, rp, assetKey(module, Escape(v)+".info"), proxy.Content)
+		return h.Resolver.LookupTarget(ctx, rp, target(assetKey(module, Escape(v)+".info")), proxy.Content)
 	}
 	if rp.Type == "hosted" {
 		// Only pseudo-versions exist: like go, fall back to the newest one.
@@ -274,12 +278,12 @@ func (h *Handler) latest(ctx context.Context, rp *repo.Repository, module string
 			return proxy.Result{}, err
 		}
 		if n := len(all); n > 0 {
-			return h.Resolver.Lookup(ctx, rp, assetKey(module, Escape(all[n-1])+".info"), proxy.Content)
+			return h.Resolver.LookupTarget(ctx, rp, target(assetKey(module, Escape(all[n-1])+".info")), proxy.Content)
 		}
 	}
 	switch rp.Type {
 	case "proxy":
-		return h.Resolver.Fetcher.Fetch(ctx, rp, module+"/@latest", proxy.Metadata)
+		return h.Resolver.Fetcher.FetchTarget(ctx, rp, target(module+"/@latest"), proxy.Metadata)
 	case "group":
 		var firstErr error
 		for _, m := range rp.OnlineMembers() {

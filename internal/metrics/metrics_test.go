@@ -121,6 +121,27 @@ func TestNoDBWriteUntilFlushAndAggregation(t *testing.T) {
 	}
 }
 
+// A read of a cached document moves its last use and counts no download.
+func TestUsedCountsNoDownload(t *testing.T) {
+	db := &fakeDB{}
+	r := New(db)
+	t0 := time.Unix(1_700_000_000, 0)
+	r.Now = func() time.Time { return t0 }
+	r.Used("r", "doc")
+	r.Used("r", "a.jar")
+	r.Download("r", "a.jar")
+	if err := r.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]meta.DownloadDelta{}
+	for _, d := range db.dl {
+		got[d.Path] = d
+	}
+	if got["doc"].N != 0 || !got["doc"].Last.Equal(t0) || got["a.jar"].N != 1 {
+		t.Fatalf("downloads %+v", db.dl)
+	}
+}
+
 func TestRequestBucketsPerHour(t *testing.T) {
 	db := &fakeDB{}
 	r := New(db)

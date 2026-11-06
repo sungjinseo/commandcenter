@@ -468,6 +468,42 @@ func TestProxyUpstreamNotYAML(t *testing.T) {
 	}
 }
 
+// An answer that is no index does not replace a good one: the copy answers,
+// marked stale, nothing changes in the cache, and the next good answer counts.
+func TestProxyUpstreamNotYAMLKeepsTheIndex(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if w := e.do("GET", "helm-proxy", "index.yaml", nil); w.Code != 200 {
+		t.Fatalf("index: %d %s", w.Code, w.Body)
+	}
+	cached, err := e.h.Store.Get(ctx, "helm-proxy", upstreamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := *e.index.Load()
+	bad := "entries: [not, a, map\n"
+	e.index.Store(&bad)
+	e.now = e.now.Add(2 * time.Hour)
+	w := e.do("GET", "helm-proxy", "index.yaml", nil)
+	if w.Code != 200 || !strings.Contains(w.Header().Get("Warning"), "Stale") || len(index(t, w).Entries) == 0 {
+		t.Fatalf("during the bad answer: %d %v", w.Code, w.Header())
+	}
+	if w := e.do("GET", "helm-proxy", "demo-2.0.0.tgz", nil); w.Code != 200 {
+		t.Fatalf("a chart during the bad answer: %d %s", w.Code, w.Body)
+	}
+	if now, err := e.h.Store.Get(ctx, "helm-proxy", upstreamKey); err != nil || now.BlobSHA256 != cached.BlobSHA256 {
+		t.Fatalf("the cached index was replaced: %+v %v", now, err)
+	}
+	next := strings.Replace(good, "version: 1.0.0", "version: 1.0.1", 1)
+	e.index.Store(&next)
+	if w := e.do("GET", "helm-proxy", "index.yaml", nil); w.Code != 200 || w.Header().Get("Warning") != "" {
+		t.Fatalf("the next good answer: %d %v", w.Code, w.Header())
+	}
+	if now, err := e.h.Store.Get(ctx, "helm-proxy", upstreamKey); err != nil || now.BlobSHA256 == cached.BlobSHA256 {
+		t.Fatalf("the next good answer was not taken: %v", err)
+	}
+}
+
 // A proxy whose upstream has no index.yaml (a wrong remote URL) answers
 // the upstream's 404, not a fabricated empty index that makes `helm repo
 // add` succeed silently; a group with such a member fails as for any failing

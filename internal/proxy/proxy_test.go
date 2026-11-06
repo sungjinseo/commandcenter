@@ -34,10 +34,12 @@ type remote struct {
 	inflight atomic.Int32 // requests currently being served
 	peak     atomic.Int32 // highest value inflight has reached
 	ctype    string       // Content-Type of the bodies, if set
+	query    atomic.Value // the last request's raw query
 }
 
 func (rm *remote) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rm.hits.Add(1)
+	rm.query.Store(r.URL.RawQuery)
 	n := rm.inflight.Add(1)
 	defer rm.inflight.Add(-1)
 	for {

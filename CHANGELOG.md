@@ -173,6 +173,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Web UI: check boxes on the support page choose the sections of the bundle.
 - Web UI: a repository administrator gets "Invalidate cache" on the proxies and groups they can open.
 - Web UI: a note beside a p2 proxy's remote says that changing it deletes the cache.
+- `test/smoke/purge-smoke.sh`: the purge with real npm, pip and go against the public registries.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -274,6 +275,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Web UI: client setup hints now show the upload command of Go, Cargo, npm and Helm repositories and
   yum's `comps.xml`, Raw repositories have hints at all, and read credentials are shown for every host
   with a note saying when they are needed, not only for hosts other than localhost.
+- `repository.purge-unused` also deletes a proxy's cached files without a component (package documents, indexes) that no
+  one read and the proxy did not check in the last `lastUsed` days, as Nexus does; the disk space comes back at the next
+  `blobstore.compact`. It keeps those of a blocked proxy, those of a proxy another group member follows where the format
+  answers from the first member that has a package, an npm document or PyPI project page while files of it are cached,
+  and a proxy's own records. A run deletes at most `maxComponents` such files.
+- A read of a proxy's cached document moves its last download time, at most hourly, without counting a download.
+- PyPI proxy: an answer that is no page of the project (a sign-in or error page with 200; also an empty HTML page) is a
+  502 and is not cached, a cached page keeps answering, and a group's next member no longer stands in. It was a 404.
+- `Fetcher.Request` honours a blocked remote and counts for auto-block: a blocked Terraform proxy no longer asks the
+  remote's module download endpoint and uses the answer it kept.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -383,6 +394,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Web UI: forms other than the repository form said "Could not save the repository" on any error.
 - Web UI: the notice of an unavailable blob store no longer says its repositories answer 503 when only
   the probe failed.
+- npm proxy: what a remote answers is checked before it is stored. A crash could leave a sign-in page cached (a tarball
+  until an admin deleted it), a refused page made a created and a deleted webhook, clocks over 30 s apart could serve the
+  page, and a hanging remote made a node's requests wait behind the others' fetches.
+- Composer proxy: an archive that does not match its `shasum` is no longer stored and deleted again.
+- Helm proxy: an upstream answer that is no index no longer replaces a good index, which made every read a 502 until
+  `metadataMaxAge`.
+- Go and Cargo proxies, and PyPI files the index gives no hash for: a web page answered with 200 is no longer cached (a
+  Go `.zip` stayed until an admin deleted it).
+- apt proxy: a Release fetched with no copy before it expires the metadata beside it.
+- npm audit passes the request's query string to the remote.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -467,6 +488,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Set LDAP static groups when every node is upgraded. An older node does not honour them, and saving the LDAP form on one drops them.
 - A body already stored through `/v1/security/ldap` with `groupType: static`, `ldapGroupsAsRoles: false` and a complete set is derived from the directory until it is written again. From then on the mappings read the group entries. Terraform shows this once as drift.
 - Anyone relying on a directory group named as an admin-containing role, through `groupsAsRoles`, must map it.
+- **A scheduled `repository.purge-unused` now removes more.** Check that the proxies it covers can fetch again. Nothing is lost that the remote still has; what the remote lost is lost if no one used it in `lastUsed` days.
+- **Before the first purge, let the proxies serve for a while.** A document's reads are recorded from this version on. One read only from the cache since before the upgrade (a failing or never-expiring remote) looks unused until it is read once; an hour or a day of traffic is enough. Blocked proxies are not touched anyway.
+- **PyPI**: a remote that answers 200 with an empty HTML page for projects it does not have now fails a group it stands ahead of with 502, instead of passing to the next member. No index I know of does that (pypi.org, Nexus, Artifactory, devpi, pypiserver answer 404, by memory; only pypi.org was run). The log says `not the page of project`. Reorder the group or fix the remote.
+- Pages and documents cached wrongly by older builds stay until their `metadataMaxAge`; a tarball or `.zip` of a sign-in page cached by an older build stays until deleted, as before.
+- Rolling upgrade: nothing to migrate. An older node still stores and undoes for npm, so while both run, a new node can read what an old node is about to undo; that ends with the rollout. `Used` writes through the existing counters.
 
 ## [0.4.0] - 2026-11-05
 

@@ -493,12 +493,18 @@ func TestProxy(t *testing.T) {
 	if devPath != "dist/monolog/monolog/dev-main/"+ref("monolog-main")+".zip" {
 		t.Fatalf("dev dist: %s", devPath)
 	}
+	commits := 0
+	e.h.Store.DB.OnCommit = func(context.Context, time.Time, []meta.Change) { commits++ }
 	if w := e.do("GET", "composer-proxy", devPath, nil); w.Code != 502 || !strings.Contains(w.Body.String(), "shasum") {
 		t.Fatalf("shasum mismatch: %d %s", w.Code, w.Body)
 	}
 	if _, err := e.h.Store.Get(context.Background(), "composer-proxy", devPath); err == nil {
 		t.Fatal("mismatching archive cached")
 	}
+	if commits != 0 { // not stored and deleted again: at no moment could a request or a crash find it
+		t.Fatalf("a mismatching archive made %d commits", commits)
+	}
+	e.h.Store.DB.OnCommit = nil
 	// unknown ref, hosted-shaped path, unknown package
 	for _, p := range []string{"dist/monolog/monolog/3.4.0.0/" + sha40 + ".zip", "dist/monolog/monolog/3.4.0.0.zip", "p2/acme/nope.json", "dist/acme/nope/1.0.0.0/" + sha40 + ".zip"} {
 		if w := e.do("GET", "composer-proxy", p, nil); w.Code != 404 {

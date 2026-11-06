@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	"commandcenter/internal/auth"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
@@ -31,7 +29,6 @@ type Handler struct {
 	Auth     *auth.Authenticator
 	BaseURL  func() string // live: read per request (plan 12)
 	Now      func() time.Time
-	flights  singleflight.Group // exclusive
 }
 
 func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticator, baseURL func() string) *Handler {

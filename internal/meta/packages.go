@@ -100,6 +100,36 @@ func (t *Tx) DeleteAsset(ctx context.Context, repo, path string) (int64, error) 
 	return size, nil
 }
 
+// DeleteUnusedAssets removes those of the assets paths of repo that were not
+// downloaded, checked or written since before, and returns how many went and
+// their size: one statement, as every other writer waits for this transaction.
+func (t *Tx) DeleteUnusedAssets(ctx context.Context, repo string, paths []string, before time.Time) (n, size int64, err error) {
+	if len(paths) == 0 {
+		return 0, 0, nil
+	}
+	ms := toMs(before)
+	args := []any{repo}
+	for _, p := range paths {
+		args = append(args, p)
+	}
+	rows, err := t.q.QueryContext(ctx, `DELETE FROM assets WHERE repo = ? AND path IN (?`+strings.Repeat(", ?", len(paths)-1)+`)
+  AND last_downloaded < ? AND checked_at < ? AND created_at < ? AND last_modified < ? RETURNING path, size`, append(args, ms, ms, ms, ms)...)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		var s int64
+		if err := rows.Scan(&p, &s); err != nil {
+			return 0, 0, err
+		}
+		t.changes = append(t.changes, Change{Op: ChangeDelete, Kind: ChangeAsset, Repo: repo, Path: p})
+		n, size = n+1, size+s
+	}
+	return n, size, rows.Err()
+}
+
 // GetAsset is DB.GetAsset inside the transaction; ErrNotFound when there is none.
 func (t *Tx) GetAsset(ctx context.Context, repo, path string) (Asset, error) {
 	return scanAsset(t.q.QueryRowContext(ctx, `SELECT `+assetSelect+` FROM assets WHERE repo = ? AND path = ?`, repo, path))

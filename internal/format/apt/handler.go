@@ -250,7 +250,9 @@ func (h *Handler) owns(ctx context.Context, rp *repo.Repository, p string) bool 
 func (h *Handler) release(ctx context.Context, rp *repo.Repository, t proxy.Target) (proxy.Result, error) {
 	prev, perr := h.Store.Get(ctx, rp.Name, t.Key)
 	res, err := h.Resolver.LookupTarget(ctx, rp, t, proxy.Metadata)
-	if err != nil || perr != nil || res.Asset.BlobSHA256 == prev.BlobSHA256 {
+	// Without a copy before it (repository.purge-unused took it) what lies
+	// beside it may be from any older one.
+	if err != nil || perr != nil && !errors.Is(perr, repo.ErrNotFound) || res.Asset.BlobSHA256 == prev.BlobSHA256 {
 		return res, err
 	}
 	// ponytail: a flat remote's root Release lists the whole cache to find its siblings; once per upstream change.

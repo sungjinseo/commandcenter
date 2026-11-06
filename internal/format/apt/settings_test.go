@@ -2,6 +2,7 @@ package apt
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +78,19 @@ func TestProxyReleaseCoherence(t *testing.T) {
 	e.text(t, "apt-proxy", "dists/bookworm/Release")
 	if e.hits.Load() != 1 { // its own expiry only
 		t.Fatalf("hits %d", e.hits.Load())
+	}
+	// An InRelease fetched with no copy before it (repository.purge-unused
+	// removed it) says nothing about what lies beside it: that is asked again.
+	e.text(t, "apt-proxy", pk) // fetched again just now: fresh
+	if err := e.h.Store.Delete(context.Background(), "apt-proxy", "dists/bookworm/InRelease"); err != nil {
+		t.Fatal(err)
+	}
+	e.up["dists/bookworm/InRelease"], e.up[pk] = []byte("newer InRelease"), []byte("Package: c\n")
+	if got := e.text(t, "apt-proxy", "dists/bookworm/InRelease"); got != "newer InRelease" {
+		t.Fatalf("InRelease %q", got)
+	}
+	if got := e.text(t, "apt-proxy", pk); got != "Package: c\n" {
+		t.Fatalf("Packages after an InRelease without a copy before it: %q", got)
 	}
 }
 

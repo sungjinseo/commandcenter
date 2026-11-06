@@ -104,15 +104,12 @@ func (h *Handler) search(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 
 // askRemote sends a search with the query string query to the remote of
 // proxy m: like the proxy's other requests, only where its routing rule lets
-// it through (not found) and while the remote is not blocked (ErrRemote).
+// it through (not found) and while the remote is not blocked (Request).
 func (h *Handler) askRemote(ctx context.Context, m *repo.Repository, query string) (*http.Response, error) {
 	const path = "-/v1/search"
 	f := h.Resolver.Fetcher
 	if !h.routed(m, path) {
 		return nil, repo.ErrNotFound
-	}
-	if f.Remote(m).Blocked {
-		return nil, proxy.ErrRemote
 	}
 	u := *m.RemoteURL
 	u.Path += path
