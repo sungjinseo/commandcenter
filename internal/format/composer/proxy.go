@@ -60,7 +60,8 @@ func absolute(rp *repo.Repository, t string) string {
 // without one, or without metadata-url (a Composer v1 repository), is a
 // 502: a wrong remote URL, not a missing package.
 func (h *Handler) upstreamFor(ctx context.Context, rp *repo.Repository) (upstream, proxy.Result, error) {
-	t := proxy.Target{Key: upstreamKey, URL: rootURL(rp), Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	t := proxy.Target{Key: upstreamKey, URL: rootURL(rp), Header: http.Header{"Accept": {ctJSON}}, DeniedIsFailure: true,
+		Check: proxy.JSONDocument("metadata-url", "packages", "includes", "providers-url", "provider-includes")} // a v1 root is told below
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if errors.Is(err, repo.ErrNotFound) {
 		return upstream{}, res, repo.Errorf(http.StatusBadGateway, "remote repository has no packages.json at %s", rootURL(rp))
@@ -108,7 +109,7 @@ func (h *Handler) readDoc(a meta.Asset) ([]byte, error) {
 
 // fetchDoc fetches a metadata document of rp's remote into key and reads it.
 func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url string) (doc, error) {
-	t := proxy.Target{Key: key, URL: url, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	t := proxy.Target{Key: key, URL: url, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true, Check: proxy.JSONDocument()}
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if err != nil {
 		return doc{}, err
@@ -165,7 +166,10 @@ func (h *Handler) proxyRoot(ctx context.Context, rp *repo.Repository) (doc, erro
 
 // metadataFile fetches (or finds in the cache) the upstream metadata file of
 // name. The file is not read: Packagist's largest are over 1 MiB, and holding
-// one per request took a 128 MiB server down at 8 clients at once.
+// one per request took a 128 MiB server down at 8 clients at once. The stable
+// file decides who owns name in a group (has), so what a remote refuses or
+// answers with what is no such file fails closed; a package may well have no
+// ~dev file, and a static site says so with a 403 too.
 func (h *Handler) metadataFile(ctx context.Context, rp *repo.Repository, name string, dev bool) (proxy.Result, error) {
 	up, _, err := h.upstreamFor(ctx, rp)
 	if err != nil {
@@ -175,7 +179,8 @@ func (h *Handler) metadataFile(ctx context.Context, rp *repo.Repository, name st
 	if dev {
 		pkg += "~dev"
 	}
-	t := proxy.Target{Key: metadataPath(name, dev), URL: fill(up.metadataURL, pkg, "", ""), Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	t := proxy.Target{Key: metadataPath(name, dev), URL: fill(up.metadataURL, pkg, "", ""), Header: http.Header{"Accept": {ctJSON}},
+		NotHTML: dev, DeniedIsFailure: !dev, Check: proxy.JSONDocument("packages")}
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if err != nil {
 		return res, err

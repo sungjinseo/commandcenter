@@ -184,7 +184,10 @@ func (h *Handler) download(ctx context.Context, rp *repo.Repository, file string
 		return res, err
 	case "group":
 		name := chartName(file)
-		for _, m := range rp.OnlineMembers() {
+		for _, m := range rp.MemberRepos {
+			if !m.IsOnline() { // it may have the chart
+				return proxy.Result{}, repo.MemberOffline(m)
+			}
 			if m.Type == "proxy" && !h.routed(m, key) {
 				continue // its routing rule: the member does not answer for this path, nor own it
 			}

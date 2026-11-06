@@ -324,6 +324,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Cleanup's `lastDownloadedDays` and snapshot purges count a never-downloaded file from when its row
   was written if that is later than its dates, so that an import with stated times is not selected
   on the first run.
+- Composer, NuGet, RubyGems, Swift, Terraform, Conan, Cargo, R and conda proxies: only the remote's 404 and 410 count as
+  "not here" for the document that decides who owns a package in a group (`p2/<name>.json`, a flat container
+  `index.json`, `info/<name>`, a release list, `versions`, a recipe's `latest`, a Cargo index file, `PACKAGES`,
+  `repodata.json`, `current_repodata.json`, `channeldata.json`). Any other 4xx, and a 200 that is no such document (a
+  sign-in page, an error text, a JSON error), is a 502, is not cached, and leaves no negative record; a group no longer
+  passes to the next member, so a refused internal registry cannot hand a name to a public member (dependency
+  confusion), as npm and PyPI already did. A cached copy keeps answering with `Warning: 110`.
+- A group without `mergeMembers` no longer lets an offline member's names go to a later member: taking a repository
+  offline does not change who owns a name. Composer, NuGet, RubyGems, Swift, Terraform, Conan, Cargo, Helm and Docker
+  answer 503 `group member "<name>" is offline` for what no member ahead of it has, as npm and PyPI do. R, conda, yum and
+  a Helm group's `index.yaml` answer 503 when an online member follows the offline one; with none after it, or with
+  `mergeMembers`, it is left out as before. APT answers 503 for an offline hosted member's distribution. Lists and
+  searches still answer from the online members. Maven, Go, raw and p2 groups still skip an offline member.
+- `repository.purge-unused` keeps the cached files of R, conda, yum and APT proxies another group member follows, as it
+  does for the other formats whose first member answers: deleting them could hand the name or path to that member.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -444,6 +459,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - apt proxy: a Release fetched with no copy before it expires the metadata beside it.
 - npm audit passes the request's query string to the remote.
 - The REST `downloadUrl` of NuGet and Git LFS files is where a client reads them; it was a 404.
+- Helm proxy: an answer that parses but has no `apiVersion` (JSON, a YAML error document) was read as an empty index, so a
+  group passed every chart to the next member; a page or a refused index left a negative record for `negativeCacheTTL`.
+- What is no JSON, or not the JSON it should be, no longer replaces a good copy for `metadataMaxAge`, during which each
+  read was a 502: Composer's root, metadata and search, NuGet's service index, registration, search and vulnerability
+  files, Swift, Terraform's discovery, version lists and downloads, Conan's documents, CocoaPods podspecs, Hugging Face
+  listings, Docker manifests and tag lists, the PyPI JSON API, Go `.info` and `@latest`, Cargo's `config.json`.
+- `repository.purge-unused`: a tarball or file fetched after a run chose its package document, and before the delete,
+  now keeps the document.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -539,6 +562,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`lastDownloadedDays`:** a proxied file never downloaded counts from its last check by the same rule. That only keeps something longer.
 - **`GET /-/api/me`** has one more field. **`downloadUrl`** of NuGet and Git LFS files changes to one that works.
 - Mixed versions: an older node ignores the header, so a stated time is lost on it silently. Import after every node runs this version. An older target answers `/-/api/me` without the field, so the importer sends none and says so.
+- A remote that answers 403 for a missing key (S3 read without `s3:ListBucket`, CloudFront in front of it) now gets a 502
+  for each such document it lacks, on a proxy outside a group too, and a group stops there. Make it answer 404, or send it
+  only its names with a routing rule. For conda that includes a `current_repodata.json` or `channeldata.json` it never
+  built, for R a `bin/...` directory it does not have.
+- A member kept offline in a group now stops public packages through that group too, unless it is the last member. Take
+  it out of the group if it stays offline for long.
+- Negative records from before the upgrade stay until `negativeCacheTTL` ends, so a refused name can still pass to the
+  next member for that long (with `"-1"` until the proxy's settings are saved with another value). During a rolling
+  upgrade older nodes keep writing such records and skipping offline members.
+- Documents an older build cached wrongly stay until `metadataMaxAge`.
 
 ## [0.4.0] - 2026-11-05
 

@@ -159,7 +159,7 @@ func (h *Handler) mount(r *http.Request, rp *repo.Repository, rt Route, c caller
 		a, err = h.Store.DB.GetAsset(ctx, m.Name, blobKey(fromImage, digest))
 		return err
 	})
-	if repo.StatusOf(err) == http.StatusNotFound {
+	if s := repo.StatusOf(err); s == http.StatusNotFound || s == http.StatusServiceUnavailable { // an offline member ahead
 		return false, nil
 	}
 	if err != nil {

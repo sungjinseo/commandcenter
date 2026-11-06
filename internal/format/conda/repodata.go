@@ -299,6 +299,16 @@ const firstPrefix = "conda-first:"
 // path asked, names its channeldata.json; nil for what it does not have.
 type member struct{ doc, names *meta.Asset }
 
+// docTarget is the fetch of a channel's repodata.json, current_repodata.json or
+// channeldata.json. They decide whose a package name is in a group
+// (firstRepodata): what a remote refuses or answers with what is no such
+// document fails closed. A repodata.json can be hundreds of MiB: the check goes
+// no further than the first of these keys.
+func docTarget(p, route string) proxy.Target {
+	return proxy.Target{Key: p, Remote: p, Route: route, DeniedIsFailure: true,
+		Check: proxy.JSONDocument("info", "packages", "packages.conda", "repodata_version", "channeldata_version", "subdirs")}
+}
+
 // firstRepodata is group rp's document p (subdir's repodata.json or
 // current_repodata.json) without mergeMembers: a package name is listed from
 // the first member that has it, with all the builds that member lists,
@@ -318,7 +328,7 @@ func (h *Handler) firstRepodata(ctx context.Context, rp *repo.Repository, p, sub
 	var failed error
 	answered := 0
 	look := func(m *repo.Repository, file string) (*meta.Asset, error) {
-		res, err := h.Resolver.LookupTarget(ctx, m, proxy.Target{Key: file, Remote: file, Route: p, NotHTML: true}, proxy.Metadata)
+		res, err := h.Resolver.LookupTarget(ctx, m, docTarget(file, p), proxy.Metadata)
 		switch {
 		case err == nil && failed != nil:
 			return nil, failed

@@ -130,8 +130,14 @@ func condaSubdir(s string) bool {
 // has for people to read.
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) error {
 	ctx := r.Context()
+	if err := rp.OfflineAhead(); err != nil {
+		return err
+	}
 	kind, subdir := doc(p)
 	t := proxy.Target{Key: p, Remote: p, NotHTML: path.Base(p) != "index.html"}
+	if kind == "repodata" || kind == "channeldata" {
+		t = docTarget(p, p)
+	}
 	var res proxy.Result
 	var err error
 	switch {

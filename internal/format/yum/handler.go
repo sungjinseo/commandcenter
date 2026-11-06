@@ -70,6 +70,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		if p == "" || strings.HasSuffix(p, "/") {
 			return repo.ErrNotFound
 		}
+		// ponytail: every path, not those the member holds; a hosted member's are known if its downtime hurts.
+		if err := rp.OfflineAhead(); err != nil {
+			return err
+		}
 		kind := proxy.Content
 		if isRepodata(p) {
 			kind = proxy.Metadata

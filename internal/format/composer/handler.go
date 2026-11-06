@@ -336,11 +336,15 @@ func (h *Handler) hostedSearch(ctx context.Context, rp *repo.Repository, q, typ 
 }
 
 // owner returns the member of group rp that answers for name: the first
-// online member, in order, that has the package (hosted: a row; proxy: an
-// upstream metadata file; group: its own owner). That member answers
-// alone, so a later (public) member never stands in for an internal package.
+// member, in order, that has the package (hosted: a row; proxy: an upstream
+// metadata file; group: its own owner). That member answers alone, so a later
+// (public) member never stands in for an internal package, nor for an offline
+// member, which may have it.
 func (h *Handler) owner(ctx context.Context, rp *repo.Repository, name string) (*repo.Repository, error) {
-	for _, m := range rp.OnlineMembers() {
+	for _, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return nil, repo.MemberOffline(m)
+		}
 		has, err := h.has(ctx, m, name)
 		if err != nil {
 			return nil, memberFailure(rp, m, err)

@@ -356,7 +356,7 @@ func (h *Handler) owner(ctx context.Context, rp *repo.Repository, project string
 			if rp.MergeMembers {
 				continue
 			}
-			return nil, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+			return nil, repo.MemberOffline(m)
 		}
 		o, err := h.owner(ctx, m, project)
 		if err == nil {
@@ -468,7 +468,7 @@ func (h *Handler) fromMember(ctx context.Context, rp *repo.Repository, project s
 	}
 	for i, m := range rp.MemberRepos {
 		if !m.IsOnline() {
-			return proxy.Result{}, repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
+			return proxy.Result{}, repo.MemberOffline(m)
 		}
 		res, err := get(m)
 		if err == nil {

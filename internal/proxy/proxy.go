@@ -135,9 +135,12 @@ type Target struct {
 	// DeniedIsFailure keeps every answer but 404 and 410 for an asset that
 	// is not cached a failure (502), not a miss: for the document that
 	// decides which group member owns a package (npm packument, PyPI project
-	// page), so that an internal registry that refuses or errs (403, 400,
-	// 451, ...) fails closed instead of letting a later member's same-named
-	// package stand in (resolve.Owner).
+	// page and the like, cleanup.OwnerRule), so that an internal registry that
+	// refuses or errs (403, 400, 451, ...) fails closed instead of letting a
+	// later member's same-named package stand in (resolve.Owner). Such a
+	// document takes no NotHTML, which is a miss too, but a Check that a web
+	// page does not pass. Every target of one key must say the same: a miss
+	// another one records would answer for it.
 	DeniedIsFailure bool
 
 	// Skip, if set, tells the resolver which hosted or proxy repositories do

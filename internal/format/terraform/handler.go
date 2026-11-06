@@ -234,12 +234,15 @@ func (h *Handler) file(ctx context.Context, rp *repo.Repository, rt Route) (prox
 }
 
 // owner returns the member of group rp that answers for the module or
-// provider rt names: the first online member, in order, that has it
-// (hosted: a row; proxy: an upstream version list; group: its own owner).
-// That member answers alone, so a later (public) member never stands in
-// for an internal module.
+// provider rt names: the first member, in order, that has it (hosted: a row;
+// proxy: an upstream version list; group: its own owner). That member answers
+// alone, so a later (public) member never stands in for an internal module, nor
+// for an offline member, which may have it.
 func (h *Handler) owner(ctx context.Context, rp *repo.Repository, rt Route) (*repo.Repository, error) {
-	for _, m := range rp.OnlineMembers() {
+	for _, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return nil, repo.MemberOffline(m)
+		}
 		has, err := h.has(ctx, m, rt)
 		if err != nil {
 			return nil, memberFailure(rp, m, err)

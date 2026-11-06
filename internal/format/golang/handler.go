@@ -47,8 +47,15 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 }
 
 // target is the fetch of the file key of a module: at the same path of the
-// remote, and never a web page (a .zip would stay cached for ever).
-func target(key string) proxy.Target { return proxy.Target{Key: key, Remote: key, NotHTML: true} }
+// remote, and never a web page (a .zip would stay cached for ever), and what
+// says which version is that (.info stays cached for ever too).
+func target(key string) proxy.Target {
+	t := proxy.Target{Key: key, Remote: key, NotHTML: true}
+	if strings.HasSuffix(key, ".info") || strings.HasSuffix(key, "/@latest") {
+		t.Check = proxy.JSONDocument("Version")
+	}
+	return t
+}
 
 // Routed reports whether path is a GOPROXY request (repo.RouteFilter); the
 // rest, the checksum database's sumdb/ paths above all, is answered without

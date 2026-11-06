@@ -779,11 +779,14 @@ func TestGroup(t *testing.T) {
 	if sr.names() != "acme/demo,monolog/monolog" || sr.Results[0].Description != "A demo package" || sr.Total != 2 {
 		t.Fatalf("group search: %+v", sr)
 	}
-	// an offline member is skipped
+	// an offline member may own what no member ahead of it has
 	off := false
 	e.repos["composer-proxy"].Online = &off
-	if w := e.do("GET", "composer-all", "p2/monolog/monolog.json", nil); w.Code != 404 {
+	if w := e.do("GET", "composer-all", "p2/monolog/monolog.json", nil); w.Code != 503 {
 		t.Fatalf("offline proxy member: %d", w.Code)
+	}
+	if w := e.do("GET", "composer-all", "p2/acme/demo.json", nil); w.Code != 200 {
+		t.Fatalf("ahead of an offline member: %d", w.Code)
 	}
 }
 

@@ -183,7 +183,13 @@ func (h *Handler) lookup(ctx context.Context, rp *repo.Repository, p string, kin
 	switch rp.Type {
 	case "group":
 		var firstErr error
-		for _, m := range rp.OnlineMembers() {
+		for _, m := range rp.MemberRepos {
+			if !m.IsOnline() {
+				if h.owns(ctx, m, p) {
+					return proxy.Result{}, repo.MemberOffline(m)
+				}
+				continue
+			}
 			res, err := h.lookup(ctx, m, p, kind)
 			if err == nil {
 				return res, nil
@@ -227,7 +233,7 @@ func (h *Handler) lookup(ctx context.Context, rp *repo.Repository, p string, kin
 func (h *Handler) owns(ctx context.Context, rp *repo.Repository, p string) bool {
 	switch rp.Type {
 	case "group":
-		for _, m := range rp.OnlineMembers() {
+		for _, m := range rp.MemberRepos { // offline ones too: it stays theirs
 			if h.owns(ctx, m, p) {
 				return true
 			}

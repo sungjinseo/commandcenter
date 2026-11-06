@@ -408,7 +408,7 @@ func (h *Handler) proxyJSON(ctx context.Context, serving, owner *repo.Repository
 	if version != "" {
 		remote = "pypi/" + project + "/" + version + "/json"
 	}
-	t := proxy.Target{Key: remote, Remote: remote, Header: http.Header{"Accept": {"application/json"}}, NotHTML: true}
+	t := proxy.Target{Key: remote, Remote: remote, Header: http.Header{"Accept": {"application/json"}}, NotHTML: true, Check: proxy.JSONDocument("info")}
 	res, err := h.Fetcher.FetchTarget(ctx, owner, t, proxy.Metadata)
 	if err != nil {
 		return nil, res, err

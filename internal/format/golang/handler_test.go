@@ -18,6 +18,7 @@ import (
 	"commandcenter/internal/meta/metatest"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
+	"commandcenter/internal/repo/repotest"
 	"commandcenter/internal/resolve"
 )
 
@@ -140,6 +141,36 @@ func TestProxyDoesNotCacheWebPages(t *testing.T) {
 			t.Errorf("%s was cached: %v", p, err)
 		}
 	}
+}
+
+// What says which version a module is must be such a document: a .info is
+// cached for ever, @latest for metadataMaxAge.
+func TestProxyInfoIsChecked(t *testing.T) {
+	e := newEnv(t)
+	rm := repotest.NewRemote(t)
+	e.repos = repotest.With(e.repos, repotest.ProxyOn("internal", "go", rm.URL))
+	ctx := context.Background()
+	const info = "example.com/m/@v/v1.0.0.info"
+	for _, a := range []repotest.Answer{{ContentType: "text/plain", Body: "Sign in"}, {ContentType: "application/json", Body: `{"error":"maintenance"}`}} {
+		rm.Set("/"+info, a)
+		if w := e.do("GET", "internal", info, nil); w.Code != 502 {
+			t.Fatalf("%q: %d %s", a.Body, w.Code, w.Body.String())
+		}
+		if _, err := e.h.Store.Get(ctx, "internal", info); repo.StatusOf(err) != 404 {
+			t.Fatalf("%q was cached: %v", a.Body, err)
+		}
+	}
+	shift := time.Duration(0)
+	repotest.KeepsCopy(t, rm, "/example.com/m/@latest", repotest.Answer{ContentType: "application/json", Body: `{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}`},
+		func() *httptest.ResponseRecorder { return e.do("GET", "internal", "example.com/m/@latest", nil) },
+		func() string {
+			a, _ := e.h.Store.Get(ctx, "internal", "example.com/m/@latest")
+			return a.BlobSHA256
+		},
+		func() {
+			shift += 2 * time.Hour
+			e.h.Resolver.Fetcher.Now = func() time.Time { return time.Now().Add(shift) }
+		})
 }
 
 func TestHostedAndGroupReads(t *testing.T) {

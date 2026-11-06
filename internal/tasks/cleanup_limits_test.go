@@ -242,6 +242,12 @@ func TestPurgeUnusedFiles(t *testing.T) {
 	h.more(t, proxy("mvn-first", "maven"),
 		proxy("npm-solo", "npm"), proxy("npm-first", "npm"), proxy("npm-last", "npm"), proxy("npm-nested", "npm"), proxy("npm-outer", "npm"), blocked,
 		proxy("py", "pypi"), proxy("p2-site", "p2"), proxy("hf", "huggingface"), proxy("tf", "terraform"), proxy("go-px", "go"),
+		proxy("r-first", "r"), proxy("r-last", "r"), proxy("conda-first", "conda"), proxy("conda-last", "conda"),
+		proxy("yum-first", "yum"), proxy("yum-last", "yum"), proxy("apt-first", "apt"), proxy("apt-last", "apt"),
+		config.Repository{Name: "yum-all", Format: "yum", Type: "group", Members: []string{"yum-first", "yum-last"}},
+		config.Repository{Name: "apt-all", Format: "apt", Type: "group", Members: []string{"apt-first", "apt-last"}},
+		config.Repository{Name: "r-all", Format: "r", Type: "group", Members: []string{"r-first", "r-last"}},
+		config.Repository{Name: "conda-all", Format: "conda", Type: "group", Members: []string{"conda-first", "conda-last"}},
 		config.Repository{Name: "mvn-all", Format: "maven", Type: "group", Members: []string{"mvn-first", "mvn-proxy"}},
 		config.Repository{Name: "npm-all", Format: "npm", Type: "group", Members: []string{"npm-first", "npm-last"}},
 		config.Repository{Name: "npm-in", Format: "npm", Type: "group", Members: []string{"npm-nested"}},
@@ -262,6 +268,14 @@ func TestPurgeUnusedFiles(t *testing.T) {
 		"hf":          {"api/models/o/m/tree/main~tree", "api/models/o/m/tree/main~tree~next"},
 		"tf":          {"v1/modules/o/m/p/1.0.0/download", "v1/modules/o/m/p/versions"},
 		"go-px":       {"example.com/m/@latest", "example.com/m/@v/list", "example.com/m/@v/v1.0.0.zip"},
+		"r-first":     {"src/contrib/PACKAGES"},
+		"r-last":      {"src/contrib/PACKAGES"},
+		"conda-first": {"linux-64/repodata.json"},
+		"conda-last":  {"linux-64/repodata.json"},
+		"yum-first":   {"el9/repodata/repomd.xml"},
+		"yum-last":    {"el9/repodata/repomd.xml"},
+		"apt-first":   {"dists/stable/Release"},
+		"apt-last":    {"dists/stable/Release"},
 	}
 	for name, paths := range seed {
 		for _, p := range paths {
@@ -304,6 +318,14 @@ func TestPurgeUnusedFiles(t *testing.T) {
 		"hf":          "api/models/o/m/tree/main~tree~next",
 		"tf":          "v1/modules/o/m/p/1.0.0/download",
 		"go-px":       "example.com/m/@v/v1.0.0.zip",
+		"r-first":     "src/contrib/PACKAGES", // a first-member merge decides by these too
+		"r-last":      "",
+		"conda-first": "linux-64/repodata.json",
+		"conda-last":  "",
+		"yum-first":   "el9/repodata/repomd.xml", // their paths too
+		"yum-last":    "",
+		"apt-first":   "dists/stable/Release",
+		"apt-last":    "",
 	} {
 		if got := h.paths(t, name); got != want {
 			t.Errorf("%s holds %q, want %q", name, got, want)
@@ -360,6 +382,41 @@ func TestPurgeUnusedFilesLimits(t *testing.T) {
 	}
 	if out, err := h.s.RunNow(scan.ID, "admin"); err != nil || count() != 0 {
 		t.Fatalf("scan: %+v %v, %d left\n%s", out, err, count(), h.get(t, scan.ID).LastLog)
+	}
+}
+
+// A tarball or file fetched after a scan chose its document keeps the document:
+// the check is in the delete too, under the lock every writer takes.
+func TestDeleteFilesKeepsDocumentOfWhatWasFetchedSince(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.storedRepos(t)
+	h.more(t, config.Repository{Name: "npm-p", Format: "npm", Type: "proxy"}, config.Repository{Name: "py-p", Format: "pypi", Type: "proxy"})
+	h.clock.Set(t0.AddDate(0, 0, -60))
+	for name, docs := range map[string][]string{"npm-p": {"a/package.json", "b/package.json", "@s/c/package.json"}, "py-p": {"simple/a/index", "simple/b/index"}} {
+		for _, p := range docs {
+			h.put(t, name, p, p)
+		}
+	}
+	h.clock.Set(t0)
+	h.put(t, "npm-p", "a/-/a-1.0.0.tgz", "fetched after the scan")
+	h.put(t, "npm-p", "@s/c/-/c-1.0.0.tgz", "fetched after the scan")
+	h.put(t, "py-p", "packages/a/a-1.0.tar.gz", "fetched after the scan")
+	before := t0.AddDate(0, 0, -7)
+	for name, c := range map[string]struct {
+		docs []string
+		left string
+	}{
+		"npm-p": {[]string{"a/package.json", "b/package.json", "@s/c/package.json"}, "@s/c/-/c-1.0.0.tgz @s/c/package.json a/-/a-1.0.0.tgz a/package.json"},
+		"py-p":  {[]string{"simple/a/index", "simple/b/index"}, "packages/a/a-1.0.tar.gz simple/a/index"},
+	} {
+		res, err := h.s.Deleters.DeleteFiles(ctx, h.reg.Get(name), c.docs, before, "admin")
+		if err != nil || res.Assets != 1 {
+			t.Errorf("%s: %+v %v", name, res, err)
+		}
+		if got := h.paths(t, name); got != c.left {
+			t.Errorf("%s left %q, want %q", name, got, c.left)
+		}
 	}
 }
 

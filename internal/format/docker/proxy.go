@@ -52,17 +52,20 @@ func memberFailure(group, m *repo.Repository, err error) error {
 }
 
 // walk runs fn on the repository that answers for image in rp: rp itself,
-// or for a group its online members in order (nested groups in place,
-// offline members skipped as cargo groups do) until one answers. A hosted
-// member that has the image owns it: its not found is the group's answer,
-// so a tag or blob a later (proxy) member has under the same name never
-// stands in for an internal image (the owner rule of npm and PyPI groups).
-// A member's failure other than not found ends the walk (memberFailure).
+// or for a group its members in order (nested groups in place) until one
+// answers. A hosted member that has the image owns it: its not found is the
+// group's answer, so a tag or blob a later (proxy) member has under the same
+// name never stands in for an internal image (the owner rule of npm and PyPI
+// groups). A member's failure other than not found ends the walk
+// (memberFailure), and so does an offline member, which may own the image.
 func (h *Handler) walk(ctx context.Context, rp *repo.Repository, image string, fn func(*repo.Repository) error) error {
 	if rp.Type != "group" {
 		return fn(rp)
 	}
-	for _, m := range rp.OnlineMembers() {
+	for _, m := range rp.MemberRepos {
+		if !m.IsOnline() {
+			return repo.MemberOffline(m)
+		}
 		err := h.walk(ctx, m, image, fn)
 		if err == nil {
 			return nil
@@ -131,7 +134,7 @@ func (h *Handler) manifest(ctx context.Context, rp *repo.Repository, image, ref 
 		}
 		return proxy.Result{Asset: a}, digest, err
 	}
-	t := proxy.Target{Key: manifestKey(image, ref), Remote: upstreamPath(rp, image, "/manifests/"+ref), Header: acceptManifests, NotHTML: true, DeniedIsNotFound: true}
+	t := proxy.Target{Key: manifestKey(image, ref), Remote: upstreamPath(rp, image, "/manifests/"+ref), Header: acceptManifests, NotHTML: true, DeniedIsNotFound: true, Check: proxy.JSONDocument("schemaVersion")}
 	kind := proxy.Metadata // a tag moves: revalidated after metadataMaxAge
 	if ValidDigest(ref) {
 		t.SHA256, kind = strings.TrimPrefix(ref, "sha256:"), proxy.Content
@@ -184,7 +187,7 @@ func (h *Handler) imageTags(ctx context.Context, rp *repo.Repository, image stri
 			tags = append(tags, t.Tag)
 		}
 	} else {
-		t := proxy.Target{Key: image + "/tags/list", Remote: upstreamPath(rp, image, "/tags/list"), NotHTML: true, DeniedIsNotFound: true}
+		t := proxy.Target{Key: image + "/tags/list", Remote: upstreamPath(rp, image, "/tags/list"), NotHTML: true, DeniedIsNotFound: true, Check: proxy.JSONDocument("tags")}
 		res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 		if errors.Is(err, repo.ErrNotFound) {
 			return nil, errUnknownName(rp.Name + "/" + image)
