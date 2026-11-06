@@ -706,7 +706,7 @@ Nexus와 다른 점:
 | nuget | `asset`(.nupkg) | push와 같이 |
 | rubygems | `asset`(.gem) | gem push와 같이 |
 | helm | `asset`(차트 .tgz) | Chart.yaml의 이름·버전 |
-| yum | `directory`(선택, depth가 있으면 필요), `asset`, `asset.filename` | `<directory>/<filename>` |
+| yum | `directory`(선택, depth가 있으면 필요), `asset`, `asset.filename` | `<directory>/` 아래 헤더의 `<이름>-<버전>-<릴리스>.<아키>.rpm` |
 | r | `asset`, `asset.pathId` | `<pathId>/<파일 이름>`(예: `src/contrib`) |
 | conda(Command Center 확장) | `directory`(subdir, 예: `noarch`), `asset` | `<directory>/<파일 이름>` |
 | composer(확장) | `vendor`, `package`, `version`, `asset`(zip) | `packages/upload/<vendor>/<package>/<version>`와 같이 |
@@ -1070,7 +1070,7 @@ commandcenter config apply -config /etc/commandcenter/config.yaml -f cc.yaml -pr
 | `routingRule` | proxy | 없음 | 이 proxy에 적용할 라우팅 규칙 이름 하나. 없는 이름은 400이고 hosted·group에는 쓸 수 없습니다("라우팅 규칙" 참고). |
 | `members` | group | 필수 | 멤버 저장소 이름 목록. 순서대로 조회하며 같은 포맷이어야 하고 순환할 수 없습니다. |
 | `writeMember` | group | 없음 | 업로드를 받을 hosted 멤버(`members`에 포함되어야 함). 없으면 group에 쓰기는 405. |
-| `mergeMembers` | npm·pypi·R·Conda group | `false` | 켜면 패키지를 가진 모든 멤버의 문서를 합쳐서 답합니다(Nexus의 group 동작). 끄면(기본값) 패키지를 가진 첫 멤버만 답하므로, 공개 저장소의 같은 이름 패키지가 내부 패키지를 대신하거나 버전을 끼워 넣지 못합니다(의존성 혼동 방지). Nexus에서 옮긴 group이 hosted의 패치 버전과 공개 버전을 함께 내주던 경우에만 켜세요. |
+| `mergeMembers` | npm·pypi·R·Conda·yum group | `false` | 켜면 패키지를 가진 모든 멤버의 문서를 합쳐서 답합니다(Nexus의 group 동작). 끄면(기본값) 패키지를 가진 첫 멤버만 답하므로, 공개 저장소의 같은 이름 패키지가 내부 패키지를 대신하거나 버전을 끼워 넣지 못합니다(의존성 혼동 방지). Nexus에서 옮긴 group이 hosted의 패치 버전과 공개 버전을 함께 내주던 경우에만 켜세요. yum은 패키지가 아니라 같은 경로의 `repodata/`를 합칩니다("Yum 설정" 참고). |
 | `versionPolicy` | Maven hosted, proxy | `release`(hosted) | `release`, `snapshot`, `mixed`. Maven에서만 쓸 수 있습니다. 업로드뿐 아니라 읽기에도 적용되어, 정책에 맞지 않는 경로의 GET·HEAD는 404이고 proxy는 원격에 묻지 않습니다("Maven 클라이언트 설정"의 동작 메모 참고). |
 | `layoutPolicy` | Maven hosted, proxy | `strict` | `strict`는 Maven 경로(아티팩트, 메타데이터, 체크섬, 서명, `archetype-catalog.xml`, `.meta/prefixes.txt`)만 저장하고 가져옵니다. `permissive`는 그 밖의 경로(`KEYS`, `docs/readme.txt` 등)도 저장하거나 원격에서 가져옵니다. 어느 쪽이든 `.index/`와 `.meta/` 아래 경로는 받지 않습니다. 기존 저장소는 모두 `strict`이며 이전과 같이 동작합니다. 편집할 때 생략하면 유지합니다. Nexus 호환 API의 `maven.layoutPolicy`(`STRICT`/`PERMISSIVE`)와 같습니다. |
 | `depth` | yum hosted | `0` | `0`~`5`. `0`은 저장소 루트에 하나, `1` 이상은 그만큼 내려간 디렉터리마다("Yum 설정" 참고). |
@@ -2256,22 +2256,33 @@ repo_gpgcheck=0
 `.repo` 파일에서는 값 뒤에 주석을 붙일 수 없습니다. `gpgcheck=1  # 설명`처럼 쓰면 dnf는 명령마다 `Invalid configuration value`를 출력하고 그 값을 무시한 채 `[main]`의 값을 씁니다. 주석은 따로 한 줄로 쓰세요.
 
 ```bash
-# 올리기: 파일 PUT(curl). add 권한이 필요합니다. 파일 이름은 패키지의 <이름>-<버전>-<릴리스>.<아키>.rpm 이어야 합니다.
+# 올리기: 파일 PUT(curl). add 권한이 필요합니다. 파일 이름은 .rpm으로 끝나면 되고, 그 디렉터리에 패키지 헤더의 <이름>-<버전>-<릴리스>.<아키>.rpm 으로 저장됩니다.
 curl -u ci:<비밀번호> --upload-file demo-1.0-1.el9.x86_64.rpm http://localhost:8081/repository/yum-hosted/el9/
 # 컴포넌트 업로드 API(Nexus와 같은 필드)
 curl -u ci:<비밀번호> -F yum.directory=el9 -F yum.asset=@demo-1.0-1.el9.x86_64.rpm -F yum.asset.filename=demo-1.0-1.el9.x86_64.rpm 'http://localhost:8081/service/rest/v1/components?repository=yum-hosted'
 dnf --repo cc makecache && dnf install demo
 ```
 
-- hosted는 올린 RPM의 헤더를 읽어 name, epoch/version/release, arch, summary, description, license, url, vendor, group, buildhost, sourcerpm, provides/requires/conflicts/obsoletes, 약한 의존성(recommends/suggests/supplements/enhances), 파일 목록, 최근 changelog 10개(createrepo_c의 기본값과 같습니다)를 저장하고 `primary.xml.gz`(`checksum type="sha256" pkgid="YES"`, `header-range`), `filelists.xml.gz`, `other.xml.gz`, `repomd.xml`을 다시 만듭니다. 파일 이름이 헤더의 `<이름>-<버전>-<릴리스>.<아키>.rpm`과 다르거나, RPM이 아니거나, `repodata/` 아래이면 400입니다. 업로드 본문은 `maxUploadMiB`를 따릅니다. 첫 업로드 전에는 `repodata/repomd.xml`이 404입니다.
+- hosted는 올린 RPM의 헤더를 읽어 name, epoch/version/release, arch, summary, description, license, url, vendor, group, buildhost, sourcerpm, provides/requires/conflicts/obsoletes, 약한 의존성(recommends/suggests/supplements/enhances), 파일 목록, 최근 changelog 10개(createrepo_c의 기본값과 같습니다)를 저장하고 `primary.xml.gz`(`checksum type="sha256" pkgid="YES"`, `header-range`), `filelists.xml.gz`, `other.xml.gz`, `repomd.xml`을 다시 만듭니다. RPM이 아니거나, 이름이 `.rpm`으로 끝나지 않거나, `repodata/` 아래이면 400입니다(`repodata/comps.xml`은 아래 "패키지 그룹"을 보세요). 패키지는 요청한 디렉터리에 헤더의 `<이름>-<버전>-<릴리스>.<아키>.rpm`으로 저장하므로, Nexus 문서처럼 `…/yum-hosted/test.rpm`으로 올려도 됩니다. 다만 Nexus와 달리 `GET …/test.rpm`은 404이고, 201 응답의 `Location`이 저장된 이름을 알려 줍니다. depth와 재업로드(`writePolicy`)는 이름과 관계없이 같고, 경로로 제한한 권한(콘텐츠 셀렉터)은 요청한 경로와 저장되는 경로 모두에 적용됩니다. 업로드 본문은 `maxUploadMiB`를 따릅니다. 첫 업로드 전에는 `repodata/repomd.xml`이 404입니다.
 - `depth`(hosted 전용, 기본 0, 최대 5): `repodata/`를 두는 위치입니다(Nexus의 repodata depth). `0`이면 저장소 루트에 하나를 두고 모든 경로의 RPM을 나열합니다. `1`이면 첫 디렉터리마다(`el8/`, `el9/` …), `3`이면 세 단계 아래 디렉터리마다(`7/os/x86_64/` …) 각각 두고 그 아래 RPM만 나열합니다. depth보다 얕은 경로에는 올릴 수 없고(400) `baseurl`은 `…/yum-hosted/7/os/x86_64/`처럼 그 디렉터리까지 적습니다. `location href`는 그 디렉터리 기준 상대 경로입니다. 패키지가 있는 저장소의 depth를 높이면 그보다 얕은 경로의 패키지는 어느 `repodata/`에도 나오지 않습니다.
 - `writePolicy`: `allow_once`(기본)는 같은 패키지(이름·버전·릴리스·아키 같음) 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요, repodata도 갱신), `deny`는 읽기 전용(400)입니다.
 - `repomd.xml`은 서명하지 않으므로 클라이언트의 `.repo`에 `repo_gpgcheck=0`을 두세요. `gpgcheck=1`은 RPM 자체의 서명을 검사하므로 서명된 패키지를 올리면 그대로 동작합니다.
 - proxy의 `remote`는 미러의 URL이며 요청 경로를 그대로 원격에 붙여 캐시합니다(예: `remote: https://dl.rockylinux.org/pub/`, `baseurl=http://localhost:8081/repository/yum-proxy/rocky/9/BaseOS/x86_64/os/`). `repodata/` 아래 파일은 `metadataMaxAge`마다 다시 확인하고, RPM은 `contentMaxAge`(기본 영구)로 캐시합니다. 원격의 디렉터리 목록(HTML)은 파일로 캐시하지 않고 404로 답합니다. 내용을 바꾸지 않으므로 미러의 `repomd.xml` 서명(`repomd.xml.asc`)도 그대로 전달되어 `repo_gpgcheck=1`을 쓸 수 있습니다.
-- group은 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다. 멤버의 `repodata/`를 병합하지 않습니다(Nexus의 yum group은 같은 경로를 쓰는 멤버를 병합하므로 이 점이 다릅니다). 그래서 hosted와 proxy의 패키지를 한 `baseurl`로 합치려 하지 말고, 디렉터리(`depth`)나 저장소별로 `.repo` 항목을 나누세요. `writeMember`가 있으면 group에 올린 RPM은 그 hosted로 갑니다.
+- group은 기본으로 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다. 공개 저장소의 같은 이름 패키지가 사내 패키지를 대신하지 못하게 하려는 것입니다(의존성 혼동 방지). hosted와 proxy의 패키지를 함께 쓰려면 디렉터리(`depth`)나 저장소별로 `.repo` 항목을 나누거나 아래 `mergeMembers`를 켜세요. `writeMember`가 있으면 group에 올린 RPM은 그 hosted로 갑니다.
+- `mergeMembers: true`(group, 기본 꺼짐): 같은 경로에 `repodata/repomd.xml`이 있는 멤버들의 메타데이터를 합쳐 답하므로, `baseurl` 하나로 모든 멤버의 패키지를 보고 설치할 수 있습니다. Sonatype 문서가 설명하는 Nexus yum group의 동작이며, Nexus의 yum 코드는 공개되어 있지 않아 그 문서와 dnf의 동작에 맞췄습니다.
+  - 경로가 같아야 합칩니다. 예를 들어 `rocky/9/BaseOS/x86_64/os/`(다섯 단계)의 미러와 합치려면 hosted를 `depth: 5`로 만들어 그 디렉터리에 올립니다. 그 경로를 가진 멤버가 하나뿐이면 그 멤버의 파일을 그대로 답합니다(서명 포함).
+  - 같은 패키지(이름·아키·epoch·버전·릴리스)가 여러 멤버에 있으면 앞 멤버의 것만 싣고, 앞 멤버의 패키지와 경로가 같은 다른 패키지도 경고 로그와 함께 뺍니다. group은 그 경로를 앞 멤버에서 답하기 때문입니다. 버전이 다르면 다른 패키지이므로, 공개 저장소의 더 높은 버전이 사내 패키지를 앞지르는 것은 막지 못합니다. 필요할 때만 켜세요.
+  - `primary`, `filelists`, `other`를 합칩니다. `group`(comps), `updateinfo`, `modules`는 합치지 않고 그것을 가진 첫 멤버의 것을 그대로 싣습니다. 멤버의 sqlite(`*_db`), zchunk(`*_zck`) 같은 다른 형식은 싣지 않습니다.
+  - 합친 결과는 group 안에 저장하고, 요청마다 멤버의 `repomd.xml`을 비교해 바뀌었을 때만 다시 만듭니다. hosted의 변경은 바로, proxy의 변경은 그 proxy의 `metadataMaxAge`가 지난 뒤 보입니다. 다시 만드는 것은 경로마다 클러스터 전체에서 한 번에 하나이고, 모든 노드가 같은 결과로 답합니다. 경로마다 현재와 직전 결과를 기본 blob store에 둡니다.
+  - 패키지 하나씩 스트리밍으로 합치므로 메모리를 거의 쓰지 않습니다(128 MiB 컨테이너에서 패키지 10만 개, 압축을 풀면 782 MiB: 약 10초, 서버 RSS 최고 45 MiB. Rocky 9 BaseOS: 약 7초). 처음 합칠 때는 proxy가 메타데이터를 받는 시간이 더해져 큰 저장소는 1분 넘게 걸리기도 합니다. dnf는 `timeout`(기본 30초) 동안 응답이 없으면 네 번까지 시도하고 실패하는데, 합치는 작업은 계속되므로 잠시 뒤 다시 실행하면 됩니다. 이전 결과가 있으면 최대 10초만 기다린 뒤 이전 결과를 `Warning: 110`과 함께 답합니다.
+  - 일부만 담긴 색인은 내주지 않습니다. 멤버가 실패하거나(원격 장애에 캐시도 없음, 원격의 거부) 읽을 수 없는 메타데이터이면 합치기가 실패하고 로그(`yum group merge failed`)에 이유를 남기며, 이전 결과를 `Warning: 110`과 함께 답하고 없으면 502로 답합니다. 실패하면 1분 동안 다시 시도하지 않습니다. 압축은 gzip, bzip2, xz, zstd와 무압축을 읽습니다. 압축 창이 8 MiB를 넘는 파일(`xz -7` 이상, `zstd --long`)은 읽지 않습니다. Offline 멤버는 없는 것으로 칩니다. S3처럼 없는 파일에 403으로 답하는 원격은 실패로 보므로, 그 멤버에 없는 경로는 라우팅 규칙으로 빼 주세요.
+  - 패키지 `location`의 `xml:base`는 지웁니다(경고 로그. 파일은 그 멤버의 같은 경로에서 찾습니다). 절대 URL이거나 저장소 밖을 가리키는 `href`는 합치기 실패입니다. 앞 멤버가 색인에 없는 파일을 같은 경로에 가지고 있으면 dnf의 체크섬 검사가 실패합니다(다른 파일이 설치되지는 않습니다).
+  - 멤버의 서명은 합친 `repomd.xml`에 맞지 않으므로 `repomd.xml.asc`는 404입니다. 합친 경로에는 `repo_gpgcheck=0`을 쓰세요. 다른 패키지의 RPM 서명(`gpgcheck=1`)은 그대로 동작합니다.
+  - 이 설정은 요청받은 group의 것을 봅니다. 안에 넣은 group은 그 멤버들로 펼쳐지고, 합치지 않는 group 안에 넣은 합치는 group은 바깥 group의 규칙을 따릅니다.
 - 컴포넌트는 디렉터리를 포함한 이름(`el9/x/demo`)과 `<버전>-<릴리스>.<아키>`(`1.0-1.el9.x86_64`)로 나타나며, 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: yum`, hosted·proxy 모두)으로 하고 지우면 `repodata/`가 바로 갱신됩니다. 역할 권한 대상으로 `format:yum`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 summary·description, license, url, requires/provides를 보여 줍니다.
 - 이전 버전에서 올린 패키지는 약한 의존성 없이 저장되어 있습니다. `repository.rebuild-metadata` 작업을 실행하면 저장된 RPM을 다시 읽어 채웁니다.
-- Nexus와 다른 점: 파일 이름은 패키지의 NVRA여야 합니다(Nexus 문서의 `…/yum-hosted/test.rpm`은 400입니다). `repodata/comps.xml` 업로드(패키지 그룹)는 받지 않습니다(400). `deployPolicy: PERMISSIVE`여도 RPM이 아닌 파일은 올릴 수 없습니다. RPM 경로로 보내는 HTTP `DELETE`는 405이므로 컴포넌트 삭제 API를 쓰세요. proxy는 `repodata/`를 바꾸지 않으므로 원격 메타데이터의 절대 URL(`xml:base`)도 그대로 전달됩니다.
+- 패키지 그룹(`dnf group list`, `dnf group install`): `repodata/comps.xml`이나 `repodata/comps.xml.gz`를 정확히 그 이름으로 올리면 `repomd.xml`에 `group`, `group_gz`로 실립니다(`curl -u ci:<비밀번호> --upload-file comps.xml http://localhost:8081/repository/yum-hosted/repodata/comps.xml`). depth가 있으면 그 깊이의 디렉터리에 있는 `repodata/`에 올립니다(`…/el9/repodata/comps.xml`). 그 밖의 위치나 최상위 요소가 `<comps>`가 아닌 파일은 400입니다. 두 번째 업로드는 패키지처럼 `writePolicy`를 따릅니다. 지우려면 `DELETE …/repodata/comps.xml` 또는 `DELETE /service/rest/v1/assets/{id}`를 쓰고(delete 권한), 지우면 `repomd.xml`에서도 빠집니다. 컴포넌트가 아니므로 Cleanup 대상이 아니고, `repository.rebuild-metadata`와 저장소 내보내기·가져오기에서 유지됩니다.
+- Nexus와 다른 점: 다른 이름으로 올린 패키지는 그 경로가 아니라 NVRA 이름으로 저장됩니다(위 참고). `deployPolicy: PERMISSIVE`여도 RPM과 `repodata/comps.xml`(`.gz`)이 아닌 파일은 올릴 수 없습니다. RPM 경로로 보내는 HTTP `DELETE`는 405이므로 컴포넌트 삭제 API를 쓰세요. group의 병합은 `mergeMembers`로 켜야 합니다. proxy는 `repodata/`를 바꾸지 않으므로 원격 메타데이터의 절대 URL(`xml:base`)도 그대로 전달됩니다(`mergeMembers`로 합친 색인에서는 지웁니다).
 
 ### Conda 설정
 

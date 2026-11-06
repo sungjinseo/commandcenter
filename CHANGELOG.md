@@ -132,6 +132,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `strictContentTypeValidation` on a proxy: a remote file whose first bytes contradict its name is not
   cached and answers 404.
 - Built-in privilege `nx-usertoken-current`.
+- Yum: `mergeMembers` on a group: `repodata/repomd.xml` describes the merged metadata of the members
+  that have it at that path, so that one `baseurl` shows and installs the packages of all of them,
+  a proxy's too, the first member keeping a package and a path. Without the setting nothing changes.
+  The merge streams (100,000 packages in a 128 MiB server: about 10 s, 45 MiB RSS), is made once across
+  the nodes and again when a member's `repomd.xml` changes. A member that fails or cannot be read
+  fails it: the previous merge with a `Warning`, or a 502, never a partial index.
+- Yum: package groups. `repodata/comps.xml` or `comps.xml.gz` is taken by PUT and listed in `repomd.xml`
+  for `dnf group list` and `dnf group install`; `DELETE` of that path or the asset API removes it.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -216,6 +224,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lifecycle rule (it was dropped and answered -1).
 - `import-nexus -config` carries `strictContentTypeValidation` of proxies, a blob store group's soft
   quota and `userSubtree: false`.
+- Yum: a PUT or component upload under a name other than the package's, as Nexus documents with
+  `.../yum-hosted/test.rpm`, is accepted (was 400). The package is stored in that directory under its
+  own name, which the 201's `Location` gives; a GET of the name uploaded to is a 404.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -374,6 +385,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`strictContentTypeValidation: true` on a proxy now acts** on the next PUT that sends it, and scripts and provider configurations usually send `true`. A remote that serves another type under a known extension (a `.jar` that is not a zip) then answers 404 and is not cached. Stored proxies have it off.
 - A PUT on `/blobstores/group/{name}` without `softQuota` removes a quota set in the web UI.
 - `import-nexus -config` run again against a Nexus with `userSubtree: false` says `differs: userOneLevel`; `-update` sets it. Until then the target searches the whole subtree, as it always did.
+- A script that relied on the 400 for a wrong file name now gets a 201.
+- Turn `mergeMembers` on a yum group only once every node runs this version: an older node refuses the definition or, if it
+  loads it, answers from the first member.
+- A merging group stores up to two generations of merged metadata per path in the default blob store. A path that stops merging
+  keeps its copies until the group is deleted.
+- A proxy member now downloads filelists and other too, which dnf alone rarely asks for (Rocky 9: 30 MiB more per metadata
+  change). Old hash-named repodata files stay in a proxy's cache as before; nothing in cleanup removes them (not changed here).
+- The proxied metadata age now decides how fresh the merge is: `metadataMaxAge` of the proxy, 24 h by default.
 
 ## [0.4.0] - 2026-11-05
 
