@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"sort"
 	"strings"
@@ -284,6 +286,19 @@ func (s *Snapshot) User(id string) (meta.User, bool) {
 		u.PasswordHash = ""
 	}
 	return u, ok
+}
+
+// PasswordStamp is a digest of local user id's stored password hash, ""
+// when there is none: a value a long-lived token can carry to end when the
+// password changes. It tells nothing about the password (the hash it is
+// made from is salted), and the hash itself stays here.
+func (s *Snapshot) PasswordStamp(id string) string {
+	u, ok := s.users[id]
+	if !ok || u.PasswordHash == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(u.PasswordHash))
+	return hex.EncodeToString(sum[:8])
 }
 
 // Roles returns copies of every role, ordered by id.

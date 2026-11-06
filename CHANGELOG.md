@@ -50,6 +50,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (terraform, tofu), `huggingface-smoke.sh` (huggingface_hub, transformers), `swift-smoke.sh` (SwiftPM).
 - Yum: a repodata depth up to 5 as in Nexus (`depth`, `yum.repodataDepth`), for layouts like
   `7/os/x86_64/`.
+- Real-client smoke tests for R, Conan and Conda: `test/smoke/r-smoke.sh` (R, remotes, renv, pak),
+  `test/smoke/conan-smoke.sh` (Conan 2 and Conan 1) and `test/smoke/conda-smoke.sh` (micromamba, conda).
+- R hosted repositories take a package in any directory at least two levels deep, as Nexus does, each with its own
+  index files: `src/contrib/Archive/<pkg>/`, `prod/src/contrib/`, a binary layout of your own. The file must still be
+  `<Package>_<Version>`; `.zip` goes under `bin/windows` and `.tgz` under `bin/macosx`.
+- `repository.rebuild-metadata` rebuilds the index files of R hosted repositories.
+- A conda proxy lets a channel's `index.html` pages through, as metadata.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -58,6 +65,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with script creation turned off and say why there is no script API (200 `[]`, 410, 404), instead of a bare
   404 `not found`; anonymous callers get 401. nexus3-cli's repository and file commands, which need that API,
   now fail with this message.
+- An R group lists a package name once per directory, from the first member that has it, with all the versions that
+  member lists. A newer public version no longer beats an internal package of the same name, in the source index or
+  in a binary one. A failing member is left out only when no later member answers.
+- Conan login tokens last a year instead of an hour, so CI that logged in once keeps working. A changed password ends
+  a local user's tokens; a disabled or deleted user is refused at once.
+- An R proxy treats only package archives as content; every other file is re-checked every `metadataMaxAge`.
+- A conda group lists a package name from the first member that has it, in any subdir, with all the
+  builds that member lists, so a newer public build no longer beats an internal package of the same
+  name. The key `mergeMembers` lists every member's builds again; it also lists every member's
+  versions in an R group. A failing member is left out only when no later member answers.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -91,6 +108,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Hugging Face: Xet tokens are no longer passed through and cached: any reader could get one made for
   the `remoteAuth` account.
 - Swift: SwiftPM on Linux no longer hangs without or with wrong credentials: it gets a Bearer challenge.
+- Conan 2 could not log in: `v2/users/authenticate`, `v2/users/check_credentials` and `v2/ping` answered 404.
+- `conan search <ref> -q` of Conan 1 with revisions failed: `v2/conans/<ref>/search` answered 404.
+- A conda group hid its hosted packages from micromamba and conda, which read sharded repodata first and got only a
+  proxy member's. A group now answers only its merged `repodata.json`.
+- Conda packages of a channel below a proxy's root (`<repo>/conda-forge/...`) were not components, so search, cleanup
+  and purge-unused skipped them and the cache only grew.
+- An R group left out a member whose remote has only `PACKAGES.gz`, such as a Nexus hosted repository.
+- R packages a proxy caches outside CRAN's directories were not components.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -101,6 +126,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Hugging Face: tree listings are cached under a new key, so each is fetched once more; the old copies stay
   until the repository is deleted. A proxy cut off from the Hub cannot serve a listing cached only before
   the upgrade. Listings of more than 1000 files need `baseURL` to be what clients open.
+- **R groups list less.** An internal package now hides every public version of that name, including public binaries.
+  A client that was getting the public version of a colliding name now gets the internal one: that is the point of the
+  fix, but check for accidental collisions. The merge is redone once on the first read after the upgrade.
+- **R proxies** re-check every file that is not an archive each `metadataMaxAge`. Conditional requests only.
+- **Cleanup on proxies:** cached R packages outside CRAN's directories and conda packages below a channel were
+  invisible and now count as components, so an existing policy can select them. They are fetched again on demand.
+- **Conan tokens:** tokens issued before the upgrade keep working until their hour ends; new ones last a year. In a
+  mixed cluster an old node accepts new tokens and ignores `pwd`.
+- **HA:** nothing new is shared. Tokens stay signed and stateless, `PasswordStamp` reads the node's snapshot, which user
+  changes already refresh; merges are stored by fingerprint as before.
+- **Conda groups list less.** An internal package now hides every public build of that name. A client
+  that was getting a public build of a colliding name now gets the internal one, or none on a platform
+  the internal package does not have. Set `mergeMembers: true` on the group to keep the old merge.
 
 ## [0.4.0] - 2026-11-05
 

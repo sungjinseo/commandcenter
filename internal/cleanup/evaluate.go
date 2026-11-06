@@ -411,8 +411,8 @@ func namePrefix(format, p, group, name string) string {
 		return homePrefix(format, p)
 	case "helm", "yum": // <name>-<version>..., the yum name directory-qualified
 		return name + "-"
-	case "conda":
-		return group + "/" + name + "-"
+	case "conda": // <subdir>/<name>-, below the channel when the remote holds several
+		return p[:strings.LastIndexByte(p, '/')+1] + name + "-"
 	case "r":
 		return group + "/" + name + "_"
 	case "apt":

@@ -636,9 +636,9 @@ func TestAptSettings(t *testing.T) {
 	}
 }
 
-// mergeMembers is a setting of npm and PyPI groups only.
+// mergeMembers is a setting of the groups that would merge by package name.
 func TestValidateDefinitionMergeMembers(t *testing.T) {
-	const want = "mergeMembers is only valid for npm and pypi groups"
+	const want = "mergeMembers is only valid for npm, pypi, r and conda groups"
 	for _, r := range []Repository{
 		{Name: "a", Format: "npm", Type: "hosted", MergeMembers: true},
 		{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, MergeMembers: true},
@@ -647,7 +647,7 @@ func TestValidateDefinitionMergeMembers(t *testing.T) {
 			t.Errorf("%s %s: %v", r.Format, r.Type, err)
 		}
 	}
-	for _, format := range []string{"npm", "pypi"} {
+	for _, format := range []string{"npm", "pypi", "r", "conda"} {
 		if err := ValidateDefinition(Repository{Name: "g", Format: format, Type: "group", Members: []string{"h"}, MergeMembers: true}); err != nil {
 			t.Errorf("%s group: %v", format, err)
 		}

@@ -716,8 +716,8 @@ func ValidateDefinition(r Repository) error {
 	if r.Distribution != "" && (r.Format != "apt" || r.Type == "group") {
 		errs = append(errs, fmt.Errorf("repository %q: distribution is only valid for apt hosted and proxy repositories", r.Name))
 	}
-	if r.MergeMembers && (r.Type != "group" || r.Format != "npm" && r.Format != "pypi") {
-		errs = append(errs, fmt.Errorf("repository %q: mergeMembers is only valid for npm and pypi groups", r.Name))
+	if r.MergeMembers && (r.Type != "group" || !slices.Contains([]string{"npm", "pypi", "r", "conda"}, r.Format)) {
+		errs = append(errs, fmt.Errorf("repository %q: mergeMembers is only valid for npm, pypi, r and conda groups", r.Name))
 	}
 	if (r.Flat || r.EnforceDistribution) && (r.Format != "apt" || r.Type != "proxy") {
 		errs = append(errs, fmt.Errorf("repository %q: flat and enforceDistribution are only valid for apt proxy repositories", r.Name))

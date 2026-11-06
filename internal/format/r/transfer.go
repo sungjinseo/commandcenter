@@ -17,9 +17,10 @@ func (h *Handler) LockPaths(ctx context.Context, rp *repo.Repository, _ []string
 	return h.Store.Lock(ctx, "r\x00"+rp.Name)
 }
 
-// RebuildMetadata regenerates the PACKAGES files of every contrib directory
-// of hosted rp that holds packages, from its rows, under the repository's
-// lock (repo.MetadataRebuilder; repository import uses it).
+// RebuildMetadata regenerates the PACKAGES files of every directory of
+// hosted rp that holds packages, from its rows, under the repository's lock
+// (repo.MetadataRebuilder; the repository.rebuild-metadata task and
+// repository import use it).
 func (h *Handler) RebuildMetadata(ctx context.Context, rp *repo.Repository, logf func(string, ...any)) error {
 	if rp.Format != "r" || rp.Type != "hosted" {
 		return fmt.Errorf("rebuild metadata of %s %s repository %q: %w", rp.Format, rp.Type, rp.Name, component.ErrNotSupported)
@@ -35,7 +36,7 @@ func (h *Handler) RebuildMetadata(ctx context.Context, rp *repo.Repository, logf
 			return err
 		}
 		dirs := map[string]bool{}
-		for _, n := range names { // <contrib dir>/<pkg>
+		for _, n := range names { // <dir>/<pkg>
 			if i := strings.LastIndexByte(n, '/'); i > 0 {
 				dirs[n[:i]] = true
 			}

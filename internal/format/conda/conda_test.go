@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -353,9 +354,18 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 	case "/linux-64/repodata.json", "/linux-64/current_repodata.json":
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, upRepodata)
-	case "/linux-64/repodata.json.zst":
+	case "/linux-64/repodata.json.zst", "/linux-64/repodata_shards.msgpack.zst":
 		w.Header().Set("Content-Type", "application/octet-stream")
 		io.WriteString(w, "ZSTD")
+	case "/linux-64/index.html", "/index.html": // the pages a channel has for people
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, "<html>channel</html>")
+	case "/main/noarch/below-1.0-py_0.conda", "/main/noarch/below-1.0-py_0.tar.bz2", "/main/linux-64/below-2.0-0.conda", "/conda-forge/label/rc/noarch/rc-1.0-0.conda":
+		w.Header().Set("Content-Type", "application/octet-stream")
+		io.WriteString(w, "pkg")
+	case "/main/noarch/repodata.json":
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"info":{"subdir":"noarch"},"packages":{},"packages.conda":{"below-1.0-py_0.conda":{"name":"below"}},"removed":[],"repodata_version":1}`)
 	case "/channeldata.json":
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, upChanneldata)
@@ -651,11 +661,121 @@ func TestProxyAndGroup(t *testing.T) {
 	e.get(t, "conda-all", "linux-64/repodata.json.zst", 404)
 	e.get(t, "conda-all", "linux-64/repodata.json.bz2", 404)
 	e.get(t, "conda-all", "linux-64/repodata.jlap", 404)
+	// nor the shards micromamba asks for first: answered by the proxy alone,
+	// they would hide every hosted package
+	if got := e.get(t, "conda-proxy", "linux-64/repodata_shards.msgpack.zst", 200); got != "ZSTD" {
+		t.Fatalf("shards through the proxy: %s", got)
+	}
+	e.get(t, "conda-all", "linux-64/repodata_shards.msgpack.zst", 404)
+	if w := e.do("HEAD", "conda-all", "linux-64/repodata_shards.msgpack.zst", nil); w.Code != 404 {
+		t.Fatalf("HEAD shards: %d", w.Code)
+	}
 	// a subdir no member has: an empty document, as a hosted channel answers
 	if got := e.get(t, "conda-all", "osx-arm64/repodata.json", 200); got != `{"info":{"subdir":"osx-arm64"},"packages":{},"packages.conda":{},"removed":[],"repodata_version":1}` {
 		t.Fatalf("group empty: %s", got)
 	}
 	e.get(t, "conda-all", "osx-arm64/nope-1.0-0.conda", 404)
+}
+
+// TestChannelBelowRoot: a proxy whose remote holds several channels serves
+// <channel>/<subdir>/<file>, and those packages are components as at the
+// root: the subdir is the group and the channel stays in the path, so
+// search, cleanup and purge-unused see them and the proxy deleter removes
+// them. A hosted channel keeps its root: an upload below it is refused.
+func TestChannelBelowRoot(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	for _, p := range []string{"main/noarch/below-1.0-py_0.conda", "main/noarch/below-1.0-py_0.tar.bz2", "main/linux-64/below-2.0-0.conda", "conda-forge/label/rc/noarch/rc-1.0-0.conda"} {
+		if w := e.do("GET", "conda-proxy", p, nil); w.Code != 200 || w.Body.String() != "pkg" {
+			t.Fatalf("GET %s: %d", p, w.Code)
+		}
+	}
+	e.get(t, "conda-proxy", "main/noarch/repodata.json", 200)
+	for p, want := range map[string][3]string{
+		"main/noarch/below-1.0-py_0.conda":           {"noarch", "below", "1.0-py_0"},
+		"main/linux-64/below-2.0-0.conda":            {"linux-64", "below", "2.0-0"},
+		"conda-forge/label/rc/noarch/rc-1.0-0.conda": {"noarch", "rc", "1.0-0"},
+	} {
+		if g, n, v, ok := component.DeriveAsset("conda", p); !ok || g != want[0] || n != want[1] || v != want[2] {
+			t.Errorf("derive %s: %q %q %q %v", p, g, n, v, ok)
+		}
+	}
+	e.now = e.now.Add(48 * time.Hour)
+	ev := &cleanup.Evaluator{DB: e.db, Now: func() time.Time { return e.now }}
+	pol := cleanup.Policy{Name: "p", Format: "conda", Criteria: cleanup.Criteria{ComponentAgeDays: 1}}
+	cands, _, _, _, err := ev.Evaluate(ctx, e.repos["conda-proxy"], pol, cleanup.DefaultScanBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var labels []string
+	for _, c := range cands {
+		labels = append(labels, c.Label())
+	}
+	if strings.Join(labels, " ") != "linux-64/below@2.0-0 noarch/below@1.0-py_0 noarch/rc@1.0-0" { // the documents are not components
+		t.Fatalf("candidates: %v", labels)
+	}
+	// retain counts the versions of a name: the scan sees the name's prefix below the channel
+	keep := cleanup.Policy{Name: "keep", Format: "conda", Criteria: cleanup.Criteria{ComponentAgeDays: 1, Retain: 1}}
+	if cands2, _, _, _, err := ev.Evaluate(ctx, e.repos["conda-proxy"], keep, cleanup.DefaultScanBudget); err != nil || len(cands2) != 0 {
+		t.Fatalf("retain: %+v %v", cands2, err)
+	}
+	// purge-unused: a package downloaded long ago is selected, one never downloaded stays
+	if err := e.db.FlushDownloads(ctx, []meta.DownloadDelta{{Repo: "conda-proxy", Path: "main/linux-64/below-2.0-0.conda", N: 1, Last: e.now.Add(-24 * time.Hour)}}); err != nil {
+		t.Fatal(err)
+	}
+	unused := cleanup.Policy{Name: "unused", Format: "conda", Criteria: cleanup.Criteria{LastDownloadedDays: 1}, DownloadedOnly: true}
+	e.now = e.now.Add(48 * time.Hour)
+	used, _, _, _, err := ev.Evaluate(ctx, e.repos["conda-proxy"], unused, cleanup.DefaultScanBudget)
+	if err != nil || len(used) != 1 || used[0].Label() != "linux-64/below@2.0-0" {
+		t.Fatalf("purge-unused: %+v %v", used, err)
+	}
+	// the proxy deleter removes a build's two files; the next read fetches them again
+	var below component.Component
+	for _, c := range cands {
+		if c.Label() == "noarch/below@1.0-py_0" {
+			below = c.Component
+		}
+	}
+	if len(below.Assets) != 2 {
+		t.Fatalf("assets: %+v", below.Assets)
+	}
+	del := &cleanup.ProxyDeleter{Store: e.h.Store}
+	if res, err := del.DeleteComponent(ctx, e.repos["conda-proxy"], below, "system"); err != nil || res.Assets != 2 {
+		t.Fatalf("delete: %+v %v", res, err)
+	}
+	if _, err := e.h.Store.Get(ctx, "conda-proxy", "main/noarch/below-1.0-py_0.conda"); !errors.Is(err, repo.ErrNotFound) {
+		t.Fatalf("after delete: %v", err)
+	}
+	if _, err := e.h.Store.Get(ctx, "conda-proxy", "main/linux-64/below-2.0-0.conda"); err != nil {
+		t.Fatalf("the other subdir: %v", err)
+	}
+	// a hosted channel is the repository root
+	if w := e.do("PUT", "conda-hosted", "main/noarch/foo-1.0-py_0.conda", condaFile("foo-1.0-py_0")); w.Code != 400 {
+		t.Errorf("upload below the root: %d %s", w.Code, w.Body)
+	}
+}
+
+// TestIndexHTML: the proxy lets a channel's index.html pages through as
+// metadata; any other web page of the remote stays a miss.
+func TestIndexHTML(t *testing.T) {
+	e := newEnv(t)
+	for _, p := range []string{"linux-64/index.html", "index.html"} {
+		w := e.do("GET", "conda-proxy", p, nil)
+		if w.Code != 200 || w.Body.String() != "<html>channel</html>" || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {
+			t.Errorf("%s: %d %v %s", p, w.Code, w.Header(), w.Body)
+		}
+	}
+	hits := e.hits.Load()
+	e.do("GET", "conda-proxy", "linux-64/index.html", nil)
+	if e.hits.Load() != hits {
+		t.Error("index.html was not cached")
+	}
+	e.now = e.now.Add(2 * time.Hour)
+	e.do("GET", "conda-proxy", "linux-64/index.html", nil)
+	if e.hits.Load() != hits+1 {
+		t.Error("index.html is not metadata")
+	}
+	e.get(t, "conda-proxy", "linux-64/", 404)
 }
 
 func TestCleanupAndDelete(t *testing.T) {
@@ -746,5 +866,73 @@ func TestCondaZipDirectoryBounded(t *testing.T) {
 	_, _, err := readConda(bytes.NewReader(buf.Bytes()), int64(buf.Len()), "x-1-0")
 	if err == nil || !strings.Contains(err.Error(), "entries") {
 		t.Fatalf("err %v", err)
+	}
+}
+
+// A package name belongs to the first member that has it, in any subdir: a
+// newer public build never beats an internal package.
+func TestGroupFirstMember(t *testing.T) {
+	e := newEnv(t)
+	hasEntry := func(doc, file string) bool { return strings.Contains(doc, `"`+file+`":`) }
+	// nothing hosted yet: the proxy's document as it is
+	got := e.get(t, "conda-all", "linux-64/repodata.json", 200)
+	if got != upRepodata {
+		t.Fatalf("one member: %s", got)
+	}
+	// hosted has up in noarch only: the proxy's linux-64 builds of it go
+	// (a client reads both subdirs), the proxy's dup stays
+	if w := e.do("PUT", "conda-hosted", "noarch/up-0.1-0.conda", condaFile("up-0.1-0")); w.Code != 201 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body)
+	}
+	got = e.get(t, "conda-all", "linux-64/repodata.json", 200)
+	if hasEntry(got, "up-1.0-0.tar.bz2") || hasEntry(got, "up-2.0-0.conda") || !hasEntry(got, "dup-1.0-0.conda") {
+		t.Fatalf("up is hosted's: %s", got)
+	}
+	// stays hidden when a client asks again, and a later member's build of another name stays visible
+	if again := e.get(t, "conda-all", "linux-64/repodata.json", 200); again != got {
+		t.Fatalf("again: %s", again)
+	}
+	// hosted has every build it lists, whatever the proxy has
+	if w := e.do("PUT", "conda-hosted", "linux-64/dup-0.1-0.conda", condaFile("dup-0.1-0")); w.Code != 201 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body)
+	}
+	got = e.get(t, "conda-all", "linux-64/repodata.json", 200)
+	if !hasEntry(got, "dup-0.1-0.conda") || hasEntry(got, "dup-1.0-0.conda") {
+		t.Fatalf("dup is hosted's: %s", got)
+	}
+	var parsed repodata
+	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
+		t.Fatalf("not valid: %v", err)
+	}
+	// the setting lists every member's files again, without waiting for a change
+	g := e.repos["conda-all"]
+	g.MergeMembers = true
+	got = e.get(t, "conda-all", "linux-64/repodata.json", 200)
+	if !hasEntry(got, "dup-0.1-0.conda") || !hasEntry(got, "dup-1.0-0.conda") || !hasEntry(got, "up-2.0-0.conda") {
+		t.Fatalf("mergeMembers: %s", got)
+	}
+	g.MergeMembers = false
+	got = e.get(t, "conda-all", "linux-64/repodata.json", 200)
+	if hasEntry(got, "up-2.0-0.conda") {
+		t.Fatalf("back to the first member: %s", got)
+	}
+	// a failing member ahead of an answering one is an error: a public
+	// member never stands in for an internal one
+	broken := *e.repos["conda-proxy"]
+	broken.Name = "conda-broken"
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer dead.Close()
+	broken.RemoteURL, _ = url.Parse(dead.URL + "/")
+	broken.Remote = dead.URL + "/"
+	g.MemberRepos = []*repo.Repository{&broken, e.repos["conda-proxy"]}
+	if w := e.do("GET", "conda-all", "linux-64/repodata.json", nil); w.Code < 500 {
+		t.Fatalf("failing first member: %d %s", w.Code, w.Body)
+	}
+	// behind every answering member it is left out
+	g.MemberRepos = []*repo.Repository{e.repos["conda-proxy"], &broken}
+	if w := e.do("GET", "conda-all", "linux-64/repodata.json", nil); w.Code != 200 {
+		t.Fatalf("failing last member: %d %s", w.Code, w.Body)
 	}
 }

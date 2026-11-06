@@ -25,13 +25,15 @@ const (
 	maxDescription = 1 << 20
 	// maxDoc bounds a member PACKAGES a group merge reads (CRAN's is ~10 MB).
 	maxDoc = 1 << 28
+	// uploadForm is the message of an upload path that cannot be a package.
+	uploadForm = "upload <directory>/<directory>/<pkg>_<version>.tar.gz (.zip under bin/windows, .tgz under bin/macosx), not %s"
 )
 
 // row is a hosted package's row (Attrs): its path, the fields of its
 // DESCRIPTION in order, and the file's sums.
 type row struct {
 	File   string      `json:"file"` // <dir>/<pkg>_<version><ext>
-	Dir    string      `json:"dir"`  // the contrib directory, the component's group
+	Dir    string      `json:"dir"`  // the directory, the component's group
 	Fields [][2]string `json:"fields"`
 	MD5    string      `json:"md5"`
 	SHA256 string      `json:"sha256"`
@@ -110,7 +112,7 @@ func parseDCF(b []byte) ([][2]string, error) {
 func parse(f blob.File, sums blob.Sums, p string) (row, error) {
 	dir, name, version, ok := component.SplitR(p)
 	if !ok {
-		return row{}, badPackage("upload <contrib dir>/<pkg>_<version>.tar.gz (.zip under bin/windows, .tgz under bin/macosx), not %s", p)
+		return row{}, badPackage(uploadForm, p)
 	}
 	var (
 		b   []byte

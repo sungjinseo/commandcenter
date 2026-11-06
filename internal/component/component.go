@@ -375,8 +375,8 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "composer":
 		name, version, ok = SplitComposer(p)
 		return "", name, version, ok
-	case "conda": // <subdir>/<name>-<version>-<build>.tar.bz2 or .conda: the subdir is the group
-		return SplitConda(p)
+	case "conda": // [<channel>/]<subdir>/<name>-<version>-<build>.tar.bz2 or .conda: the subdir is the group
+		return SplitConda(condaTail(p))
 	case "rubygems": // gems/<name>-<version>[-<platform>].gem, hosted and proxy alike
 		rest, cut := strings.CutPrefix(p, "gems/")
 		file, isGem := strings.CutSuffix(rest, ".gem")
@@ -388,7 +388,7 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "gitlfs": // objects/<aa>/<bb>/<oid>: the object is a component named by its oid, without a version
 		name, ok = SplitLFS(p)
 		return "", name, "", ok
-	case "r": // <contrib dir>/<pkg>_<version>.tar.gz (.zip, .tgz): the contrib dir is the group
+	case "r": // <dir>/<pkg>_<version>.tar.gz (.zip, .tgz): the directory is the group
 		return SplitR(p)
 	case "conan": // v2/conans/<name>/<version>/<user>/<channel>/revisions/<rrev>/...: user/channel is the group
 		return SplitConan(p)
@@ -545,39 +545,35 @@ func SplitLFS(p string) (oid string, ok bool) {
 	return oid, segs[1] == oid[:2] && segs[2] == oid[2:4]
 }
 
-// R repositories (CRAN layout). rContribRE is a contrib directory, the
-// unit an R client reads PACKAGES from: src/contrib for sources,
-// bin/windows/contrib/<R.x> and bin/macosx[/<build>]/contrib/<R.x> for
-// binaries. rArchiveRE is CRAN's src/contrib/Archive/<pkg>, old sources a
-// proxy passes through.
+// R repositories. A package's directory is what an R client reads PACKAGES
+// from: CRAN's src/contrib, bin/windows/contrib/<R.x>,
+// bin/macosx[/<build>]/contrib/<R.x> and src/contrib/Archive/<pkg>, the same
+// below a prefix (prod/src/contrib), or a layout of its own (a proxied
+// Posit __linux__/<distro>/latest/src/contrib, a hosted bin/linux/<distro>).
 var (
-	rContribRE = regexp.MustCompile(`^(src/contrib|bin/windows/contrib/[0-9]+\.[0-9]+|bin/macosx(/[a-z0-9_.-]+)?/contrib/[0-9]+\.[0-9]+)$`)
-	rArchiveRE = regexp.MustCompile(`^src/contrib/Archive/[A-Za-z][A-Za-z0-9.]*$`)
 	rNameRE    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]$`) // "Writing R Extensions" 1.1.1
 	rVersionRE = regexp.MustCompile(`^[0-9]+([.-][0-9]+)+$`)
 )
 
-// RContribDir reports whether dir is a contrib directory of an R
-// repository (one with its own PACKAGES files).
-func RContribDir(dir string) bool { return rContribRE.MatchString(dir) }
-
-// RExt is the archive extension of the packages in dir: .zip under
-// bin/windows, .tgz under bin/macosx, .tar.gz for sources.
+// RExt is the archive extension of the packages in dir: .zip under a
+// bin/windows directory, .tgz under a bin/macosx one, otherwise .tar.gz
+// (sources and Linux binaries). ponytail: the directory decides, because a
+// packages row (PackageComponent) has no room for the extension; a .zip or
+// .tgz in another directory is refused, which Nexus takes.
 func RExt(dir string) string {
-	switch {
-	case strings.HasPrefix(dir, "bin/windows/"):
+	switch d := "/" + dir + "/"; {
+	case strings.Contains(d, "/bin/windows/"):
 		return ".zip"
-	case strings.HasPrefix(dir, "bin/"):
+	case strings.Contains(d, "/bin/macosx/"):
 		return ".tgz"
 	}
 	return ".tar.gz"
 }
 
-// SplitR splits the path of an R package, <dir>/<pkg>_<version><ext>
-// where dir is a contrib directory (RContribDir) or an Archive directory
-// and ext the directory's (RExt), into its component: the directory is
-// the group, so a package built for several R versions is one component
-// per directory. Package names never hold "_". PACKAGES files are not
+// SplitR splits the path of an R package, <dir>/<pkg>_<version><ext> with
+// ext the directory's (RExt), into its component: the directory is the
+// group, so a package built for several R versions is one component per
+// directory. Package names never hold "_". PACKAGES files are not
 // components.
 func SplitR(p string) (dir, name, version string, ok bool) {
 	i := strings.LastIndexByte(p, '/')
@@ -585,9 +581,6 @@ func SplitR(p string) (dir, name, version string, ok bool) {
 		return "", "", "", false
 	}
 	dir, file := p[:i], p[i+1:]
-	if !rContribRE.MatchString(dir) && !rArchiveRE.MatchString(dir) {
-		return "", "", "", false
-	}
 	stem, cut := strings.CutSuffix(file, RExt(dir))
 	if !cut {
 		return "", "", "", false
@@ -627,6 +620,17 @@ func SplitConda(p string) (subdir, name, version string, ok bool) {
 		return "", "", "", false
 	}
 	return subdir, stem[:j], stem[j+1:], true
+}
+
+// condaTail is the <subdir>/<file> of a cached path: a proxy whose remote
+// holds several channels (https://conda.anaconda.org/) has packages at
+// <channel>/<subdir>/<file>, any number of segments deep, and the channel
+// stays in the asset's path only. A hosted channel is the repository root.
+func condaTail(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i > 0 {
+		return p[strings.LastIndexByte(p[:i], '/')+1:]
+	}
+	return p
 }
 
 // SplitRPM splits an RPM path, <dir>/<name>-<version>-<release>.<arch>.rpm,
@@ -731,7 +735,7 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, version, ""
 	case "rubygems": // the version holds the platform (1.0.0-java), as the file name does
 		return "", name, version, "gems/" + name + "-" + version + ".gem"
-	case "r": // the name is directory-qualified, <contrib dir>/<pkg>; the directory is the group
+	case "r": // the name is directory-qualified, <dir>/<pkg>; the directory is the group
 		if i := strings.LastIndexByte(name, '/'); i > 0 {
 			return name[:i], name[i+1:], version, name + "_" + version + RExt(name[:i])
 		}

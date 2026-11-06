@@ -1,22 +1,26 @@
 // Package r implements R (CRAN-style) repositories, what install.packages(),
 // remotes, pak and renv read: /repository/<repo>/ is the repository, its
-// contrib directories (src/contrib for sources, bin/windows/contrib/<R.x>
-// and bin/macosx[/<build>]/contrib/<R.x> for binaries) hold the packages
-// and the PACKAGES, PACKAGES.gz and PACKAGES.rds that list them. A hosted
-// repository takes packages by PUT and keeps the three index files of
-// each contrib directory itself, regenerated in the transaction of every
-// upload and delete; a proxy caches a mirror's files at their paths; a
-// group answers a file from the first member that has it and merges the
-// members' PACKAGES of a directory (PACKAGES.gz and PACKAGES.rds derived
-// from the merge).
+// directories (CRAN's src/contrib for sources, bin/windows/contrib/<R.x>
+// and bin/macosx[/<build>]/contrib/<R.x> for binaries, or any layout of
+// their own) hold the packages and the PACKAGES, PACKAGES.gz and
+// PACKAGES.rds that list them. A hosted repository takes packages by PUT
+// and keeps the three index files of each directory itself, regenerated in
+// the transaction of every upload and delete; a proxy caches a mirror's
+// files at their paths; a group answers a file from the first member that
+// has it and lists a package name once per directory, from the first member
+// that lists it (PACKAGES.gz and PACKAGES.rds derived from that merge).
 package r
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -26,6 +30,7 @@ import (
 	"commandcenter/internal/blob"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
@@ -89,14 +94,15 @@ func checkPath(p string) error {
 	return nil
 }
 
-// doc classifies p as an index file of a contrib directory: the file
-// (PACKAGES, PACKAGES.gz or PACKAGES.rds) and the directory, or "".
+// doc classifies p as an index file of a directory that can hold uploads
+// (upload): the file (PACKAGES, PACKAGES.gz or PACKAGES.rds) and the
+// directory, or "".
 func doc(p string) (file, dir string) {
 	dir, file = path.Split(p)
 	dir = strings.TrimSuffix(dir, "/")
 	switch file {
 	case "PACKAGES", "PACKAGES.gz", "PACKAGES.rds":
-		if component.RContribDir(dir) {
+		if strings.Contains(dir, "/") {
 			return file, dir
 		}
 	}
@@ -104,24 +110,23 @@ func doc(p string) (file, dir string) {
 }
 
 // isMetadata reports whether a proxy re-checks p every metadataMaxAge:
-// any PACKAGES file (CRAN also has PACKAGES.json) and the Meta/ databases
-// (archive.rds, current.rds) remotes and pak read.
+// everything but a package archive, which never changes at its path. A
+// mirror rewrites the rest in place: PACKAGES*, the Meta/ databases remotes
+// and pak read, web/packages/packages.rds, Views.rds and so on.
 func isMetadata(p string) bool {
-	return strings.HasPrefix(path.Base(p), "PACKAGES") || strings.Contains(p, "/Meta/")
+	return !strings.HasSuffix(p, ".tar.gz") && !strings.HasSuffix(p, ".tgz") && !strings.HasSuffix(p, ".zip")
 }
 
 // get serves a file of rp. Index files are metadata, packages content. A
-// group merges the members' PACKAGES of a contrib directory (cached
-// until a member's changes) and derives PACKAGES.gz and PACKAGES.rds from
-// the merge. A hosted repository or group without an index yet answers
-// an empty one, so install.packages() of another repository's package
-// does not warn about this one.
+// group merges the members' indexes of a directory (merged) and derives
+// PACKAGES.gz and PACKAGES.rds from the merge. A hosted repository or group
+// without an index yet answers an empty one, so install.packages() of
+// another repository's package does not warn about this one.
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) error {
 	ctx := r.Context()
 	file, dir := doc(p)
 	if rp.Type == "group" && file != "" {
-		t := proxy.Target{Key: dir + "/PACKAGES", Remote: dir + "/PACKAGES", NotHTML: true}
-		a, err := h.Resolver.MergedTarget(ctx, rp, t, ctText, mergePackages)
+		a, err := h.merged(ctx, rp, dir, p)
 		if repo.StatusOf(err) == http.StatusNotFound {
 			return serveEmpty(w, r, file, dir)
 		}
@@ -152,13 +157,93 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 	return nil
 }
 
+// memberIndex is leaf member m's index of dir: its PACKAGES, or PACKAGES.gz
+// when that is all it has, as a Nexus hosted repository publishes. route is
+// the request's path, which a proxy's routing rule sees.
+func (h *Handler) memberIndex(ctx context.Context, m *repo.Repository, dir, route string) (meta.Asset, error) {
+	lookup := func(file string) (proxy.Result, error) {
+		return h.Resolver.LookupTarget(ctx, m, proxy.Target{Key: dir + "/" + file, Remote: dir + "/" + file, Route: route, NotHTML: true}, proxy.Metadata)
+	}
+	res, err := lookup("PACKAGES")
+	if repo.StatusOf(err) == http.StatusNotFound {
+		res, err = lookup("PACKAGES.gz")
+	}
+	return res.Asset, err
+}
+
+// merged is group rp's <dir>/PACKAGES (mergePackages), stored in its
+// namespace and reused until a member's index changes. A member that fails
+// is left out only while no later member answers: a later (public) member
+// never stands in for an earlier (internal) one. For a binary directory the
+// source index of every member but the last is read too, as the names it
+// lists are that member's there as well. mergeMembers lists every member's
+// versions and leaves a failing member out, whoever comes after it.
+func (h *Handler) merged(ctx context.Context, rp *repo.Repository, dir, route string) (meta.Asset, error) {
+	leaves := resolve.Leaves(rp)
+	src := sourceDir(dir)
+	if rp.MergeMembers {
+		src = ""
+	}
+	members := make([]member, len(leaves))
+	sum := sha256.New()
+	var failed error
+	found := false
+	look := func(m *repo.Repository, d string) (*meta.Asset, error) {
+		a, err := h.memberIndex(ctx, m, d, route)
+		switch {
+		case err == nil && failed != nil && !rp.MergeMembers:
+			return nil, failed
+		case err == nil:
+			io.WriteString(sum, d+" "+a.BlobSHA256+"\n")
+			return &a, nil
+		case repo.StatusOf(err) != http.StatusNotFound:
+			slog.Warn("group member index failed", "group", rp.Name, "member", m.Name, "dir", d, "err", logsafe.Err(err))
+			failed = cmp.Or(failed, err)
+		}
+		return nil, nil
+	}
+	for i, m := range leaves {
+		var err error
+		if members[i].index, err = look(m, dir); err != nil {
+			return meta.Asset{}, err
+		}
+		found = found || members[i].index != nil
+		if src != "" && i < len(leaves)-1 {
+			if members[i].source, err = look(m, src); err != nil {
+				return meta.Asset{}, err
+			}
+		}
+	}
+	switch {
+	case !found && failed != nil:
+		return meta.Asset{}, failed
+	case !found:
+		return meta.Asset{}, repo.ErrNotFound
+	}
+	fp := fmt.Sprintf("%s%v:%x", mergePrefix, rp.MergeMembers, sum.Sum(nil))
+	key := dir + "/PACKAGES"
+	if a, err := h.Store.Get(ctx, rp.Name, key); err == nil && a.RemoteETag == fp {
+		return a, nil
+	}
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pw.CloseWithError(h.mergePackages(pw, members, rp.MergeMembers))
+	}()
+	a, err := h.Store.Put(ctx, rp.Name, key, ctText, pr, func(a *meta.Asset) { a.RemoteETag = fp })
+	pr.Close() // unblocks the merger if Put stopped early
+	<-done
+	return a, err
+}
+
 func serveEmpty(w http.ResponseWriter, r *http.Request, file, dir string) error {
 	b, ct := index(file, dir, nil)
 	repo.ServeText(w, r, string(b), ct, time.Time{})
 	return nil
 }
 
-// index renders one of a contrib directory's index files from its stanzas.
+// index renders one of a directory's index files from its stanzas.
 func index(file, dir string, ss []stanza) (body []byte, contentType string) {
 	switch file {
 	case "PACKAGES.gz":
@@ -192,22 +277,23 @@ func (h *Handler) derived(ctx context.Context, rp *repo.Repository, dir, file st
 	return h.Store.Put(ctx, rp.Name, key, ct, bytes.NewReader(b), func(a *meta.Asset) { a.RemoteETag = fp })
 }
 
-// upload takes a package into hosted rp: `PUT <contrib dir>/<pkg>_<version>.tar.gz`
-// (.zip under bin/windows/contrib/<R.x>, .tgz under bin/macosx/.../contrib/<R.x>)
-// with the file as the body (curl --upload-file). The blob is written
-// first and its DESCRIPTION read back from it (Package and Version must
-// be the file name's), then the row, the file and the directory's
-// rebuilt index files are recorded in one transaction under the
-// repository's lock. An existing package is a 409 unless writePolicy is
-// allow, when replacing it needs Edit.
+// upload takes a package into hosted rp: `PUT <dir>/<pkg>_<version>.tar.gz`
+// (.zip under bin/windows, .tgz under bin/macosx) with the file as the body
+// (curl --upload-file). Any directory at least two levels deep will do, as
+// in Nexus: an R client reads a directory's PACKAGES wherever it is. The
+// blob is written first and its DESCRIPTION read back from it (Package and
+// Version must be the file name's: R builds the download URL from them),
+// then the row, the file and the directory's rebuilt index files are
+// recorded in one transaction under the repository's lock. An existing
+// package is a 409 unless writePolicy is allow, when replacing it needs Edit.
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) error {
 	ctx := r.Context()
 	if rp.WritePolicy == "deny" {
 		return repo.Errorf(http.StatusBadRequest, "repository %q is read-only", rp.Name)
 	}
 	dir, name, version, ok := component.SplitR(p)
-	if !ok || !component.RContribDir(dir) {
-		return badPackage("upload <contrib dir>/<pkg>_<version>.tar.gz (.zip under bin/windows, .tgz under bin/macosx), not %s", p)
+	if !ok || !strings.Contains(dir, "/") {
+		return badPackage(uploadForm, p)
 	}
 	sums, err := h.Store.WriteBlob(rp.Name, r.Body, nil)
 	if err != nil {
@@ -324,7 +410,7 @@ func (h *Handler) rebuild(ctx context.Context, tx *meta.Tx, rp *repo.Repository,
 }
 
 // DeleteComponent removes one package of a hosted repository (its group
-// is the contrib directory): the row and the file, and rebuilds the
+// is the directory): the row and the file, and rebuilds the
 // directory's index files, in one transaction under the repository's
 // lock, for the web UI's delete and cleanup policies. A package that is
 // gone already is not an error, and one that changed since an evaluation
@@ -337,11 +423,11 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 		return component.Result{}, err
 	}
 	if c.Group == "" || c.Name == "" || c.Version == "" {
-		return component.Result{}, fmt.Errorf("r component %q is incomplete: contrib directory, package and version are needed", c.Label())
+		return component.Result{}, fmt.Errorf("r component %q is incomplete: directory, package and version are needed", c.Label())
 	}
 	file := c.Group + "/" + c.Name + "_" + c.Version + component.RExt(c.Group)
-	if _, _, _, ok := component.SplitR(file); !ok || !component.RContribDir(c.Group) {
-		return component.Result{}, fmt.Errorf("r component %q is not a package of a contrib directory", c.Label())
+	if _, _, _, ok := component.SplitR(file); !ok || !strings.Contains(c.Group, "/") {
+		return component.Result{}, fmt.Errorf("r component %q is not a package of a repository directory", c.Label())
 	}
 	unlock, err := h.Store.Lock(ctx, "r\x00"+rp.Name)
 	if err != nil {

@@ -199,7 +199,11 @@ func TestDeriveAsset(t *testing.T) {
 		{"conda", "noarch/foo--0.conda", "", "", "", false}, // no version
 		{"conda", "foo-1.0-0.conda", "", "", "", false},     // no subdir
 		{"conda", "Noarch/foo-1.0-0.conda", "", "", "", false},
-		{"conda", "noarch/a/foo-1.0-0.conda", "", "", "", false},
+		{"conda", "main/linux-64/foo-1.0-0.conda", "linux-64", "foo", "1.0-0", true},               // a channel below the root: the channel stays in the path only
+		{"conda", "conda-forge/label/rc/noarch/foo-1.0-0.tar.bz2", "noarch", "foo", "1.0-0", true}, // several segments
+		{"conda", "main/Noarch/foo-1.0-0.conda", "", "", "", false},
+		{"conda", "main/linux-64/repodata.json", "", "", "", false},
+		{"conda", "main/noarch/index.html", "", "", "", false},
 		{"conda", "noarch/repodata.json", "", "", "", false}, // metadata
 		{"conda", "channeldata.json", "", "", "", false},
 		{"r", "src/contrib/foo_1.0.0.tar.gz", "src/contrib", "foo", "1.0.0", true}, // the contrib directory is the group

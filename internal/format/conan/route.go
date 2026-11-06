@@ -25,9 +25,9 @@ import (
 type Kind int
 
 const (
-	KindPing              Kind = iota // v1/ping
-	KindAuthenticate                  // v1/users/authenticate
-	KindCheckCredentials              // v1/users/check_credentials
+	KindPing              Kind = iota // v1/ping, v2/ping
+	KindAuthenticate                  // v1/users/authenticate, v2/users/authenticate (where Conan 2 logs in)
+	KindCheckCredentials              // v1/users/check_credentials, v2/users/check_credentials
 	KindSearch                        // v2/conans/search?q=, v1/conans/search?q=
 	KindRecipe                        // v2/conans/<ref>: DELETE; v1: GET the snapshot, DELETE
 	KindLatest                        // v2/conans/<ref>/latest
@@ -35,7 +35,7 @@ const (
 	KindRevision                      // v2/conans/<ref>/revisions/<rrev>: DELETE
 	KindFiles                         // .../revisions/<rrev>/files
 	KindFile                          // .../revisions/<rrev>/files/<file>: GET, PUT
-	KindPkgSearch                     // .../revisions/<rrev>/search; v1/conans/<ref>/search
+	KindPkgSearch                     // .../revisions/<rrev>/search; v1 and v2/conans/<ref>/search
 	KindPackages                      // .../revisions/<rrev>/packages: DELETE
 	KindPackage                       // .../packages/<pkgid>: DELETE; v1 .../packages/<pkgid>: GET the snapshot
 	KindPkgLatest                     // .../packages/<pkgid>/latest
@@ -125,12 +125,12 @@ func notFound(path string) error { return repo.Errorf(http.StatusNotFound, "not 
 // (";key=value", which Conan may add after a file name) are dropped.
 func ParseRoute(path string) (Route, error) {
 	switch path {
-	case "v1/ping":
-		return Route{Kind: KindPing, V1: true}, nil
-	case "v1/users/authenticate":
-		return Route{Kind: KindAuthenticate, V1: true}, nil
-	case "v1/users/check_credentials":
-		return Route{Kind: KindCheckCredentials, V1: true}, nil
+	case "v1/ping", "v2/ping":
+		return Route{Kind: KindPing, V1: path[1] == '1'}, nil
+	case "v1/users/authenticate", "v2/users/authenticate":
+		return Route{Kind: KindAuthenticate, V1: path[1] == '1'}, nil
+	case "v1/users/check_credentials", "v2/users/check_credentials":
+		return Route{Kind: KindCheckCredentials, V1: path[1] == '1'}, nil
 	case "v1/conans/search":
 		return Route{Kind: KindSearch, V1: true}, nil
 	case "v2/conans/search":
@@ -198,6 +198,8 @@ func ParseRoute(path string) (Route, error) {
 		rt.Kind = KindLatest
 	case len(rest) == 1 && rest[0] == "revisions":
 		rt.Kind = KindRevisions
+	case len(rest) == 1 && rest[0] == "search": // Conan 1 with revisions: the latest revision's, as the v1 route
+		rt.Kind, rt.V1 = KindPkgSearch, true
 	case len(rest) >= 2 && rest[0] == "revisions" && revRE.MatchString(rest[1]):
 		rt.RRev = rest[1]
 		rest = rest[2:]
