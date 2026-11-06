@@ -18,13 +18,14 @@ import (
 // directory's settings as import-nexus maps a Nexus server: the user base DN
 // is userBaseDn and searchBase joined, the filter is made of userObjectClass,
 // userIdAttribute and userLdapFilter (a userLdapFilter with {user} is the whole
-// filter, which is how a directory set up in the web UI reads). What a body
-// has no field for (group mappings, default roles, StartTLS, skipping
-// certificate verification) stays. What cannot be honoured is refused.
+// filter, which is how a directory set up in the web UI reads), the group base
+// DN groupBaseDn and searchBase joined. What a body has no field for (group
+// mappings, default roles, StartTLS, skipping certificate verification) stays.
+// What cannot be honoured is refused.
 //
 // The rest of a body changes nothing here and reads back as written
 // (nexusLDAPKey): the name, useTrustStore (the SSL trust store is always
-// used), the retry settings and the settings of static groups while
+// used), the retry settings and incomplete settings of static groups while
 // ldapGroupsAsRoles is off, when Nexus does not use them either.
 
 // nexusLDAPKey keeps the body last written through this API, without its
@@ -97,6 +98,13 @@ type uiLDAP struct {
 	DefaultRoles       []string            `json:"defaultRoles"`
 	UserOneLevel       bool                `json:"userOneLevel"`
 	GroupsAsRoles      bool                `json:"groupsAsRoles"`
+	GroupType          string              `json:"groupType"`
+	GroupBaseDN        string              `json:"groupBaseDN"`
+	GroupSubtree       bool                `json:"groupSubtree"`
+	GroupObjectClass   string              `json:"groupObjectClass"`
+	GroupIDAttr        string              `json:"groupIdAttr"`
+	GroupMemberAttr    string              `json:"groupMemberAttr"`
+	GroupMemberFormat  string              `json:"groupMemberFormat"`
 }
 
 // directory is what body n makes of the directory's settings cur, or the
@@ -115,8 +123,15 @@ func (n nexusLDAP) directory(cur uiLDAP) (uiLDAP, []string) {
 	refuse(n.Port < 1 || n.Port > 65535, "port: must be between 1 and 65535")
 	refuse(auth != "SIMPLE" && auth != "NONE", "authScheme: the service bind is SIMPLE or NONE here; CRAM_MD5 and DIGEST_MD5 are not spoken")
 	refuse(n.UserPasswordAttribute != "", "userPasswordAttribute: a password is checked by binding as the user, never by reading an attribute")
-	refuse(n.LDAPGroupsAsRoles && strings.EqualFold(n.GroupType, "static"),
-		"groupType: groups are read from an attribute of the user (dynamic, userMemberOfAttribute), not from group entries: use dynamic with a directory that fills that attribute")
+	// Complete static groups act, with the roles they give or the mappings
+	// alone. Incomplete ones are refused only if they are to give roles.
+	wantStatic := strings.EqualFold(n.GroupType, meta.LDAPGroupsStatic)
+	static := meta.LDAP{GroupBaseDN: strings.Trim(n.GroupBaseDN+","+n.SearchBase, ","), GroupObjectClass: n.GroupObjectClass,
+		GroupIDAttr: n.GroupIDAttribute, GroupMemberAttr: n.GroupMemberAttribute, GroupMemberFormat: n.GroupMemberFormat}
+	usable := wantStatic && static.CheckStaticGroups() == nil
+	refuse(n.GroupType != "" && !wantStatic && !strings.EqualFold(n.GroupType, meta.LDAPGroupsDynamic), "groupType: dynamic or static")
+	refuse(wantStatic && n.LDAPGroupsAsRoles && !usable,
+		"groupType: static groups need groupBaseDn or searchBase, groupObjectClass, groupIdAttribute, groupMemberAttribute, and a groupMemberFormat with ${username} or ${dn}")
 	def := meta.DefaultLDAP()
 	c := cur
 	c.URL = scheme + "://" + net.JoinHostPort(n.Host, strconv.Itoa(n.Port))
@@ -136,6 +151,11 @@ func (n nexusLDAP) directory(cur uiLDAP) (uiLDAP, []string) {
 	c.EmailAttr = cmp.Or(n.UserEmailAddressAttribute, def.EmailAttr)
 	c.GroupAttr = cmp.Or(n.UserMemberOfAttribute, def.GroupAttr)
 	c.UserOneLevel, c.GroupsAsRoles = !n.UserSubtree, n.LDAPGroupsAsRoles
+	c.GroupType = meta.LDAPGroupsDynamic
+	if usable {
+		c.GroupType, c.GroupBaseDN, c.GroupSubtree, c.GroupObjectClass = meta.LDAPGroupsStatic, static.GroupBaseDN, n.GroupSubtree, n.GroupObjectClass
+		c.GroupIDAttr, c.GroupMemberAttr, c.GroupMemberFormat = n.GroupIDAttribute, n.GroupMemberAttribute, n.GroupMemberFormat
+	}
 	return c, errs
 }
 
@@ -173,6 +193,11 @@ func derivedLDAP(cur uiLDAP) nexusLDAP {
 	}
 	if cur.UserFilter == "("+cur.UserIDAttr+"={user})" { // only the id attribute: that field says it
 		n.UserLDAPFilter = ""
+	}
+	if cur.GroupType == meta.LDAPGroupsStatic { // the two bases need not share a search base: both whole
+		n.SearchBase, n.UserBaseDN = "", cur.UserBaseDN
+		n.GroupType, n.GroupBaseDN, n.GroupSubtree, n.GroupObjectClass = cur.GroupType, cur.GroupBaseDN, cur.GroupSubtree, cur.GroupObjectClass
+		n.GroupIDAttribute, n.GroupMemberAttribute, n.GroupMemberFormat = cur.GroupIDAttr, cur.GroupMemberAttr, cur.GroupMemberFormat
 	}
 	if u, err := url.Parse(cur.URL); err == nil {
 		n.Protocol, n.Host = u.Scheme, u.Hostname()

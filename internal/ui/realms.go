@@ -180,6 +180,13 @@ type ldapDTO struct {
 	DefaultRoles       []string            `json:"defaultRoles"`
 	UserOneLevel       bool                `json:"userOneLevel"`
 	GroupsAsRoles      bool                `json:"groupsAsRoles"`
+	GroupType          string              `json:"groupType"`
+	GroupBaseDN        string              `json:"groupBaseDN"`
+	GroupSubtree       bool                `json:"groupSubtree"`
+	GroupObjectClass   string              `json:"groupObjectClass"`
+	GroupIDAttr        string              `json:"groupIdAttr"`
+	GroupMemberAttr    string              `json:"groupMemberAttr"`
+	GroupMemberFormat  string              `json:"groupMemberFormat"`
 }
 
 func ldapJSON(c meta.LDAP) ldapDTO {
@@ -193,7 +200,9 @@ func ldapJSON(c meta.LDAP) ldapDTO {
 		BindPasswordSet: c.BindPassword != "", TimeoutSeconds: c.TimeoutSeconds, UserBaseDN: c.UserBaseDN,
 		UserFilter: c.UserFilter, UserIDAttr: c.UserIDAttr, NameAttr: c.NameAttr, EmailAttr: c.EmailAttr,
 		GroupAttr: c.GroupAttr, GroupMappings: c.GroupMappings, DefaultRoles: c.DefaultRoles,
-		UserOneLevel: c.UserOneLevel, GroupsAsRoles: c.GroupsAsRoles}
+		UserOneLevel: c.UserOneLevel, GroupsAsRoles: c.GroupsAsRoles, GroupType: c.GroupType, GroupBaseDN: c.GroupBaseDN,
+		GroupSubtree: c.GroupSubtree, GroupObjectClass: c.GroupObjectClass, GroupIDAttr: c.GroupIDAttr,
+		GroupMemberAttr: c.GroupMemberAttr, GroupMemberFormat: c.GroupMemberFormat}
 }
 
 type ldapRequest struct {
@@ -212,9 +221,48 @@ type ldapRequest struct {
 	GroupAttr          string              `json:"groupAttr"`
 	GroupMappings      []meta.GroupMapping `json:"groupMappings"`
 	DefaultRoles       []string            `json:"defaultRoles"`
-	// The form has no fields for these two: absent keeps the stored value.
-	UserOneLevel  *bool `json:"userOneLevel"`
-	GroupsAsRoles *bool `json:"groupsAsRoles"`
+	// A form may have no fields for these: absent keeps the stored value.
+	UserOneLevel      *bool   `json:"userOneLevel"`
+	GroupsAsRoles     *bool   `json:"groupsAsRoles"`
+	GroupType         *string `json:"groupType"`
+	GroupBaseDN       *string `json:"groupBaseDN"`
+	GroupSubtree      *bool   `json:"groupSubtree"`
+	GroupObjectClass  *string `json:"groupObjectClass"`
+	GroupIDAttr       *string `json:"groupIdAttr"`
+	GroupMemberAttr   *string `json:"groupMemberAttr"`
+	GroupMemberFormat *string `json:"groupMemberFormat"`
+}
+
+// groupSettings puts what the body says of the group type and the static
+// groups into next.
+func (b ldapRequest) groupSettings(next *meta.LDAP) {
+	for _, f := range []struct {
+		to   *string
+		from *string
+	}{{&next.GroupType, b.GroupType}, {&next.GroupBaseDN, b.GroupBaseDN}, {&next.GroupObjectClass, b.GroupObjectClass},
+		{&next.GroupIDAttr, b.GroupIDAttr}, {&next.GroupMemberAttr, b.GroupMemberAttr}, {&next.GroupMemberFormat, b.GroupMemberFormat}} {
+		if f.from != nil {
+			*f.to = strings.TrimSpace(*f.from)
+		}
+	}
+	if b.GroupSubtree != nil {
+		next.GroupSubtree = *b.GroupSubtree
+	}
+	next.GroupType = orDefault(next.GroupType, meta.LDAPGroupsDynamic)
+}
+
+// ldapFilterProblems compiles the filters next searches with, which ValidateLDAP cannot.
+func ldapFilterProblems(next meta.LDAP) []string {
+	var out []string
+	if _, err := ldap.CompileFilter(ldap.UserFilter(next.UserFilter, "x")); err != nil {
+		out = append(out, "ldap userFilter: "+strings.TrimPrefix(err.Error(), "ldap filter: "))
+	}
+	if next.URL != "" && next.StaticGroups() {
+		if _, err := ldap.CompileFilter(ldap.GroupFilter(next, "x", "x")); err != nil {
+			out = append(out, "ldap group settings: "+strings.TrimPrefix(err.Error(), "ldap filter: "))
+		}
+	}
+	return out
 }
 
 func (u *UI) getLDAP(w http.ResponseWriter, r *http.Request) {
@@ -261,7 +309,9 @@ func (u *UI) putLDAP(w http.ResponseWriter, r *http.Request) {
 		UserIDAttr: orDefault(body.UserIDAttr, def.UserIDAttr), NameAttr: orDefault(body.NameAttr, def.NameAttr),
 		EmailAttr: orDefault(body.EmailAttr, def.EmailAttr), GroupAttr: orDefault(body.GroupAttr, def.GroupAttr),
 		DefaultRoles: append([]string{}, body.DefaultRoles...),
-		UserOneLevel: cur.UserOneLevel, GroupsAsRoles: cur.GroupsAsRoles,
+		UserOneLevel: cur.UserOneLevel, GroupsAsRoles: cur.GroupsAsRoles, GroupType: cur.GroupType, GroupBaseDN: cur.GroupBaseDN,
+		GroupSubtree: cur.GroupSubtree, GroupObjectClass: cur.GroupObjectClass, GroupIDAttr: cur.GroupIDAttr,
+		GroupMemberAttr: cur.GroupMemberAttr, GroupMemberFormat: cur.GroupMemberFormat,
 	}
 	if body.UserOneLevel != nil {
 		next.UserOneLevel = *body.UserOneLevel
@@ -269,6 +319,7 @@ func (u *UI) putLDAP(w http.ResponseWriter, r *http.Request) {
 	if body.GroupsAsRoles != nil {
 		next.GroupsAsRoles = *body.GroupsAsRoles
 	}
+	body.groupSettings(&next)
 	for _, m := range body.GroupMappings {
 		next.GroupMappings = append(next.GroupMappings, meta.GroupMapping{Group: strings.TrimSpace(m.Group), Roles: append([]string{}, m.Roles...)})
 	}
@@ -298,8 +349,8 @@ func (u *UI) putLDAP(w http.ResponseWriter, r *http.Request) {
 	if next.URL == "" && realmEnabled(set.Realms, meta.RealmLDAP) {
 		v.add("ldap url is required while the ldap realm is enabled")
 	}
-	if _, err := ldap.CompileFilter(ldap.UserFilter(next.UserFilter, "x")); err != nil {
-		v.add("ldap userFilter: %s", strings.TrimPrefix(err.Error(), "ldap filter: "))
+	for _, msg := range ldapFilterProblems(next) {
+		v.add("%s", msg)
 	}
 	for i, m := range next.GroupMappings {
 		var mv validation
@@ -356,6 +407,9 @@ func ldapChanged(a, b meta.LDAP) string {
 	add(strings.Join(a.DefaultRoles, ",") != strings.Join(b.DefaultRoles, ","), "defaultRoles")
 	add(a.UserOneLevel != b.UserOneLevel, "userOneLevel")
 	add(a.GroupsAsRoles != b.GroupsAsRoles, "groupsAsRoles")
+	add(a.GroupType != b.GroupType, "groupType")
+	add(a.GroupBaseDN != b.GroupBaseDN || a.GroupSubtree != b.GroupSubtree || a.GroupObjectClass != b.GroupObjectClass || a.GroupIDAttr != b.GroupIDAttr ||
+		a.GroupMemberAttr != b.GroupMemberAttr || a.GroupMemberFormat != b.GroupMemberFormat, "staticGroups")
 	return strings.Join(keys, ", ")
 }
 

@@ -152,6 +152,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `test/smoke/composer-smoke.sh` and `test/smoke/nuget-smoke.sh` test advisories with the real clients
   on real packages. The Composer script also checks, against an upstream that logs what it hears, that a
   hosted name never reaches it and that a failing API is a failure.
+- LDAP static groups, as in Nexus: `groupType: static` reads a user's groups from the group entries that list
+  them (`groupOfNames`/`member`, `groupOfUniqueNames`/`uniqueMember`, `posixGroup`/`memberUid`), set with
+  `groupBaseDN`, `groupSubtree`, `groupObjectClass`, `groupIdAttr`, `groupMemberAttr` and `groupMemberFormat`
+  (`${username}`, `${dn}`). The search runs as the service account after the password bind and at every
+  re-check, and feeds `groupMappings` and `groupsAsRoles`. Dynamic groups stay the default and do not change.
+  If the search fails, the user signs in without roles from groups, with a WARN line and a failing `groups`
+  step in the LDAP test. `test/smoke/ldap-smoke.sh` proves it against OpenLDAP.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -246,6 +253,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A Composer proxy's `packages.json` has no `Last-Modified`: clients would have kept a copy without the
   advisories offer for as long as the upstream's file did not change.
 - npm audit: a request that is not JSON is a 400 here instead of going to the remote.
+- `/v1/security/ldap`: `groupType: static` with `ldapGroupsAsRoles` is accepted and acts, and reads back as
+  written; an incomplete set is a 400 with `ldapGroupsAsRoles` on and does nothing with it off. A complete set
+  with it off now feeds `groupMappings`. Any other `groupType` is a 400.
+- LDAP searches stop at 4 MiB of messages per search; the limit on messages now follows the size limit.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -343,6 +354,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - npm audit sent every name in the client's lock file to the remote, through a proxy and through a group,
   including packages from hosted repositories. Names a hosted repository holds, and names the routing
   rule refuses, are now removed first, as are the project's name and `install` and `remove` lists.
+- LDAP `groupsAsRoles` no longer makes an administrator through a role that contains `admin`, when a group
+  has that role's name. A mapping to that role still does.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -424,6 +437,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Content selectors.** A user with only a selector needs it to match those paths too: otherwise a 403, which `composer audit` reports as a failure, `composer update` warns about, and NuGet turns into NU1900.
 - **npm.** A malformed audit body is a 400 from here. Results for private names are gone from the report, as they should be. A group is still answered by its first proxy alone.
 - No stored data changes meaning, nothing to migrate.
+- Set LDAP static groups when every node is upgraded. An older node does not honour them, and saving the LDAP form on one drops them.
+- A body already stored through `/v1/security/ldap` with `groupType: static`, `ldapGroupsAsRoles: false` and a complete set is derived from the directory until it is written again. From then on the mappings read the group entries. Terraform shows this once as drift.
+- Anyone relying on a directory group named as an admin-containing role, through `groupsAsRoles`, must map it.
 
 ## [0.4.0] - 2026-11-05
 

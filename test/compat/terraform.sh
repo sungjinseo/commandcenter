@@ -11,8 +11,8 @@
 #   2. plan -detailed-exitcode: nothing to change (no drift); the users it made
 #      and the directory's users sign in as their settings say
 #   3. apply with step=2, which changes attributes of all of them and takes
-#      credentials, policies and rules away; no drift; they sign in as the new
-#      settings say; back to step 1
+#      credentials, policies and rules away, and turns the directory to static
+#      groups; no drift; they sign in as the new settings say; back to step 1
 #   4. import: every resource is removed from the state and imported again;
 #      only the write-only secrets may then differ, and after one apply nothing
 #   5. what is left out on purpose (scripts, capabilities, IQ and OpenID Connect
@@ -172,7 +172,9 @@ if [ "$bucket$container" != 11 ]; then
 fi
 
 echo "== the directory (OpenLDAP)"
-# The groups are in the users' description attribute: no memberOf overlay.
+# At step 1 the groups are in the users' description attribute, with no
+# memberOf overlay; at step 2 they are static, in the group entries, and that
+# attribute says nothing (dave has the group there, and no entry lists him).
 cat > "$work/seed.ldif" <<'EOF'
 dn: dc=example,dc=org
 objectClass: dcObject
@@ -187,6 +189,21 @@ ou: people
 dn: ou=contractors,ou=people,dc=example,dc=org
 objectClass: organizationalUnit
 ou: contractors
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: cn=tf-docs,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: tf-docs
+member: uid=carol,ou=people,dc=example,dc=org
+member: uid=erin,ou=contractors,ou=people,dc=example,dc=org
+
+dn: cn=admin,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: admin
+member: uid=mallory,ou=people,dc=example,dc=org
 
 dn: uid=carol,ou=people,dc=example,dc=org
 objectClass: inetOrgPerson
@@ -204,6 +221,7 @@ uid: dave
 cn: Dave Sales
 sn: Sales
 employeeType: sales
+description: cn=tf-docs,ou=groups,dc=example,dc=org
 userPassword: dave-ldap-pw
 
 dn: uid=erin,ou=contractors,ou=people,dc=example,dc=org
@@ -288,9 +306,11 @@ expect 401 "$(anonymous /service/rest/v1/repositories/tf-npm-hosted)" "anonymous
 expect 401 "$(signin tf-alice alice-secret-2)" "the user made disabled"
 expect ok "$(signin tf-bob bob-secret-2)" "the new write-only password"
 expect 401 "$(signin tf-bob bob-secret-1)" "the old write-only password"
-expect ok "$(signin carol carol-ldap-pw)" "the directory user after the update"
-expect 403 "$(signin dave dave-ldap-pw)" "a directory user without the filter, and without the group"
-expect ok "$(signin erin erin-ldap-pw)" "a directory user in the subtree"
+has "$(api /service/rest/v1/security/ldap/tf-ldap)" '"groupType":"static"' "the static groups read back"
+expect ok "$(signin carol carol-ldap-pw)" "a directory user in the group's entry, after the update"
+expect 403 "$(signin dave dave-ldap-pw)" "a directory user without the filter, the group in an attribute only"
+expect ok "$(signin erin erin-ldap-pw)" "a directory user in the subtree and in the group's entry"
+expect 403 "$(signin mallory mallory-ldap-pw)" "a directory user in a static group named as the administrators' role"
 run "the way back to step 1" . apply -auto-approve -no-color
 nodrift "back at step 1"
 

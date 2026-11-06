@@ -526,14 +526,117 @@ func TestLDAPCompat(t *testing.T) {
 	} {
 		e.wantField("PUT", v1+"/security/ldap/corp", strings.Replace(wide, x.from, x.to, 1), x.id)
 	}
-	// Static groups are fine while they give no roles, as in Nexus.
-	static := strings.NewReplacer(`"groupType":"dynamic"`, `"groupType":"static","groupBaseDn":"ou=groups","groupObjectClass":"groupOfNames"`, `"ldapGroupsAsRoles":true`, `"ldapGroupsAsRoles":false`).Replace(wide)
-	e.want("PUT", v1+"/security/ldap/corp", "admin", static, 204)
-	if got = get(); got["groupObjectClass"] != "groupOfNames" || got["ldapGroupsAsRoles"] != false {
+	// An incomplete set of static groups is fine while it gives no roles, as
+	// in Nexus: it reads back and does nothing.
+	partial := strings.NewReplacer(`"groupType":"dynamic"`, `"groupType":"static","groupBaseDn":"ou=groups","groupObjectClass":"groupOfNames"`, `"ldapGroupsAsRoles":true`, `"ldapGroupsAsRoles":false`).Replace(wide)
+	e.want("PUT", v1+"/security/ldap/corp", "admin", partial, 204)
+	if got = get(); got["groupObjectClass"] != "groupOfNames" || got["groupType"] != "static" || got["ldapGroupsAsRoles"] != false {
 		t.Errorf("static groups: %v", got)
+	}
+	if c = ui(); c["groupType"] != "dynamic" {
+		t.Errorf("an incomplete set acts: %v", c)
 	}
 	e.want("GET", v1+"/security/users", "carol", "", 403)
 	e.want("PUT", v1+"/security/ldap/corp", "admin", wide, 204)
+
+	// Static groups, with the roles they give: the provider's body reads back as
+	// written and means the same in the directory's settings. The group entries
+	// say who is in, not the attribute (carol has the group there, erin too).
+	groupEntry := func(name, class, attr string, members ...string) {
+		dir.Add(ldaptest.Entry{DN: "cn=" + name + ",ou=groups,dc=example,dc=org", Attrs: map[string][]string{"objectClass": {class}, "cn": {name}, attr: members}})
+	}
+	groupEntry("devs", "groupOfNames", "member", "uid=dave,"+base)
+	groupEntry("admin", "groupOfNames", "member", "uid=mallory,"+base, "uid=dave,"+base)
+	const groups = `"groupType":"static","groupBaseDn":"ou=groups","groupSubtree":true,"groupObjectClass":"groupOfNames","groupIdAttribute":"cn","groupMemberAttribute":"member","groupMemberFormat":"${dn}"`
+	staticBody := strings.Replace(wide, `"groupType":"dynamic"`, groups, 1)
+	e.want("PUT", v1+"/security/ldap/corp", "admin", staticBody, 204)
+	got, written = get(), decodeMap(t, []byte(staticBody))
+	delete(written, "authPassword")
+	delete(written, "id")
+	if d := subset(written, got, "static server"); d != "" {
+		t.Errorf("read back: %s", d)
+	}
+	c = ui()
+	for k, want := range map[string]any{"groupType": "static", "groupBaseDN": "ou=groups,dc=example,dc=org", "groupSubtree": true, "groupObjectClass": "groupOfNames",
+		"groupIdAttr": "cn", "groupMemberAttr": "member", "groupMemberFormat": "${dn}", "groupsAsRoles": true} {
+		if c[k] != want {
+			t.Errorf("the directory's %s = %v, want %v", k, c[k], want)
+		}
+	}
+	e.want("GET", v1+"/security/users", "dave", "", 200)
+	e.want("GET", v1+"/security/users", "carol", "", 403)
+	e.want("GET", v1+"/security/users", "mallory", "", 403) // the administrators' role takes a mapping, also for a static group
+	// No relative group DN: the groups are under the search base, in its subtree here.
+	e.want("PUT", v1+"/security/ldap/corp", "admin", strings.Replace(staticBody, `"groupBaseDn":"ou=groups",`, ``, 1), 204)
+	if c = ui(); c["groupBaseDN"] != "dc=example,dc=org" {
+		t.Errorf("the search base as the group base: %v", c)
+	}
+	e.want("GET", v1+"/security/users", "dave", "", 200)
+	// With posixGroup and a plain name, as Nexus's template for it has it.
+	groupEntry("devs", "posixGroup", "memberUid", "erin")
+	posix := strings.NewReplacer(`"groupObjectClass":"groupOfNames"`, `"groupObjectClass":"posixGroup"`, `"groupMemberAttribute":"member"`, `"groupMemberAttribute":"memberUid"`, `"${dn}"`, `"${username}"`).Replace(staticBody)
+	e.want("PUT", v1+"/security/ldap/corp", "admin", posix, 204)
+	e.want("GET", v1+"/security/users", "erin", "", 200)
+	e.want("GET", v1+"/security/users", "dave", "", 403)
+	if got = get(); got["groupMemberFormat"] != "${username}" {
+		t.Errorf("posix: %v", got)
+	}
+	// The settings a static directory reads in Nexus's shape, set up in the web
+	// UI, say the same when sent back: the two forms do not disagree, with or
+	// without groups as roles.
+	for _, asRoles := range []bool{true, false} {
+		form := ui()
+		delete(form, "bindPasswordSet")
+		form["groupBaseDN"], form["groupsAsRoles"] = "ou=teams,o=elsewhere", asRoles
+		if st, b := e.ui("PUT", "/-/api/realms/ldap", jsonText(form)); st != 200 {
+			t.Fatalf("ui update: %d %s", st, b)
+		}
+		before := ui()
+		got = get()
+		if got["groupType"] != "static" || got["ldapGroupsAsRoles"] != asRoles || got["searchBase"] != "" || got["userBaseDn"] != base || got["groupBaseDn"] != "ou=teams,o=elsewhere" ||
+			got["groupMemberAttribute"] != "memberUid" || got["groupMemberFormat"] != "${username}" || got["groupObjectClass"] != "posixGroup" || got["groupIdAttribute"] != "cn" || got["groupSubtree"] != true {
+			t.Errorf("derived from a static directory: %v", got)
+		}
+		e.want("PUT", v1+"/security/ldap/corp", "admin", jsonText(got), 204)
+		if after := ui(); !reflect.DeepEqual(after, before) {
+			t.Errorf("the derived answer sent back changed the directory:\n%v\n%v", before, after)
+		}
+		if again := get(); !reflect.DeepEqual(again, got) {
+			t.Errorf("read back after it:\n%v\n%v", got, again)
+		}
+	}
+	// A complete set acts with ldapGroupsAsRoles off as well: the mappings read it.
+	if st, b := e.ui("PUT", "/-/api/realms/ldap", jsonText(func() map[string]any {
+		f := ui()
+		delete(f, "bindPasswordSet")
+		f["groupBaseDN"], f["groupMappings"] = "ou=groups,dc=example,dc=org", []map[string]any{{"group": "cn=devs,ou=groups,dc=example,dc=org", "roles": []string{"devs"}}}
+		return f
+	}())); st != 200 {
+		t.Fatalf("a mapping: %d %s", st, b)
+	}
+	off := strings.Replace(posix, `"ldapGroupsAsRoles":true`, `"ldapGroupsAsRoles":false`, 1)
+	e.want("PUT", v1+"/security/ldap/corp", "admin", off, 204)
+	e.want("GET", v1+"/security/users", "erin", "", 200)
+	e.want("GET", v1+"/security/users", "dave", "", 403)
+	e.wantField("PUT", v1+"/security/ldap/corp", strings.Replace(posix, `"groupType":"static"`, `"groupType":"other"`, 1), "groupType")
+	// A format that names nobody would put everyone in the group.
+	e.wantField("PUT", v1+"/security/ldap/corp", strings.Replace(posix, `"${username}"`, `"erin"`, 1), "groupType")
+	// An attribute that would break the search is refused by the directory's settings.
+	e.want("PUT", v1+"/security/ldap/corp", "admin", strings.Replace(posix, `"groupIdAttribute":"cn"`, `"groupIdAttribute":"c n"`, 1), 400)
+	// Back to dynamic, the groups of the attribute again; the mapping stays.
+	e.want("PUT", v1+"/security/ldap/corp", "admin", wide, 204)
+	e.want("GET", v1+"/security/users", "carol", "", 200)
+	if c = ui(); c["groupType"] != "dynamic" {
+		t.Errorf("back to dynamic: %v", c)
+	}
+	if st, b := e.ui("PUT", "/-/api/realms/ldap", jsonText(func() map[string]any {
+		f := ui()
+		delete(f, "bindPasswordSet")
+		f["groupMappings"] = []map[string]any{}
+		return f
+	}())); st != 200 {
+		t.Fatalf("no mapping: %d %s", st, b)
+	}
 
 	// The web UI's form, which has no fields for the two switches, keeps
 	// them; the change then reads through the API, under the same name, and
@@ -570,7 +673,7 @@ func TestLDAPCompat(t *testing.T) {
 	if b := e.want("GET", v1+"/security/ldap", "admin", "", 200); strings.TrimSpace(string(b)) != "[]" {
 		t.Errorf("after the delete: %s", b)
 	}
-	if c = ui(); c["url"] != "" || c["bindPasswordSet"] != false || c["bindDN"] != "" {
+	if c = ui(); c["url"] != "" || c["bindPasswordSet"] != false || c["bindDN"] != "" || c["groupType"] != "dynamic" || c["groupBaseDN"] != "" || c["groupMemberFormat"] != "" {
 		t.Errorf("after the delete: %v", c)
 	}
 	if b := e.want("GET", v1+"/security/realms/active", "admin", "", 200); strings.Contains(string(b), "LdapRealm") {

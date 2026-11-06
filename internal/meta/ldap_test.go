@@ -17,6 +17,58 @@ func validLDAP() LDAP {
 	return c
 }
 
+func TestValidateLDAPStaticGroups(t *testing.T) {
+	static := func() LDAP {
+		c := validLDAP()
+		c.GroupType, c.GroupBaseDN, c.GroupObjectClass = LDAPGroupsStatic, "ou=groups,dc=example,dc=org", "groupOfNames"
+		c.GroupIDAttr, c.GroupMemberAttr, c.GroupMemberFormat = "cn", "member", "${dn}"
+		return c
+	}
+	if err := ValidateLDAP(static()); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"${username}", "uid=${username},ou=people", "cn=x,${dn}"} {
+		c := static()
+		c.GroupMemberFormat = f
+		if err := ValidateLDAP(c); err != nil {
+			t.Errorf("format %q: %v", f, err)
+		}
+	}
+	for name, mut := range map[string]func(*LDAP){
+		"another type":                           func(c *LDAP) { c.GroupType = "STATIC" },
+		"no base":                                func(c *LDAP) { c.GroupBaseDN = " " },
+		"no class":                               func(c *LDAP) { c.GroupObjectClass = "" },
+		"no id":                                  func(c *LDAP) { c.GroupIDAttr = "" },
+		"no member":                              func(c *LDAP) { c.GroupMemberAttr = "" },
+		"no format":                              func(c *LDAP) { c.GroupMemberFormat = "" },
+		"a fixed member, everyone in its groups": func(c *LDAP) { c.GroupMemberFormat = "uid=alice,ou=people" },
+		"an unknown placeholder":                 func(c *LDAP) { c.GroupMemberFormat = "${user}" },
+	} {
+		c := static()
+		mut(&c)
+		if err := ValidateLDAP(c); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// Dynamic groups need none of it, and a configuration without a server may be partial.
+	c := validLDAP()
+	c.GroupBaseDN = "ou=kept-for-later"
+	if err := ValidateLDAP(c); err != nil {
+		t.Errorf("dynamic: %v", err)
+	}
+	c = DefaultLDAP()
+	c.GroupType = LDAPGroupsStatic
+	if err := ValidateLDAP(c); err != nil {
+		t.Errorf("no server: %v", err)
+	}
+	// What an older row holds: no group type at all.
+	c = validLDAP()
+	c.GroupType = ""
+	if err := ValidateLDAP(c); err != nil || c.StaticGroups() {
+		t.Errorf("no group type: %v, static %v", err, c.StaticGroups())
+	}
+}
+
 func TestValidateLDAP(t *testing.T) {
 	if err := ValidateLDAP(validLDAP()); err != nil {
 		t.Fatal(err)

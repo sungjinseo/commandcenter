@@ -15,7 +15,6 @@ import (
 	"commandcenter/internal/blob"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/config"
-	"commandcenter/internal/ldap"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/saml"
@@ -867,6 +866,7 @@ func ldapMerged(body ldapRequest) meta.LDAP {
 	if body.GroupsAsRoles != nil {
 		next.GroupsAsRoles = *body.GroupsAsRoles
 	}
+	body.groupSettings(&next)
 	return next
 }
 
@@ -876,8 +876,8 @@ func checkLDAP(c *confRun, objs []confObj) {
 	if err := meta.ValidateLDAP(next); err != nil {
 		c.bad("ldap: %v", err)
 	}
-	if _, err := ldap.CompileFilter(ldap.UserFilter(next.UserFilter, "x")); err != nil {
-		c.bad("ldap userFilter: %s", strings.TrimPrefix(err.Error(), "ldap filter: "))
+	for _, msg := range ldapFilterProblems(next) {
+		c.bad("%s", msg)
 	}
 }
 

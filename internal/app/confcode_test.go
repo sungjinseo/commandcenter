@@ -173,7 +173,9 @@ func populate(t *testing.T, n *ccNode, s3 *s3test.Server) {
 	n.must(t, "PUT", "/-/api/settings/smtp", `{"host":"smtp.example.com","port":587,"security":"starttls","username":"m",`+
 		`"password":"s3cr3t-smtp","from":"cc@example.com","enabled":true}`, 200)
 	n.must(t, "PUT", "/-/api/realms/ldap", `{"url":"ldap://ldap.example.com","bindDN":"cn=cc","bindPassword":"s3cr3t-ldap",`+
-		`"userBaseDN":"ou=people,dc=example,dc=com","groupMappings":[{"group":"devs","roles":["dev"]}]}`, 200)
+		`"userBaseDN":"ou=people,dc=example,dc=com","groupMappings":[{"group":"devs","roles":["dev"]}],`+
+		`"groupType":"static","groupBaseDN":"ou=groups,dc=example,dc=com","groupSubtree":true,"groupObjectClass":"groupOfNames",`+
+		`"groupIdAttr":"cn","groupMemberAttr":"member","groupMemberFormat":"${dn}"}`, 200)
 	n.must(t, "PUT", "/-/api/realms/oidc", `{"issuer":"https://idp.example.com","clientId":"cc","clientSecret":"s3cr3t-oidc","scopes":["openid","email"]}`, 200)
 	n.must(t, "PUT", "/-/api/realms/saml", `{"displayName":"Corp SSO","defaultRoles":["dev"]}`, 200) // creates the SP key pair
 	n.must(t, "PUT", "/-/api/realms/crowd", `{"url":"https://crowd.example.com","applicationName":"cc","applicationPassword":"s3cr3t-crowd"}`, 200)
@@ -269,6 +271,9 @@ func TestConfigurationAsCode(t *testing.T) {
 	}
 	ss, _ := src.a.DB.LoadSettings(context.Background())
 	ds, _ := dst.a.DB.LoadSettings(context.Background())
+	if !ds.LDAP.StaticGroups() || !ds.LDAP.GroupSubtree || ds.LDAP.GroupMemberFormat != "${dn}" || ds.LDAP.GroupBaseDN != ss.LDAP.GroupBaseDN {
+		t.Fatalf("static groups not restored: %+v", ds.LDAP)
+	}
 	if ds.SMTP.Password != "s3cr3t-smtp" || ds.LDAP.BindPassword != "s3cr3t-ldap" || ds.OIDC.ClientSecret != "s3cr3t-oidc" ||
 		ds.Crowd.ApplicationPassword != "s3cr3t-crowd" || ds.HTTP.Proxy.Password != "s3cr3t-proxy-pw" ||
 		ds.SAML.SPPrivateKey == "" || ds.SAML.SPPrivateKey != ss.SAML.SPPrivateKey || ds.SAML.SPCertificate != ss.SAML.SPCertificate {

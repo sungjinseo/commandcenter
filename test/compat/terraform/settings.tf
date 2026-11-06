@@ -43,7 +43,12 @@ resource "nexus_security_ldap" "directory" {
   user_real_name_attribute       = "cn"
   user_email_address_attribute   = "mail"
   ldap_groups_as_roles           = true
-  group_type                     = "dynamic"
+  group_type                     = local.changed ? "static" : "dynamic"
+  group_base_dn                  = local.changed ? "ou=groups" : null
+  group_object_class             = local.changed ? "groupOfNames" : null
+  group_id_attribute             = local.changed ? "cn" : null
+  group_member_attribute         = local.changed ? "member" : null
+  group_member_format            = local.changed ? "$${dn}" : null
   user_member_of_attribute       = "description"
 }
 

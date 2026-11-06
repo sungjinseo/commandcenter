@@ -35,11 +35,28 @@ type LDAP struct {
 	// GroupsAsRoles also grants the role named as each of a user's groups,
 	// but for the admin role, which takes a mapping (Nexus ldapGroupsAsRoles).
 	GroupsAsRoles bool `json:"groupsAsRoles"`
+	// GroupType says where a user's groups come from: LDAPGroupsDynamic is
+	// GroupAttr of the user's entry, LDAPGroupsStatic the group entries that
+	// list the user (Nexus groupType). The mappings and GroupsAsRoles act on
+	// them either way. The fields below are for static groups.
+	GroupType         string `json:"groupType"`
+	GroupBaseDN       string `json:"groupBaseDN"`
+	GroupSubtree      bool   `json:"groupSubtree"` // the whole subtree of GroupBaseDN, not its direct children
+	GroupObjectClass  string `json:"groupObjectClass"`
+	GroupIDAttr       string `json:"groupIdAttr"`       // holds a group's name
+	GroupMemberAttr   string `json:"groupMemberAttr"`   // lists a group's members
+	GroupMemberFormat string `json:"groupMemberFormat"` // a member's value: ${username}, ${dn} or a DN made with them
 }
 
+// The group types of an LDAP configuration.
+const (
+	LDAPGroupsDynamic = "dynamic"
+	LDAPGroupsStatic  = "static"
+)
+
 // GroupMapping grants Roles to members of Group, matched against the
-// user's group attribute by full DN or by the first RDN's value
-// (case-insensitive).
+// user's groups (values of the group attribute, or a static group's name and
+// DN) by full DN or by the first RDN's value (case-insensitive).
 type GroupMapping struct {
 	Group string   `json:"group"`
 	Roles []string `json:"roles"`
@@ -54,7 +71,7 @@ const (
 // DefaultLDAP is the configuration of an install that never set one.
 func DefaultLDAP() LDAP {
 	return LDAP{TimeoutSeconds: 5, UserFilter: "(uid={user})", UserIDAttr: "uid", NameAttr: "cn",
-		EmailAttr: "mail", GroupAttr: "memberOf"}
+		EmailAttr: "mail", GroupAttr: "memberOf", GroupType: LDAPGroupsDynamic}
 }
 
 // Copy returns c with its own slices.
@@ -72,6 +89,23 @@ func (c LDAP) Copy() LDAP {
 // {user}: enough to look a user up.
 func (c LDAP) Complete() bool {
 	return strings.TrimSpace(c.URL) != "" && strings.TrimSpace(c.UserBaseDN) != "" && strings.Contains(c.UserFilter, "{user}")
+}
+
+// StaticGroups reports whether a user's groups are read from group entries.
+func (c LDAP) StaticGroups() bool { return c.GroupType == LDAPGroupsStatic }
+
+// CheckStaticGroups checks the settings of static groups. A member format
+// must name the user: a fixed value would put everyone in the same groups.
+func (c LDAP) CheckStaticGroups() error {
+	for _, v := range []string{c.GroupBaseDN, c.GroupObjectClass, c.GroupIDAttr, c.GroupMemberAttr} {
+		if strings.TrimSpace(v) == "" {
+			return fmt.Errorf("ldap static groups need groupBaseDN, groupObjectClass, groupIdAttr and groupMemberAttr")
+		}
+	}
+	if !strings.Contains(c.GroupMemberFormat, "${username}") && !strings.Contains(c.GroupMemberFormat, "${dn}") {
+		return fmt.Errorf("ldap groupMemberFormat must contain ${username} or ${dn}")
+	}
+	return nil
 }
 
 // GrantsAdmin reports whether a group mapping or the default roles grant
@@ -136,6 +170,9 @@ func ValidateLDAP(c LDAP) error {
 	if c.TimeoutSeconds < MinLDAPTimeoutSeconds || c.TimeoutSeconds > MaxLDAPTimeoutSeconds {
 		return fmt.Errorf("ldap timeoutSeconds must be between %d and %d", MinLDAPTimeoutSeconds, MaxLDAPTimeoutSeconds)
 	}
+	if c.GroupType != "" && c.GroupType != LDAPGroupsDynamic && c.GroupType != LDAPGroupsStatic {
+		return fmt.Errorf("ldap groupType must be %s or %s", LDAPGroupsDynamic, LDAPGroupsStatic)
+	}
 	if strings.TrimSpace(c.URL) == "" {
 		return nil
 	}
@@ -155,6 +192,8 @@ func ValidateLDAP(c LDAP) error {
 		return fmt.Errorf("ldap attribute names are required")
 	case c.BindDN != "" && c.BindPassword == "":
 		return fmt.Errorf("ldap bindPassword is required with a bindDN")
+	case c.StaticGroups():
+		return c.CheckStaticGroups()
 	}
 	return nil
 }

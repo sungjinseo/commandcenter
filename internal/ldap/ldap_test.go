@@ -620,3 +620,336 @@ func TestMapRolesGroupsAsRoles(t *testing.T) {
 		t.Errorf("with GroupsAsRoles: %v", roles)
 	}
 }
+
+// staticConfig reads groups from the group entries under ou=groups.
+func staticConfig(url, class, memberAttr, format string) meta.LDAP {
+	c := config(url)
+	c.GroupType, c.GroupBaseDN, c.GroupObjectClass, c.GroupIDAttr = meta.LDAPGroupsStatic, "ou=groups,dc=example,dc=org", class, "cn"
+	c.GroupMemberAttr, c.GroupMemberFormat = memberAttr, format
+	return c
+}
+
+func group(dn, class, attr string, members ...string) ldaptest.Entry {
+	return ldaptest.Entry{DN: dn, Attrs: map[string][]string{"objectClass": {class}, "cn": {firstRDN(dn)}, attr: members}}
+}
+
+func firstRDN(dn string) string {
+	v, _, _ := strings.Cut(strings.TrimPrefix(dn, "cn="), ",")
+	return v
+}
+
+// The three shapes of a member, one level and the whole subtree: the groups
+// are what the group entries say, not what the user's attribute says (seed
+// gives alice memberOf cc-admins and devs). They are read as the service
+// account, after the bind, and the re-check reads them as well.
+func TestStaticGroups(t *testing.T) {
+	s := ldaptest.New(t, nil)
+	seed(s)
+	const direct, nested = "cn=team,ou=groups,dc=example,dc=org", "cn=deep,ou=sub,ou=groups,dc=example,dc=org"
+	s.Add(group(direct, "groupOfNames", "member", aliceDN))
+	s.Add(group(nested, "groupOfNames", "member", aliceDN))
+	s.Add(group("cn=others,ou=groups,dc=example,dc=org", "groupOfNames", "member", "uid=bob,ou=people,dc=example,dc=org"))
+	s.Add(group("cn=outside,ou=elsewhere,dc=example,dc=org", "groupOfNames", "member", aliceDN))
+	s.Add(group("cn=wrong-class,ou=groups,dc=example,dc=org", "organizationalRole", "member", aliceDN))
+	s.Add(group("cn=posix,ou=groups,dc=example,dc=org", "posixGroup", "memberUid", "alice"))
+	s.Add(group("cn=uniq,ou=groups,dc=example,dc=org", "groupOfUniqueNames", "uniqueMember", aliceDN))
+	url := s.URL("ldap")
+	cl := &ldap.Client{}
+	ctx := context.Background()
+	for name, c := range map[string]struct {
+		cfg     meta.LDAP
+		subtree bool
+		want    []string
+	}{
+		"member by DN":      {cfg: staticConfig(url, "groupOfNames", "member", "${dn}"), want: []string{"team", direct}},
+		"subtree":           {cfg: staticConfig(url, "groupOfNames", "member", "${dn}"), subtree: true, want: []string{"team", direct, "deep", nested}},
+		"memberUid by name": {cfg: staticConfig(url, "posixGroup", "memberUid", "${username}"), want: []string{"posix", "cn=posix,ou=groups,dc=example,dc=org"}},
+		"a DN made of the name": {cfg: staticConfig(url, "groupOfUniqueNames", "uniqueMember", "uid=${username},ou=people,dc=example,dc=org"),
+			want: []string{"uniq", "cn=uniq,ou=groups,dc=example,dc=org"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c.cfg.GroupSubtree = c.subtree
+			u, err := cl.Authenticate(ctx, c.cfg, "alice", "alice-pw")
+			if err != nil || u.GroupsErr != nil || !slices.Equal(u.Groups, c.want) {
+				t.Fatalf("authenticate: %v %v %v, want %v", u.Groups, u.GroupsErr, err, c.want)
+			}
+			if u, err = cl.Find(ctx, c.cfg, "alice"); err != nil || u.GroupsErr != nil || !slices.Equal(u.Groups, c.want) {
+				t.Fatalf("find: %v %v %v, want %v", u.Groups, u.GroupsErr, err, c.want)
+			}
+		})
+	}
+	for _, as := range s.SearchedAs() {
+		if as != serviceDN {
+			t.Errorf("a search ran as %q", as)
+		}
+	}
+
+	// The id attribute names a group, also when it is not the DN's first value.
+	s.Add(ldaptest.Entry{DN: "cn=Platform Team,ou=groups,dc=example,dc=org", Attrs: map[string][]string{"objectClass": {"group"},
+		"cn": {"Platform Team"}, "sAMAccountName": {"platform", "plat"}, "member": {aliceDN}}})
+	byName := staticConfig(url, "group", "member", "${dn}")
+	byName.GroupIDAttr = "sAMAccountName"
+	if u, err := cl.Authenticate(ctx, byName, "alice", "alice-pw"); err != nil || !slices.Equal(u.Groups, []string{"platform", "plat", "cn=Platform Team,ou=groups,dc=example,dc=org"}) {
+		t.Errorf("another id attribute: %+v %v", u, err)
+	}
+
+	// Without a service account, anonymously: the bind as alice does not stay.
+	anon := staticConfig(url, "posixGroup", "memberUid", "${username}")
+	anon.BindDN, anon.BindPassword = "", ""
+	u, err := cl.Authenticate(ctx, anon, "alice", "alice-pw")
+	if err != nil || u.GroupsErr != nil || len(u.Groups) != 2 {
+		t.Fatalf("anonymous: %+v %v", u, err)
+	}
+	if as := s.SearchedAs(); as[len(as)-1] != "" {
+		t.Errorf("the group search ran as %q", as[len(as)-1])
+	}
+
+	// A wrong password searches for no group.
+	cfg := staticConfig(url, "groupOfNames", "member", "${dn}")
+	before := s.Searches()
+	if _, err := cl.Authenticate(ctx, cfg, "alice", "wrong"); !errors.Is(err, ldap.ErrInvalidCredentials) {
+		t.Fatalf("wrong password: %v", err)
+	}
+	if got := s.Searches() - before; got != 1 {
+		t.Errorf("%d searches for a wrong password", got)
+	}
+}
+
+// LDAP injection here hands out roles: the value is escaped as a whole (RFC
+// 4515 3), once, whatever the name or the DN holds.
+func TestGroupFilterEscapes(t *testing.T) {
+	cfg := meta.LDAP{GroupObjectClass: "posixGroup", GroupIDAttr: "cn", GroupMemberAttr: "memberUid", GroupMemberFormat: "${username}"}
+	for name, want := range map[string]string{
+		"alice":        `alice`,
+		"*":            `\2a`,
+		"(":            `\28`,
+		")":            `\29`,
+		`\`:            `\5c`,
+		"a\x00b":       `a\00b`,
+		"*)(cn=*":      `\2a\29\28cn=\2a`,
+		"x)(|(cn=*))(": `x\29\28|\28cn=\2a\29\29\28`,
+		`\2a`:          `\5c2a`,
+		"${dn}":        "${dn}", // one pass: a name is not a format
+	} {
+		got := ldap.GroupFilter(cfg, name, "uid=the-dn")
+		if w := "(&(objectClass=posixGroup)(cn=*)(memberUid=" + want + "))"; got != w {
+			t.Errorf("%q: %s, want %s", name, got, w)
+		}
+		b, err := ldap.CompileFilter(got)
+		if err != nil {
+			t.Errorf("%q: %v", name, err)
+		} else if name != "${dn}" && !bytes.Contains(b, []byte(name)) {
+			t.Errorf("%q does not stay one literal value: %x", name, b)
+		}
+	}
+	// The format's own text and a DN are one value with the name; the class
+	// cannot break out either.
+	cfg.GroupMemberAttr, cfg.GroupMemberFormat = "member", `uid=${username},ou=a\,b,dc=x`
+	if got, want := ldap.GroupFilter(cfg, "*", ""), `(&(objectClass=posixGroup)(cn=*)(member=uid=\2a,ou=a\5c,b,dc=x))`; got != want {
+		t.Errorf("format: %s, want %s", got, want)
+	}
+	cfg.GroupMemberFormat = "${dn}"
+	if got, want := ldap.GroupFilter(cfg, "x", `uid=a (b)\, c*,dc=x`), `(&(objectClass=posixGroup)(cn=*)(member=uid=a \28b\29\5c, c\2a,dc=x))`; got != want {
+		t.Errorf("dn: %s, want %s", got, want)
+	}
+	cfg.GroupObjectClass = "x)(cn=*"
+	if got, want := ldap.GroupFilter(cfg, "x", "y"), `(&(objectClass=x\29\28cn=\2a)(cn=*)(member=y))`; got != want {
+		t.Errorf("class: %s, want %s", got, want)
+	}
+
+	// Against a directory: users whose id and DN hold what would widen the
+	// search find none of the groups, and the DN of a real such user finds its own.
+	s := ldaptest.New(t, nil)
+	seed(s)
+	s.Add(group("cn=posix,ou=groups,dc=example,dc=org", "posixGroup", "memberUid", "alice"))
+	const odd = `uid=o\, (dd)*,ou=people,dc=example,dc=org`
+	s.Add(group("cn=odd,ou=groups,dc=example,dc=org", "groupOfNames", "member", odd))
+	s.Add(group("cn=plain,ou=groups,dc=example,dc=org", "groupOfNames", "member", aliceDN))
+	s.Add(ldaptest.Entry{DN: odd, Password: "pw", Attrs: map[string][]string{"uid": {"odd"}}})
+	byName := staticConfig(s.URL("ldap"), "posixGroup", "memberUid", "${username}")
+	byName.UserFilter = "(cn={user})" // the search for the user must not stop it: its id is what goes in
+	for _, id := range []string{"*", "*)(cn=*", ")(|(cn=*", `\2a`} {
+		s.Add(ldaptest.Entry{DN: "uid=mallory,ou=people,dc=example,dc=org", Password: "pw",
+			Attrs: map[string][]string{"uid": {id}, "cn": {"mallory"}}})
+		u, err := (&ldap.Client{}).Authenticate(context.Background(), byName, "mallory", "pw")
+		if err != nil || u.ID != id || len(u.Groups) != 0 || u.GroupsErr != nil {
+			t.Errorf("id %q: %+v %v", id, u, err)
+		}
+		filters := s.Filters()
+		if got, want := filters[len(filters)-1], ldap.GroupFilter(byName, id, ""); got != want {
+			t.Errorf("id %q: the server got %s, want %s", id, got, want)
+		}
+	}
+	byDN := staticConfig(s.URL("ldap"), "groupOfNames", "member", "${dn}")
+	u, err := (&ldap.Client{}).Authenticate(context.Background(), byDN, "odd", "pw")
+	if err != nil || u.GroupsErr != nil || !slices.Equal(u.Groups, []string{"odd", "cn=odd,ou=groups,dc=example,dc=org"}) {
+		t.Errorf("a DN with what a filter escapes: %+v %v", u, err)
+	}
+}
+
+// A failed search for groups fails nothing else and grants nothing: the user
+// is who the password said, without groups, and the error says why. The next
+// search starts over. Only a caller that left is an error.
+func TestStaticGroupSearchFails(t *testing.T) {
+	s := ldaptest.New(t, nil)
+	seed(s)
+	s.Add(group("cn=team,ou=groups,dc=example,dc=org", "groupOfNames", "member", aliceDN))
+	cfg := staticConfig(s.URL("ldap"), "groupOfNames", "member", "${dn}")
+	cfg.TimeoutSeconds = 1
+	cl := &ldap.Client{}
+	ctx := context.Background()
+	check := func(t *testing.T, want string) {
+		t.Helper()
+		for what, read := range map[string]func() (ldap.User, error){
+			"authenticate": func() (ldap.User, error) { return cl.Authenticate(ctx, cfg, "alice", "alice-pw") },
+			"find":         func() (ldap.User, error) { return cl.Find(ctx, cfg, "alice") },
+		} {
+			u, err := read()
+			if err != nil || u.ID != "alice" || len(u.Groups) != 0 || u.GroupsErr == nil || !strings.Contains(u.GroupsErr.Error(), want) {
+				t.Errorf("%s: %+v, %v", what, u, err)
+			}
+		}
+	}
+	onGroups := func(answer func() int64) {
+		s.SetSearchHook(func(base string) int64 {
+			if base == cfg.GroupBaseDN {
+				return answer()
+			}
+			return -1
+		})
+	}
+
+	t.Run("no such base", func(t *testing.T) {
+		onGroups(func() int64 { return 32 })
+		check(t, "result code 32")
+		steps := cl.Diagnose(ctx, cfg, "alice", "alice-pw")
+		last := steps[len(steps)-1]
+		if last.Step != "groups" || last.OK || !strings.Contains(last.Detail, "result code 32") || !strings.Contains(last.Detail, "without roles from groups") {
+			t.Errorf("diagnostic: %+v", steps)
+		}
+		// A wrong password is still that.
+		if _, err := cl.Authenticate(ctx, cfg, "alice", "wrong"); !errors.Is(err, ldap.ErrInvalidCredentials) {
+			t.Errorf("wrong password: %v", err)
+		}
+	})
+	t.Run("a slow server", func(t *testing.T) {
+		answer := make(chan struct{})
+		defer close(answer)
+		onGroups(func() int64 { <-answer; return -1 })
+		start := time.Now()
+		u, err := cl.Authenticate(ctx, cfg, "alice", "alice-pw")
+		if err != nil || u.GroupsErr == nil || len(u.Groups) != 0 {
+			t.Errorf("%+v, %v", u, err)
+		}
+		if took := time.Since(start); took > 5*time.Second {
+			t.Errorf("took %v with a timeout of 1s", took)
+		}
+	})
+	t.Run("the caller leaves", func(t *testing.T) {
+		left, cancel := context.WithCancel(ctx)
+		defer cancel()
+		onGroups(func() int64 { cancel(); time.Sleep(200 * time.Millisecond); return -1 })
+		if _, err := cl.Find(left, cfg, "alice"); !errors.Is(err, context.Canceled) {
+			t.Errorf("find: %v", err)
+		}
+	})
+	s.SetSearchHook(nil)
+	u, err := cl.Authenticate(ctx, cfg, "alice", "alice-pw")
+	if err != nil || u.GroupsErr != nil || len(u.Groups) != 2 {
+		t.Errorf("after the failures: %+v %v", u, err)
+	}
+}
+
+// One user in many groups: up to the limit they arrive, beyond it the search
+// has failed, whole: a few groups that happen to come first are not a state a
+// role should hang on. A server that ignores the limit is stopped at it, and
+// by the bytes it sends.
+func TestGroupSearchBounded(t *testing.T) {
+	s := ldaptest.New(t, nil)
+	seed(s)
+	for i := range 1024 {
+		s.Add(group(fmt.Sprintf("cn=g%d,ou=groups,dc=example,dc=org", i), "groupOfNames", "member", aliceDN))
+	}
+	cfg := staticConfig(s.URL("ldap"), "groupOfNames", "member", "${dn}")
+	cl := &ldap.Client{}
+	u, err := cl.Authenticate(context.Background(), cfg, "alice", "alice-pw")
+	if err != nil || u.GroupsErr != nil || len(u.Groups) != 2048 {
+		t.Fatalf("at the limit: %d groups, %v %v", len(u.Groups), u.GroupsErr, err)
+	}
+	s.Add(group("cn=one-more,ou=groups,dc=example,dc=org", "groupOfNames", "member", aliceDN))
+	u, err = cl.Authenticate(context.Background(), cfg, "alice", "alice-pw")
+	if err != nil || len(u.Groups) != 0 || u.GroupsErr == nil || !strings.Contains(u.GroupsErr.Error(), "result code 4") {
+		t.Fatalf("over the limit: %d groups, %v %v", len(u.Groups), u.GroupsErr, err)
+	}
+
+	search := func(reply []byte, limit int) ([]ldap.Entry, error) {
+		c, err := ldap.Dial(context.Background(), ldap.DialOptions{URL: rawServer(t, reply), Timeout: 2 * time.Second})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		return c.Search(ldap.SearchRequest{BaseDN: "dc=x", Filter: "(cn=*)", Attributes: []string{"cn"}, SizeLimit: limit})
+	}
+	// More entries than asked for.
+	var flood []byte
+	for i := range 100 {
+		flood = append(flood, entryMsg(fmt.Sprintf("cn=g%d,dc=x", i), attr("cn", "g"))...)
+	}
+	if es, err := search(append(flood, searchDone()...), 10); len(es) != 11 || err == nil {
+		t.Errorf("past the size limit: %d entries, %v", len(es), err)
+	}
+	// References do not go on for ever.
+	ref := msg1(ber.TLV(0x73, ber.String(4, "ldap://elsewhere/dc=x")))
+	if _, err := search(bytes.Repeat(ref, 100), 10); err == nil || !strings.Contains(err.Error(), "too many") {
+		t.Errorf("references: %v", err)
+	}
+	// Few entries, each just under the message cap, kept whole: stopped at
+	// the bytes of the search, and what it held is a few MiB.
+	big := append(bytes.Repeat(entryMsg("cn=big,dc=x", attr("cn", strings.Repeat("x", 900<<10))), 60), searchDone()...)
+	n := allocated(func() {
+		if _, err = search(big, 1000); err == nil || !strings.Contains(err.Error(), "bytes") {
+			t.Errorf("many big entries: %v", err)
+		}
+	})
+	t.Logf("allocated %d bytes", n)
+	if n > 40<<20 { // about 15 MiB, 27 with the race detector; twice what was offered without the bound
+		t.Errorf("allocated %d bytes of the %d offered", n, len(big))
+	}
+}
+
+// Of a static group the id attribute names the role, also when it is not the
+// DN's first value; the DN is for the mappings; nothing makes an admin but a mapping.
+func TestMapRolesStaticGroups(t *testing.T) {
+	cfg := meta.LDAP{GroupType: meta.LDAPGroupsStatic, GroupsAsRoles: true, GroupMappings: []meta.GroupMapping{
+		{Group: "cn=boss,ou=groups,dc=x", Roles: []string{"admin"}}, {Group: "named", Roles: []string{"from-name"}}}}
+	groups := []string{"devs", "cn=devs,ou=groups,dc=x", "Platform", "cn=other-name,ou=groups,dc=x", "admin", "cn=admin,ou=groups,dc=x",
+		"named", "cn=named,ou=groups,dc=x"}
+	if roles, _ := ldap.MapRoles(cfg, groups); !slices.Equal(roles, []string{"from-name", "devs", "Platform", "named"}) {
+		t.Errorf("roles: %v", roles)
+	}
+	roles, matched := ldap.MapRoles(cfg, append(groups, "boss", "cn=boss,ou=groups,dc=x"))
+	if !slices.Contains(roles, "admin") || !slices.Contains(matched, "cn=boss,ou=groups,dc=x") {
+		t.Errorf("mapped by DN: %v, %v", roles, matched)
+	}
+	// Dynamic groups read as before: the DN's first value.
+	cfg.GroupType = meta.LDAPGroupsDynamic
+	if roles, _ := ldap.MapRoles(cfg, []string{"cn=devs,ou=groups,dc=x"}); !slices.Equal(roles, []string{"devs"}) {
+		t.Errorf("dynamic: %v", roles)
+	}
+}
+
+func TestDiagnoseStaticGroups(t *testing.T) {
+	s := ldaptest.New(t, nil)
+	seed(s)
+	s.Add(group("cn=team,ou=groups,dc=example,dc=org", "groupOfNames", "member", aliceDN))
+	cfg := staticConfig(s.URL("ldap"), "groupOfNames", "member", "${dn}")
+	cfg.GroupMappings = []meta.GroupMapping{{Group: "team", Roles: []string{"deployer"}}}
+	for _, pw := range []string{"alice-pw", ""} { // the search for the user alone reads them too
+		steps := (&ldap.Client{}).Diagnose(context.Background(), cfg, "alice", pw)
+		last := steps[len(steps)-1]
+		if last.Step != "groups" || !last.OK || !strings.Contains(last.Detail, "found under ou=groups,dc=example,dc=org: [team, cn=team,") ||
+			!strings.Contains(last.Detail, "roles: [deployer]") {
+			t.Errorf("%+v", steps)
+		}
+	}
+}

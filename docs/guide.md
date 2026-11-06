@@ -579,7 +579,7 @@ Sonatype Nexus Repository 3에서 Command Center로 옮길 때는 `commandcenter
 - **비밀번호 해시는 옮길 수 없습니다.** REST API는 해시를 내주지 않고 Command Center는 bcrypt만 받으므로 로컬 사용자는 비밀번호를 새로 정해야 합니다. `-config`는 무작위 비밀번호로 사용자를 만들고 `-passwords-out` 파일에만 적습니다(2단계). 상태는 `locked`가 `disabled`, `changepassword`가 `active`로 바뀝니다.
 - **읽기 기본값**: Command Center는 `authenticatedRead`(로그인한 사용자는 모두 읽기)가 기본으로 켜져 있고, Nexus는 권한이 있어야만 읽습니다("읽기 권한"). `-config`는 대상에 실행하는 관리자 말고 다른 로컬 사용자가 없으면(새로 만든 서버) 이 설정을 꺼서 옮긴 역할이 읽기를 정하게 합니다(`setting authenticatedRead updated` 줄). 이미 사용자가 있는 서버에서는 그 사용자들의 읽기가 막힐 수 있으므로 바꾸지 않고 수동 조치 줄로 알려 줍니다.
 - **익명 사용자**는 역할이 있는 사용자가 아니라 전역·저장소별 `anonymousRead`이며 쓰기는 항상 거부됩니다. `-config`는 Nexus의 anonymous 사용자가 역할을 통해 모든 저장소를 읽을 수 있을 때(`nx-repository-view-*-*-read`, `nx-repository-view-*-*-*`, `nx-all`)만 전역 익명 읽기를 켭니다. 일부 저장소만 읽게 해 둔 경우에는 접근이 넓어지지 않도록 전역 스위치를 켜지 않고 수동 조치로 남기므로, 그 저장소들에 저장소별 `anonymousRead`를 켜세요. browse만 주는 익명 접근은 없습니다.
-- **LDAP**: Command Center의 LDAP 서버는 하나이므로 Nexus의 첫 번째 서버만 옮기고 나머지는 `skipped`로 알려 줍니다. 사용자 기준 DN은 Nexus의 `userBaseDn`과 `searchBase`를 이은 값이고, 필터는 `userObjectClass`, `userIdAttribute`, `userLdapFilter`로 만듭니다(예: `(&(objectClass=inetOrgPerson)(uid={user})(employeeType=engineer))`). Nexus의 `userSubtree: false`는 `userOneLevel`로 옮깁니다. Nexus에서 LDAP 그룹을 역할로 쓰고 있었다면(`ldapGroupsAsRoles`) 옮긴 역할마다 "같은 이름의 그룹 → 그 역할" 매핑을 만들어 Nexus와 같이 동작하게 합니다. 다만 `nx-admin`(관리자) 매핑은 만들지 않으니, 관리자 그룹은 전체 DN으로 직접 매핑하세요("그룹 매핑"). Command Center는 사용자의 `memberOf` 같은 속성에서 그룹을 읽으므로 Nexus의 static 그룹(그룹 객체가 멤버를 가진 방식)은 디렉터리가 그 속성을 채워 줘야 합니다. bind DN과 비밀번호는 2단계의 설명대로 직접 넣습니다.
+- **LDAP**: Command Center의 LDAP 서버는 하나이므로 Nexus의 첫 번째 서버만 옮기고 나머지는 `skipped`로 알려 줍니다. 사용자 기준 DN은 Nexus의 `userBaseDn`과 `searchBase`를 이은 값이고, 필터는 `userObjectClass`, `userIdAttribute`, `userLdapFilter`로 만듭니다(예: `(&(objectClass=inetOrgPerson)(uid={user})(employeeType=engineer))`). Nexus의 `userSubtree: false`는 `userOneLevel`로 옮깁니다. Nexus에서 LDAP 그룹을 역할로 쓰고 있었다면(`ldapGroupsAsRoles`) 옮긴 역할마다 "같은 이름의 그룹 → 그 역할" 매핑을 만들어 Nexus와 같이 동작하게 합니다. 다만 `nx-admin`(관리자) 매핑은 만들지 않으니, 관리자 그룹은 전체 DN으로 직접 매핑하세요("그룹 매핑"). Nexus의 static 그룹(그룹 항목이 구성원을 가진 방식)은 `groupType: static`과 그 설정으로 옮기며, `groupBaseDN`은 Nexus의 `groupBaseDn`과 `searchBase`를 이은 값입니다("정적 그룹"). bind DN과 비밀번호는 2단계의 설명대로 직접 넣습니다.
 - **Realm**: 켜는 것과 순서만 옮기고 끄지는 않습니다. Command Center의 `token` realm(API 토큰)은 Nexus에 대응하는 realm이 하나로 정해지지 않으므로 Nexus에 토큰 realm이 없어도 그대로 둡니다. LDAP realm은 LDAP 서버를 옮긴 경우에만 켜고, SAML·Crowd·OAuth2·RUT realm은 Command Center에서 먼저 설정해야 하므로 수동 조치로 남깁니다.
 - **Docker 셀렉터**: Command Center의 Docker 셀렉터 `path`는 이미지 이름입니다. Nexus의 Docker 셀렉터가 `/v2/…` 경로를 썼다면 이미지 이름 기준으로 고쳐 쓰세요.
 
@@ -617,7 +617,7 @@ Sonatype Nexus Repository 3의 REST API(v1) 가운데 스크립트, CI 작업, T
 | `GET /service/rest/wonderland/status` | 로그인한 사용자. Sonatype 클라이언트 라이브러리(Jenkins Nexus Platform 플러그인의 "Test connection")가 가장 먼저 읽는 에디션과 버전입니다. Nexus처럼 `Accept`가 없으면 XML(`<status><edition>PRO</edition><version>3.91.1-04</version></status>`), `Accept: application/json`이면 JSON으로 답합니다. 버전은 Command Center의 버전이 아니라 이 API가 따르는 Nexus 릴리스이고, `PRO`는 태그·스테이징 같은 Pro 엔드포인트를 제공한다는 뜻입니다 |
 | `GET /script`, `POST /script`, `/script/{name}`, `POST /script/{name}/run` | 로그인한 사용자. 스크립트 API는 없습니다(Groovy 스크립트는 서버 안에서 임의의 코드를 실행합니다). 스크립트 생성을 끈 Nexus(3.21.2부터 기본값)처럼 목록은 `[]`, 생성은 `410`, 이름을 지정한 요청(조회·수정·삭제·실행)은 `404`이며, 메시지에 이유가 들어 있습니다 |
 | `GET/PUT/DELETE /security/saml` | 조회는 admin 또는 `settings` `read`, 쓰기는 admin. `/-/api/realms/saml`의 값을 Nexus 모양으로 다룹니다(`entityId`, `idpMetadata`, `usernameAttribute`, `firstNameAttribute`, `lastNameAttribute`, `emailAttribute`, `groupsAttribute`, `validateResponseSignature`, `validateAssertionSignature`). 그룹 매핑, 기본 역할처럼 Command Center에만 있는 값은 PUT이 건드리지 않습니다. 설정이 없으면 GET은 404이고, DELETE는 설정을 지우고 `saml` realm을 끕니다. 서명 검사를 둘 다 끄면 400입니다 |
-| `GET/POST /security/ldap`, `GET/PUT/DELETE /security/ldap/{name}`, `POST /security/ldap/change-order` | 조회는 admin 또는 `settings` `read`, 쓰기는 admin. Command Center의 LDAP 서버는 하나이므로 목록에는 많아야 하나가 나오고, 둘째 POST는 400입니다. 사용자 기준 DN과 필터는 `import-nexus`와 같은 규칙으로 만듭니다("사용자, 역할, 권한 옮기기"의 LDAP). `userLdapFilter`에 `{user}`가 있으면 그것이 필터 전체입니다. `authPassword`는 돌려주지 않습니다. 그룹 매핑과 기본 역할, StartTLS, 인증서 검증 생략은 이 API에 필드가 없어 그대로 둡니다. `CRAM_MD5`·`DIGEST_MD5`, `userPasswordAttribute`, `ldapGroupsAsRoles`와 함께 쓴 `groupType: static`은 400입니다. 효과가 없는 값(`useTrustStore`, 재시도 설정, `ldapGroupsAsRoles`가 꺼져 있을 때의 정적 그룹 설정)은 그대로 돌려주며, 화면에서 LDAP 설정을 바꾸면 그때부터는 설정에서 만든 값으로 답합니다. DELETE는 설정을 지우고 `ldap` realm을 끕니다 |
+| `GET/POST /security/ldap`, `GET/PUT/DELETE /security/ldap/{name}`, `POST /security/ldap/change-order` | 조회는 admin 또는 `settings` `read`, 쓰기는 admin. Command Center의 LDAP 서버는 하나이므로 목록에는 많아야 하나가 나오고, 둘째 POST는 400입니다. 사용자 기준 DN과 필터는 `import-nexus`와 같은 규칙으로 만듭니다("사용자, 역할, 권한 옮기기"의 LDAP). `userLdapFilter`에 `{user}`가 있으면 그것이 필터 전체입니다. `authPassword`는 돌려주지 않습니다. 그룹 매핑과 기본 역할, StartTLS, 인증서 검증 생략은 이 API에 필드가 없어 그대로 둡니다. `CRAM_MD5`·`DIGEST_MD5`, `userPasswordAttribute`는 400입니다. `groupType: static`("정적 그룹")의 기준 DN은 `groupBaseDn`과 `searchBase`를 이은 값이고, `groupObjectClass`, `groupIdAttribute`, `groupMemberAttribute`와 `${username}`이나 `${dn}`이 든 `groupMemberFormat`이 필요합니다. 값이 모자라면 `ldapGroupsAsRoles`를 켠 본문은 400이고, 끈 본문은 그대로 돌려주기만 할 뿐 효과가 없습니다. 값이 다 있으면 `ldapGroupsAsRoles`를 꺼도 그룹 항목을 읽어 그룹 매핑에 씁니다. 그 밖의 `groupType`은 400입니다. 효과가 없는 값(`useTrustStore`, 재시도 설정)은 그대로 돌려주며, 화면에서 LDAP 설정을 바꾸면 그때부터는 설정에서 만든 값으로 답합니다. 이때 정적 그룹을 쓰는 디렉터리는 `searchBase`가 비고 `userBaseDn`과 `groupBaseDn`에 전체 DN이 나옵니다. DELETE는 설정을 지우고 `ldap` realm을 끕니다 |
 | `/capabilities`, `/iq`, `/security/oauth2` | 없습니다. capability와 IQ Server 연동은 없고, OAuth2 본문에는 발급자(issuer)가 없어 ID 토큰의 `iss`를 확인할 수 없으므로 `/-/api/realms/oidc`를 쓰세요. 404(`/security/oauth2`의 PUT·POST는 400)이며 메시지에 이유가 들어 있습니다 |
 | `GET /service/rest/swagger.json` | 인증 없음. `GET /-/api/openapi.json`과 같은 OpenAPI 3.0 문서("OpenAPI 문서" 참고) |
 | `GET /service/rest/repository/browse/<저장소>/<디렉터리>/` | 해당 저장소의 browse 권한. Nexus의 HTML 디렉터리 목록입니다. 끝에 `/`가 없으면 303으로 붙여 주고, 루트(`/service/rest/repository/browse/`)는 볼 수 있는 저장소 목록, group은 멤버의 트리를 합쳐 보여 줍니다. 없는 저장소나 경로는 404 페이지이고, 한 번에 1000개까지 보여 줍니다 |
@@ -1392,17 +1392,24 @@ curl -u admin -H 'X-Command-Center-UI: 1' -H 'Content-Type: application/json' \
 | `userFilter` | `(uid={user})` | 검색 필터. `{user}`가 필수이며 로그인 이름은 필터에 넣기 전에 이스케이프합니다. 정확히 한 항목이 나와야 합니다. |
 | `userIdAttr` | `uid` | 사용자 ID로 쓸 속성 |
 | `nameAttr`, `emailAttr` | `cn`, `mail` | 표시 이름, 이메일 |
-| `groupAttr` | `memberOf` | 사용자의 그룹을 담은 속성 |
+| `groupAttr` | `memberOf` | 사용자의 그룹을 담은 속성(`groupType`이 `dynamic`일 때) |
 | `groupMappings` | 없음 | `[{group, roles}]` 그룹 → 역할 |
 | `defaultRoles` | 없음 | 모든 LDAP 사용자에게 주는 역할 |
 | `userOneLevel` | `false` | `userBaseDN` 바로 아래 항목에서만 사용자를 찾습니다(Nexus의 `userSubtree: false`). 끄면 하위 트리 전체에서 찾습니다. |
-| `groupsAsRoles` | `false` | 사용자의 그룹 이름(DN이면 첫 RDN의 값)과 같은 이름의 역할을 줍니다(Nexus의 `ldapGroupsAsRoles`). `admin` 역할은 이렇게 주지 않으며 `groupMappings`에 적어야 합니다. 없는 역할은 아무 권한도 주지 않습니다. |
+| `groupsAsRoles` | `false` | 사용자의 그룹 이름(DN이면 첫 RDN의 값, 정적 그룹이면 `groupIdAttr`의 값)과 같은 이름의 역할을 줍니다(Nexus의 `ldapGroupsAsRoles`). `admin` 역할과 `admin`을 포함한 역할은 이렇게 주지 않으며 `groupMappings`에 적어야 합니다. 없는 역할은 아무 권한도 주지 않습니다. |
+| `groupType` | `dynamic` | 그룹을 어디서 읽을지 정합니다. `dynamic`은 사용자 항목의 `groupAttr`, `static`은 구성원을 나열한 그룹 항목입니다(Nexus의 `groupType`, "정적 그룹"). |
+| `groupBaseDN` | 없음 | `static`에서 그룹 항목을 검색할 기준 DN(필수) |
+| `groupSubtree` | `false` | `static`에서 `groupBaseDN`의 하위 트리 전체를 검색합니다. 끄면 바로 아래 항목만 봅니다. |
+| `groupObjectClass` | 없음 | `static`에서 그룹 항목의 objectClass(필수). 예: `groupOfNames`, `groupOfUniqueNames`, `posixGroup` |
+| `groupIdAttr` | 없음 | `static`에서 그룹 이름을 담은 속성(필수). 예: `cn` |
+| `groupMemberAttr` | 없음 | `static`에서 구성원을 나열한 속성(필수). 예: `member`, `uniqueMember`, `memberUid` |
+| `groupMemberFormat` | 없음 | `static`에서 구성원 값의 형식(필수). `${username}`(`userIdAttr`의 값)이나 `${dn}`(사용자 DN)이 있어야 합니다. 예: `${dn}`, `${username}`, `uid=${username},ou=people,dc=example,dc=org` |
 
 ### 로그인 흐름
 
 1. 서비스 계정으로 바인드(`bindDN`이 있을 때)하고 `userBaseDN` 아래에서 `userFilter`로 사용자를 한 명 찾습니다(0명이나 2명 이상이면 실패).
 2. 찾은 항목의 DN으로 사용자 비밀번호를 바인드합니다. 이름이나 비밀번호가 비어 있으면 서버에 보내지 않고 거부합니다(익명 바인드 방지). 출력 가능한 ASCII가 아니거나 앞뒤·연속 공백이 있는 이름도 디렉터리에 보내지 않습니다("보호"의 로그인 시도 제한 참고).
-3. 사용자의 `groupAttr` 값을 그룹 매핑에 대응시켜 역할을 정합니다. 성공한 비밀번호 확인은 로컬과 같이 1분간 캐시합니다.
+3. 사용자의 그룹을 정합니다. `dynamic`이면 사용자의 `groupAttr` 값이고, `static`이면 서비스 계정으로 다시 바인드해 찾은 그룹 항목입니다("정적 그룹"). 이 그룹을 그룹 매핑에 대응시켜 역할을 정합니다. 성공한 비밀번호 확인은 로컬과 같이 1분간 캐시합니다.
 
 LDAP 사용자는 DB에 사용자 행이 따로 없고, 로그인하면 메모리에 항목이 생깁니다. 세션과 토큰의 소유자 키는 `ldap:<id>`이며(예: `ldap:alice`) 같은 ID의 로컬 사용자와 섞이지 않습니다. `/-/api/me`는 `user`에 `alice`를, `owner`에 `ldap:alice`를 돌려주고, API 토큰 화면은 `owner`로 본인 토큰을 찾습니다. LDAP 사용자의 계정 화면에도 이 소유자 키가 나옵니다. 사용자 목록에서는 같은 ID의 로컬 사용자와 LDAP 사용자가 Realm이 다른 두 행으로 따로 나옵니다. LDAP 사용자는 같은 ID의 역할 덮어쓰기 행(아래)이 있을 때만 그 행과 한 행으로 합쳐지고, 그 행에는 그룹 매핑이 준 역할까지 더한 역할이 나옵니다. 토큰을 Basic 인증의 비밀번호로 쓸 때 사용자 이름은 `ldap:`을 뺀 `alice`입니다. 역할은 요청마다 최신 설정으로 계산하므로 매핑을 바꾸면 곧바로 반영됩니다.
 
@@ -1412,8 +1419,24 @@ LDAP 사용자는 DB에 사용자 행이 따로 없고, 로그인하면 메모�
 
 - **CN만 적은 매핑은 같은 CN의 다른 그룹과도 일치합니다.** 서로 다른 OU에 같은 이름의 그룹이 있을 수 있으면 전체 DN으로 적으세요. 특히 `admin` 역할을 주는 매핑은 DN으로 적는 것이 안전합니다.
 - `defaultRoles`에 `admin`을 넣으면 디렉터리의 모든 사용자가 관리자가 됩니다(UI가 경고합니다).
-- `memberOf` 같은 속성을 서버가 채워 줘야 합니다(OpenLDAP은 memberOf overlay가 필요). 중첩 그룹은 풀지 않습니다.
+- `dynamic`에서는 `memberOf` 같은 속성을 서버가 채워 줘야 합니다(OpenLDAP은 memberOf overlay가 필요). 그럴 수 없으면 `static`을 쓰세요("정적 그룹"). 어느 쪽이든 중첩 그룹은 풀지 않습니다.
 - Active Directory에서 비활성화된 계정은 자동으로 막히지 않습니다. 필터가 지원하는 `&`, `|`, `!`, 등호, 존재(`attr=*`) 조건으로 허용 그룹을 `userFilter`에 넣으세요(예: `(&(sAMAccountName={user})(memberOf=CN=허용그룹,…))`). AD 확장 매칭 규칙(`:1.2.840…:=`), 부분 일치, 비교 필터는 지원하지 않습니다.
+
+### 정적 그룹
+
+`groupType: static`이면 사용자 항목의 속성이 아니라 구성원을 나열한 그룹 항목에서 그룹을 읽습니다(Nexus의 Static Groups). memberOf overlay가 없어도 되며 `groupAttr`은 읽지 않습니다.
+
+| 그룹 항목 | `groupObjectClass` | `groupIdAttr` | `groupMemberAttr` | `groupMemberFormat` |
+|---|---|---|---|---|
+| 구성원이 DN | `groupOfNames` | `cn` | `member` | `${dn}` |
+| 구성원이 DN | `groupOfUniqueNames` | `cn` | `uniqueMember` | `${dn}` 또는 `uid=${username},ou=people,dc=example,dc=org` |
+| 구성원이 이름 | `posixGroup` | `cn` | `memberUid` | `${username}` |
+
+- **검색.** 비밀번호 바인드가 성공한 뒤 서비스 계정으로(`bindDN`이 없으면 익명으로) `groupBaseDN` 아래를 검색합니다. 비밀번호가 틀리면 검색하지 않습니다. 필터는 `(&(objectClass=<groupObjectClass>)(<groupIdAttr>=*)(<groupMemberAttr>=<값>))`이고, `<값>`은 `groupMemberFormat`을 채운 뒤 통째로 이스케이프(RFC 4515)한 값이므로 사용자 이름이나 DN에 든 `*`, `(`, `)`, `\`, NUL이 필터를 바꾸지 못합니다. `${username}`에는 로그인할 때 입력한 이름이 아니라 디렉터리의 `userIdAttr` 값이 들어갑니다(`memberUid`는 대소문자를 구분합니다). 서비스 계정이 그룹 항목을 읽을 수 있어야 합니다.
+- **역할.** `groupsAsRoles`는 `groupIdAttr`의 값(값이 여럿이면 각각)과 같은 이름의 역할을 줍니다. `groupMappings[].group`에는 그 값, 그룹 항목의 전체 DN, DN의 첫 RDN 값 가운데 하나를 적습니다. 중첩 그룹은 풀지 않습니다(Nexus와 같습니다).
+- **갱신.** 1분 재확인 때 그룹 항목도 다시 읽습니다. 그룹에서 빠진 사용자는 다음 재확인에서 역할을 잃으며, 세션과 토큰도 같습니다.
+- **제한.** 한 번의 검색은 그룹 1024개, 응답 4 MiB, 서버 쪽 제한 시간 10초, 응답 대기 `timeoutSeconds`까지입니다. 페이지 나눔은 하지 않습니다. 그룹 이름만 요청하므로 구성원이 아주 많은 그룹도 구성원 목록을 받아 오지 않습니다. 디렉터리에 구성원 속성의 인덱스를 두세요(OpenLDAP: `olcDbIndex: member eq`).
+- **검색이 실패하면.** 기준 DN이 없거나, 응답이 늦거나, 그룹이 1024개나 서버의 크기 제한을 넘으면 그 사용자는 로그인되지만 그룹에서 오는 역할이 없습니다. `defaultRoles`와 덮어쓰기 행의 역할만 남습니다. 그룹 속성을 읽지 못한 사용자와 같은 결과이며, 맞는 비밀번호가 틀린 비밀번호처럼 보이지 않게 하려는 동작입니다. 서버 로그에 `ldap group search failed` 경고가 남고 연결 테스트의 `groups` 단계가 실패하며, 다음 재확인(최대 1분 뒤)에 다시 검색합니다. 디렉터리에 아예 닿을 수 없으면 "1분 재확인과 장애 시 동작"대로 거부합니다.
 
 ### 로컬 역할 덮어쓰기
 
@@ -1424,12 +1447,12 @@ LDAP 사용자는 DB에 사용자 행이 따로 없고, 로그인하면 메모�
 - LDAP 사용자의 항목은 1분이 지나면 다음 사용 때 서비스 계정으로 다시 검색해 확인합니다(**세션, 토큰, 비밀번호 캐시 모두**). 디렉터리에서 사라졌거나 검색 결과가 모호하면 즉시 거부합니다.
 - 디렉터리에 닿을 수 없으면 **닫힌 채로(fail closed)** 거부합니다. 재확인이 실패하면 그 시도가 끝난 때부터 10초 동안은 다시 시도하지 않고 거부합니다(클라이언트가 먼저 연결을 끊은 경우는 실패로 치지 않습니다). 한 사용자의 재확인은 한 번에 하나만 하고 같은 사용자의 다른 요청은 그 결과를 기다리며, 기다리는 요청은 클라이언트가 끊으면 바로 끝납니다. 재시작 직후에도 LDAP 사용자의 세션과 토큰은 한 번 재확인을 통과해야 합니다. 로컬 관리자는 영향을 받지 않습니다.
 - 재확인은 `userFilter`의 `{user}`가 `userIdAttr`와 같은 값을 가리킨다고 가정합니다(예: `(uid={user})`와 `uid`). 다르면 재확인이 실패해 1분 뒤 세션·토큰이 거부됩니다.
-- 로그인 경로의 **장애 백오프**: 연결·TLS 단계(TCP, TLS/StartTLS, 서비스 바인드의 네트워크 오류)가 연달아 3번 실패하면 15초 동안 로그인에서 `ldap` Realm을 건너뛰어(뒤의 Realm이 판단) 로컬 로그인이 느려지지 않게 합니다. 잘못된 비밀번호, 검색 실패, 너무 큰 응답 같은 요청별 실패는 장애로 세지 않습니다. 디렉터리 응답 메시지는 1 MiB로 제한합니다. 검색 결과 항목 하나에는 속성 64개, 속성 하나에는 값 1024개까지 받으며, 넘는 사용자(예: 직접 속한 그룹이 1024개를 넘는 사용자)는 로그인할 수 없습니다.
+- 로그인 경로의 **장애 백오프**: 연결·TLS 단계(TCP, TLS/StartTLS, 서비스 바인드의 네트워크 오류)가 연달아 3번 실패하면 15초 동안 로그인에서 `ldap` Realm을 건너뛰어(뒤의 Realm이 판단) 로컬 로그인이 느려지지 않게 합니다. 잘못된 비밀번호, 검색 실패, 너무 큰 응답 같은 요청별 실패는 장애로 세지 않습니다. 디렉터리 응답 메시지는 1 MiB로 제한합니다. 검색 결과 항목 하나에는 속성 64개, 속성 하나에는 값 1024개까지 받으며, 넘는 사용자(예: `dynamic`에서 직접 속한 그룹이 1024개를 넘는 사용자)는 로그인할 수 없습니다. `static`에서는 로그인되고 그룹에서 오는 역할이 없습니다("정적 그룹").
 - 디렉터리에서 사용자가 사라져도 토큰과 세션을 지우지는 않고 접근만 거부합니다(기준 DN 오타로 전부 폐기되는 일을 막기 위해서입니다). 같은 ID가 다시 생기면 이전 토큰이 되살아날 수 있으므로 재사용되지 않는 값을 `userIdAttr`로 쓰세요.
 
 ### 연결 테스트
 
-`POST /-/api/realms/ldap/test`(`{user, password}`, 저장된 설정을 사용)는 `connect`, `starttls`, `bind`, `search`, `userBind`, `groups` 단계를 하나씩 실행해 `{ok, steps:[{step, ok, detail}]}`로 돌려줍니다. 사용자 이름을 주면 `search`까지, 비밀번호도 주면 `userBind`와 `groups`(매핑에 일치한 그룹)까지 갑니다. 사용자 이름이 로그인 규칙(출력 가능한 ASCII, 앞뒤 공백과 연속 공백 없음)에 맞지 않으면 맨 앞에 `name` 단계가 실패로 붙고 `ok`는 `false`가 됩니다. 디렉터리가 그 이름으로 항목을 찾더라도 로그인은 그 이름을 거부하기 때문입니다. API는 이름을 보낸 그대로 검사합니다(설정 화면은 앞뒤 공백을 지우고 보냅니다). 응답에 비밀번호는 나오지 않습니다. 설정 화면의 테스트 버튼이 이 호출입니다.
+`POST /-/api/realms/ldap/test`(`{user, password}`, 저장된 설정을 사용)는 `connect`, `starttls`, `bind`, `search`, `userBind`, `groups` 단계를 하나씩 실행해 `{ok, steps:[{step, ok, detail}]}`로 돌려줍니다. 사용자 이름을 주면 `search`까지, 비밀번호도 주면 `userBind`와 `groups`(매핑에 일치한 그룹, `static`이면 찾은 그룹도)까지 갑니다. `static`에서 그룹 검색이 실패하면 `groups`가 실패로 나오고 `ok`는 `false`입니다. 로그인은 되지만 그룹에서 오는 역할이 없다는 뜻입니다. 사용자 이름이 로그인 규칙(출력 가능한 ASCII, 앞뒤 공백과 연속 공백 없음)에 맞지 않으면 맨 앞에 `name` 단계가 실패로 붙고 `ok`는 `false`가 됩니다. 디렉터리가 그 이름으로 항목을 찾더라도 로그인은 그 이름을 거부하기 때문입니다. API는 이름을 보낸 그대로 검사합니다(설정 화면은 앞뒤 공백을 지우고 보냅니다). 응답에 비밀번호는 나오지 않습니다. 설정 화면의 테스트 버튼이 이 호출입니다.
 
 ### 예: bitnami/openldap 스타일
 
@@ -1443,7 +1466,7 @@ userIdAttr:    uid          groupAttr: memberOf
 groupMappings: [{ "group": "cc-admins", "roles": ["admin"] }]
 ```
 
-`test/smoke/ldap-smoke.sh`가 이 구성을 컨테이너로 띄워 로그인, 토큰, 잠금 방지를 확인합니다.
+`test/smoke/ldap-smoke.sh`가 이 구성을 컨테이너로 띄워 로그인, 토큰, 잠금 방지를 확인하고, `groupOfNames`, `groupOfUniqueNames`, `posixGroup`으로 정적 그룹까지 확인합니다.
 
 ### OIDC 설정
 

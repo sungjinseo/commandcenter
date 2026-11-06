@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -196,6 +197,115 @@ func TestLDAPSettingsAPI(t *testing.T) {
 	wantStatus(t, r, http.StatusOK)
 	if strings.Contains(r.body, "ldap") || strings.Contains(r.body, uiSvcPW) {
 		t.Fatalf("settings leak: %s", r.body)
+	}
+}
+
+// The settings of static groups: taken and returned, absent keeps them (a form
+// that has no such fields), and what would break the search is refused.
+func TestLDAPStaticGroupSettings(t *testing.T) {
+	e, s := ldapEnv(t)
+	sink := &repotest.Sink{}
+	e.ui.Events = sink
+	const static = `,"groupType":"static","groupBaseDN":" ou=groups,dc=example,dc=org ","groupSubtree":true,"groupObjectClass":"groupOfNames","groupIdAttr":"cn","groupMemberAttr":"member","groupMemberFormat":"${dn}"`
+	want := map[string]any{"groupType": "static", "groupBaseDN": "ou=groups,dc=example,dc=org", "groupSubtree": true, "groupObjectClass": "groupOfNames",
+		"groupIdAttr": "cn", "groupMemberAttr": "member", "groupMemberFormat": "${dn}"}
+	check := func(what string, r resp) {
+		t.Helper()
+		wantStatus(t, r, http.StatusOK)
+		m := r.json(t)
+		for k, v := range want {
+			if m[k] != v {
+				t.Errorf("%s: %s = %v, want %v", what, k, m[k], v)
+			}
+		}
+	}
+	if m := e.admin(t, "GET", "/-/api/realms/ldap", "").json(t); m["groupType"] != "dynamic" || m["groupBaseDN"] != "" || m["groupSubtree"] != false {
+		t.Fatalf("defaults: %v", m)
+	}
+	check("PUT", e.admin(t, "PUT", "/-/api/realms/ldap", ldapBody(s.URL("ldap"), static)))
+	check("GET", e.admin(t, "GET", "/-/api/realms/ldap", ""))
+	if ev := sink.Events(); len(ev) == 0 || !strings.Contains(ev[0].Detail, "groupType") || !strings.Contains(ev[0].Detail, "staticGroups") {
+		t.Errorf("events: %+v", ev)
+	}
+	// A form without these fields keeps them.
+	check("absent", e.admin(t, "PUT", "/-/api/realms/ldap", ldapBody(s.URL("ldap"), "")))
+	// What GET answers can be sent back.
+	got := e.admin(t, "GET", "/-/api/realms/ldap", "").json(t)
+	delete(got, "bindPasswordSet")
+	b, _ := json.Marshal(got)
+	check("sent back", e.admin(t, "PUT", "/-/api/realms/ldap", string(b)))
+	// Back to dynamic: the settings stay for later, and are not checked.
+	r := e.admin(t, "PUT", "/-/api/realms/ldap", ldapBody(s.URL("ldap"), `,"groupType":"dynamic","groupObjectClass":""`))
+	wantStatus(t, r, http.StatusOK)
+	if m := r.json(t); m["groupType"] != "dynamic" || m["groupObjectClass"] != "" || m["groupBaseDN"] != "ou=groups,dc=example,dc=org" {
+		t.Errorf("dynamic: %v", m)
+	}
+	// Blank is the default type.
+	r = e.admin(t, "PUT", "/-/api/realms/ldap", ldapBody(s.URL("ldap"), `,"groupType":""`))
+	wantStatus(t, r, http.StatusOK)
+	if r.json(t)["groupType"] != "dynamic" {
+		t.Errorf("blank type: %s", r.body)
+	}
+	for name, c := range map[string]struct{ from, to, says string }{
+		"unknown type":     {`"groupType":"static"`, `"groupType":"STATIC"`, "groupType"},
+		"no base":          {`"groupBaseDN":" ou=groups,dc=example,dc=org "`, `"groupBaseDN":" "`, "groupBaseDN"},
+		"no class":         {`"groupObjectClass":"groupOfNames"`, `"groupObjectClass":""`, "groupObjectClass"},
+		"no id":            {`"groupIdAttr":"cn"`, `"groupIdAttr":""`, "groupIdAttr"},
+		"no member":        {`"groupMemberAttr":"member"`, `"groupMemberAttr":""`, "groupMemberAttr"},
+		"fixed member":     {`"groupMemberFormat":"${dn}"`, `"groupMemberFormat":"uid=alice"`, "${username}"},
+		"no format":        {`"groupMemberFormat":"${dn}"`, `"groupMemberFormat":""`, "${username}"},
+		"attribute breaks": {`"groupMemberAttr":"member"`, `"groupMemberAttr":"member)(cn=x"`, "group settings"},
+		"id breaks":        {`"groupIdAttr":"cn"`, `"groupIdAttr":"c n"`, "group settings"},
+	} {
+		r := e.admin(t, "PUT", "/-/api/realms/ldap", ldapBody(s.URL("ldap"), strings.Replace(static, c.from, c.to, 1)))
+		if r.status != http.StatusBadRequest || !strings.Contains(r.body, c.says) {
+			t.Errorf("%s: %d %s", name, r.status, r.body)
+		}
+	}
+}
+
+// Through the API, a sign-in with the role a group entry gives, and the test
+// of the settings says the same; while the search fails, the sign-in still works
+// and the test says what is wrong.
+func TestLDAPStaticGroupsSignIn(t *testing.T) {
+	e, s := ldapEnv(t)
+	wantStatus(t, e.admin(t, "PUT", "/-/api/realms/ldap", ldapBody(s.URL("ldap"), `,"groupType":"static","groupBaseDN":"ou=groups,dc=example,dc=org","groupObjectClass":"posixGroup","groupIdAttr":"cn","groupMemberAttr":"memberUid","groupMemberFormat":"${username}"`)), http.StatusOK)
+	wantStatus(t, e.admin(t, "PUT", "/-/api/realms", `{"realms":[{"id":"local","enabled":true},{"id":"token","enabled":true},{"id":"ldap","enabled":true}]}`), http.StatusOK)
+	s.Add(ldaptest.Entry{DN: "cn=cc-admins,ou=groups,dc=example,dc=org", Attrs: map[string][]string{"objectClass": {"posixGroup"}, "cn": {"cc-admins"}, "memberUid": {"bob"}}})
+	me := func(user, pw string) map[string]any {
+		r := e.basicAs(t, user, pw, "GET", "/-/api/me", "")
+		wantStatus(t, r, http.StatusOK)
+		return r.json(t)
+	}
+	// ldapEnv's memberOf has alice in cc-admins and bob in devs: not read here.
+	if m := me("bob", "bob-pw"); m["admin"] != true || m["realm"] != "LDAP" {
+		t.Errorf("bob: %v", m)
+	}
+	if m := me("alice", "alice-pw"); m["admin"] != false {
+		t.Errorf("alice: %v", m)
+	}
+	r := e.admin(t, "POST", "/-/api/realms/ldap/test", `{"user":"bob","password":"bob-pw"}`)
+	wantStatus(t, r, http.StatusOK)
+	if m := r.json(t); m["ok"] != true || !strings.Contains(r.body, "found under ou=groups,dc=example,dc=org: [cc-admins,") || !strings.Contains(r.body, "roles: [admin]") {
+		t.Errorf("test: %s", r.body)
+	}
+	if strings.Contains(r.body, uiSvcPW) || strings.Contains(r.body, "bob-pw") {
+		t.Errorf("a secret in the test's answer: %s", r.body)
+	}
+	s.SetSearchHook(func(base string) int64 {
+		if base == "ou=groups,dc=example,dc=org" {
+			return 32
+		}
+		return -1
+	})
+	s.Add(ldaptest.Entry{DN: "uid=carol,ou=people,dc=example,dc=org", Password: "carol-pw", Attrs: map[string][]string{"uid": {"carol"}}})
+	if m := me("carol", "carol-pw"); m["admin"] != false || m["user"] != "carol" {
+		t.Errorf("carol, the search failing: %v", m)
+	}
+	r = e.admin(t, "POST", "/-/api/realms/ldap/test", `{"user":"carol","password":"carol-pw"}`)
+	wantStatus(t, r, http.StatusOK)
+	if m := r.json(t); m["ok"] != false || !strings.Contains(r.body, "result code 32") || !strings.Contains(r.body, "without roles from groups") {
+		t.Errorf("test, the search failing: %s", r.body)
 	}
 }
 
