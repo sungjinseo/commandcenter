@@ -181,6 +181,12 @@ func TestPrereleasePerFormat(t *testing.T) {
 		{"pypi", "1.0.post1.dev2", true},
 		{"pypi", "1.0+local.abc", false},
 		{"pypi", "1!2.0.0beta", true},
+		// "-" joins a build, a release or a tag variant there, not a prerelease.
+		{"conda", "1.26.4-py312h8753938_0", false},
+		{"r", "1.84.0-0", false},
+		{"yum", "1.2.3-4.el9", false},
+		{"apt", "1.2.3-1", false},
+		{"docker", "1.2.3-alpine", false},
 	} {
 		if got := Prerelease(c.format, c.version); got != c.pre {
 			t.Errorf("Prerelease(%s, %s) = %v, want %v", c.format, c.version, got, c.pre)

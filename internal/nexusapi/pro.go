@@ -327,6 +327,24 @@ var nexusTaskRefusals = map[string]string{
 	"script":                               "Command Center has no script API",
 }
 
+// TaskTypeRefusal says why there is no task for the Nexus task type id, or
+// "" when there is one: import-nexus plans with what POST /tasks answers.
+func TaskTypeRefusal(id string) string {
+	typ := id
+	if a, ok := nexusTaskAliases[id]; ok {
+		typ = a.typ
+	}
+	for _, t := range tasks.Types() {
+		if t == typ || nexusTaskType(t) == typ {
+			return ""
+		}
+	}
+	if why, ok := nexusTaskRefusals[id]; ok {
+		return why
+	}
+	return "Command Center has no task of this type"
+}
+
 func nexusTaskItem(t uiTask) map[string]any {
 	var result any
 	switch t.LastResult {

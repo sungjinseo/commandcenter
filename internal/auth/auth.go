@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -741,7 +742,13 @@ func (s *Snapshot) grant(roles []string) []string {
 // "selector:" privilege counts whenever the repository is in its scope (the
 // user could reach some path there); CanPath is the exact, per-path check.
 func (a *Authenticator) Can(p Principal, repo string, acc Access) bool {
-	return a.can(p, repo, acc, "", false)
+	return a.can(p, repo, acc, "", somePath)
+}
+
+// CanAll is Can for every path of the repository: a "selector:" privilege,
+// which holds only where its selector matches, does not count.
+func (a *Authenticator) CanAll(p Principal, repo string, acc Access) bool {
+	return a.can(p, repo, acc, "", everyPath)
 }
 
 // CanPath is Can for one path of the repository: the path after
@@ -749,10 +756,18 @@ func (a *Authenticator) Can(p Principal, repo string, acc Access) bool {
 // privilege counts only when its selector matches the path; "" is the
 // repository root ("/"), which only a selector matching "/" grants.
 func (a *Authenticator) CanPath(p Principal, repo string, acc Access, path string) bool {
-	return a.can(p, repo, acc, path, true)
+	return a.can(p, repo, acc, path, thisPath)
 }
 
-func (a *Authenticator) can(p Principal, repo string, acc Access, path string, exact bool) bool {
+// How can counts "selector:" privileges: wherever the repository is in
+// their scope, where they match the path, or not at all.
+const (
+	somePath = iota
+	thisPath
+	everyPath
+)
+
+func (a *Authenticator) can(p Principal, repo string, acc Access, path string, paths int) bool {
 	if acc == Public {
 		return true
 	}
@@ -782,7 +797,13 @@ func (a *Authenticator) can(p Principal, repo string, acc Access, path string, e
 	if a.RepoFormat != nil {
 		format = a.RepoFormat(repo)
 	}
-	return s.hasPath(p.roles, repo, format, accessBits[acc], path, exact)
+	if paths == everyPath {
+		return slices.ContainsFunc(p.roles, func(id string) bool {
+			r := s.roles[id]
+			return r != nil && r.grants(repo, format, accessBits[acc])
+		})
+	}
+	return s.hasPath(p.roles, repo, format, accessBits[acc], path, paths == thisPath)
 }
 
 // CanReadMetrics reports whether p may read the usage data: an admin, or a

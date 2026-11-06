@@ -3,7 +3,8 @@
 // listed in (repomd.xml, primary, filelists, other). A hosted repository
 // takes RPMs by PUT and keeps repodata/ itself, regenerated in the
 // transaction of every upload and delete; at depth 0 one repodata/ at the
-// root lists every RPM, at depth 1 each top-level directory has its own.
+// root lists every RPM, at depth 1 each top-level directory has its own, at
+// depth 2 each directory below those, up to depth 5 as in Nexus.
 // A proxy caches a remote repository's files at their paths; a group
 // answers from the first member that has the path (no merging, as Nexus).
 package yum
@@ -117,7 +118,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	}
 	dir, ok := repoDir(rp, p)
 	if !ok {
-		return repo.Errorf(http.StatusBadRequest, "repository %q has depth 1: put the file in a directory (<dir>/%s)", rp.Name, p)
+		return repo.Errorf(http.StatusBadRequest, "repository %q has depth %d: put the file that many directories down: %s", rp.Name, rp.Depth, p)
 	}
 	sums, err := h.Store.WriteBlob(rp.Name, r.Body, nil)
 	if err != nil {
@@ -202,7 +203,7 @@ func (h *Handler) DeleteComponent(ctx context.Context, rp *repo.Repository, c co
 	file := c.Name + "-" + c.Version + ".rpm"
 	dir, ok := repoDir(rp, file)
 	if !ok {
-		return component.Result{}, fmt.Errorf("yum component %q is not in a directory of repository %q (depth 1)", c.Label(), rp.Name)
+		return component.Result{}, fmt.Errorf("yum component %q is not in a directory of repository %q (depth %d)", c.Label(), rp.Name, rp.Depth)
 	}
 	unlock, err := h.Store.Lock(ctx, "yum\x00"+rp.Name)
 	if err != nil {

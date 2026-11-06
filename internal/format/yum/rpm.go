@@ -72,6 +72,10 @@ const (
 	tagBasenames      = 1117
 	tagDirnames       = 1118
 	tagLongSize       = 5009
+	tagRecommendName  = 5046 // the weak dependencies (rpm 4.12): each name tag, then its version and flags tags
+	tagSuggestName    = 5049
+	tagSupplementName = 5052
+	tagEnhanceName    = 5055
 	sigTagPayload     = 1007 // signature header: the uncompressed payload size
 	sigTagLongPayload = 271
 
@@ -83,6 +87,10 @@ const (
 
 	fileFlagGhost = 1 << 6
 	modeDir       = 0o040000
+
+	// changelogLimit is how many changelog entries (the newest) the
+	// repodata lists of a package, as createrepo_c: a kernel has thousands.
+	changelogLimit = 10
 )
 
 var headerMagic = [4]byte{0x8e, 0xad, 0xe8, 0x01}
@@ -126,7 +134,13 @@ type Package struct {
 	Conflicts []Dep       `json:"conflicts,omitempty"`
 	Obsoletes []Dep       `json:"obsoletes,omitempty"`
 	Files     []File      `json:"files,omitempty"`
-	Changelog []Changelog `json:"changelog,omitempty"`
+	Changelog []Changelog `json:"changelog,omitempty"` // the newest first
+
+	// The weak dependencies: dnf installs what a package recommends.
+	Suggests    []Dep `json:"suggests,omitempty"`
+	Enhances    []Dep `json:"enhances,omitempty"`
+	Recommends  []Dep `json:"recommends,omitempty"`
+	Supplements []Dep `json:"supplements,omitempty"`
 }
 
 // Dep is one rpm:entry: name, the comparison (EQ, LT, GT, LE, GE or none)
@@ -320,6 +334,10 @@ func Parse(r io.ReaderAt, size int64) (*Package, error) {
 	p.Requires = deps(h, tagRequireName, tagRequireFlags, tagRequireVer)
 	p.Conflicts = deps(h, tagConflictName, tagConflictFlags, tagConflictVer)
 	p.Obsoletes = deps(h, tagObsoleteName, tagObsoleteFlags, tagObsoleteVer)
+	p.Suggests = deps(h, tagSuggestName, tagSuggestName+2, tagSuggestName+1)
+	p.Enhances = deps(h, tagEnhanceName, tagEnhanceName+2, tagEnhanceName+1)
+	p.Recommends = deps(h, tagRecommendName, tagRecommendName+2, tagRecommendName+1)
+	p.Supplements = deps(h, tagSupplementName, tagSupplementName+2, tagSupplementName+1)
 	dirs, bases, idx := h.strs(tagDirnames), h.strs(tagBasenames), h.ints(tagDirIndexes)
 	modes, flags := h.ints(tagFileModes), h.ints(tagFileFlags)
 	for i, b := range bases {
@@ -336,7 +354,7 @@ func Parse(r io.ReaderAt, size int64) (*Package, error) {
 		p.Files = append(p.Files, f)
 	}
 	times, names, texts := h.ints(tagChangeTime), h.strs(tagChangeName), h.strs(tagChangeText)
-	for i := range min(len(times), len(names), len(texts)) {
+	for i := range min(len(times), len(names), len(texts), changelogLimit) {
 		p.Changelog = append(p.Changelog, Changelog{Author: names[i], Date: times[i], Text: texts[i]})
 	}
 	return p, nil

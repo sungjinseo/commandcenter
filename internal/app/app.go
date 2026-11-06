@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,7 @@ import (
 	"commandcenter/internal/repo"
 	"commandcenter/internal/resolve"
 	"commandcenter/internal/server"
+	"commandcenter/internal/sysinfo"
 	"commandcenter/internal/tasks"
 	"commandcenter/internal/transfer"
 	"commandcenter/internal/ui"
@@ -106,6 +108,32 @@ const maxConcurrentFetches = 32
 // plus about 1.6 times the header bytes it sent, at most ~40 KiB with
 // maxHeaderBytes: 1024 stay within ~40 MiB of the 80 MiB GOMEMLIMIT.
 const maxConns = 1024
+
+// socketCost is what a connection can hold outside Go: the kernel's receive
+// buffer (net.ipv4.tcp_rmem, 128 KiB by default) with what a client sent and
+// nobody read, say an upload refused before its body is read, which net/http
+// keeps for 500 ms. The kernel charges it to the container, and GOMEMLIMIT
+// does not see it: 1024 such connections killed a 128 MiB container.
+const socketCost = 160 << 10
+
+// minConns is the fewest connections connLimit allows, however small the
+// container.
+const minConns = 64
+
+// connLimit is how many connections fit in a container limit (bytes; 0: none)
+// beside the Go heap's limit goLimit: maxConns, or what the difference holds
+// when that is less. A goLimit that leaves nothing (GOMEMLIMIT unset, or above
+// the limit) leaves a third of the limit.
+func connLimit(limit, goLimit int64) int {
+	if limit <= 0 {
+		return maxConns
+	}
+	spare := limit - goLimit
+	if spare < limit/3 {
+		spare = limit / 3
+	}
+	return int(min(max(spare/socketCost, minConns), maxConns))
+}
 
 // maxHeaderBytes bounds a request's headers (431 above it). Go's default of
 // 1 MiB lets one connection cost ~1.5 MiB while it sends them.
@@ -442,7 +470,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	p2H := p2.New(store, fetcher, baseURL) // proxy and group only: its proxies use the generic deleter
 	swiftH := swift.New(store, fetcher, authn, baseURL)
 	podsH := cocoapods.New(store, fetcher, baseURL)
-	hfH := huggingface.New(store, fetcher)
+	hfH := huggingface.New(store, fetcher, baseURL)
 	terraformH := terraform.New(store, fetcher, authn, baseURL)
 	dockerKey, err := tokenKey(db)
 	if err != nil {
@@ -484,6 +512,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Rebuilders: map[string]repo.MetadataRebuilder{"apt": aptH, "yum": yumH, "helm": helmH, "conda": condaH},
 		RunTimeout: time.Duration(cfg.TaskRunTimeoutHours) * time.Hour}
 	taskSvc.OwnerGone = authn.TokenOwnerGone // security.purge-api-keys
+	taskSvc.Docker = dockerH                 // docker.gc
 	if err := taskSvc.Seed(context.Background()); err != nil {
 		return nil, err
 	}
@@ -975,7 +1004,11 @@ func (a *App) Serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ln = server.LimitConns(srv, ln, maxConns)
+	conns := connLimit(sysinfo.MemoryLimit(), debug.SetMemoryLimit(-1))
+	if conns < maxConns {
+		a.log.Info("connections limited by the container's memory limit", "connections", conns)
+	}
+	ln = server.LimitConns(srv, ln, conns)
 	errc := make(chan error, 1)
 	go func() {
 		a.log.Info("listening", "addr", a.Config.Listen)

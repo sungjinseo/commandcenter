@@ -163,12 +163,15 @@ type object struct {
 	Size int64  `json:"size"`
 }
 
+// batchObject has no "authenticated" member: the hrefs carry no credentials
+// of their own, and git-lfs adds its own to a transfer only when the object
+// is not marked authenticated (marked, it repeats the upload the server
+// answered 401 without them, with no end).
 type batchObject struct {
-	OID           string             `json:"oid"`
-	Size          int64              `json:"size"`
-	Authenticated bool               `json:"authenticated,omitempty"`
-	Actions       map[string]*action `json:"actions,omitempty"`
-	Error         *objectError       `json:"error,omitempty"`
+	OID     string             `json:"oid"`
+	Size    int64              `json:"size"`
+	Actions map[string]*action `json:"actions,omitempty"`
+	Error   *objectError       `json:"error,omitempty"`
 }
 
 type action struct {
@@ -220,7 +223,7 @@ func (h *Handler) batch(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	base := h.BaseURL() + "/repository/" + rp.Name + "/objects/"
 	out := make([]batchObject, 0, len(req.Objects))
 	for _, o := range req.Objects {
-		bo := batchObject{OID: o.OID, Size: o.Size, Authenticated: true}
+		bo := batchObject{OID: o.OID, Size: o.Size}
 		if !ValidOID(o.OID) || o.Size < 0 {
 			bo.Error = &objectError{Code: http.StatusUnprocessableEntity, Message: "invalid oid or size"}
 			out = append(out, bo)

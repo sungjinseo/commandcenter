@@ -40,6 +40,7 @@ type env struct {
 	now   time.Time
 	repos []config.Repository
 	extra []config.Repository // added to the hosted ones; ci may write them too
+	seen  chan string         // when set, the users the server reports for requests to repositories
 }
 
 // newEnv serves the registry through the real server (its Basic
@@ -107,7 +108,14 @@ func (e *env) open() {
 	h := New(store, fetcher, authn, registry, func() string { return base }, []byte("test-key"))
 	h.Now = func() time.Time { return e.now }
 	srv := &server.Server{Registry: registry, Handlers: map[string]repo.Handler{"docker": h}, Auth: authn, Docker: h,
-		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Requests: func(string, int, int64, int64, time.Duration) {},
+		Seen: func(user, _ string) {
+			select {
+			case e.seen <- user:
+			default:
+			}
+		}}
 	e.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(e.ts.Close)
 	base = e.ts.URL
@@ -245,6 +253,32 @@ func TestPing(t *testing.T) {
 	e.check(resp, b, 404, CodeUnsupported)
 }
 
+// A request with a registry token is logged and counted under the token's
+// user, as one with Basic credentials is: every docker client sends tokens.
+func TestTokenOwnerIsSeen(t *testing.T) {
+	e := newEnv(t)
+	e.seen = make(chan string, 1)
+	for _, c := range []struct {
+		opt  opt
+		want string
+	}{
+		{bearer(e.token("ci", "repository:dh/app:pull")), "ci"},
+		{bearer(e.token("", "repository:dh/app:pull")), ""},
+		{bearer("not-a-token"), ""},
+		{basic("reader"), "reader"},
+	} {
+		e.do("GET", "/v2/dh/app/tags/list", nil, c.opt)
+		select {
+		case got := <-e.seen:
+			if got != c.want {
+				t.Fatalf("seen %q, want %q", got, c.want)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("the request of %q was not reported", c.want)
+		}
+	}
+}
+
 func TestTokenFlow(t *testing.T) {
 	e := newEnv(t)
 	access := func(tok string) []scope {
@@ -265,6 +299,13 @@ func TestTokenFlow(t *testing.T) {
 	}
 	if got := access(e.token("reader", "repository:priv/app:pull,push")); fmt.Sprint(got) != "[{repository priv/app [pull]}]" {
 		t.Fatalf("reader access %v", got)
+	}
+	// the action "*" is every action the caller may use
+	if got := access(e.token("ci", "repository:priv/app:*")); fmt.Sprint(got) != "[{repository priv/app [pull push delete]}]" {
+		t.Fatalf("ci access for *: %v", got)
+	}
+	if got := access(e.token("reader", "repository:priv/app:*")); fmt.Sprint(got) != "[{repository priv/app [pull]}]" {
+		t.Fatalf("reader access for *: %v", got)
 	}
 	// a token as the Basic password works like the other formats
 	_, tok, err := e.h.Auth.CreateToken(context.Background(), "ci")
@@ -724,6 +765,25 @@ func TestDeleteByDigest(t *testing.T) {
 	e.check(resp, b, 404, CodeNameUnknown)
 	resp, b = e.do("GET", "/v2/dh/app/blobs/"+digestOf(shared), nil)
 	e.check(resp, b, 404, CodeBlobUnknown)
+}
+
+// skopeo delete asks the token endpoint for the action "*" alone, reads the
+// tag's manifest for its digest with that token and deletes the digest.
+func TestSkopeoDelete(t *testing.T) {
+	e := newEnv(t)
+	_, d := e.pushImage("dh/app", "v1", [][]byte{[]byte("layer")}, basic("ci"))
+	resp, b := e.do("DELETE", "/v2/dh/app/manifests/"+d, nil, bearer(e.token("reader", "repository:dh/app:*")))
+	e.check(resp, b, 403, CodeDenied)
+	tok := bearer(e.token("ci", "repository:dh/app:*"))
+	resp, b = e.do("GET", "/v2/dh/app/manifests/v1", nil, tok, hdr("Accept", mtSchema2))
+	e.check(resp, b, 200, "")
+	if resp.Header.Get("Docker-Content-Digest") != d {
+		t.Fatalf("manifest by tag: %v", resp.Header)
+	}
+	resp, b = e.do("DELETE", "/v2/dh/app/manifests/"+d, nil, tok)
+	e.check(resp, b, 202, "")
+	resp, b = e.do("GET", "/v2/dh/app/manifests/v1", nil)
+	e.check(resp, b, 404, CodeManifestUnknown)
 }
 
 // A manifest delete keeps the layer rows a push in flight relies on: docker

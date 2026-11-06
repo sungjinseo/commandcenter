@@ -14,7 +14,7 @@ name=commandcenter-ui-smoke-$$
 base=http://localhost:18086
 
 cleanup() {
-  docker rm -f "$name" "$name-pg" >/dev/null 2>&1 || true
+  docker rm -f -v "$name" "$name-pg" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -579,5 +580,28 @@ func TestTasksWired(t *testing.T) {
 	defer b.Close()
 	if list, err := b.Tasks.List(ctx); err != nil || len(list) != 0 {
 		t.Fatalf("tasks after restart: %+v %v", list, err)
+	}
+}
+
+// The connections a container's memory holds: their kernel buffers are charged
+// to it outside GOMEMLIMIT (a client that keeps sending what is refused killed
+// a 128 MiB container at 1024).
+func TestConnLimit(t *testing.T) {
+	const mi = int64(1 << 20)
+	for _, c := range []struct {
+		limit, goLimit int64
+		want           int
+	}{
+		{0, 80 * mi, maxConns},          // no limit
+		{128 * mi, 80 * mi, 307},        // the chart's default
+		{256 * mi, 160 * mi, 614},       // doubled
+		{1024 * mi, 640 * mi, maxConns}, // enough
+		{128 * mi, math.MaxInt64, 273},  // GOMEMLIMIT unset: a third of the limit
+		{128 * mi, 200 * mi, 273},       // above the limit
+		{16 * mi, 10 * mi, minConns},    // the floor
+	} {
+		if got := connLimit(c.limit, c.goLimit); got != c.want {
+			t.Errorf("connLimit(%d MiB, %d) = %d, want %d", c.limit/mi, c.goLimit, got, c.want)
+		}
 	}
 }

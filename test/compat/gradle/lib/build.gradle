@@ -1,0 +1,22 @@
+// The library test/compat/gradle.sh publishes: jar, sources, POM and Gradle
+// module metadata (.module), each with md5, sha1, sha256 and sha512 files.
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+group = 'com.example.gradle'
+version = providers.gradleProperty('libVersion').get()
+java { withSourcesJar() }
+publishing {
+    publications { maven(MavenPublication) { from components.java } }
+    repositories {
+        maven {
+            url = 'http://commandcenter:8081/repository/' + (version.endsWith('-SNAPSHOT') ? 'maven-snapshots' : 'maven-releases') + '/'
+            allowInsecureProtocol = true
+            credentials {
+                username = 'ci'
+                password = providers.environmentVariable('CC_PASSWORD').get()
+            }
+        }
+    }
+}

@@ -45,7 +45,10 @@ func loadRows(ctx context.Context, tx *meta.Tx, repoName string) ([]row, error) 
 // every one), the Release that lists them with their sizes and checksums
 // and, when rp has a signing key, its detached (Release.gpg) and cleartext
 // (InRelease) signatures. Paths are relative to the repository. The same
-// rows give the same bytes, except for Release's Date.
+// rows give the same bytes, except for Release's Date. Without rows the
+// Release lists an empty Packages of architecture "all": apt refuses a
+// Release that has no hash entry ("provides only weak security
+// information"), so an empty repository would fail every `apt update`.
 func build(rp *repo.Repository, rows []row, now time.Time) (map[string][]byte, error) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		if rows[i].Package != rows[j].Package {
@@ -65,6 +68,9 @@ func build(rp *repo.Repository, rows []row, now time.Time) (map[string][]byte, e
 		archList = append(archList, a)
 	}
 	sort.Strings(archList)
+	if len(archList) == 0 {
+		archList = []string{"all"}
+	}
 
 	dist, comp := "dists/"+rp.Distribution+"/", rp.Component
 	files := map[string][]byte{}

@@ -116,6 +116,7 @@ func (h *Handler) init() {
 	h.configRoutes(m, p)
 	h.repoAPIRoutes(m, p)
 	h.cacheRoutes(m, p)
+	h.clientRoutes(m, p)
 	// BrowsePrefix, outside the prefix too (the server routes it here)
 	m.HandleFunc("GET /service/rest/repository/browse/", h.browseHTML)
 	h.mux = m
@@ -596,6 +597,7 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 	}
 	if cur != nil {
 		out["anonymousRead"], out["depth"], out["gpgPublicKey"] = cur.AnonymousRead, cur.Depth, cur.GPGPublicKey
+		out["mergeMembers"] = cur.MergeMembers
 		out["contentDisposition"] = cur.ContentDisposition
 	}
 	switch {
@@ -1538,6 +1540,7 @@ var nexusTaskTypes = map[string]string{
 	"repository.cleanup":           "repository.cleanup",
 	"blobstore.recalculate-size":   "blobstore.metrics.reconcile",
 	"maven.purge-unused-snapshots": "repository.maven.purge-unused-snapshots",
+	"docker.gc":                    "repository.docker.gc",
 }
 
 func nexusTaskType(typ string) string {

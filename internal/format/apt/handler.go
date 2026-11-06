@@ -42,6 +42,14 @@ func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticato
 
 const publicKeyPath = "public.key"
 
+// emptyModTime is the Last-Modified of what a repository without packages
+// answers for its dists/ (generated per request): older than any stored
+// file. apt asks again with If-Modified-Since, the time it was given or,
+// given none, the time of its own clock: an upload in that second, or to
+// a server whose clock is behind the client's, would be answered 304 and
+// the client would keep the empty list.
+var emptyModTime = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
 	if err := h.serve(w, r, rp, p); err != nil {
 		repo.WriteError(w, r, err)
@@ -143,7 +151,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 			if !ok {
 				return repo.ErrNotFound
 			}
-			repo.ServeText(w, r, string(b), contentType(p), time.Time{})
+			repo.ServeText(w, r, string(b), contentType(p), emptyModTime)
 			return nil
 		}
 	}
@@ -168,7 +176,8 @@ func isPackageFile(p string) bool {
 // enforcing its distribution has no other dists/<name>/, a refreshed
 // Release expires what was cached with the old one (release), and a
 // hosted repository also answers the pool path Nexus gives a package
-// (nexusPoolPath).
+// (nexusPoolPath). What a hosted member lacks of its own distribution is
+// not a later member's (owns).
 func (h *Handler) lookup(ctx context.Context, rp *repo.Repository, p string, kind proxy.Kind) (proxy.Result, error) {
 	t := proxy.Target{Key: p, Remote: p, NotHTML: true}
 	switch rp.Type {
@@ -181,6 +190,9 @@ func (h *Handler) lookup(ctx context.Context, rp *repo.Repository, p string, kin
 			}
 			if repo.StatusOf(err) != http.StatusNotFound && firstErr == nil {
 				firstErr = err
+			}
+			if h.owns(ctx, m, p) {
+				break
 			}
 		}
 		return proxy.Result{}, cmp.Or(firstErr, repo.ErrNotFound)
@@ -204,6 +216,29 @@ func (h *Handler) lookup(ctx context.Context, rp *repo.Repository, p string, kin
 		return res, err
 	}
 	return h.Resolver.LookupTarget(ctx, rp, t, kind)
+}
+
+// owns reports whether p is in the distribution of hosted rp (or of a
+// hosted member of group rp) that holds packages. Such a member answers
+// for its dists/<distribution>/ alone: without a signing key it has no
+// InRelease, and a proxy after it in a group would answer with the
+// InRelease of the remote's suite of the same name (Debian has "stable"),
+// which apt prefers to the hosted member's Release.
+func (h *Handler) owns(ctx context.Context, rp *repo.Repository, p string) bool {
+	switch rp.Type {
+	case "group":
+		for _, m := range rp.OnlineMembers() {
+			if h.owns(ctx, m, p) {
+				return true
+			}
+		}
+	case "hosted":
+		if dist := "dists/" + rp.Distribution + "/"; strings.HasPrefix(p, dist) {
+			_, err := h.Store.Get(ctx, rp.Name, dist+"Release")
+			return err == nil
+		}
+	}
+	return false
 }
 
 // release fetches a Release or InRelease through proxy rp. When it came

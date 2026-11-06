@@ -1,6 +1,7 @@
 package nexusapi
 
 import (
+	"context"
 	"html"
 	"net/http"
 	"net/url"
@@ -12,6 +13,7 @@ import (
 	"commandcenter/internal/auth"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
+	"commandcenter/internal/resolve"
 )
 
 // BrowsePrefix is where Nexus's HTML directory listing of a repository's
@@ -67,6 +69,20 @@ func (h *Handler) browseHTML(w http.ResponseWriter, r *http.Request) {
 			browsePage(w, http.StatusNotFound, "Path not found", nil, false)
 			return
 		}
+		// A caller whose access comes from content selectors sees the files
+		// they match, and the directories that hold one.
+		if v := h.viewOf(r); !v.all(rp) {
+			entries = slices.DeleteFunc(entries, func(e meta.DirEntry) bool {
+				if e.Dir {
+					return !h.seesUnder(r.Context(), v, rp, dir+e.Name+"/")
+				}
+				return !slices.ContainsFunc(resolve.Leaves(rp), func(m *repo.Repository) bool { return v.sees(m, dir+e.Name) })
+			})
+			if len(entries) == 0 && dir != "" {
+				browsePage(w, http.StatusNotFound, "Path not found", nil, false)
+				return
+			}
+		}
 		truncated = more
 		rows = append(rows, browseRow{name: "Parent Directory", href: "../", dir: true})
 		for _, e := range entries {
@@ -83,6 +99,28 @@ func (h *Handler) browseHTML(w http.ResponseWriter, r *http.Request) {
 		title += "/" + strings.TrimSuffix(dir, "/")
 	}
 	browsePage(w, http.StatusOK, title, rows, truncated)
+}
+
+// seesUnder reports whether the caller may list some file under dir of rp
+// (a group: of its members). ponytail: it reads the paths under dir until
+// one matches, the whole subtree when none does; only callers without a
+// repository-wide grant come here.
+func (h *Handler) seesUnder(ctx context.Context, v *view, rp *repo.Repository, dir string) bool {
+	for _, m := range resolve.Leaves(rp) {
+		ctx, stop := context.WithCancel(ctx)
+		found := false
+		h.DB.WalkAssetPaths(ctx, m.Name, dir, func(p string) {
+			if !found && v.sees(m, p) {
+				found = true
+				stop() // ends the walk
+			}
+		})
+		stop()
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // listDir lists dir in rp, or for a group in each of its members (nested

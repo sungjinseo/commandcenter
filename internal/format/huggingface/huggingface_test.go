@@ -36,6 +36,8 @@ const (
 	body1   = "model-weights-version-one"
 	body2   = "model-weights-version-two!"
 	cfgJSON = `{"model_type":"bert"}`
+	tokJSON = `{"version":"1.0"}`
+	gitOID  = "22ffb3454131a71d4144340befb799c66ad0c670" // a regular file's X-Linked-Etag at the hub: its git blob id
 )
 
 // The hub's X-Linked-Etag of an LFS file is its sha256, which the proxy
@@ -77,6 +79,7 @@ func newEnv(t *testing.T) *env {
 	files := map[string]string{ // the hub's own ETag of each is a git oid, "c0ffee" here
 		sha1st + "/model.bin": body1, sha2nd + "/model.bin": body2,
 		sha1st + "/config.json": cfgJSON, "ds/" + sha1st + "/data.csv": "a,b\n1,2\n",
+		sha1st + "/tokenizer.json": tokJSON,
 	}
 	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.cdnHits.Add(1)
@@ -117,6 +120,18 @@ func newEnv(t *testing.T) *env {
 		case p == "api/models/org/model/tree/main/100% done#.txt" && r.URL.RawQuery == "recursive=true":
 			w.Header().Set("Content-Type", "application/json")
 			io.WriteString(w, `[{"path":"100% done#.txt"}]`)
+		case p == "api/models/org/model/tree/"+sha1st && r.URL.Query().Get("cursor") == "": // the first page, as the hub lists it
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.Header().Set("Link", `<https://huggingface.co/api/models/org/model/tree/`+sha1st+`?expand=false&recursive=true&limit=1000&cursor=Y3Vyc29y%3D>; rel="next"`)
+			io.WriteString(w, `[{"type":"directory","oid":"d1","size":0,"path":"onnx"},`+
+				`{"type":"file","oid":"`+gitOID+`","size":17,"path":"tokenizer.json"},`+
+				`{"type":"file","oid":"f2","size":25,"lfs":{"oid":"`+strings.Trim(etag1, `"`)+`","size":25,"pointerSize":131},"xetHash":"`+strings.Repeat("ab", 32)+`","path":"model.bin"}]`)
+		case p == "api/models/org/model/tree/"+sha1st && r.URL.Query().Get("cursor") == "Y3Vyc29y=": // the last page
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			io.WriteString(w, `[{"type":"file","oid":"f3","size":1,"path":"z.txt"}]`)
+		case p == "api/resolve-cache/models/org/model/"+sha1st+"/tokenizer.json":
+			w.Header().Set("ETag", `"`+gitOID+`"`)
+			http.ServeContent(w, r, "", time.Time{}, strings.NewReader(tokJSON))
 		case p == "api/models/org/model/revision/v1":
 			w.Header().Set("Content-Type", "application/json")
 			io.WriteString(w, `{"sha":"not-a-sha"}`)
@@ -136,6 +151,12 @@ func newEnv(t *testing.T) *env {
 				return
 			}
 			w.Header().Set("X-Repo-Commit", rev)
+			if strings.HasSuffix(p, "tokenizer.json") { // not LFS, as the hub answers now: a redirect to itself, the git blob id linked
+				w.Header().Set("X-Linked-Etag", `"`+gitOID+`"`)
+				w.Header().Set("X-Linked-Size", itoa(len(f)))
+				http.Redirect(w, r, "/api/resolve-cache/models/org/model/"+rev+"/tokenizer.json", http.StatusTemporaryRedirect)
+				return
+			}
 			w.Header().Set("ETag", `"c0ffee"`)
 			if strings.HasSuffix(p, "config.json") { // not LFS: served by the hub
 				w.Header().Set("Content-Type", "application/json")
@@ -179,7 +200,7 @@ func newEnv(t *testing.T) *env {
 	e.db = db
 	f := proxy.New(e.store, proxy.NewClient(), 4)
 	f.Now = now
-	e.h = New(e.store, f)
+	e.h = New(e.store, f, func() string { return e.ts.URL })
 	e.registry = repo.NewRegistry(nil, cfg.Repositories)
 	srv := &server.Server{Registry: e.registry, Handlers: map[string]repo.Handler{"huggingface": e.h}, Auth: auth.New(cfg, db),
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
@@ -328,6 +349,123 @@ func TestHeadThenGetFollowsRedirectAndCaches(t *testing.T) {
 	e.h.Serve(w, httptest.NewRequest("PUT", "/x", nil), e.registry.Get("hf"), "org/model/resolve/main/model.bin")
 	if w.Code != 405 || w.Header().Get("Allow") != "GET, HEAD" {
 		t.Fatalf("PUT: %d", w.Code)
+	}
+}
+
+// The hub redirects a regular file to itself now and links the file's git
+// blob id (X-Linked-Etag), where an LFS file has its sha256. A HEAD of an
+// uncached regular file must not replay that id: once the file is cached
+// its ETag is the content's sha256, and huggingface_hub names what it
+// stores by the ETag.
+func TestRegularFileHasOneETag(t *testing.T) {
+	e := newEnv(t)
+	want := quotedSHA(tokJSON)
+	resp, _ := e.do("HEAD", "org/model/resolve/main/tokenizer.json")
+	if resp.StatusCode != 200 {
+		t.Fatalf("HEAD: %d", resp.StatusCode)
+	}
+	wantHeaders(t, resp, sha1st, want, len(tokJSON))
+	resp, b := e.do("GET", "org/model/resolve/main/tokenizer.json")
+	if resp.StatusCode != 200 || b != tokJSON {
+		t.Fatalf("GET: %d %q", resp.StatusCode, b)
+	}
+	wantHeaders(t, resp, sha1st, want, len(tokJSON))
+	resp, _ = e.do("HEAD", "org/model/resolve/"+sha1st+"/tokenizer.json")
+	wantHeaders(t, resp, sha1st, want, len(tokJSON))
+}
+
+// huggingface_hub 2.x lists a repository with api/<kind>/<id>/tree/<commit>
+// before it downloads. With an entry's xetHash (and hf_xet installed, the
+// default) it asks api/.../xet-read-token/<commit> and downloads from the
+// hub's Xet storage ("Xet headers have not been correctly set by the
+// server" through a proxy): the listing is served without the hashes and
+// the token is not. The hub lists 1000 entries a page and links the next
+// (69226 files of allenai/c4 were 1000 through the proxy): the Link is
+// passed on, pointing at the proxy.
+func TestTreeListingForTheClient(t *testing.T) {
+	e := newEnv(t)
+	tree := "api/models/org/model/tree/" + sha1st
+	next := `<` + e.ts.URL + `/repository/hf/` + tree + `?expand=false&recursive=true&limit=1000&cursor=Y3Vyc29y%3D>; rel="next"`
+	for i := range 2 { // from the hub, then from the cache
+		resp, b := e.do("GET", tree+"?recursive=True&expand=False")
+		if resp.StatusCode != 200 || strings.Contains(b, "xetHash") || !strings.Contains(b, `"lfs":{"oid":"`+strings.Trim(etag1, `"`)+`"`) ||
+			!strings.Contains(b, `"path":"model.bin"`) || !strings.Contains(b, `"path":"onnx"`) {
+			t.Fatalf("listing %d: %d %s", i, resp.StatusCode, b)
+		}
+		if got := resp.Header.Get("Link"); got != next {
+			t.Fatalf("listing %d: Link %q, want %q", i, got, next)
+		}
+	}
+	if n := e.hits("GET /" + tree + "?recursive=True&expand=False"); n != 1 {
+		t.Fatalf("the hub was asked %d times for the first page", n)
+	}
+	// a listing an earlier version cached, without its next page, is not served
+	old := apiTarget(e.registry.Get("hf"), tree, "recursive=false")
+	if _, err := e.store.Put(context.Background(), "hf", old.Key, "application/json", strings.NewReader(`[{"type":"file","path":"old"}]`)); err != nil {
+		t.Fatal(err)
+	}
+	if resp, b := e.do("GET", tree+"?recursive=false"); strings.Contains(b, `"old"`) || resp.Header.Get("Link") == "" {
+		t.Fatalf("a listing of an earlier version: %s Link %q", b, resp.Header.Get("Link"))
+	}
+	// the client follows the Link as it is given
+	resp, b := e.do("GET", tree+"?expand=false&recursive=true&limit=1000&cursor=Y3Vyc29y%3D")
+	if resp.StatusCode != 200 || b != `[{"oid":"f3","path":"z.txt","size":1,"type":"file"}]` || resp.Header.Get("Link") != "" {
+		t.Fatalf("last page: %d %s Link %q", resp.StatusCode, b, resp.Header.Get("Link"))
+	}
+	for _, p := range []string{"api/models/org/model/xet-read-token/" + sha1st, "api/models/org/model/xet-write-token/main"} {
+		if resp, _ := e.do("GET", p); resp.StatusCode != 404 || e.hits("GET /"+p) != 0 {
+			t.Fatalf("%s: %d, hub hits %d", p, resp.StatusCode, e.hits("GET /"+p))
+		}
+	}
+}
+
+// The hub says what was not found in X-Error-Code, and huggingface_hub
+// raises EntryNotFoundError, RevisionNotFoundError or
+// RepositoryNotFoundError by it (file_exists and repo_exists answer False,
+// transformers skips an optional file). Without the code the client
+// reports "cannot find the requested files in the local cache. Please
+// check your connection".
+func TestNotFoundSaysWhat(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct{ method, path, code string }{
+		{"HEAD", "org/model/resolve/main/missing.json", "EntryNotFound"},
+		{"GET", "org/model/resolve/main/missing.json", "EntryNotFound"},
+		{"HEAD", "org/model/resolve/" + sha1st + "/missing.json", "EntryNotFound"},
+		{"HEAD", "org/model/resolve/no-such-rev/config.json", "RevisionNotFound"},
+		{"GET", "api/models/org/model/revision/no-such-rev", "RevisionNotFound"},
+		{"GET", "api/models/org/model/tree/no-such-rev", "RevisionNotFound"},
+		// transformers lists this directory of every tokenizer's repository and takes EntryNotFoundError for "none"
+		{"GET", "api/models/org/model/tree/main/additional_chat_templates?recursive=false&expand=false", "EntryNotFound"},
+		{"HEAD", "org/nope/resolve/main/config.json", "RepoNotFound"},
+		{"GET", "api/models/org/nope", "RepoNotFound"},
+		{"GET", "api/models/org/nope/revision/main", "RepoNotFound"},
+		{"GET", "api/datasets/org/nope/tree/main", "RepoNotFound"},
+	} {
+		resp, _ := e.do(c.method, c.path)
+		if resp.StatusCode != 404 || resp.Header.Get("X-Error-Code") != c.code || resp.Header.Get("X-Error-Message") == "" {
+			t.Errorf("%s %s: %d X-Error-Code %q", c.method, c.path, resp.StatusCode, resp.Header.Get("X-Error-Code"))
+		}
+	}
+	// what is there carries no error code
+	if resp, _ := e.do("HEAD", "org/model/resolve/main/config.json"); resp.StatusCode != 200 || resp.Header.Get("X-Error-Code") != "" {
+		t.Fatalf("existing file: %d %q", resp.StatusCode, resp.Header.Get("X-Error-Code"))
+	}
+}
+
+func TestSplitAPI(t *testing.T) {
+	for _, c := range []struct{ rest, id, doc, rev string }{
+		{"gpt2", "gpt2", "", ""},
+		{"org/model", "org/model", "", ""},
+		{"gpt2/revision/main", "gpt2", "revision", "main"},
+		{"gpt2/tree/main/sub/dir", "gpt2", "tree", "main"},
+		{"org/model/revision/main", "org/model", "revision", "main"},
+		{"org/model/tree/main/sub/dir", "org/model", "tree", "main"},
+		{"org/model/xet-read-token/main", "org/model", "xet-read-token", "main"},
+		{"org/model/refs", "org/model", "refs", ""},
+	} {
+		if id, doc, rev := splitAPI(c.rest); id != c.id || doc != c.doc || rev != c.rev {
+			t.Errorf("%s: %q %q %q", c.rest, id, doc, rev)
+		}
 	}
 }
 

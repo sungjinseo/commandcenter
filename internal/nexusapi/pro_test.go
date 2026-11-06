@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"commandcenter/internal/nexusapi"
 )
 
 // ui sends a web UI API request as admin (basic auth, the UI header).
@@ -371,5 +373,17 @@ func TestRepositoryPolicyNames(t *testing.T) {
 	e.get(v1+"/repositories/maven/hosted/maven-releases", "admin", &got)
 	if names := fmt.Sprint(got["cleanup"].(map[string]any)["policyNames"]); names != "[]" {
 		t.Fatalf("cleared: %s", names)
+	}
+}
+
+// TaskTypeRefusal answers what POST /tasks does with a type id.
+func TestTaskTypeRefusal(t *testing.T) {
+	for id, want := range map[string]string{
+		"blobstore.compact": "", "repository.maven.remove-snapshots": "", "repository.apt.rebuild.metadata": "", "repository.cleanup": "",
+		"script": "Command Center has no script API", "firewall.audit": "Command Center has no task of this type",
+	} {
+		if got := nexusapi.TaskTypeRefusal(id); got != want {
+			t.Errorf("TaskTypeRefusal(%q) = %q, want %q", id, got, want)
+		}
 	}
 }

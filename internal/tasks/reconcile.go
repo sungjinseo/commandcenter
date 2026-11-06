@@ -65,6 +65,7 @@ var recoveryRefused = map[string]bool{
 	TypeCompact: true, TypeCleanup: true, TypePurge: true, TypeChangeBlobStore: true, TypeGroupRemove: true, TypeImport: true,
 	TypePurgeUnused:      true,
 	TypeMavenPurgeUnused: true,
+	TypeDockerGC:         true,
 }
 
 // recoverySkip returns why a run of type typ is skipped now, "" when it

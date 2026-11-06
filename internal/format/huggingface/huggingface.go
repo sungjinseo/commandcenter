@@ -15,6 +15,13 @@
 // with metadataMaxAge). The remoteAuth bearer token goes to the hub only,
 // never to the CDN, and a client's own Authorization is not forwarded.
 // Nexus has Hugging Face proxies only, and so does this.
+//
+// What huggingface_hub 1.x and 2.x need beyond the files: a tree listing
+// (api/<kind>/<repo id>/tree/...) without the Xet hashes, which would send
+// the client to the hub's Xet storage past the proxy, and with the Link to
+// its next page pointing at the proxy; and the hub's X-Error-Code on a 404,
+// which the client turns into EntryNotFoundError, RevisionNotFoundError or
+// RepositoryNotFoundError (transformers probes optional files with it).
 package huggingface
 
 import (
@@ -25,11 +32,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
 
+	"commandcenter/internal/logsafe"
+	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
 )
@@ -38,14 +49,15 @@ import (
 type Handler struct {
 	Store   *repo.Store
 	Fetcher *proxy.Fetcher
+	BaseURL func() string // live: read per request (the Link of a tree listing)
 
 	// ponytail: one HEAD client per remote URL, never pruned; a handful
 	// of repositories.
 	heads sync.Map // remote URL -> *http.Client that does not follow redirects
 }
 
-func New(store *repo.Store, fetcher *proxy.Fetcher) *Handler {
-	return &Handler{Store: store, Fetcher: fetcher}
+func New(store *repo.Store, fetcher *proxy.Fetcher, baseURL func() string) *Handler {
+	return &Handler{Store: store, Fetcher: fetcher, BaseURL: baseURL}
 }
 
 // maxDoc bounds an API document read back from the cache (a revision's
@@ -129,11 +141,28 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		if kind != "models" && kind != "datasets" && kind != "spaces" || rest == "" || strings.Contains(p, "/..") {
 			return repo.ErrNotFound
 		}
-		res, err := h.Fetcher.FetchTarget(ctx, rp, apiTarget(rp, p, r.URL.RawQuery), proxy.Metadata)
+		id, doc, rev := splitAPI(rest)
+		// A Xet token is the hub's for remoteAuth's account: with one the
+		// client would fetch past the proxy, and any reader would hold it.
+		if doc == "xet-read-token" || doc == "xet-write-token" {
+			return repo.ErrNotFound
+		}
+		t := apiTarget(rp, p, r.URL.RawQuery)
+		if doc == "tree" {
+			t.Key += treeSuffix
+			t.Keep = h.keepNext(ctx, rp, t.Key)
+		}
+		res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 		if err != nil {
-			return err
+			if doc == "" {
+				return hubError(w, err, "RepoNotFound", "Repository not found")
+			}
+			return h.missing(ctx, w, rp, kind, id, rev, err)
 		}
 		proxy.SetStaleHeader(w, res)
+		if doc == "tree" {
+			return h.serveTree(w, r, rp, p, t.Key, res.Asset)
+		}
 		if res.Asset.ContentType == "" {
 			res.Asset.ContentType = "application/json"
 		}
@@ -148,7 +177,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	if !IsSHA(sha) {
 		var err error
 		if sha, err = h.commit(ctx, rp, rt); err != nil {
-			return err
+			return h.missing(ctx, w, rp, rt.Kind, rt.RepoID, rt.Rev, err)
 		}
 	}
 	key := rt.prefix() + "resolve/" + sha + "/" + rt.File
@@ -158,12 +187,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	}
 	if err != nil && r.Method == http.MethodHead {
 		if done, err := h.head(ctx, w, rp, key, sha); done || err != nil {
-			return err
+			return hubError(w, err, "EntryNotFound", "Entry not found")
 		}
 	}
 	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, Remote: key, NotHTML: true, DeniedIsNotFound: true}, proxy.Content)
 	if err != nil {
-		return err
+		return hubError(w, err, "EntryNotFound", "Entry not found")
 	}
 	proxy.SetStaleHeader(w, res)
 	a = res.Asset
@@ -177,6 +206,136 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	a.SHA1 = "" // keeps the ETag above, which the client names its cache entries by
 	repo.ServeAsset(w, r, h.Store, a)
 	return nil
+}
+
+// hubError marks a 404 as the hub does: huggingface_hub reads X-Error-Code
+// and raises EntryNotFoundError, RevisionNotFoundError or
+// RepositoryNotFoundError for it. Without the code it reports a connection
+// problem, and transformers, which probes optional files, gives up.
+func hubError(w http.ResponseWriter, err error, code, msg string) error {
+	if repo.StatusOf(err) == http.StatusNotFound {
+		w.Header().Set("X-Error-Code", code)
+		w.Header().Set("X-Error-Message", msg)
+	}
+	return err
+}
+
+// missing is hubError for a document of revision rev of a repository: the
+// repository's own document and its revision document (cached, or their
+// misses) tell whether the repository, the revision or, with both there,
+// the entry asked for is missing (a directory tree/<rev>/<path> lists).
+func (h *Handler) missing(ctx context.Context, w http.ResponseWriter, rp *repo.Repository, kind, id, rev string, err error) error {
+	if repo.StatusOf(err) != http.StatusNotFound {
+		return err
+	}
+	has := func(doc string) bool {
+		_, err := h.Fetcher.FetchTarget(ctx, rp, apiTarget(rp, "api/"+kind+"/"+id+doc, ""), proxy.Metadata)
+		return repo.StatusOf(err) != http.StatusNotFound
+	}
+	switch {
+	case !has(""):
+		return hubError(w, err, "RepoNotFound", "Repository not found")
+	case rev != "" && !has("/revision/"+rev):
+		return hubError(w, err, "RevisionNotFound", "Invalid rev id: "+rev)
+	}
+	return hubError(w, err, "EntryNotFound", "Entry not found")
+}
+
+// splitAPI splits what follows api/<kind>/ into the repository id (name or
+// org/name), the document asked of it ("" for the repository's own,
+// "revision", "tree", ...) and that document's revision.
+func splitAPI(rest string) (id, doc, rev string) {
+	segs := strings.Split(rest, "/")
+	n := min(2, len(segs))
+	if n == 2 && (segs[1] == "revision" || segs[1] == "tree") {
+		n = 1 // a repository without an organisation (gpt2)
+	}
+	if len(segs) > n {
+		doc = segs[n]
+	}
+	if len(segs) > n+1 {
+		rev = segs[n+1]
+	}
+	return strings.Join(segs[:n], "/"), doc, rev
+}
+
+const (
+	// treeSuffix marks a tree listing's cache key. A listing cached before
+	// the next page was kept has no treeSuffix: a revalidation answers 304
+	// to it and would never bring the page's Link.
+	treeSuffix = "~tree"
+	nextSuffix = "~next"
+)
+
+// keepNext is the Keep of a tree listing cached at key: the hub lists
+// 1000 entries a page and names the next page in its Link header. Its
+// query is stored at key~next (removed when the listing ends there) for
+// serveTree to offer.
+func (h *Handler) keepNext(ctx context.Context, rp *repo.Repository, key string) func(http.Header) {
+	ctx = context.WithoutCancel(ctx) // the fetch outlives a client that went away
+	return func(hd http.Header) {
+		var err error
+		if next := nextQuery(hd.Get("Link")); next != "" {
+			_, err = h.Store.Put(ctx, rp.Name, key+nextSuffix, "text/plain", strings.NewReader(next))
+		} else if err = h.Store.Delete(ctx, rp.Name, key+nextSuffix); errors.Is(err, repo.ErrNotFound) {
+			err = nil
+		}
+		if err != nil {
+			slog.Warn("huggingface proxy: could not record the next page of a tree listing", "repo", rp.Name, "path", key, "err", logsafe.Err(err))
+		}
+	}
+}
+
+// nextQuery is the query of the rel="next" URL of a Link header, "" without one.
+func nextQuery(link string) string {
+	for _, l := range strings.Split(link, ",") {
+		target, params, _ := strings.Cut(l, ";")
+		if !strings.Contains(params, `rel="next"`) {
+			continue
+		}
+		if u, err := url.Parse(strings.Trim(strings.TrimSpace(target), "<>")); err == nil {
+			return u.RawQuery
+		}
+	}
+	return ""
+}
+
+// serveTree answers the tree listing cached as a (at key, asked for at
+// path p): without the entries' xetHash, with which huggingface_hub would
+// skip the proxy and download from the hub's Xet storage, and with the
+// next page's Link at the proxy.
+func (h *Handler) serveTree(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p, key string, a meta.Asset) error {
+	body, err := h.readDoc(a)
+	if err != nil {
+		return err
+	}
+	var entries []map[string]json.RawMessage
+	if json.Unmarshal(body, &entries) == nil {
+		for _, e := range entries {
+			delete(e, "xetHash")
+		}
+		if body, err = json.Marshal(entries); err != nil {
+			return err
+		}
+	}
+	if na, err := h.Store.Get(r.Context(), rp.Name, key+nextSuffix); err == nil {
+		if next, err := h.readDoc(na); err == nil && len(next) > 0 && h.BaseURL != nil {
+			u := url.URL{Path: "/repository/" + rp.Name + "/" + p, RawQuery: string(next)}
+			w.Header().Set("Link", "<"+strings.TrimRight(h.BaseURL(), "/")+u.String()+`>; rel="next"`)
+		}
+	}
+	repo.ServeText(w, r, string(body), "application/json", a.LastModified)
+	return nil
+}
+
+// readDoc reads a cached API document.
+func (h *Handler) readDoc(a meta.Asset) ([]byte, error) {
+	f, err := h.Store.Open(a)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxDoc))
 }
 
 // apiTarget caches an API document under its path, plus a hash of the
@@ -220,9 +379,10 @@ func (h *Handler) commit(ctx context.Context, rp *repo.Repository, rt Route) (st
 
 // head answers a HEAD for an LFS file that is not cached without
 // downloading it: a HEAD at the hub, whose redirect to the CDN carries the
-// headers the client reads. A regular file (the hub serves it itself, no
-// X-Linked-Etag; under 10 MB) is left to the caller to fetch (done false),
-// so its ETag is the content's sha256 as when it is cached.
+// headers the client reads. A regular file (under 10 MB; the hub serves it
+// itself without X-Linked-Etag or, now, redirects with the file's git blob
+// id there) is left to the caller to fetch (done false), so its ETag is
+// the content's sha256 as when it is cached.
 func (h *Handler) head(ctx context.Context, w http.ResponseWriter, rp *repo.Repository, key, sha string) (done bool, err error) {
 	u := *rp.RemoteURL
 	u.Path += key
@@ -251,7 +411,7 @@ func (h *Handler) head(ctx context.Context, w http.ResponseWriter, rp *repo.Repo
 		return false, repo.Errorf(http.StatusBadGateway, "remote status %d", resp.StatusCode)
 	}
 	etag, size := resp.Header.Get("X-Linked-Etag"), resp.Header.Get("X-Linked-Size")
-	if etag == "" || size == "" {
+	if !proxy.IsSHA256Hex(strings.Trim(etag, `"`)) || size == "" {
 		return false, nil
 	}
 	hd := w.Header()

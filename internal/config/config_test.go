@@ -269,7 +269,8 @@ func TestValidateRepositoriesCatchesEveryRule(t *testing.T) {
 		"bad writePolicy":     {[]Repository{{Name: "a", Format: "maven", Type: "hosted", WritePolicy: "maybe"}}, `repository "a": unknown writePolicy "maybe"`},
 		"depth on raw":        {[]Repository{{Name: "a", Format: "raw", Type: "hosted", Depth: 1}}, `repository "a": depth is only valid for yum hosted repositories`},
 		"depth on yum proxy":  {[]Repository{{Name: "a", Format: "yum", Type: "proxy", Remote: "https://x.example/", Depth: 1}}, `repository "a": depth is only valid for yum hosted repositories`},
-		"bad depth":           {[]Repository{{Name: "a", Format: "yum", Type: "hosted", Depth: 2}}, `repository "a": depth must be 0 or 1`},
+		"bad depth":           {[]Repository{{Name: "a", Format: "yum", Type: "hosted", Depth: 6}}, `repository "a": depth must be 0 to 5`},
+		"negative depth":      {[]Repository{{Name: "a", Format: "yum", Type: "hosted", Depth: -1}}, `repository "a": depth must be 0 to 5`},
 		"missing member":      {[]Repository{{Name: "g", Format: "maven", Type: "group", Members: []string{"x"}}}, `repository "g": unknown member "x"`},
 		"gitlfs proxy":        {[]Repository{{Name: "a", Format: "gitlfs", Type: "proxy", Remote: "https://x.example/"}}, `repository "a": gitlfs supports hosted repositories only`},
 		"gitlfs group":        {[]Repository{{Name: "h", Format: "gitlfs", Type: "hosted"}, {Name: "g", Format: "gitlfs", Type: "group", Members: []string{"h"}}}, `repository "g": gitlfs supports hosted repositories only`},
@@ -632,5 +633,23 @@ func TestAptSettings(t *testing.T) {
 	if err := ValidateRepositories([]Repository{{Name: "a", Format: "apt", Type: "hosted"}, {Name: "p", Format: "apt", Type: "proxy", Remote: "https://x/"},
 		{Name: "g", Format: "apt", Type: "group", Members: []string{"a", "p"}, WriteMember: "a"}}); err != nil {
 		t.Fatalf("apt list: %v", err)
+	}
+}
+
+// mergeMembers is a setting of npm and PyPI groups only.
+func TestValidateDefinitionMergeMembers(t *testing.T) {
+	const want = "mergeMembers is only valid for npm and pypi groups"
+	for _, r := range []Repository{
+		{Name: "a", Format: "npm", Type: "hosted", MergeMembers: true},
+		{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, MergeMembers: true},
+	} {
+		if err := ValidateDefinition(r); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s %s: %v", r.Format, r.Type, err)
+		}
+	}
+	for _, format := range []string{"npm", "pypi"} {
+		if err := ValidateDefinition(Repository{Name: "g", Format: format, Type: "group", Members: []string{"h"}, MergeMembers: true}); err != nil {
+			t.Errorf("%s group: %v", format, err)
+		}
 	}
 }

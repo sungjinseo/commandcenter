@@ -106,6 +106,18 @@ func (h *Handler) caller(r *http.Request) (caller, error) {
 	return caller{p: p}, nil
 }
 
+// TokenOwner is the owner key of the registry token r carries, "" when it
+// has none, an anonymous one or one that does not verify: the server logs
+// requests under it (an API token sent as Bearer stays unnamed there).
+func (h *Handler) TokenOwner(r *http.Request) string {
+	_, tok, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+	c, err := h.verify(strings.TrimSpace(tok))
+	if err != nil {
+		return ""
+	}
+	return c.Sub
+}
+
 // allowed reports whether c may perform action on the registry name, whose
 // first segment is the Command Center repository.
 func (h *Handler) allowed(c caller, name, action string) bool {

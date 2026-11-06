@@ -55,6 +55,7 @@ var types = map[string]typeDef{
 	TypeImport:          {name: "Import repositories", params: importParamsOf, run: runImport, fields: importFields},
 
 	TypeMavenPurgeUnused: {name: "Remove unused Maven snapshots", params: mavenPurgeUnusedParamsOf, run: runPurge, fields: mavenPurgeUnusedFields},
+	TypeDockerGC:         {name: "Remove unused Docker manifests and layers", params: dockerGCParamsOf, run: runDockerGC, fields: dockerGCFields},
 }
 
 var blobStoreFields = []ParamSpec{{Name: "blobStore", Type: "blobStore", Help: "empty: every blob store"}}

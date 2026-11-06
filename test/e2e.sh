@@ -5,13 +5,14 @@
 # and two nodes, a kill -9 and a rolling restart; about 6 minutes).
 set -uo pipefail
 cd "$(dirname "$0")/.."
-checks=(maven-smoke npm-smoke pypi-smoke go-smoke cargo-smoke ui-smoke ldap-smoke mail-smoke load)
+checks=(maven-smoke npm-smoke pypi-smoke go-smoke cargo-smoke docker-smoke gitlfs-smoke yum-smoke apt-smoke raw-smoke terraform-smoke huggingface-smoke swift-smoke import-config-smoke ui-smoke ldap-smoke mail-smoke load flood)
 [ "${1:-}" = --ha ] && checks+=(ha-smoke)
 declare -A result duration memory
 failed=0
 for c in "${checks[@]}"; do
   script="test/smoke/$c.sh"
   [ "$c" = load ] && script="test/load/load.sh"
+  [ "$c" = flood ] && script="test/load/flood.sh"
   [ "$c" = ha-smoke ] && script="test/ha/ha-smoke.sh"
   log="$(mktemp)"
   start=$(date +%s)

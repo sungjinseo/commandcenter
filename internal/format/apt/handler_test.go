@@ -294,9 +294,18 @@ func (e *env) releaseFor(name, dist, comp string, archs []string, files map[stri
 
 func TestHostedUploadAndMetadata(t *testing.T) {
 	e := newEnv(t)
-	// before any upload: an empty Release, so `apt update` succeeds
-	if got := e.text(t, "apt-hosted", "dists/stable/Release"); got != e.releaseFor("apt-hosted", "stable", "main", nil, nil) {
+	// before any upload: a Release that lists an empty Packages for "all",
+	// so `apt update` succeeds (apt refuses a Release without a hash entry)
+	empty := map[string]string{"main/binary-all/Packages": "", "main/binary-all/Packages.gz": string(gzipBytes(nil))}
+	if got := e.text(t, "apt-hosted", "dists/stable/Release"); got != e.releaseFor("apt-hosted", "stable", "main", []string{"all"}, empty) ||
+		!strings.Contains(got, "\nSHA256:\n e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855                0 main/binary-all/Packages\n") {
 		t.Fatalf("empty Release:\n%s", got)
+	}
+	if got := e.text(t, "apt-hosted", "dists/stable/main/binary-all/Packages"); got != "" {
+		t.Fatalf("empty repository's Packages: %q", got)
+	}
+	if w := e.do("GET", "apt-hosted", "dists/stable/main/binary-all/Packages.gz", nil); w.Code != 200 || gunzip(t, w.Body.Bytes()) != "" {
+		t.Fatalf("empty repository's Packages.gz: %d", w.Code)
 	}
 	if w := e.do("GET", "apt-hosted", "dists/stable/main/binary-amd64/Packages", nil); w.Code != 404 {
 		t.Fatalf("empty repository Packages: %d", w.Code)
@@ -676,6 +685,69 @@ func TestGroup(t *testing.T) {
 	}
 }
 
+// `apt update` of an empty repository, then the first upload in the same
+// second, then `apt update` again: apt sends If-Modified-Since with the
+// Last-Modified it was given, and must get the new InRelease, not a 304
+// that leaves it with the empty list for good. The empty files therefore
+// carry a Last-Modified older than any upload.
+func TestFirstUploadIsNewerThanTheEmptyRelease(t *testing.T) {
+	e := newEnv(t)
+	for _, c := range []struct{ repo, path string }{{"apt-signed", "dists/jammy/InRelease"}, {"apt-hosted", "dists/stable/Release"}} {
+		w := e.do("GET", c.repo, c.path, nil)
+		given := w.Header().Get("Last-Modified")
+		if w.Code != 200 || given == "" {
+			t.Fatalf("%s empty %s: %d Last-Modified %q", c.repo, c.path, w.Code, given)
+		}
+		if w := e.do("GET", c.repo, c.path, nil, "If-Modified-Since", given); w.Code != 304 {
+			t.Fatalf("%s: unchanged empty %s: %d", c.repo, c.path, w.Code)
+		}
+		if w := e.do("PUT", c.repo, "pool/hello.deb", deb(t, helloControl, "control.tar.gz")); w.Code != 201 {
+			t.Fatalf("PUT: %d %s", w.Code, w.Body)
+		}
+		w = e.do("GET", c.repo, c.path, nil, "If-Modified-Since", given)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "binary-amd64/Packages\n") {
+			t.Fatalf("%s: %s after the first upload, If-Modified-Since %s: %d\n%s", c.repo, c.path, given, w.Code, w.Body)
+		}
+	}
+}
+
+// apt asks for dists/stable/InRelease first. An unsigned hosted member has
+// none, and the Debian archive a proxy member mirrors has a suite of that
+// name: once the hosted member holds packages its distribution is its
+// own, so the group answers 404 (apt then reads the hosted Release) and
+// not the remote's InRelease, which would hide the hosted packages.
+func TestGroupHostedOwnsItsDistribution(t *testing.T) {
+	e := newEnv(t)
+	e.up["dists/stable/InRelease"] = []byte("-----BEGIN PGP SIGNED MESSAGE-----\n\nOrigin: Debian\nSuite: stable\n")
+	// nothing uploaded yet: the name is the remote's
+	if got := e.text(t, "apt-all", "dists/stable/InRelease"); !strings.Contains(got, "Origin: Debian") {
+		t.Fatalf("before the first upload: %q", got)
+	}
+	if w := e.do("PUT", "apt-hosted", "pool/hello.deb", deb(t, helloControl, "control.tar.gz")); w.Code != 201 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body)
+	}
+	e.now = e.now.Add(2 * time.Hour) // the proxy's copy is due for a re-check
+	hits := e.hits.Load()
+	for _, p := range []string{"dists/stable/InRelease", "dists/stable/Release.gpg", "dists/stable/main/i18n/Translation-en"} {
+		if w := e.do("GET", "apt-all", p, nil); w.Code != 404 {
+			t.Errorf("%s: %d %s", p, w.Code, w.Body)
+		}
+	}
+	if e.hits.Load() != hits {
+		t.Errorf("the remote was asked %d times for the hosted member's distribution", e.hits.Load()-hits)
+	}
+	if got := e.text(t, "apt-all", "dists/stable/Release"); !strings.HasPrefix(got, "Origin: apt-hosted\n") {
+		t.Fatalf("group Release:\n%s", got)
+	}
+	// other distributions are still the proxy's, and the proxy alone is unchanged
+	if got := e.text(t, "apt-all", "dists/bookworm/InRelease"); !strings.Contains(got, "Origin: Debian") {
+		t.Fatalf("bookworm through the group: %q", got)
+	}
+	if got := e.text(t, "apt-proxy", "dists/stable/InRelease"); !strings.Contains(got, "Origin: Debian") {
+		t.Fatalf("the proxy itself: %q", got)
+	}
+}
+
 func TestDeleteComponent(t *testing.T) {
 	e := newEnv(t)
 	for _, c := range []string{helloControl, control("hello", "1.1", "amd64"), control("tool", "2.0", "all")} {
@@ -723,7 +795,8 @@ func TestDeleteComponent(t *testing.T) {
 	if _, err := e.h.DeleteComponent(ctx, rp, component.Component{Format: "apt", Group: "all", Name: "tool", Version: "2.0"}, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.text(t, "apt-hosted", "dists/stable/Release"); got != e.releaseFor("apt-hosted", "stable", "main", nil, nil) {
+	empty := map[string]string{"main/binary-all/Packages": "", "main/binary-all/Packages.gz": string(gzipBytes(nil))}
+	if got := e.text(t, "apt-hosted", "dists/stable/Release"); got != e.releaseFor("apt-hosted", "stable", "main", []string{"all"}, empty) {
 		t.Fatalf("empty Release:\n%s", got)
 	}
 	// a component the evaluation saw differently is skipped

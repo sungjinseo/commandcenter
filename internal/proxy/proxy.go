@@ -2,6 +2,7 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -63,6 +64,12 @@ type Target struct {
 	Remote string
 	URL    string
 	Header http.Header
+	// Route, if set, is the path the proxy's routing rule sees instead of
+	// the remote path: the request path within the repository, for a file
+	// whose upstream URL lies elsewhere (a PyPI file on another host, a
+	// chart or archive URL taken from an index), where the administrator's
+	// rule cannot know the upstream path.
+	Route string
 	// SHA256 is the expected content sha256 (hex); a mismatching download is rejected and not cached.
 	SHA256 string
 	// NotHTML marks an asset that is never a web page: a text/html answer
@@ -74,11 +81,12 @@ type Target struct {
 	// 401 for an image that does not exist, to not reveal which do. A
 	// cached asset is served stale instead, as for any other failure.
 	DeniedIsNotFound bool
-	// DeniedIsFailure keeps a 403 for an asset that is not cached a failure
-	// (502), not a miss: for the document that decides which group member
-	// owns a package (npm packument, PyPI project page), so that a refused
-	// internal registry fails closed instead of letting a later member's
-	// same-named package stand in (resolve.Owner).
+	// DeniedIsFailure keeps every answer but 404 and 410 for an asset that
+	// is not cached a failure (502), not a miss: for the document that
+	// decides which group member owns a package (npm packument, PyPI project
+	// page), so that an internal registry that refuses or errs (403, 400,
+	// 451, ...) fails closed instead of letting a later member's same-named
+	// package stand in (resolve.Owner).
 	DeniedIsFailure bool
 
 	// Skip, if set, tells the resolver which hosted or proxy repositories do
@@ -86,6 +94,12 @@ type Target struct {
 	// is not found without a lookup, so a proxy asks no remote, and a group
 	// asks its other members.
 	Skip func(rp *repo.Repository) bool
+
+	// Keep, if set, is given the header of the remote's answer when a fetch
+	// has stored its body, just before the asset is recorded: for what a
+	// format keeps of the answer beside the asset (the Link to a listing's
+	// next page), there for whoever then finds the asset on any node.
+	Keep func(http.Header)
 }
 
 type Fetcher struct {
@@ -170,10 +184,10 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 	}
 }
 
-// routePath is the path a routing rule sees for t: the remote path, or the
-// path of an absolute URL, with one leading "/".
+// routePath is the path a routing rule sees for t: its Route, else the
+// remote path or the path of an absolute URL, with one leading "/".
 func routePath(t Target) string {
-	p := t.Remote
+	p := cmp.Or(t.Route, t.Remote)
 	if p == "" && t.URL != "" {
 		if u, err := url.Parse(t.URL); err == nil {
 			p = u.Path
@@ -353,6 +367,9 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 			if cerr := f.Store.Current(rp); cerr != nil {
 				return Result{}, cerr
 			}
+			if t.Keep != nil {
+				t.Keep(resp.Header)
+			}
 			err = f.Store.DB.PutAsset(ctx, na)
 		}
 		if err != nil {
@@ -368,7 +385,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 
 	case status == http.StatusNotFound || status == http.StatusGone,
 		t.DeniedIsNotFound && !cached && status == http.StatusUnauthorized,
-		!cached && remoteMiss(status) && !(t.DeniedIsFailure && status == http.StatusForbidden):
+		!cached && remoteMiss(status) && !t.DeniedIsFailure:
 		// A 404 from a remote that was replaced meanwhile must not outlive the change.
 		if cerr := f.Store.Current(rp); cerr != nil {
 			return Result{}, cerr

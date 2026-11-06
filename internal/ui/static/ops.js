@@ -637,7 +637,7 @@ const CLEANUP = "repository.cleanup", REBUILD = "repository.rebuild-metadata", C
 const VERIFY = "repository.verify-blobs", PURGE = "maven.purge-snapshots", RECALC = "blobstore.recalculate-size", TEMP = "blobstore.delete-temp-files";
 const EXPORT = "repository.export", IMPORT = "repository.import", MOVE = "repository.change-blobstore", RMMEMBER = "blobstore.group-remove-member";
 const VSYNC = "vulnerability.sync", VSCAN = "vulnerability.scan";
-const PUNUSED = "repository.purge-unused", MPURGE = "maven.purge-unused-snapshots", PKEYS = "security.purge-api-keys", PUTOKENS = "security.purge-expired-user-tokens";
+const PUNUSED = "repository.purge-unused", MPURGE = "maven.purge-unused-snapshots", DOCKERGC = "docker.gc", PKEYS = "security.purge-api-keys", PUTOKENS = "security.purge-expired-user-tokens";
 const REPL = "repository.pull-replication", EVAL = "repository.evaluate";
 export const RPLAN = "blobstore.reconcile-plan", REXEC = "blobstore.reconcile-execute";
 const TASK_STATUS = { Running: ["task.running", "blue"], Waiting: ["task.waiting"], Disabled: ["task.disabled"] };
@@ -652,17 +652,17 @@ const typeLabel = (type, fallback) => ({ [COMPACT]: t("task.tCompact"), [CLEANUP
   [VERIFY]: t("task.tVerify"), [PURGE]: t("task.tPurge"), [RECALC]: t("task.tRecalc"), [TEMP]: t("task.tTemp"),
   [EXPORT]: t("task.tExport"), [IMPORT]: t("task.tImport"), [MOVE]: t("task.tMove"), [RMMEMBER]: t("task.tRmMember"),
   [VSYNC]: t("task.tVulnSync"), [VSCAN]: t("task.tVulnScan"), [REPL]: t("task.tRepl"), [EVAL]: t("task.tEval"),
-  [RPLAN]: t("task.tRPlan"), [REXEC]: t("task.tRExec"), [PUNUSED]: t("task.tPurgeUnused"), [MPURGE]: t("task.tMPurge"), [PKEYS]: t("task.tPurgeKeys"),
+  [RPLAN]: t("task.tRPlan"), [REXEC]: t("task.tRExec"), [PUNUSED]: t("task.tPurgeUnused"), [MPURGE]: t("task.tMPurge"), [DOCKERGC]: t("task.tDockerGC"), [PKEYS]: t("task.tPurgeKeys"),
   [PUTOKENS]: t("task.tPurgeTokens") }[type] || fallback || type);
 // Parameter names the dictionaries label; any other name is shown as is.
 const PARAM_KEY = "task.p.", PARAM_HELP = "task.ph."; // + the parameter name
 const PARAM_KEYS = ["repos", "repo", "repository", "format", "blobStore", "checksum", "maxBytes", "minimumRetained", "snapshotRetentionDays", "lastDownloadedDays", "removeIfReleased", "gracePeriodDays", "preview",
   "repositories", "destination", "includeProxies", "since", "hardLinks", "source", "createMissing", "overwrite", "target", "group", "member", "full", "sinceHours", "all", "planId",
-  "maxComponents", "scanAssets", "lastUsed", "scope", "groupId", "artifactId", "baseVersion", "cascadeRebuild", "rebuildChecksums", "resetProxyMetadata", "olderThanDays"];
+  "maxComponents", "scanAssets", "lastUsed", "scope", "groupId", "artifactId", "baseVersion", "cascadeRebuild", "rebuildChecksums", "resetProxyMetadata", "olderThanDays", "deployOffset"];
 // A parameter whose help depends on its task type: "<type>:<name>" → the help key suffix.
 const HELP_ALIAS = { [PURGE + ":repository"]: "purgeRepository", [IMPORT + ":repositories"]: "importRepositories", [VSCAN + ":repository"]: "vulnRepository", [MOVE + ":repo"]: "moveRepo",
   [REPL + ":repository"]: "replRepository", [EVAL + ":repository"]: "evalRepository", [RPLAN + ":since"]: "reconcileSince",
-  [MPURGE + ":repository"]: "mpurgeRepository", [MPURGE + ":lastUsed"]: "mpurgeLastUsed", [PUNUSED + ":repos"]: "punusedRepos" };
+  [MPURGE + ":repository"]: "mpurgeRepository", [MPURGE + ":lastUsed"]: "mpurgeLastUsed", [PUNUSED + ":repos"]: "punusedRepos", [DOCKERGC + ":repository"]: "dockerGCRepository" };
 // A string parameter with fixed values: "<type>:<name>" → the values (labels "task.v.<value>").
 const PARAM_ENUM = { [PURGE + ":scope"]: ["build", "version"] };
 const ENUM_KEYS = { build: "task.v.build", version: "task.v.version" };
@@ -688,6 +688,7 @@ function paramParts(params) {
 const REBUILDABLE = (r) => (r.format === "maven" && r.type !== "group") || (["apt", "yum", "helm", "conda"].includes(r.format) && r.type === "hosted") || (r.format === "apt" && r.type === "proxy");
 const repoChoices = (type, repos) => (type === REBUILD ? repos.filter(REBUILDABLE) : type === PURGE ? repos.filter((r) => r.format === "maven")
   : type === MPURGE ? repos.filter((r) => r.format === "maven" && r.type !== "proxy")
+  : type === DOCKERGC ? repos.filter((r) => r.format === "docker" && r.type === "hosted")
   : type === MOVE ? repos.filter((r) => r.type !== "group") : type === VSCAN || type === EVAL ? repos.filter((r) => r.type !== "group" && OSV_FORMATS.includes(r.format))
     : type === REPL ? repos.filter((r) => r.type === "proxy" && !NO_REPLICATION.includes(r.format)) : repos);
 

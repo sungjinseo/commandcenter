@@ -1,0 +1,45 @@
+# Jenkins configuration as code for test/compat/jenkins.sh: one local admin,
+# the Command Center accounts as credentials, Command Center as a "Nexus
+# Repository Manager 3.x Server" (once per account) and the pipeline jobs.
+jenkins:
+  numExecutors: 2
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: admin
+          password: "${JENKINS_API_TOKEN}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - usernamePassword:
+              scope: GLOBAL
+              id: commandcenter
+              username: ci
+              password: "${CC_PASSWORD}"
+          - usernamePassword:
+              scope: GLOBAL
+              id: commandcenter-admin
+              username: admin
+              password: "${CC_PASSWORD}"
+unclassified:
+  location:
+    url: "http://localhost:8080/"
+  globalNexusConfiguration:
+    nxrmConfigs:
+      - nxrm3Configuration:
+          id: commandcenter
+          displayName: Command Center
+          serverUrl: "http://commandcenter:8081"
+          credentialsId: commandcenter
+      - nxrm3Configuration:
+          id: commandcenter-admin
+          displayName: Command Center (admin)
+          serverUrl: "http://commandcenter:8081"
+          credentialsId: commandcenter-admin
+jobs:
+  - file: /work/jobs.groovy

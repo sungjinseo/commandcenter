@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -39,18 +40,28 @@ func TestFetchRemoteMissStatuses(t *testing.T) {
 	}
 }
 
-// A package document that decides a group's owner keeps a 403 a failure.
+// A package document that decides a group's owner keeps every remote error
+// a failure; only "not there" is a miss.
 func TestFetchDeniedIsFailure(t *testing.T) {
 	rm := &remote{}
 	f, rp, _ := setup(t, rm)
-	rm.status.Store(403)
-	for i := 0; i < 2; i++ {
-		if _, err := f.FetchTarget(ctx, rp, Target{Key: "pkg", Remote: "pkg", DeniedIsFailure: true}, Metadata); repo.StatusOf(err) != 502 {
-			t.Fatalf("fetch %d: %v", i, err)
+	// Whatever a remote answers but "not there" stays a failure for these.
+	for n, status := range []int{403, 400, 405, 409, 451} {
+		rm.status.Store(int32(status))
+		for i := 0; i < 2; i++ {
+			if _, err := f.FetchTarget(ctx, rp, Target{Key: "pkg", Remote: "pkg", DeniedIsFailure: true}, Metadata); repo.StatusOf(err) != http.StatusBadGateway {
+				t.Fatalf("status %d, fetch %d: %v", status, i, err)
+			}
+		}
+		if want := int32(2 * (n + 1)); rm.hits.Load() != want {
+			t.Fatalf("status %d: hits %d, want %d (not negative-cached)", status, rm.hits.Load(), want)
 		}
 	}
-	if rm.hits.Load() != 2 {
-		t.Fatalf("hits %d, want 2 (not negative-cached)", rm.hits.Load())
+	for _, status := range []int{404, 410} {
+		rm.status.Store(int32(status))
+		if _, err := f.FetchTarget(ctx, rp, Target{Key: fmt.Sprint("gone", status), Remote: "pkg", DeniedIsFailure: true}, Metadata); !errors.Is(err, repo.ErrNotFound) {
+			t.Fatalf("status %d: %v", status, err)
+		}
 	}
 }
 

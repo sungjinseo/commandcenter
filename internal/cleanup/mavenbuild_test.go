@@ -31,4 +31,19 @@ func TestEvaluateMavenSnapshotBuilds(t *testing.T) {
 	if got := e.labels(t, m, p); got != "g:a:0.9-20260101.120000-1" {
 		t.Fatalf("retain 1 keeps every build of 1.0-SNAPSHOT: %q", got)
 	}
+	// The three builds of 1.0-SNAPSHOT are one place, not three: retain 2
+	// keeps 0.9-SNAPSHOT too, and retain 3 a release behind them, by
+	// version and by date.
+	e.put(t, "m", "g/a/0.8/a-0.8.jar", 1, daysAgo(400), time.Time{})
+	for _, by := range []string{"version", "date"} {
+		p = policy(Criteria{Retain: 2})
+		p.RetainSortBy = by
+		if got := e.labels(t, m, p); got != "g:a:0.8" {
+			t.Fatalf("retain 2 by %s: %q", by, got)
+		}
+		p.Retain = 3
+		if got := e.labels(t, m, p); got != "" {
+			t.Fatalf("retain 3 by %s: %q", by, got)
+		}
+	}
 }

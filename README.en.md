@@ -32,7 +32,7 @@ Everything an in-house package repository needs, in one binary, with no editions
 
 - **The same URL layout.** `/repository/<name>/...` and Docker's `/v2/` are unchanged, so clients only need a new host name.
 - **The same operating model.** hosted, proxy and group repositories, users, roles and privileges, cleanup policies, scheduled tasks, blob stores: nothing to relearn.
-- **Nexus REST API compatibility and a migration tool.** Existing scripts and the Terraform provider keep working against `/service/rest/v1`, and `import-nexus` copies hosted repositories wholesale.
+- **Nexus REST API compatibility and a migration tool.** `/service/rest/v1` offers the same paths and JSON field names for what scripts and tools use. Jenkins's `nexusArtifactUploader` and Nexus Platform plugin (`nexusPublisher`, the tag and staging steps), Gradle, Maven and sbt are run against it in `test/compat/`. There is no Groovy script API, so tools built on it (nexus3-cli's repository and file commands) do not work. `import-nexus -config` moves the configuration and the content of hosted repositories.
 - **Small.** One Go binary without CGO. It runs in a 128 MiB container; the load test peaks at 43 MiB RSS.
 - **No editions.** LDAP, OIDC (SSO), SAML, Crowd, user tokens, S3, Azure and Google Cloud Storage blob stores, staging and tags, group blob stores, retain-N cleanup, pull replication, export and import, database reconcile, configuration as code and active-active high availability are all included, under MIT or Apache-2.0 at your option.
 

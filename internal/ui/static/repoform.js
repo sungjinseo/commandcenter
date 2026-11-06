@@ -418,7 +418,7 @@ export async function viewRepoForm(view, o) {
   // Terraform hosted: the provider signing public key (not a secret: shown, and sent back as is; "" clears it)
   const gpgKey = cfg.format === "terraform" && isHosted ? h("textarea", { id: uid("gk"), class: "mono", rows: 5, spellcheck: "false", autocomplete: "off",
     placeholder: "-----BEGIN PGP PUBLIC KEY BLOCK-----" }, cfg.gpgPublicKey || "") : null;
-  const depth = isYum ? select([["0", t("rf.depth0")], ["1", t("rf.depth1")]], String(cfg.depth || 0)) : null;
+  const depth = isYum ? select([["0", t("rf.depth0")], ["1", t("rf.depth1")], ["2", "2"], ["3", "3"], ["4", "4"], ["5", "5"]], String(cfg.depth || 0)) : null;
 
   // Proxy
   let remote, mdAge, ctAge, negTTL, hidden, user, pass, bearer, clrPass, clrBearer;

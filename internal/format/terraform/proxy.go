@@ -173,15 +173,26 @@ func (h *Handler) proxyModuleSource(ctx context.Context, rp *repo.Repository, rt
 	return parseSource(endpoint, raw, rt), nil
 }
 
-// upstreamSource is the X-Terraform-Get of the upstream download endpoint.
+// upstreamSource is the source the upstream download endpoint names: its
+// X-Terraform-Get header (registry.terraform.io, with a 204) or, without
+// one, the "location" of its JSON body (registry.opentofu.org, with a
+// 200). terraform and tofu read both.
 func (h *Handler) upstreamSource(ctx context.Context, rp *repo.Repository, endpoint string) (string, error) {
 	resp, err := h.Fetcher.Request(ctx, rp, endpoint)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	raw := resp.Header.Get("X-Terraform-Get")
+	if raw == "" && resp.StatusCode == http.StatusOK {
+		var v struct {
+			Location string `json:"location"`
+		}
+		if json.Unmarshal(body, &v) == nil {
+			raw = v.Location
+		}
+	}
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return "", repo.ErrNotFound

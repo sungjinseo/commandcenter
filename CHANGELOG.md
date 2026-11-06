@@ -8,6 +8,100 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- `commandcenter import-nexus -config` makes a Nexus Repository 3 server's configuration on Command Center before it
+  copies content (`-config-only`: the configuration alone): blob stores, cleanup policies, routing rules, content
+  selectors, repositories (hosted, proxy, then groups in member order, with their format settings), privileges,
+  roles, local users, anonymous access, the first LDAP server, the realm order, e-mail, the scheduled tasks that
+  have an equivalent and the outbound HTTP proxy. It reads Nexus's REST API as an administrator (cleanup policies
+  from the web UI's internal resource, task schedules and HTTP settings through ExtDirect) and writes through the
+  Nexus-compatible API. What Nexus does not hand out (remote passwords and tokens, S3 secret keys, the LDAP bind,
+  SMTP and proxy passwords, apt signing keys with a passphrase) is never made up: the object is made without it
+  and a `needs manual action:` line says what to enter. New users get a random password, written to
+  `-passwords-out FILE` (mode 0600) or kept nowhere. A target with no user but its administrator gets Nexus's
+  rule that a privilege, not a sign-in, lets someone read (`authenticatedRead` off); a target in use keeps its
+  setting. `-dry-run` prints the plan, a second run changes nothing, what exists and differs is reported and left
+  alone unless `-update` is given, one failed object does not stop the rest, and the last line and the exit code
+  summarize. Built from Nexus 3.91.1's public source and tested against a stand-in and against Command Center as
+  the source, not against a running Nexus: plan with `-dry-run` first.
+- Docker: a blob can be mounted from a group or a proxy (`POST .../blobs/uploads/?mount=&from=`): an image
+  built on a base that was pulled through a group is pushed without uploading the base's layers again. A
+  blob the proxy has not cached is uploaded as before.
+- `GET /service/rest/wonderland/status`: the Nexus edition and version the API answers as (XML, or JSON for
+  `Accept: application/json`), for signed-in callers. Sonatype's client library reads it first, so "Test
+  connection" of a Nexus Repository Manager 3.x server in Jenkins (Nexus Platform plugin) now succeeds.
+- Component upload API: `maven2.tag` associates the uploaded component with an existing tag (read and edit on the
+  repository; a missing tag is a 400 before anything is stored). Jenkins `nexusPublisher` sends its `tagName`
+  this way. `GET /formats/upload-specs` lists the field.
+- Nexus API: `POST /staging/move/{destination}?tag=` and `POST /staging/delete?tag=` without `repository` act on
+  every repository that holds the tag (a move: the hosted ones of the destination's format), as Jenkins
+  `moveComponents` and `deleteComponents` call them. Lacking delete in one of them refuses the request first.
+- `test/compat/`: end-to-end checks with the real tools in their official images: `jenkins.sh` (Jenkins LTS with
+  nexus-artifact-uploader and the Nexus Platform plugin: `nexusArtifactUploader`, `nexusPublisher`, the tag and
+  staging steps, "Test connection"), `gradle.sh` (maven-publish with module metadata, sha256/sha512), `sbt.sh` and
+  `nexus3-cli.sh` (its blob store, task and realm commands work; its repository and file commands need Nexus's
+  Groovy script API and are refused).
+- Task `docker.gc` (Nexus `repository.docker.gc`): removes the manifests of Docker hosted repositories that no tag
+  reaches, directly or through an index, and that went unstored and unpulled for `deployOffset` hours, then the
+  layers nothing references. An image from a recent docker is an index, so deleting its tag freed almost nothing
+  before; `blobstore.compact` then gives the disk space back.
+- End-to-end tests with the real clients for six more formats, in `test/smoke/`: `yum-smoke.sh` (dnf,
+  rpmbuild), `apt-smoke.sh` (apt-get, dpkg-deb), `raw-smoke.sh` (curl, wget), `terraform-smoke.sh`
+  (terraform, tofu), `huggingface-smoke.sh` (huggingface_hub, transformers), `swift-smoke.sh` (SwiftPM).
+- Yum: a repodata depth up to 5 as in Nexus (`depth`, `yum.repodataDepth`), for layouts like
+  `7/os/x86_64/`.
+
+### Changed
+- The request log's `user` and the monthly users now name the user of a Docker registry token; such
+  requests were logged without one.
+- The script API paths (`/service/rest/v1/script`, `/script/{name}`, `/script/{name}/run`) answer as a Nexus
+  with script creation turned off and say why there is no script API (200 `[]`, 410, 404), instead of a bare
+  404 `not found`; anonymous callers get 401. nexus3-cli's repository and file commands, which need that API,
+  now fail with this message.
+
+### Fixed
+- Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
+  docker component for a prerelease, because their versions join a build, a release number or a tag variant with
+  `-` (`1.2.3-4.el9`, `1.2-alpine`): a policy for prereleases selected them all. Those formats have no
+  prereleases now.
+- Git LFS: `git push` could not upload. The batch answer marked every object `authenticated`, so git-lfs sent
+  the upload without credentials and repeated it on the 401 without end. Objects are no longer marked, and
+  git-lfs sends its credentials.
+- Docker proxy: the tags list held only the upstream's first page (100 tags from quay.io and ghcr.io). The
+  pages are now followed and cached as one list; a list cached before is replaced at its next refresh.
+- Docker: `skopeo delete` was denied. The token endpoint now grants the scope action `*` as the pull, push
+  and delete the user may use.
+- A client repeating refused uploads on many connections could get a 128 MiB container OOM-killed in seconds, without
+  credentials: what it sent stays in the kernel's socket buffers for the 500 ms a refused connection is kept, and
+  those count against the container, outside GOMEMLIMIT. The connection limit now follows the container's memory
+  (limit minus GOMEMLIMIT, 160 KiB a connection, at most 1024): 307 in the default 128 MiB. `test/load/flood.sh`
+  proves it.
+- Yum: primary.xml lists weak dependencies, so `dnf install` installs what a package recommends, and
+  the directories and ghosts under `/etc` and `bin/`. other.xml lists the newest 10 changelog entries,
+  oldest first, as createrepo_c does. `repository.rebuild-metadata` reads stored RPMs again to fill in
+  packages uploaded earlier.
+- APT: `apt-get update` of an empty repository works, and one right after the first upload sees it.
+- APT: in a group, a hosted member with packages answers alone for its distribution, so a proxy with
+  a suite of that name (Debian's `stable`) no longer hides its packages.
+- Terraform: a proxy of registry.opentofu.org installs modules: the source can be in the response body.
+- Hugging Face: `hf download` and `snapshot_download` of huggingface_hub 2.x work: tree listings hide
+  Xet hashes. Listings past 1000 files are no longer cut short: the next page's `Link` is kept.
+- Hugging Face: a missing file, revision or repository is a 404 with the Hub's `X-Error-Code`, so
+  clients raise the right error. A regular file has one ETag before and after it is cached.
+- Hugging Face: Xet tokens are no longer passed through and cached: any reader could get one made for
+  the `remoteAuth` account.
+- Swift: SwiftPM on Linux no longer hangs without or with wrong credentials: it gets a Bearer challenge.
+
+### Upgrade notes
+- Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
+  runs on the repository. It now reads every RPM's header under the repository's lock, so uploads to that
+  repository wait meanwhile (three ranged reads per package on S3).
+- Yum depth: create repositories of depth 2 to 5 only once every node runs this version: an older node
+  would write repodata one level down for them.
+- Hugging Face: tree listings are cached under a new key, so each is fetched once more; the old copies stay
+  until the repository is deleted. A proxy cut off from the Hub cannot serve a listing cached only before
+  the upgrade. Listings of more than 1000 files need `baseURL` to be what clients open.
+
 ## [0.4.0] - 2026-11-05
 
 ### Added
@@ -16,8 +110,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `assetN.classifier`, `assetN.extension`), raw (`directory`, `assetN.filename`), apt, npm, pypi, nuget,
   rubygems, helm, yum (`directory`, `asset.filename`) and r (`asset.pathId`), plus conda, composer and
   terraform modules. Each file goes through the format's own upload (same privileges, write policy,
-  validation, events and metadata); 204 on success, 400 validation lists as Nexus answers. Works with
-  `curl -F`, Jenkins `nexusPublisher` and `nexus3-cli`.
+  validation, events and metadata); 204 on success, 400 validation lists as Nexus answers. Tested with
+  `curl -F` and Jenkins `nexusPublisher`.
 - `GET /service/rest/v1/formats/upload-specs` and `/formats/{format}/upload-specs`: the fields each
   format's component upload takes.
 - Nexus API: S3 blob stores (`POST /v1/blobstores/s3` 201, `GET`/`PUT /v1/blobstores/s3/{name}`, secret

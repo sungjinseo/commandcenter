@@ -50,9 +50,12 @@ type Server struct {
 	// Docker serves the Docker/OCI registry API at /v2/ and renders its
 	// errors; nil serves none. It authenticates Bearer tokens there itself
 	// (the tokens its /v2/token issues); Basic credentials are checked here.
+	// TokenOwner names whose registry token a request carries ("" for an
+	// anonymous or invalid one), for the request log and Seen.
 	Docker interface {
 		http.Handler
 		repo.ErrorWriter
+		TokenOwner(r *http.Request) string
 	}
 
 	// TerraformDiscovery, if set, answers GET /.well-known/terraform.json,
@@ -75,6 +78,19 @@ type Server struct {
 }
 
 const realm = `Basic realm="commandcenter"`
+
+// challenge is the WWW-Authenticate of a 401 for r. SwiftPM on Linux hangs
+// for good on a Basic challenge, never reporting the 401 (seen with SwiftPM
+// 6.2.4 and a registry that answers nothing else), so it gets a Bearer one,
+// which it reports at once as bad credentials. By the client and not by the
+// repository: a request for a repository it may not read must not learn its
+// format.
+func challenge(r *http.Request) string {
+	if strings.HasPrefix(r.UserAgent(), "SwiftPackageManager/") {
+		return `Bearer realm="commandcenter"`
+	}
+	return realm
+}
 
 // UploadIdleTimeout is how long a request body may go without data, so a
 // stalled client cannot hold the connection or a per-key lock.
@@ -126,6 +142,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/service/rest/v1/", s.Nexus) // the exact status route above stays the plain ping
 		mux.Handle("GET /service/rest/swagger.json", s.Nexus)
 		mux.Handle("GET /service/rest/atlas/system-information", s.Nexus)
+		mux.Handle("GET /service/rest/wonderland/status", s.Nexus)
 		mux.Handle("/service/rest/beta/", s.Nexus) // Nexus's deprecated twins, rewritten to v1 there
 		mux.Handle("GET /service/metrics/", s.Nexus)
 		mux.Handle("GET /service/rest/metrics/ping", s.Nexus)
@@ -257,7 +274,7 @@ func deny(w http.ResponseWriter, r *http.Request, p auth.Principal, h repo.Handl
 		// The web UI (upload) handles 401 itself; a challenge would pop up
 		// the browser's Basic-auth dialog over it.
 		if r.Header.Get(auth.UIHeader) != "1" {
-			w.Header().Set("WWW-Authenticate", realm)
+			w.Header().Set("WWW-Authenticate", challenge(r))
 		}
 		err = repo.Errorf(http.StatusUnauthorized, "authentication required")
 	} else {
@@ -282,6 +299,7 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 		}
 		rec := &statusRecorder{ResponseWriter: w}
 		var p auth.Principal
+		var owner string // p's, or the owner of a registry token
 		// Deferred so the request is logged even when a handler panics
 		// (http.ErrAbortHandler mid-stream); the panic still propagates.
 		defer func() {
@@ -290,7 +308,7 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 				status = http.StatusOK
 			}
 			s.Log.Info("request", "id", id, "method", r.Method, "path", logsafe.Path(r.URL.Path), "status", status,
-				"bytes", rec.bytes, "ms", time.Since(start).Milliseconds(), "user", p.Owner(), "remote", r.RemoteAddr)
+				"bytes", rec.bytes, "ms", time.Since(start).Milliseconds(), "user", owner, "remote", r.RemoteAddr)
 			if s.Requests != nil {
 				// Only names the registry knows: a scanner cannot add rows.
 				name, ok := strings.CutPrefix(r.URL.Path, "/repository/")
@@ -303,7 +321,7 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 						// ponytail: Content-Length only; a chunked upload counts 0 bytes in.
 						s.Requests(name, status, max(r.ContentLength, 0), rec.bytes, time.Since(start))
 						if s.Seen != nil {
-							s.Seen(p.Owner(), r.RemoteAddr)
+							s.Seen(owner, r.RemoteAddr)
 						}
 					}
 				}
@@ -354,11 +372,14 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			// the body is what counts there.
 			p, err = auth.Principal{}, nil
 		}
+		if owner = p.Owner(); bearer {
+			owner = s.Docker.TokenOwner(r)
+		}
 		if wait := auth.RetryAfter(rec.Header(), err); wait > 0 {
 			writeErr(rec, r, repo.Errorf(http.StatusTooManyRequests, "too many failed sign-ins; try again in %d seconds", wait))
 		} else if err != nil {
 			if r.Header.Get(auth.UIHeader) != "1" { // the web UI handles 401 itself: no browser dialog
-				rec.Header().Set("WWW-Authenticate", realm)
+				rec.Header().Set("WWW-Authenticate", challenge(r))
 			}
 			msg := "invalid credentials"
 			if errors.Is(err, auth.ErrUserTokenRequired) {

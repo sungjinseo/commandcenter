@@ -78,6 +78,7 @@ func newHarness(t *testing.T) *harness {
 		{Name: "mvn-proxy", Format: "maven", Type: "proxy", Remote: "https://repo.example.org/maven2"},
 		{Name: "mvn-group", Format: "maven", Type: "group", Members: []string{"mvn"}},
 		{Name: "crates", Format: "cargo", Type: "hosted"},
+		{Name: "images", Format: "docker", Type: "hosted"},
 		{Name: "mvn-npm-policy", Format: "maven", Type: "hosted", CleanupPolicy: "npm-only"}, // format mismatch
 		{Name: "mvn-ro", Format: "maven", Type: "hosted", WritePolicy: "deny"},
 		{Name: "charts", Format: "helm", Type: "hosted"},

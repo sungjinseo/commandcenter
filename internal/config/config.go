@@ -232,14 +232,20 @@ type Repository struct {
 	// group
 	Members     []string `yaml:"members" json:"members,omitempty"`
 	WriteMember string   `yaml:"writeMember" json:"writeMember,omitempty"`
+	// MergeMembers makes an npm or PyPI group answer a package from every
+	// member that has it, merged, as Nexus does. Off (the default), the
+	// first member that has the package answers alone, so a public package
+	// cannot stand in for or add versions to an internal one of the same
+	// name (dependency confusion).
+	MergeMembers bool `yaml:"mergeMembers,omitempty" json:"mergeMembers,omitempty"`
 
 	// hosted
 	VersionPolicy string `yaml:"versionPolicy" json:"versionPolicy,omitempty"` // maven only: release | snapshot | mixed
 	WritePolicy   string `yaml:"writePolicy" json:"writePolicy,omitempty"`     // allow | allow_once | deny
 	// Depth is where a yum hosted repository keeps its repodata/: 0 at the
-	// root, listing every RPM; 1 in each top-level directory, listing its
-	// RPMs (Nexus "repodata depth").
-	Depth int `yaml:"depth,omitempty" json:"depth,omitempty"` // yum hosted only: 0 | 1
+	// root, listing every RPM; 1 to 5 in each directory that many segments
+	// down, listing the RPMs under it (Nexus "repodata depth").
+	Depth int `yaml:"depth,omitempty" json:"depth,omitempty"` // yum hosted only: 0 to 5
 
 	// apt hosted: the dists/<distribution> and component the generated
 	// Release and Packages files are published under (defaults "stable"
@@ -710,6 +716,9 @@ func ValidateDefinition(r Repository) error {
 	if r.Distribution != "" && (r.Format != "apt" || r.Type == "group") {
 		errs = append(errs, fmt.Errorf("repository %q: distribution is only valid for apt hosted and proxy repositories", r.Name))
 	}
+	if r.MergeMembers && (r.Type != "group" || r.Format != "npm" && r.Format != "pypi") {
+		errs = append(errs, fmt.Errorf("repository %q: mergeMembers is only valid for npm and pypi groups", r.Name))
+	}
 	if (r.Flat || r.EnforceDistribution) && (r.Format != "apt" || r.Type != "proxy") {
 		errs = append(errs, fmt.Errorf("repository %q: flat and enforceDistribution are only valid for apt proxy repositories", r.Name))
 	}
@@ -871,8 +880,8 @@ func ValidateRepositories(list []Repository) error {
 		if r.Depth != 0 {
 			if r.Format != "yum" || r.Type != "hosted" {
 				add("repository %q: depth is only valid for yum hosted repositories", r.Name)
-			} else if r.Depth != 1 {
-				add("repository %q: depth must be 0 or 1", r.Name)
+			} else if r.Depth < 0 || r.Depth > 5 {
+				add("repository %q: depth must be 0 to 5", r.Name)
 			}
 		}
 		if names := r.CleanupPolicyNames(); len(names) > 0 {
