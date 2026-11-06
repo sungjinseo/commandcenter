@@ -26,7 +26,7 @@ ldappw=ldap-admin-Secret-7
 alicepw=alice-ldap-pw-9
 
 cleanup() {
-  docker rm -f "$name" "$name-pg" "$ldapname" >/dev/null 2>&1 || true
+  docker rm -f -v "$name" "$name-pg" "$ldapname" >/dev/null 2>&1 || true
   docker network rm "$net" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }

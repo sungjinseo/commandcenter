@@ -26,7 +26,7 @@ name=commandcenter-nexusdiff-$$
 . test/postgres.sh
 
 cleanup() {
-  docker rm -f "$name" "$name-pg" >/dev/null 2>&1 || true
+  docker rm -f -v "$name" "$name-pg" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }
 trap cleanup EXIT
