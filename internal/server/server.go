@@ -244,6 +244,16 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	if acc.IsWrite() && s.refused(w, r, errorWriter(h)) {
 		return
 	}
+	// The one place an upload's stated publish time is read: refused, not
+	// dropped, for a caller or a format it is not for.
+	if v := r.Header.Get(repo.PublishTimeHeader); v != "" && (acc == auth.Add || acc == auth.Edit) {
+		ctx, err := repo.WithPublishTime(r.Context(), p, rp.Format, v, time.Now())
+		if err != nil {
+			errorWriter(h)(w, r, err)
+			return
+		}
+		r = r.WithContext(ctx)
+	}
 	h.Serve(w, r, rp, path)
 }
 

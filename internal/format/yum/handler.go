@@ -172,7 +172,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 			return repo.Errorf(http.StatusForbidden, "user %q may not add %s", auth.FromContext(ctx).User, p)
 		}
 	}
-	now := h.Now().UTC()
+	now := repo.PublishedAt(ctx, h.Now()).UTC()
 	pkg.Checksum, pkg.Location, pkg.Uploaded = sums.SHA256, p, now.Unix()
 	attrs, err := json.Marshal(pkg)
 	if err != nil {
@@ -198,7 +198,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		case err != nil:
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, p, ctRPM, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, p, ctRPM, sums)); err != nil {
 			return err
 		}
 		return h.rebuild(ctx, tx, rp, dir)

@@ -89,6 +89,7 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 		// The principal's own roles: a stored user's, or an LDAP user's
 		// mapped and override roles (plan 12 Task 6).
 		out["roles"] = p.Roles()
+		out["statesPublishTime"] = repo.MayStatePublishTime(p) // what import-nexus asks before it sends one
 		// The key of its sessions and tokens ("ldap:<id>" for an LDAP
 		// user), which the token page matches token owners against.
 		out["owner"] = p.Owner()

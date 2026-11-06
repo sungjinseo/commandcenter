@@ -347,6 +347,7 @@ type snapBuild struct {
 	paths    map[string]bool
 	created  time.Time // newest asset
 	modified time.Time
+	checked  time.Time // when its newest row came: an import states an older created
 	lastDl   time.Time
 	bytes    int64
 }
@@ -361,6 +362,9 @@ func (b *snapBuild) add(a meta.ScanAsset) {
 	if a.Modified.After(b.modified) {
 		b.modified = a.Modified
 	}
+	if a.Checked.After(b.checked) {
+		b.checked = a.Checked
+	}
 	if a.LastDownloaded.After(b.lastDl) {
 		b.lastDl = a.LastDownloaded
 	}
@@ -369,6 +373,9 @@ func (b *snapBuild) add(a meta.ScanAsset) {
 // lastUsed is when the build was last downloaded, or stored if never.
 func (b *snapBuild) lastUsed() time.Time {
 	if b.lastDl.IsZero() {
+		if b.checked.After(b.created) {
+			return b.checked
+		}
 		return b.created
 	}
 	return b.lastDl

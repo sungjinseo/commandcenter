@@ -220,7 +220,7 @@ func (h *Handler) record(ctx context.Context, rp *repo.Repository, project strin
 			}
 		}
 		err = tx.InsertPackage(ctx, meta.Package{
-			Repo: rp.Name, Format: "pypi", Name: project, Version: attrs.Filename, Attrs: string(doc), CreatedAt: h.Now(),
+			Repo: rp.Name, Format: "pypi", Name: project, Version: attrs.Filename, Attrs: string(doc), CreatedAt: repo.PublishedAt(ctx, h.Now()),
 		})
 		if errors.Is(err, meta.ErrExists) {
 			return repo.Errorf(http.StatusBadRequest, "File already exists.")
@@ -228,15 +228,15 @@ func (h *Handler) record(ctx context.Context, rp *repo.Repository, project strin
 		if err != nil {
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, fileKey(project, attrs.Filename), "application/octet-stream", sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, fileKey(project, attrs.Filename), "application/octet-stream", sums)); err != nil {
 			return err
 		}
 		if sigSums != nil {
-			if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, fileKey(project, attrs.Filename)+sigExt, metadataType, *sigSums)); err != nil {
+			if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, fileKey(project, attrs.Filename)+sigExt, metadataType, *sigSums)); err != nil {
 				return err
 			}
 		}
-		return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, metadataKey(project, attrs.Filename), metadataType, mdSums))
+		return tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, metadataKey(project, attrs.Filename), metadataType, mdSums))
 	})
 }
 
@@ -301,6 +301,16 @@ func checkFields(fields map[string]string, filename string) (string, error) {
 		return "", repo.Errorf(http.StatusBadRequest, "invalid requires_python %q", rpy)
 	}
 	return project, nil
+}
+
+// CheckUpload is what an upload's fields and file name are checked for, for
+// import-nexus -dry-run.
+func CheckUpload(name, version, filename string) error {
+	if !validFile(filename) {
+		return repo.Errorf(http.StatusBadRequest, "invalid file name %q", filename)
+	}
+	_, err := checkFields(map[string]string{":action": "file_upload", "name": name, "version": version}, filename)
+	return err
 }
 
 // multipartErr maps a failed read of the multipart body: an exceeded upload cap

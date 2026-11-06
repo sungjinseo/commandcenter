@@ -44,7 +44,7 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 		return err
 	}
 	name, ver := a.Name, a.rowVersion()
-	now := h.Now().UTC()
+	now := repo.PublishedAt(r.Context(), h.Now()).UTC()
 	unlock, err := h.Store.Lock(r.Context(), "rubygems\x00"+rp.Name)
 	if err != nil {
 		return err
@@ -65,7 +65,7 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 		case err != nil:
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, gemFile(fullName(name, ver)), ctBinary, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, gemFile(fullName(name, ver)), ctBinary, sums)); err != nil {
 			return err
 		}
 		return h.writeVersions(ctx, tx, rp, name, ver, false)

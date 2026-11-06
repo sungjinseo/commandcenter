@@ -34,7 +34,7 @@ var apiDocs = []openapi.Route{
 	{Pattern: "GET /-/sso/saml/login", Summary: "Starts a SAML browser login (redirect to the IdP)", Tag: "auth", Query: []string{"next", "return"}},
 	{Pattern: "POST /-/sso/saml/acs", Summary: "SAML assertion consumer service (HTTP-POST binding); ends with a session cookie", Tag: "auth"},
 	{Pattern: "GET /-/api/openapi.json", Summary: "This document (OpenAPI 3.0)", Tag: "meta"},
-	{Pattern: "GET /-/api/me", Summary: "The caller: user, admin, anonymous, roles, owner, realm, defaultLanguage", Tag: "auth", Reply: "Me"},
+	{Pattern: "GET /-/api/me", Summary: "The caller: user, admin, anonymous, roles, owner, realm, defaultLanguage, statesPublishTime", Tag: "auth", Reply: "Me"},
 	{Pattern: "POST /-/api/login", Summary: "Password sign-in; sets the session cookie", Tag: "auth", Request: "Login", Reply: "LoginResult", Replies: map[int]string{401: "Error", 429: "Error"}},
 	{Pattern: "POST /-/api/logout", Summary: "Ends the session named by the cookie", Tag: "auth", Replies: map[int]string{204: "signed out"}},
 	{Pattern: "GET /-/api/auth/sso", Summary: "The SSO providers the login dialog offers", Tag: "auth", Reply: "SSOProviders"},

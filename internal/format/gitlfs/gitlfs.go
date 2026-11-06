@@ -277,7 +277,7 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 		return err
 	}
 	err = h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
-		return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, ObjectPath(oid), "application/octet-stream", sums))
+		return tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, ObjectPath(oid), "application/octet-stream", sums))
 	})
 	if err != nil {
 		return err

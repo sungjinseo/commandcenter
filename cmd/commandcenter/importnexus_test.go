@@ -30,21 +30,27 @@ import (
 )
 
 // fakeNexus is a Nexus 3 REST API v1 with hosted maven2, npm, pypi, raw, helm
-// and docker repositories, a proxy and a go repository, one component per
+// and docker repositories, a proxy and a bower repository, one component per
 // page, and asset downloads under /repository/. It counts downloads.
 type fakeNexus struct {
 	url   string
 	repos []nexusRepo
 	comps map[string][]nexusComponent
 	files map[string][]byte // "/repository/<repo>/<path>"
+	docs  map[string]string // the same, what Nexus makes on read: no download
+
+	assets map[string][]nexusAsset // what /assets lists beyond the components' files
 
 	mu        sync.Mutex
 	downloads int
 }
 
+// nexusBlobCreated is when the files of a fakeNexus came to it.
+const nexusBlobCreated = "2019-05-06T07:08:09.000+00:00"
+
 func (n *fakeNexus) asset(repo, p string, data []byte) nexusAsset {
 	n.files["/repository/"+repo+"/"+p] = data
-	a := nexusAsset{DownloadURL: n.url + "/repository/" + repo + "/" + p, Path: p, FileSize: int64(len(data))}
+	a := nexusAsset{DownloadURL: n.url + "/repository/" + repo + "/" + p, Path: p, FileSize: int64(len(data)), BlobCreated: nexusBlobCreated, LastModified: "2019-05-07T00:00:00.000+00:00"}
 	s1, s256, m5 := sha1.Sum(data), sha256.Sum256(data), md5.Sum(data)
 	a.Checksum.SHA1, a.Checksum.SHA256, a.Checksum.MD5 = hex.EncodeToString(s1[:]), hex.EncodeToString(s256[:]), hex.EncodeToString(m5[:])
 	return a
@@ -66,8 +72,12 @@ func (n *fakeNexus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			page["continuationToken"] = strconv.Itoa(i + 1)
 		}
 		json.NewEncoder(w).Encode(page)
+	case r.URL.Path == "/service/rest/v1/assets":
+		json.NewEncoder(w).Encode(map[string]any{"items": n.assets[r.URL.Query().Get("repository")], "continuationToken": nil})
 	case r.URL.Path == "/repository/npm-hosted/pkg":
 		io.WriteString(w, `{"name":"pkg","dist-tags":{"latest":"1.0.0","next":"1.1.0"}}`)
+	case n.docs[r.URL.Path] != "":
+		io.WriteString(w, n.docs[r.URL.Path])
 	default:
 		data, ok := n.files[r.URL.Path]
 		if !ok {
@@ -157,7 +167,7 @@ func TestImportNexus(t *testing.T) {
 	defer nxs.Close()
 	nx.url = nxs.URL
 	nx.repos = []nexusRepo{
-		{"maven-hosted", "maven2", "hosted"}, {"maven-central", "maven2", "proxy"}, {"go-hosted", "go", "hosted"},
+		{"maven-hosted", "maven2", "hosted"}, {"maven-central", "maven2", "proxy"}, {"bower-hosted", "bower", "hosted"},
 		{"npm-hosted", "npm", "hosted"}, {"pypi-hosted", "pypi", "hosted"}, {"raw-hosted", "raw", "hosted"},
 		{"helm-hosted", "helm", "hosted"}, {"docker-hosted", "docker", "hosted"}, {"apt-hosted", "apt", "hosted"},
 	}
@@ -246,7 +256,7 @@ repositories:
 	base := []string{"import-nexus", "-from", nxs.URL, "-from-user", "nx", "-from-password-file", pwFile,
 		"-to", ts.URL, "-to-user", "ci", "-to-token-file", tokFile, "-docker-from", regs.URL, "-concurrency", "3",
 		"-repo", "maven-hosted=maven-releases", "-repo", "npm-hosted", "-repo", "pypi-hosted", "-repo", "raw-hosted",
-		"-repo", "helm-hosted", "-repo", "docker-hosted", "-repo", "apt-hosted", "-repo", "maven-central", "-repo", "go-hosted", "-repo", "missing"}
+		"-repo", "helm-hosted", "-repo", "docker-hosted", "-repo", "apt-hosted", "-repo", "maven-central", "-repo", "bower-hosted", "-repo", "missing"}
 	run := func(extra ...string) (string, error) {
 		var out bytes.Buffer
 		err := run(append(append([]string{}, base...), extra...), nil, &out)
@@ -260,7 +270,7 @@ repositories:
 		t.Fatalf("dry run: %v", err)
 	}
 	for _, want := range []string{"maven-hosted\tmaven\tapp\t1.0\t2\t", "would copy", "npm-hosted\tnpm\tpkg\t1.1.0\t1\t",
-		"docker-hosted\tdocker\tapp\tv1\t7\t", "maven-central: skipped (proxy repository", "go-hosted: skipped (format go is not supported)",
+		"docker-hosted\tdocker\tapp\tv1\t7\t", "maven-central: skipped (proxy repository", "bower-hosted: skipped (format bower is not supported)",
 		"missing: error: not found", "dry run: nothing was written"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("dry run output lacks %q", want)
@@ -349,6 +359,20 @@ repositories:
 		}
 	}
 
+	// Without the probes every format answers for itself, each in its own
+	// way (409, 400 with a message, npm's 403), and counts as skipped too.
+	out, err = run("-skip-existing=false", "-repo", "maven-hosted=maven-releases")
+	if err == nil || !strings.Contains(err.Error(), "1 errors") {
+		t.Fatalf("run without probes: %v\n%s", err, out)
+	}
+	for _, want := range []string{"maven-hosted -> maven-releases (maven): 0 copied, 2 skipped, 0 failed", "npm-hosted -> npm-hosted (npm): 0 copied, 2 skipped, 0 failed",
+		"pypi-hosted -> pypi-hosted (pypi): 0 copied, 1 skipped, 0 failed", "helm-hosted -> helm-hosted (helm): 0 copied, 1 skipped, 0 failed",
+		"apt-hosted -> apt-hosted (apt): 0 copied, 2 skipped, 0 failed", "raw-hosted -> raw-hosted (raw): 0 copied, 1 skipped, 0 failed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("run without probes lacks %q", want)
+		}
+	}
+
 	// A second run skips everything: nothing is downloaded again.
 	downloads := nx.downloads
 	out, err = run()
@@ -367,6 +391,22 @@ repositories:
 	}
 	if strings.Contains(out, "\tok") {
 		t.Errorf("second run copied something:\n%s", out)
+	}
+
+	// A tag the target has on another manifest, under allow_once: no skip,
+	// the image Nexus has is not the one the target serves.
+	for d, m := range reg.manifests {
+		if d != "v1" && d != reg.index && len(m) > 0 {
+			reg.manifests["v1"], reg.types["v1"] = m, reg.types[d]
+			break
+		}
+	}
+	out, err = run()
+	if err == nil || !strings.Contains(err.Error(), "2 errors") || !strings.Contains(out, "the tag is another manifest's on the target") {
+		t.Errorf("a moved tag: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "docker-hosted -> docker-hosted (docker): 0 copied, 0 skipped, 1 failed") {
+		t.Errorf("a moved tag was not counted as failed:\n%s", out)
 	}
 
 	// Wrong Nexus password: exit 1 with a readable message, no secret in it.

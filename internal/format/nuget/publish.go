@@ -64,7 +64,7 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 		return err
 	}
 	id, ver := strings.ToLower(a.ID), strings.ToLower(a.Version)
-	now := h.Now().UTC()
+	now := repo.PublishedAt(r.Context(), h.Now()).UTC()
 	a.Listed, a.Published, a.PackageHash, a.Size = true, now.Format(time.RFC3339), hashBase64(sums.SHA512), sums.Size
 	attrs, err := json.Marshal(a)
 	if err != nil {
@@ -94,10 +94,10 @@ func (h *Handler) push(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 		case err != nil:
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, assetPath(id, ver, NupkgFile(id, ver)), ctNupkg, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, assetPath(id, ver, NupkgFile(id, ver)), ctNupkg, sums)); err != nil {
 			return err
 		}
-		return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, assetPath(id, ver, NuspecFile(id, ver)), ctNuspec, nuspecSums))
+		return tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, assetPath(id, ver, NuspecFile(id, ver)), ctNuspec, nuspecSums))
 	})
 	if err != nil {
 		return err

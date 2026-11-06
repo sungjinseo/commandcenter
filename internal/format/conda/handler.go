@@ -197,7 +197,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if err != nil {
 		return err
 	}
-	now := h.Now().UTC()
+	now := repo.PublishedAt(ctx, h.Now()).UTC()
 	ct := ctBzip2
 	if strings.HasSuffix(p, ".conda") {
 		ct = ctZip
@@ -221,7 +221,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		case err != nil:
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, p, ct, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, p, ct, sums)); err != nil {
 			return err
 		}
 		return h.rebuild(ctx, tx, rp, subdir)

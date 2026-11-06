@@ -387,3 +387,19 @@ func TestDeleteFilesKeepsWhatWasUsedSince(t *testing.T) {
 		t.Fatalf("left: %s", got)
 	}
 }
+
+// A snapshot build an import dated years back, not downloaded since it came:
+// the purge counts from when it came, not from the date it brought.
+func TestSnapBuildLastUsedOfAnImport(t *testing.T) {
+	var b snapBuild
+	b.paths = map[string]bool{}
+	came, dated := t0.AddDate(0, 0, -2), t0.AddDate(-3, 0, 0)
+	b.add(meta.ScanAsset{Path: "x", Created: dated, Modified: dated, Checked: came})
+	if got := b.lastUsed(); !got.Equal(came) {
+		t.Errorf("never downloaded: %v, want %v", got, came)
+	}
+	b.lastDl = t0.AddDate(0, 0, -1)
+	if got := b.lastUsed(); !got.Equal(b.lastDl) {
+		t.Errorf("downloaded: %v", got)
+	}
+}

@@ -162,7 +162,7 @@ type ScanAsset struct {
 	Created        time.Time
 	Modified       time.Time // last_modified
 	LastDownloaded time.Time // zero if never downloaded
-	Checked        time.Time // checked_at: last stored or found current at the remote; zero if invalidated
+	Checked        time.Time // checked_at: last stored, whatever publish time its upload stated, or found current at the remote; zero if invalidated
 	BlobSHA256     string
 }
 

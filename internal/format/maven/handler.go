@@ -319,7 +319,7 @@ func (h *Handler) storeArtifact(ctx context.Context, rp *repo.Repository, p Path
 	if err != nil {
 		return facts, err
 	}
-	return facts, h.Store.DB.PutAsset(ctx, h.Store.NewAsset(rp.Name, p.Main, ContentType(p.Main), sums))
+	return facts, h.Store.DB.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, p.Main, ContentType(p.Main), sums))
 }
 
 func (h *Handler) delete(r *http.Request, rp *repo.Repository, p Path) error {

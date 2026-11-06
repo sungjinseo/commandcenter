@@ -411,7 +411,7 @@ func (h *Handler) store(ctx context.Context, rp *repo.Repository, body io.Reader
 	if err != nil {
 		return row{}, err
 	}
-	now := h.Now().UTC()
+	now := repo.PublishedAt(ctx, h.Now()).UTC()
 	// Every upload and delete regenerates dists/. ponytail: one lock per repository.
 	unlock, err := h.Store.Lock(ctx, "apt\x00"+rp.Name)
 	if err != nil {
@@ -432,7 +432,7 @@ func (h *Handler) store(ctx context.Context, rp *repo.Repository, body io.Reader
 		case err != nil:
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, rw.Filename, ctDeb, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, rw.Filename, ctDeb, sums)); err != nil {
 			return err
 		}
 		return h.regenerate(ctx, tx, rp)

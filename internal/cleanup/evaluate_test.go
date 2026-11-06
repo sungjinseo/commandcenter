@@ -128,6 +128,29 @@ func TestEvaluateNeverDownloadedAssetKeepsComponent(t *testing.T) {
 	}
 }
 
+// An import states an old publish time but brings no downloads: the age rule
+// counts from that time, the last-downloaded rule from when the row came, so
+// what is in use on the old server is not selected on the first run.
+func TestEvaluateImportedWithAStatedTime(t *testing.T) {
+	e := newEvalEnv(t)
+	rp := testRepo("n", "npm", "hosted")
+	ctx := context.Background()
+	if err := e.db.PutAsset(ctx, meta.Asset{Repo: "n", Path: "moved/-/moved-1.0.0.tgz", BlobSHA256: "sha-moved", Size: 1,
+		CreatedAt: daysAgo(400), LastModified: daysAgo(400), CheckedAt: daysAgo(2)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.labels(t, rp, policy(Criteria{ComponentAgeDays: 30})); got != "moved@1.0.0" {
+		t.Errorf("age rule: %q", got)
+	}
+	if got := e.labels(t, rp, policy(Criteria{LastDownloadedDays: 30})); got != "" {
+		t.Errorf("last-downloaded rule on the first run: %q", got)
+	}
+	e.ev.Now = func() time.Time { return evalNow.AddDate(0, 0, 31) }
+	if got := e.labels(t, rp, policy(Criteria{LastDownloadedDays: 30})); got != "moved@1.0.0" {
+		t.Errorf("last-downloaded rule a month later: %q", got)
+	}
+}
+
 func TestEvaluateCriteriaCombineWithAnd(t *testing.T) {
 	e := newEvalEnv(t)
 	rp := testRepo("n", "npm", "hosted")

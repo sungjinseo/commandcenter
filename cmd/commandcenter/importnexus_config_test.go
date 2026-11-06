@@ -872,7 +872,7 @@ func TestImportNexusConfigBetweenCommandCenters(t *testing.T) {
 		{"PUT", nx + "/email", obj{"enabled": true, "host": "smtp.example.org", "port": 465, "username": "mailer", "password": "smtp-secret", "fromAddress": "cc@example.org",
 			"sslOnConnectEnabled": true, "sslServerIdentityCheckEnabled": true}},
 		{"PUT", native + "/realms/ldap", obj{"url": "ldap://ldap.example.org", "userBaseDN": "ou=people,dc=example,dc=org"}},
-		{"PUT", nx + "/security/realms/active", []string{"NpmToken", "NexusAuthenticatingRealm", "LdapRealm"}},
+		{"PUT", nx + "/security/realms/active", []string{"NpmToken", "DockerToken", "NexusAuthenticatingRealm", "LdapRealm"}},
 	} {
 		a.must(t, step.method, step.path, step.body)
 	}

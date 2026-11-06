@@ -70,7 +70,7 @@ func (h *Handler) uploadComps(w http.ResponseWriter, r *http.Request, rp *repo.R
 		case err != nil && !errors.Is(err, meta.ErrNotFound):
 			return err
 		}
-		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, p, ct, sums)); err != nil {
+		if err := tx.PutAsset(ctx, h.Store.PublishedAsset(ctx, rp.Name, p, ct, sums)); err != nil {
 			return err
 		}
 		return h.rebuild(ctx, tx, rp, dir)
