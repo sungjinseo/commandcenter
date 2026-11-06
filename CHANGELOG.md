@@ -159,6 +159,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-check, and feeds `groupMappings` and `groupsAsRoles`. Dynamic groups stay the default and do not change.
   If the search fails, the user signs in without roles from groups, with a WARN line and a failing `groups`
   step in the LDAP test. `test/smoke/ldap-smoke.sh` proves it against OpenLDAP.
+- Web UI: a `mergeMembers` switch on npm, PyPI, R, Conda and yum group forms, off by default, with the
+  dependency-confusion warning; the group's page says whether it is on.
+- Web UI: the role editor offers the `tags` domain, and the tag screens follow its add, edit and delete
+  actions instead of asking for an administrator.
+- Web UI: the e-mail form has the subject prefix and, with TLS, the trust store switch.
+- Web UI: an S3 store's page has an "S3 connection" form for keys, endpoint, region, path style and
+  maximum connections; it shows the server's answer when the secret has to be entered again.
+- Web UI: "Pause scheduler" and "Resume scheduler" on the tasks screen, a banner while paused, and
+  "Stop" on a queued run, which drops it.
+- Web UI: the repository of the Maven snapshot tasks is a text field that takes several names with
+  commas, or `*`.
+- Web UI: check boxes on the support page choose the sections of the bundle.
+- Web UI: a repository administrator gets "Invalidate cache" on the proxies and groups they can open.
+- Web UI: a note beside a p2 proxy's remote says that changing it deletes the cache.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -257,6 +271,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   written; an incomplete set is a 400 with `ldapGroupsAsRoles` on and does nothing with it off. A complete set
   with it off now feeds `groupMappings`. Any other `groupType` is a 400.
 - LDAP searches stop at 4 MiB of messages per search; the limit on messages now follows the size limit.
+- Web UI: client setup hints now show the upload command of Go, Cargo, npm and Helm repositories and
+  yum's `comps.xml`, Raw repositories have hints at all, and read credentials are shown for every host
+  with a note saying when they are needed, not only for hosts other than localhost.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -356,6 +373,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rule refuses, are now removed first, as are the project's name and `install` and `remove` lists.
 - LDAP `groupsAsRoles` no longer makes an administrator through a role that contains `admin`, when a group
   has that role's name. A mapping to that role still does.
+- Web UI: client setup hints that did not work: `dotnet` without `--allow-insecure-connections` on an
+  http source, Composer without `secure-http false` on http and with `http-basic.<host>` lacking the
+  port, `gem push --key <token>` (`--key` names a credentials entry; the hint now uses
+  `GEM_HOST_API_KEY`), the RubyGems default source left in place, `helm cm-push` without
+  `--context-path`, `swift package-registry login` without `--no-confirm` and offered over http where
+  it cannot work, `git credential approve` without a credential helper, a `conan remote login` hidden
+  on localhost although uploads need it, and pip `trusted-host` on https hosts.
+- Web UI: forms other than the repository form said "Could not save the repository" on any error.
+- Web UI: the notice of an unavailable blob store no longer says its repositories answer 503 when only
+  the probe failed.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`

@@ -60,7 +60,7 @@ export function formState(form) {
     err, ok, dirty,
     clean() { if (unBusy) { unBusy(); unBusy = null; } }, // the edits are saved or dropped
     show(list, head) {
-      put(err, h("strong", null, head || (list.length > 1 ? t("rf.errMany") : t("rf.errOne"))), h("ul", null, list.map((x) => h("li", null, x))));
+      put(err, h("strong", null, head || t("gen.errOne")), h("ul", null, list.map((x) => h("li", null, x))));
       err.hidden = false;
       ok.hidden = true;
       err.focus();
@@ -800,6 +800,9 @@ function scheduleEditor(sch) {
   return { el, value, errs };
 }
 
+// pausedNote is the banner while the scheduler is paused (paused in GET /-/api/tasks).
+const pausedNote = (paused) => (paused ? h("div", { class: "notice amber", role: "status" }, h("strong", null, t("task.pausedTitle")), " ", t("task.pausedText")) : null);
+
 export async function viewTasks(view, id) {
   if (id === "create" && !state.me.admin) return needAdmin(view, t("nav.tasks"));
   if (id !== undefined) return taskForm(view, id === "create" ? null : id);
@@ -812,8 +815,23 @@ export async function viewTasks(view, id) {
     b.addEventListener("click", () => transferDialog(kind, all.types));
     return state.me.admin && all.types && all.types.some((x) => x.type === (kind === "export" ? EXPORT : IMPORT)) ? b : null;
   };
+  // Pause or resume the scheduler on every node (admins).
+  const pause = state.me.admin ? button(all.paused ? t("task.resume") : t("task.pause")) : null;
+  if (pause) {
+    pause.addEventListener("click", async () => {
+      pause.disabled = true;
+      try {
+        await api("tasks/scheduler", { method: "PUT", body: { paused: !all.paused } });
+        if (isLive()) rerender();
+      } catch (e) {
+        pause.disabled = false;
+        if (isLive()) handleError(e);
+      }
+    });
+  }
   put(view,
-    pageHead(t("nav.tasks"), sub(t("task.sub")), acts(xfer("export"), xfer("import"), state.me.admin ? h("a", { class: "btn primary", href: taskLink("create") }, t("task.create")) : null), taskEyebrow()),
+    pageHead(t("nav.tasks"), sub(t("task.sub")), acts(pause, xfer("export"), xfer("import"), state.me.admin ? h("a", { class: "btn primary", href: taskLink("create") }, t("task.create")) : null), taskEyebrow()),
+    pausedNote(all.paused),
     h("section", { class: "card" }, tbl(
       [t("task.task"), t("col.status"), t("task.schedule"), t("task.next"), t("task.lastResult"), actHead()],
       tasks.map((x) => h("tr", null,
@@ -856,8 +874,15 @@ function paramsEditor(type, spec, params, repos, stores, policyOf) {
       }
       case "repository": {
         const list = repoChoices(type, repos).map((r) => [r.name, r.name + " · " + r.format + " · " + r.type]);
-        if (type === PURGE || type === MPURGE) list.unshift(["*", t("task.everyMaven")]);
         const v = typeof cur === "string" ? cur : "";
+        if (type === PURGE || type === MPURGE) { // a name, "*" or several names with commas: typed, with the names to pick from
+          const id = uid("rl");
+          const inp = textIn(v, { class: "mono", list: id, maxlength: 2000, placeholder: "maven-snapshots, maven-ci" });
+          el = field(paramLabel(p.name), inp, help, { req: !!p.required, full: true });
+          el.append(h("datalist", { id }, h("option", { value: "*" }, t("task.everyMaven")), list.map(([n, label]) => h("option", { value: n }, label))));
+          get = () => inp.value.trim();
+          break;
+        }
         if (v && !list.some(([n]) => n === v)) list.unshift([v, v]);
         const one = sel([["", p.required ? t("task.pickRepo") : t("task.allRepos")]].concat(list), v);
         el = field(paramLabel(p.name), one, help, { req: !!p.required, full: true });
@@ -1101,7 +1126,7 @@ async function taskForm(view, id) {
       task.lastRun && withBytes ? kv(t("task.bytes"), fmtBytes(task.lastBytes)) : null,
       task.lastMessage ? kv(t("task.message"), task.lastMessage) : null);
     run.disabled = task.status === "Running" || !!task.queued;
-    stop.hidden = task.status !== "Running" || !can("tasks", "run");
+    stop.hidden = (task.status !== "Running" && !task.queued) || !can("tasks", "run");
   };
   // showRun puts one stored run's log where the last run's log is.
   const showRun = async (x) => {
@@ -1203,7 +1228,14 @@ async function taskForm(view, id) {
     stop.disabled = true;
     try {
       await api("tasks/" + encSeg(task.id) + "/stop", { method: "POST" });
-      if (isLive()) msg.textContent = t("task.stopping");
+      if (!isLive()) return;
+      if (task.status === "Running") { msg.textContent = t("task.stopping"); return; }
+      // It was queued: the run is dropped, unless it has just started and stops now.
+      task = await api("tasks/" + encSeg(task.id));
+      if (!isLive()) return;
+      show();
+      if (task.status === "Running") track(null);
+      msg.textContent = task.status === "Running" ? t("task.stopping") : t("task.unqueued");
     } catch (e) {
       if (!isLive()) return;
       if (e.status === 409) msg.textContent = t("task.notRunning");
@@ -1238,6 +1270,7 @@ async function taskForm(view, id) {
   }
   put(view,
     pageHead(taskName(task), sub(typeLabel(task.type, task.typeName)), acts(back, del, stop, run), taskEyebrow()),
+    pausedNote(list.paused),
     fs.ok,
     h("div", { class: "two" },
       h("div", { class: "stack" }, settings),
@@ -1602,7 +1635,7 @@ export async function viewWebhooks(view, id) {
 }
 
 // ---- tags and staging ----------------------------------------------------------------
-//   #browse/tags[:create|:<name>]   (signed-in users; editing a tag is for admins)
+//   #browse/tags[:create|:<name>]   (signed-in users; creating, editing and deleting a tag take the actions of the tags domain)
 //   #admin/repository/staging
 // Components are selected by the Nexus search parameters (exact, "*" wildcards).
 
@@ -1647,7 +1680,7 @@ function compTable(list, emptyText, noResult) {
 
 export async function viewTags(view, name) {
   const isLive = alive();
-  const admin = state.me.admin; // the API lets only admins create, edit and delete tags
+  const canAdd = can("tags", "add"); // the server checks again
   const eb = polEyebrow();
   const back = h("a", { class: "btn", href: tagLink() }, t("tag.back"));
   if (name === undefined) {
@@ -1674,7 +1707,7 @@ export async function viewTags(view, name) {
         more.hidden = !token;
       } catch (e) { handleError(e); } finally { more.disabled = false; }
     });
-    put(view, pageHead(t("nav.tags"), sub(t("tag.sub")), admin ? acts(h("a", { class: "btn", href: "#admin/repository/staging" }, t("nav.staging")), h("a", { class: "btn primary", href: tagLink("create") }, t("tag.create"))) : null, eb),
+    put(view, pageHead(t("nav.tags"), sub(t("tag.sub")), state.me.admin || canAdd ? acts(state.me.admin ? h("a", { class: "btn", href: "#admin/repository/staging" }, t("nav.staging")) : null, canAdd ? h("a", { class: "btn primary", href: tagLink("create") }, t("tag.create")) : null) : null, eb),
       h("section", { class: "card" }, list.length ? h("div", { class: "tablewrap" }, h("table", null,
         h("thead", null, h("tr", null, [t("col.name"), t("tag.attrs"), t("col.updated")].map((x) => h("th", { scope: "col" }, x)), h("th", { scope: "col", class: "act" }, h("span", { class: "sr-only" }, t("col.actions"))))),
         body)) : h("div", { class: "empty" }, t("tag.none"))),
@@ -1695,8 +1728,9 @@ export async function viewTags(view, name) {
   const repos = await loadRepos(true);
   if (!isLive()) return;
   const nameIn = textIn(cur.name, { disabled: !creating, required: true, maxlength: 256, class: "mono" });
-  const attrs = h("textarea", { class: "mono", rows: 8, spellcheck: "false", readonly: !admin, placeholder: '{"build": "1234", "stage": "qa"}' }, JSON.stringify(cur.attributes || {}, null, 2));
-  const save = h("button", { type: "submit", class: "btn primary", hidden: !admin }, creating ? t("tag.createBtn") : t("roles.save"));
+  const mayWrite = creating ? canAdd : can("tags", "edit");
+  const attrs = h("textarea", { class: "mono", rows: 8, spellcheck: "false", readonly: !mayWrite, placeholder: '{"build": "1234", "stage": "qa"}' }, JSON.stringify(cur.attributes || {}, null, 2));
+  const save = h("button", { type: "submit", class: "btn primary", hidden: !mayWrite }, creating ? t("tag.createBtn") : t("roles.save"));
   const form = h("form", { novalidate: true });
   const fs = formState(form);
   put(form, fs.err, fields(
@@ -1754,7 +1788,7 @@ export async function viewTags(view, name) {
   assoc.addEventListener("click", runAssoc("POST"));
   dis.addEventListener("click", runAssoc("DELETE"));
   loadTagged();
-  const del = admin ? deleter(isLive, "tags", cur.name, t("tag.delText", { name: cur.name }), t("tag.delTitle"), tagLink(), () => "") : null;
+  const del = can("tags", "delete") ? deleter(isLive, "tags", cur.name, t("tag.delText", { name: cur.name }), t("tag.delTitle"), tagLink(), () => "") : null;
   put(view, pageHead(cur.name, sub(t("tag.detailSub", { time: fmtDate(cur.firstCreated) })), acts(back, del), eb), fs.ok,
     h("div", { class: "two" },
       h("div", { class: "stack" }, formCard, card(t("tag.tagged"), t("tag.taggedSub"), tagged)),

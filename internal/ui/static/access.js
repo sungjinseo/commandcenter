@@ -342,8 +342,8 @@ const METRICS = "metrics"; // the usage data's target: action "read" only
 // APP_DOMAINS: the delegated administration ("app:<domain>", Nexus nx-<domain>-*)
 // and the actions each delegates (auth.AppDomains); the rest stays with admins.
 const APP_DOMAINS = { users: ["read", "add", "edit", "delete"], roles: ["read", "add", "edit", "delete"], selectors: ["read", "add", "edit", "delete"],
-  settings: ["read"], tasks: ["read", "run"], blobstores: ["read"] };
-const APP_KEYS = { users: "roles.app.users", roles: "roles.app.roles", selectors: "roles.app.selectors", settings: "roles.app.settings", tasks: "roles.app.tasks", blobstores: "roles.app.blobstores" };
+  settings: ["read"], tasks: ["read", "run"], blobstores: ["read"], tags: ["read", "add", "edit", "delete"] };
+const APP_KEYS = { users: "roles.app.users", roles: "roles.app.roles", selectors: "roles.app.selectors", settings: "roles.app.settings", tasks: "roles.app.tasks", blobstores: "roles.app.blobstores", tags: "roles.app.tags" };
 const appName = (d) => (APP_KEYS[d] ? t(APP_KEYS[d]) : d);
 // A target's kind: "*", format:, repo:, selector:, metrics, app:<domain>, and the
 // repository administration admin:* | admin:format:<f> | admin:repo:<n>.

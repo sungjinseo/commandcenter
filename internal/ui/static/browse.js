@@ -4,7 +4,7 @@
 import {
   state, h, put, api, APIError, apiRepo, enc, encPath, browseLink, searchLink, adminRepoLink, fmtBytes, fmtNum, fmtDate, alive,
   fmtBadge, typeBadge, fmtTile, nameCell, onlineBadge, FORMATS, FORMAT_NAMES, canUpload, uploadLink, repoBase, copyButton, copyLine,
-  pageHead, loading, truncNote, card, kv, tbl, handleError, showError, icon, repoFlags, OSV_FORMATS, sevBadge, osvLink,
+  pageHead, loading, truncNote, card, kv, tbl, handleError, showError, icon, repoFlags, OSV_FORMATS, MERGE_FORMATS, sevBadge, osvLink,
 } from "./util.js";
 import { modal, dropdown } from "./shell.js";
 import { deleteDialog } from "./repoform.js";
@@ -620,12 +620,18 @@ export async function assetView(r, path, opts) {
 
 // ---- repository setup (client configuration, from docs/guide.md) -------------
 
+const LOCAL_HOSTS = ["localhost", "127.0.0.1", "::1", "[::1]"];
+
 function setupSnippets(r) {
-  const url = r.url;
-  let host = "";
-  try { host = new URL(url).hostname; } catch (e) { /* keep empty */ }
-  const local = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(host);
-  const hosted = r.type === "hosted";
+  const url = r.url, base = url.replace(/\/$/, "");
+  let host = "", authority = ""; // authority is host:port: what credentials are keyed by
+  try { const u = new URL(url); host = u.hostname; authority = u.host; } catch (e) { /* keep empty */ }
+  const local = LOCAL_HOSTS.includes(host);
+  const plain = url.startsWith("http:");
+  const hosted = r.type === "hosted", writable = hosted || !!r.writeMember;
+  const pw = "<" + t("setup.password") + ">", tok = "<" + t("setup.token") + ">";
+  const readAuth = "# " + t("setup.readAuth");
+  const withUser = url.replace("://", "://ci:" + pw + "@");
   const cred = "<server><id>commandcenter</id><username>ci</username><password>" + t("setup.password") + "</password></server>";
   switch (r.format) {
     case "docker": return dockerSnippets(r);
@@ -643,96 +649,108 @@ function setupSnippets(r) {
           "      <pluginRepositories>\n        " + central("pluginRepository") + "\n      </pluginRepositories>\n    </profile>\n  </profiles>\n" +
           "  <activeProfiles>\n    <activeProfile>commandcenter</activeProfile>\n  </activeProfiles>\n</settings>"]];
     }
-    case "npm":
-      return [["~/.npmrc", "registry=" + url], ["npm login", "npm login --registry " + url]];
-    case "pypi": {
-      const out = [["pip.conf", "[global]\nindex-url = " + url + "simple/" + (local ? "" : "\ntrusted-host = " + host)]];
-      if (hosted || r.writeMember) out.push(["twine", "twine upload --repository-url " + url + " -u ci dist/*"]);
+    case "npm": {
+      const out = [["~/.npmrc", "registry=" + url], ["npm login", "npm login --registry " + url]];
+      if (writable) out.push(["npm publish", "npm publish --registry " + url]);
+      out.push([".yarnrc.yml — yarn 4", 'npmRegistryServer: "' + url + '"\n' + (plain ? 'unsafeHttpWhitelist: ["' + host + '"]\n' : "") + "# " + t("setup.yarnAge") + '\nnpmPreapprovedPackages: ["@acme/*"]']);
       return out;
     }
-    case "go":
-      return [["GOPROXY", "go env -w GOPROXY=" + url.replace(/\/$/, "") + "\ngo env -w GONOSUMDB=example.com"]];
-    case "cargo":
-      return [["~/.cargo/config.toml", "[registries.commandcenter]\nindex = \"sparse+" + url + "\"" + (hosted ? "" : "\n\n[source.crates-io]\nreplace-with = \"commandcenter\"")]];
+    case "pypi": {
+      const out = [["pip.conf", "[global]\nindex-url = " + url + "simple/" + (plain && !local ? "\ntrusted-host = " + host : "") + "\n" + readAuth + ": index-url = " + withUser + "simple/"]];
+      if (writable) out.push(["twine", "twine upload --repository-url " + url + " -u ci dist/*"]);
+      return out;
+    }
+    case "go": {
+      const out = [["GOPROXY", "go env -w GOPROXY=" + base + "\ngo env -w GONOSUMDB=example.com\n# " + t("setup.goSum")],
+        ["~/.netrc", "# " + t("setup.netrcNote") + "\nmachine " + host + " login ci password " + pw]];
+      if (writable) out.push(["upload", "curl -u ci -X PUT --data-binary @go.mod " + url + "<module>/@v/<version>.mod\ncurl -u ci -X PUT --data-binary @<module>.zip " + url + "<module>/@v/<version>.zip"]);
+      return out;
+    }
+    case "cargo": {
+      const out = [["~/.cargo/config.toml", "[registries.commandcenter]\nindex = \"sparse+" + url + "\"" + (hosted ? "" : "\n\n[source.crates-io]\nreplace-with = \"commandcenter\"")],
+        ["cargo login", readAuth + " (cargo 1.74+): " + t("setup.token") + "\ncargo login --registry commandcenter"]];
+      if (writable) out.push(["cargo publish", "cargo publish --registry commandcenter"]);
+      return out;
+    }
     case "nuget": {
-      const idx = url + "index.json";
-      const out = [["dotnet nuget add source", "dotnet nuget add source " + idx + " -n commandcenter" + (local ? "" : " -u ci -p <" + t("setup.password") + "> --store-password-in-clear-text")]];
-      if (hosted || r.writeMember) out.push(["dotnet nuget push", "dotnet nuget push <package>.nupkg -s " + idx + " -k <" + t("setup.token") + ">"]);
+      const idx = url + "index.json", insecure = plain ? " --allow-insecure-connections" : "";
+      const out = [["dotnet nuget add source", "# -u/-p: " + t("setup.readAuth") + "\ndotnet nuget add source " + idx + " -n commandcenter" + insecure + " \\\n  -u ci -p " + pw + " --store-password-in-clear-text"]];
+      if (writable) out.push(["dotnet nuget push", "dotnet nuget push <package>.nupkg -s " + idx + " -k " + tok + insecure]);
       return out;
     }
     case "apt": {
-      const base = url.replace(/\/$/, "");
-      const dist = hosted ? r.distribution || "stable" : "<suite>", comp = hosted ? r.component || "main" : "<component>";
-      const out = r.signingKeySet
-        ? [["public.key", "curl -fsSL " + url + "public.key | sudo gpg --dearmor -o /usr/share/keyrings/" + r.name + ".gpg"],
-          ["sources.list", "deb [signed-by=/usr/share/keyrings/" + r.name + ".gpg] " + base + " " + dist + " " + comp]]
-        : [["sources.list", "deb " + (hosted ? "[trusted=yes] " : "") + base + " " + dist + " " + comp]];
-      if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <package>_<version>_<arch>.deb " + url + "pool/<package>.deb"]);
+      const dist = r.distribution || "<suite>", comp = r.component || "<component>", key = "/etc/apt/keyrings/" + r.name + ".asc";
+      const signed = [["public.key", "# " + t("setup.aptSigned") + "\nsudo install -d /etc/apt/keyrings\nsudo curl -fsSL " + url + "public.key -o " + key],
+        ["sources.list", "deb [signed-by=" + key + "] " + base + " " + dist + " " + comp]];
+      const unsigned = ["sources.list", "# " + t("setup.aptTrusted") + "\ndeb [trusted=yes] " + base + " " + dist + " " + comp];
+      // Whether a hosted repository has a key is shown to admins only, and a group answers with its members' key: the others get both ways.
+      const out = r.type === "proxy" ? [["sources.list", "deb " + base + " " + dist + " " + comp]]
+        : r.signingKeySet ? signed : hosted && state.me.admin ? [unsigned] : [...signed, unsigned];
+      if (writable) out.push(["upload", "curl -u ci -T <package>_<version>_<arch>.deb " + url + "pool/<package>_<version>_<arch>.deb"]);
       return out;
     }
     case "yum": {
-      const base = url.replace(/\/$/, "") + (hosted ? (r.depth > 0 ? "/<dir>" : "") : "/<path on the mirror>");
-      const out = [[r.name + ".repo", "[" + r.name + "]\nname=" + r.name + "\nbaseurl=" + base + "/\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=0"]];
-      if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <name>-<version>-<release>.<arch>.rpm " + url + (r.depth > 0 ? "<dir>/" : "")]);
+      const path = hosted ? (r.depth > 0 ? "/<dir>" : "") : r.type === "proxy" ? "/<path on the mirror>" : "/<dir>";
+      const out = [[r.name + ".repo", "[" + r.name + "]\nname=" + r.name + "\nbaseurl=" + base + path + "/\nenabled=1\n# " + t("setup.yumGpg") + "\ngpgcheck=1\ngpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-mine\n" + (hosted ? "# " + t("setup.yumRepomd") + "\n" : "") + "repo_gpgcheck=0"]];
+      if (writable) out.push(["upload", "curl -u ci -T <name>-<version>-<release>.<arch>.rpm " + url + (r.depth > 0 ? "<dir>/" : "") + (hosted ? "\ncurl -u ci --upload-file comps.xml " + url + (r.depth > 0 ? "<dir>/" : "") + "repodata/comps.xml" : "")]);
       return out;
     }
     case "rubygems": {
-      const out = [["gem sources", "gem sources --add " + url],
-        ["bundle config", "bundle config mirror.https://rubygems.org " + url + (local ? "" : "\nbundle config " + url + " ci:<" + t("setup.password") + ">")]];
-      if (hosted || r.writeMember) out.push(["gem push", "gem push <gem>.gem --host " + url.replace(/\/$/, "") + " --key <" + t("setup.token") + ">"]);
+      const out = [["gem sources", "gem sources --add " + url + "\ngem sources --remove https://rubygems.org/"],
+        ["bundle config", "bundle config set --global mirror.https://rubygems.org " + url + "\n" + readAuth + "\nbundle config set --global " + url + " ci:" + pw]];
+      if (writable) out.push(["gem push", "GEM_HOST_API_KEY=" + tok + " gem push <gem>.gem --host " + base + "\n# " + t("setup.gemSignin")]);
       return out;
     }
     case "conda": {
-      const out = [["conda config", "conda config --add channels " + url], [".condarc", "channels:\n  - " + url], ["conda install", "conda install -c " + url + " <package>"]];
-      if (hosted || r.writeMember) out.push(["upload", "curl -u ci --upload-file <file> " + url + "<subdir>/"]);
+      const out = [["conda config", "conda config --add channels " + base], [".condarc", "channels:\n  - " + base], ["conda install", "conda install -c " + base + " <package>"]];
+      if (writable) out.push(["upload", "curl -u ci --upload-file <name>-<version>-<build>.conda " + url + "<subdir>/"]);
       return out;
     }
     case "conan": {
-      const out = [["conan remote add", "conan remote add commandcenter " + url + (local ? "" : "\nconan remote login commandcenter ci -p <" + t("setup.password") + ">")],
+      const out = [["conan remote add", "conan remote add commandcenter " + base + "\n# " + t("setup.conanLogin") + "\nconan remote login commandcenter ci -p " + pw],
         ["conan install", "conan install --requires=<package>/<version> -r commandcenter"]];
-      if (hosted || r.writeMember) out.push(["conan upload", "conan upload \"<package>/*\" -r commandcenter --confirm"]);
+      if (writable) out.push(["conan upload", "conan upload \"<package>/*\" -r commandcenter --confirm"]);
       return out;
     }
     case "r": {
-      const out = [[".Rprofile", "options(repos = c(" + r.name.replace(/[^A-Za-z0-9_.]/g, "_") + " = \"" + url + "\"))"], ["install.packages", 'install.packages("<package>")']];
-      if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <package>_<version>.tar.gz " + url + "src/contrib/\ncurl -u ci -T <package>_<version>.zip " + url + "bin/windows/contrib/<R.x>/"]);
+      const repo = r.name.replace(/[^A-Za-z0-9_.]/g, "_");
+      const out = [[".Rprofile", "options(repos = c(" + repo + " = \"" + base + "\"))\n" + readAuth + ": options(repos = c(" + repo + " = \"" + withUser.replace(/\/$/, "") + "\"))"], ["install.packages", 'install.packages("<package>")']];
+      if (writable) out.push(["upload", "curl -u ci -T <package>_<version>.tar.gz " + url + "src/contrib/\ncurl -u ci -T <package>_<version>.zip " + url + "bin/windows/contrib/<R.x>/\ncurl -u ci -T <package>_<version>.tgz " + url + "bin/macosx/<build>/contrib/<R.x>/"]);
       return out;
     }
-    case "gitlfs": {
-      let authority = host; // host:port, as git credential keys it
-      try { authority = new URL(url).host; } catch (e) { /* keep the host name */ }
+    case "gitlfs":
       return [[".lfsconfig", "git config -f .lfsconfig lfs.url " + url + "info/lfs"], ["git config", "git config lfs.url " + url + "info/lfs"],
-        ["git credential", "printf 'protocol=" + (url.startsWith("https:") ? "https" : "http") + "\\nhost=" + authority + "\\nusername=ci\\npassword=<" + t("setup.token") + ">\\n' | git credential approve"],
+        ["git credential", "git config credential.helper store\nprintf 'protocol=" + (url.startsWith("https:") ? "https" : "http") + "\\nhost=" + authority + "\\nusername=ci\\npassword=" + tok + "\\n' | git credential approve"],
         ["git lfs push", "git lfs push origin <branch>\n# " + t("setup.lfsNote")]];
-    }
     case "p2":
       return [["Eclipse — Install New Software", "Help > Install New Software… > Add… > Location: " + url],
         ["Tycho — pom.xml", "<repository>\n  <id>commandcenter</id>\n  <url>" + xml(url) + "</url>\n  <layout>p2</layout>\n</repository>"],
         ["curl", "curl " + url + "p2.index"]];
+    case "raw": {
+      const out = [["curl", "curl -O " + url + "<path>/<file>"]];
+      if (writable) out.push(["upload", "curl -u ci -T <file> " + url + "<path>/<file>"]);
+      return out;
+    }
     case "swift": {
-      const base = url.replace(/\/$/, "");
-      const out = [["swift package-registry set", "swift package-registry set " + base + (base.startsWith("http:") ? " --allow-insecure-http" : "")]];
-      if (!local) out.push(["swift package-registry login", "swift package-registry login " + base + "/login --username ci --password <" + t("setup.password") + ">"]);
+      const out = [["swift package-registry set", "swift package-registry set " + base + (plain ? " --allow-insecure-http\n# " + t("setup.swiftHttp") : "")]];
+      if (!plain) out.push(["swift package-registry login", "# " + t("setup.swiftCi") + "\nswift package-registry login " + base + "/login --username ci --password " + pw + " --no-confirm"]);
       out.push(["Package.swift", '.package(id: "<scope>.<name>", from: "1.0.0")']);
-      if (hosted || r.writeMember) out.push(["swift package-registry publish", "swift package-registry publish <scope>.<name> <version> --url " + base]);
+      if (writable && !plain) out.push(["swift package-registry publish", "# " + t("setup.swiftZip") + "\nswift package-registry publish <scope>.<name> <version> --url " + base]);
       return out;
     }
     case "cocoapods":
       return [["Podfile", "source '" + url + "'\n# " + t("setup.podsGitNote")],
-        ["~/.netrc", "# " + t("setup.netrcNote") + "\nmachine " + host + " login ci password <" + t("setup.password") + ">"]];
+        ["~/.netrc", "# " + t("setup.netrcNote") + "\nmachine " + host + " login ci password " + pw]];
     case "huggingface":
-      return [["HF_ENDPOINT", "export HF_ENDPOINT=" + url.replace(/\/$/, "") + "\n# " + t("setup.hfTimeoutNote") + "\nexport HF_HUB_DOWNLOAD_TIMEOUT=600"],
-        ["HF_TOKEN", "# " + t("setup.hfTokenNote") + "\nexport HF_TOKEN=<" + t("setup.token") + ">"], ["hf download", "hf download <repo id>"]];
+      return [["HF_ENDPOINT", "export HF_ENDPOINT=" + base + "\n# " + t("setup.hfTimeoutNote") + "\nexport HF_HUB_DOWNLOAD_TIMEOUT=600\nexport HF_HUB_ETAG_TIMEOUT=60"],
+        ["HF_TOKEN", "# " + t("setup.hfTokenNote") + "\nexport HF_TOKEN=" + tok + "\n# " + t("setup.hfImplicit") + "\nexport HF_HUB_DISABLE_IMPLICIT_TOKEN=1"], ["hf download", "hf download <repo id>"]];
     case "terraform": {
-      let authority = host; // host[:port]: what source addresses and credentials name
-      try { authority = new URL(url).host; } catch (e) { /* keep the host name */ }
-      const tok = "<" + t("setup.token") + ">";
       const out = [["~/.terraformrc", 'credentials "' + authority + '" {\n  token = "' + tok + '"\n}'],
         ["TF_TOKEN", "export TF_TOKEN_" + host.replace(/-/g, "__").replace(/\./g, "_") + "=" + tok],
         ["module", 'module "<name>" {\n  source  = "' + authority + '/<namespace>/<name>/<provider>"\n  version = "1.0.0"\n}'],
         ["required_providers", 'terraform {\n  required_providers {\n    <type> = {\n      source  = "' + authority + '/<namespace>/<type>"\n      version = "1.0.0"\n    }\n  }\n}'],
         ["~/.netrc", "# " + t("setup.tfNetrcNote") + "\nmachine " + host + " login ci password " + tok]];
-      if (hosted || r.writeMember) {
+      if (writable) {
         const auth = '-H "Authorization: Bearer $TOKEN"';
         out.push(["upload — module", "curl -fsS -X PUT " + auth + " --data-binary @<name>-<version>.tgz \\\n  " + url + "v1/modules/<namespace>/<name>/<provider>/<version>"],
           ["upload — provider", "B=" + url + "v1/providers/<namespace>/<type>/<version>\n" +
@@ -741,8 +759,9 @@ function setupSnippets(r) {
       return out;
     }
     case "composer": {
-      const out = [["composer config", "composer config repositories.commandcenter composer " + url + (local ? "" : "\ncomposer config -g http-basic." + host + " ci <" + t("setup.password") + ">")]];
-      if (hosted || r.writeMember) out.push(["upload", "curl -u ci:<" + t("setup.password") + "> -T <package>.zip " + url + "packages/upload/<vendor>/<package>/<version>"]);
+      const out = [["composer config", (plain ? "# " + t("setup.composerHttp") + "\ncomposer config -g secure-http false\n" : "") + "composer config repositories.commandcenter composer " + url +
+        (hosted ? "" : "\n# " + t("setup.composerPackagist") + "\ncomposer config -g repo.packagist false") + "\n" + readAuth + "\ncomposer config -g http-basic." + authority + " ci " + pw]];
+      if (writable) out.push(["upload", "curl -u ci:" + pw + " -T <package>.zip " + url + "packages/upload/<vendor>/<package>/<version>"]);
       return out;
     }
   }
@@ -774,7 +793,8 @@ function dockerSnippets(r, c) {
   const tag = c && c.version || "<tag>";
   const local = image + ":" + tag;
   const ref = host + "/" + r.name + "/" + local;
-  const list = [["docker login", "docker login " + host], ["docker pull", "docker pull " + ref]];
+  const insecure = (r.url || "").startsWith("http:") && !LOCAL_HOSTS.includes(host.replace(/:\d+$/, ""));
+  const list = [["docker login", (insecure ? "# " + t("setup.dockerInsecure") + "\n" : "") + "docker login " + host], ["docker pull", "docker pull " + ref]];
   if (r.type === "hosted") list.push(["docker tag / push", "docker tag " + local + " " + ref + "\ndocker push " + ref]);
   return list;
 }
@@ -858,8 +878,12 @@ async function viewDocker(view, r, path, head, isLive) {
 // arrive on a version or through the component metadata endpoint.
 const shellArg = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
 function helmSnippets(r, name, version) {
-  return [["helm repo add", "helm repo add commandcenter " + shellArg(r.url) + "\nhelm repo update"],
+  const out = [["helm repo add", "helm repo add commandcenter " + shellArg(r.url) + "\nhelm repo update"],
     ["helm install", "helm install my-release " + (name ? shellArg("commandcenter/" + name) : "commandcenter/<chart>") + (version ? " --version " + shellArg(version) : "")]];
+  if (!name && (r.type === "hosted" || r.writeMember)) { // cm-push needs the repository's path
+    out.push(["upload", "curl -u ci --upload-file <chart>-<version>.tgz " + shellArg(r.url) + "\n# " + t("setup.helmSigned") + "\nhelm cm-push <chart>-<version>.tgz commandcenter --context-path " + shellArg(repoBase(r).replace(/\/$/, "")) + " -u ci -p <" + t("setup.password") + ">"]);
+  }
+  return out;
 }
 function helmUsage(r, name, version) {
   return helmSnippets(r, name, version).map(([title, text]) => {
@@ -939,11 +963,13 @@ export async function viewTree(view, name, path) {
   }
   if (r.type === "group") {
     const members = r.members || [];
+    const cfg = MERGE_FORMATS.includes(fmt) && (state.me.admin || state.me.repositoryAdmin) ? await api(apiRepo(name, "/config")).catch(() => null) : null;
     put(view, head, h("div", { class: "two" },
       card(t("tree.members"), t("tree.groupNote"), members.length
         ? members.map((m) => h("div", { class: "listrow" }, h("a", { href: browseLink(m) }, h("strong", null, m)), h("a", { class: "btn small", href: browseLink(m) }, t("repos.browse"))))
         : h("div", { class: "empty" }, t("tree.noMembers"))),
-      card(t("repo.info"), null, [kv(t("col.format"), fmtBadge(fmt)), kv(t("col.type"), typeBadge(r.type)), kv("URL", copyLine(r.url, t("repos.copyUrlFor", { name: r.name })))])),
+      card(t("repo.info"), null, [kv(t("col.format"), fmtBadge(fmt)), kv(t("col.type"), typeBadge(r.type)), kv("URL", copyLine(r.url, t("repos.copyUrlFor", { name: r.name }))),
+        cfg ? kv(t("rf.merge"), cfg.mergeMembers ? h("span", { class: "badge amber" }, t("rf.mergeOn")) : t("rf.mergeOff")) : null])),
     setupCard(r));
     return;
   }

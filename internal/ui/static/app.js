@@ -2,7 +2,7 @@
 // Center design (plan 10), with "#browse/..." and "#admin/..." hash routes.
 import {
   state, h, put, badSeg, browseLink, searchLink, loading, pageHead, needAdmin, needLogin, hideBanner, handleError, setAuthLostHook, SEARCH_FORMATS,
-  mayOpen, readOnlyFor, readOnly,
+  mayOpen, readOnlyFor, readOnly, can,
 } from "./util.js";
 import { initShell, renderChrome, openLogin, refreshMe, screenTitle } from "./shell.js";
 import { t } from "./i18n.js";
@@ -210,7 +210,7 @@ async function show(view, r) {
     case "browse/upload": return p0 === undefined ? viewUploadList(view) : viewUpload(view, p0);
     case "browse/tags":
       if (state.me.anonymous) return needLogin(view, t("nav.tags"));
-      if (p0 === "create" && !state.me.admin) return needAdmin(view, t("nav.tags"));
+      if (p0 === "create" && !can("tags", "add")) return needAdmin(view, t("nav.tags"));
       return viewTags(view, p0);
     case "browse/search": return viewSearch(view, "generic", r.criteria);
     case "user/account": return viewAccount(view);

@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
 	"commandcenter/internal/component"
+	"commandcenter/internal/config"
 )
 
 // staticNames are the files the shell cannot work without; every other
@@ -401,6 +403,57 @@ func TestMavenSetupEnablesSnapshots(t *testing.T) {
 	for _, want := range []string{"<snapshots><enabled>true</enabled></snapshots>", "<activeProfile>commandcenter</activeProfile>"} {
 		if !strings.Contains(js, want) {
 			t.Errorf("browse.js setup snippet lacks %s", want)
+		}
+	}
+}
+
+// TestSetupHintsKeepClientFlags: what the clients refuse or hang without, as
+// docs/guide.md says it (each one was missing from the hints once).
+func TestSetupHintsKeepClientFlags(t *testing.T) {
+	js := readStatic(t, "browse.js")
+	for _, want := range []string{"--allow-insecure-connections", "secure-http false", "http-basic.\" + authority", "gem sources --remove https://rubygems.org/",
+		"GEM_HOST_API_KEY=", "--context-path ", "--no-confirm", "credential.helper store", "conan remote login commandcenter", "unsafeHttpWhitelist"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("browse.js setup snippet lacks %s", want)
+		}
+	}
+}
+
+// TestMergeFormatsMatchServer: the repository form offers mergeMembers
+// (MERGE_FORMATS) on exactly the group formats the server takes it on.
+func TestMergeFormatsMatchServer(t *testing.T) {
+	js := readStatic(t, "util.js")
+	m := regexp.MustCompile(`export const MERGE_FORMATS = \[([^\]]*)\];`).FindStringSubmatch(js)
+	all := regexp.MustCompile(`export const FORMATS = \[([^\]]*)\];`).FindStringSubmatch(js)
+	if m == nil || all == nil {
+		t.Fatal("util.js does not define MERGE_FORMATS and FORMATS")
+	}
+	for _, f := range regexp.MustCompile(`"(\w+)"`).FindAllStringSubmatch(all[1], -1) {
+		err := config.ValidateDefinition(config.Repository{Name: "g", Format: f[1], Type: "group", Members: []string{"h"}, MergeMembers: true})
+		server := err == nil || !strings.Contains(err.Error(), "mergeMembers")
+		if ui := strings.Contains(m[1], `"`+f[1]+`"`); ui != server {
+			t.Errorf("format %s: the form offers mergeMembers: %v, the server takes it: %v", f[1], ui, server)
+		}
+	}
+}
+
+// TestSupportSectionsListed: the support page's check boxes are the server's sections.
+func TestSupportSectionsListed(t *testing.T) {
+	m := regexp.MustCompile(`(?s)const ZIP_SECTIONS = \[(.*?)\];`).FindStringSubmatch(readStatic(t, "admin.js"))
+	if m == nil {
+		t.Fatal("admin.js does not define ZIP_SECTIONS")
+	}
+	var got []string
+	for _, x := range regexp.MustCompile(`\["(\w+)", "`).FindAllStringSubmatch(m[1], -1) {
+		got = append(got, x[1])
+	}
+	if !slices.Equal(got, SupportSections()) {
+		t.Errorf("ZIP_SECTIONS = %v, the server has %v", got, SupportSections())
+	}
+	keys := i18nKeys(t, readStatic(t, "i18n.js"), "ko")
+	for _, k := range got {
+		if !keys["sup.sec."+k] {
+			t.Errorf("no label sup.sec.%s", k)
 		}
 	}
 }
