@@ -77,6 +77,18 @@ func CoreFields(raw []byte) map[string][]string {
 	return parseCore(raw).fields
 }
 
+// SearchAttributes are what Nexus's search parameters pypi.classifiers,
+// pypi.description, pypi.keywords and pypi.summary look at in the core
+// metadata document raw, by the parameter's last part.
+func SearchAttributes(raw []byte) map[string][]string {
+	h := parseCore(raw)
+	description := h.fields["description"]
+	if h.body != "" {
+		description = []string{h.body}
+	}
+	return map[string][]string{"classifiers": h.fields["classifier"], "description": description, "keywords": h.fields["keywords"], "summary": h.fields["summary"]}
+}
+
 // nullable is a string field of the warehouse JSON: null when absent.
 func nullable(s string) any {
 	if s == "" {
@@ -162,7 +174,7 @@ func fileDoc(url string, attrs fileAttrs, a meta.Asset) map[string]any {
 	doc := map[string]any{
 		"filename": attrs.Filename, "url": url, "digests": digests, "md5_digest": a.MD5, "size": a.Size,
 		"packagetype": packagetype, "python_version": pyver, "requires_python": nullable(attrs.RequiresPython),
-		"has_sig": false, "comment_text": "", "yanked": false, "yanked_reason": nil,
+		"has_sig": attrs.HasSig, "comment_text": "", "yanked": false, "yanked_reason": nil,
 		"upload_time": nil, "upload_time_iso_8601": nil,
 	}
 	if !a.CreatedAt.IsZero() {
@@ -558,6 +570,12 @@ func (h *Handler) extract(ctx context.Context, rp *repo.Repository, project, fil
 
 // markMetadata records sha as a hosted row's MetadataSHA256.
 func markMetadata(ctx context.Context, tx *meta.Tx, repoName, project, filename, sha string) error {
+	return editRow(ctx, tx, repoName, project, filename, func(a *fileAttrs) { a.MetadataSHA256 = sha })
+}
+
+// editRow changes the attrs of filename's row in tx; a file without a row
+// changes nothing.
+func editRow(ctx context.Context, tx *meta.Tx, repoName, project, filename string, edit func(*fileAttrs)) error {
 	pkgs, err := tx.ListPackages(ctx, repoName, project)
 	if err != nil {
 		return err
@@ -570,7 +588,7 @@ func markMetadata(ctx context.Context, tx *meta.Tx, repoName, project, filename,
 		if err := json.Unmarshal([]byte(p.Attrs), &attrs); err != nil {
 			return err
 		}
-		attrs.MetadataSHA256 = sha
+		edit(&attrs)
 		doc, err := json.Marshal(attrs)
 		if err != nil {
 			return err

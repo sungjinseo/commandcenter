@@ -838,6 +838,9 @@ func (h *Handler) walkComponents(ctx context.Context, rp *repo.Repository, prefi
 		return nil
 	}
 	return h.DB.WalkAssetPaths(ctx, rp.Name, prefix, func(p string) {
+		if rp.Format == "pypi" && strings.HasSuffix(p, ".metadata") {
+			return // a file's core metadata, generated: Nexus has no such asset, and a one-file release is one asset
+		}
 		if group, name, version, ok := component.DeriveAsset(rp.Format, p); ok {
 			fn(group, name, version, p)
 		}
@@ -866,7 +869,7 @@ func rfc3339(t time.Time) any {
 // leading "/", the download URL on via's URL ("": rp's; a group a search
 // went through), only the checksums stored, and the format's attributes
 // ({"maven2": {groupId, artifactId, version, extension, classifier}},
-// {"<format>": {}} for the others).
+// {"pypi": {name, version}}, {"<format>": {}} for the others).
 func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[string]any {
 	sums := map[string]string{}
 	for k, v := range map[string]string{"sha1": a.SHA1, "sha256": a.BlobSHA256, "md5": a.MD5, "sha512": a.SHA512} {
@@ -881,6 +884,11 @@ func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[s
 	attrs := map[string]string{}
 	if rp.Format == "maven" {
 		attrs = maven2Attributes(a.Path) // a SNAPSHOT build's own version
+	}
+	if rp.Format == "pypi" {
+		if _, name, version, ok := component.DeriveAsset("pypi", a.Path); ok {
+			attrs = map[string]string{"name": name, "version": version}
+		}
 	}
 	return map[string]any{
 		"id":           assetID(rp.Name, a.Path),
@@ -1202,13 +1210,15 @@ func (h *Handler) getAsset(w http.ResponseWriter, r *http.Request) {
 //   - a proxy's (any format) cached copy is dropped; the next request
 //     fetches it again;
 //   - a hosted Maven file goes through the Maven handler's delete, which
-//     rebuilds maven-metadata.xml;
+//     rebuilds maven-metadata.xml; a hosted Helm chart or provenance file
+//     and a hosted PyPI file, each a file a client can address, go through
+//     their handler's delete too;
 //   - a hosted file that is a component of its own (a raw file, an npm
 //     tarball, a .deb or .rpm, a .nupkg, ...) goes through the component
 //     delete, which updates the format's index files;
 //   - anything else is part of a larger component (one layer of a docker
-//     image, one file of a Go module or a PyPI release) or generated
-//     metadata: 400, delete the component instead.
+//     image, one file of a Go module) or generated metadata: 400, delete
+//     the component instead.
 func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	if p.Anonymous() {
@@ -1222,8 +1232,8 @@ func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case rp.Type == "proxy":
 		h.dropCached(w, r, rp, a.Path)
-	case rp.Type == "hosted" && rp.Format == "maven":
-		h.deleteMavenFile(w, r, rp, a.Path)
+	case rp.Type == "hosted" && (rp.Format == "maven" || rp.Format == "helm" || rp.Format == "pypi"):
+		h.deleteFile(w, r, rp, a.Path)
 	case rp.Type == "hosted":
 		c, err := h.ownComponent(r.Context(), rp, a.Path)
 		switch {
@@ -1266,9 +1276,10 @@ func (h *Handler) dropCached(w http.ResponseWriter, r *http.Request, rp *repo.Re
 	}
 }
 
-// deleteMavenFile deletes a hosted Maven file as a client's DELETE does
-// (the server's checks, then the Maven handler).
-func (h *Handler) deleteMavenFile(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
+// deleteFile deletes a hosted file as a client's DELETE does (the server's
+// checks, then the format's handler). A path the handler takes no DELETE on
+// is generated metadata: 400, as for the other formats.
+func (h *Handler) deleteFile(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
 	if h.ServeRepository == nil {
 		writeMessage(w, http.StatusNotImplemented, "file deletion is not available")
 		return
@@ -1289,6 +1300,8 @@ func (h *Handler) deleteMavenFile(w http.ResponseWriter, r *http.Request, rp *re
 		w.WriteHeader(http.StatusNoContent)
 	case rec.status == http.StatusUnauthorized || rec.status == http.StatusForbidden:
 		deny(w, principal(r))
+	case rec.status == http.StatusMethodNotAllowed:
+		writeMessage(w, http.StatusBadRequest, "this file is generated metadata: delete the file it belongs to, or the component (DELETE /service/rest/v1/components/{id})")
 	default:
 		writeMessage(w, rec.status, strings.TrimSpace(rec.body.String()))
 	}

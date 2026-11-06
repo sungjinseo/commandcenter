@@ -408,7 +408,7 @@ func TestDeleteOneAsset(t *testing.T) {
 		t.Fatalf("packument versions: %v", doc.Versions)
 	}
 
-	// PyPI: one file of a release with two is refused.
+	// PyPI: one file of a release with two goes (TestPyPIComponentModel).
 	ctx := context.Background()
 	for _, f := range []string{"packages/demo/demo-1.0.tar.gz", "packages/demo/demo-1.0-py3-none-any.whl"} {
 		if _, err := a.Store.Put(ctx, "pypi-hosted", f, "", strings.NewReader(f)); err != nil {
@@ -416,9 +416,8 @@ func TestDeleteOneAsset(t *testing.T) {
 		}
 	}
 	e.get(v1+"/assets?repository=pypi-hosted", "ci", &p)
-	if b := e.want("DELETE", v1+"/assets/"+p.Items[0].ID, "admin", "", 400); !strings.Contains(string(b), "component") {
-		t.Fatalf("pypi: %s", b)
-	}
+	e.want("DELETE", v1+"/assets/"+p.Items[0].ID, "admin", "", 204)
+	eq(t, "pypi after delete", e.items(v1+"/assets?repository=pypi-hosted", "ci", "path"), "/packages/demo/demo-1.0.tar.gz")
 
 	// Proxy: the cached copy goes and is fetched again.
 	e.want("GET", "/repository/raw-px/dir/f.bin", "ci", "", 200)

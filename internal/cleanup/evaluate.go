@@ -291,8 +291,10 @@ func unitPrefix(format, p string) string {
 		if i := strings.LastIndex(p, "."); i > strings.LastIndex(p, "/") {
 			return p[:i+1]
 		}
-	case "npm", "cargo", "helm", "yum":
+	case "npm", "cargo", "yum":
 		return p
+	case "helm": // the chart file, which its provenance file (<chart>.prov) starts with
+		return strings.TrimSuffix(p, ".prov")
 	case "nuget": // the version directory, <id>/<version>/ (under v3-flatcontainer/ in a proxy)
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]

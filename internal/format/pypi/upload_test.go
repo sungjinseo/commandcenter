@@ -166,16 +166,25 @@ func TestUploadLargeDescription(t *testing.T) {
 	}
 }
 
-func TestUploadFieldCaps(t *testing.T) {
+// twine sends one field per Requires-Dist, Provides-Extra and classifier:
+// their number is not bounded, the bytes are (TestUploadLargeDescription).
+func TestUploadManyFields(t *testing.T) {
 	e := newEnv(t)
+	sd := smoke(t)
+	f := goodFields(sd)
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	for i := 0; i < 300; i++ {
-		mw.WriteField("f"+strconv.Itoa(i), "")
+	for _, k := range []string{":action", "protocol_version", "name", "version"} {
+		mw.WriteField(k, f[k])
 	}
+	for i := 0; i < 20000; i++ {
+		mw.WriteField("requires_dist", "dep"+strconv.Itoa(i))
+	}
+	fw, _ := mw.CreateFormFile("content", "smoke_hello-1.0.0.tar.gz")
+	fw.Write([]byte(sd))
 	mw.Close()
-	if w := e.upload("py-hosted", mw.FormDataContentType(), &buf); w.Code != 413 {
-		t.Errorf("too many parts: %d", w.Code)
+	if w := e.upload("py-hosted", mw.FormDataContentType(), &buf); w.Code != 200 {
+		t.Errorf("20000 fields: %d %s", w.Code, w.Body)
 	}
 }
 

@@ -33,6 +33,9 @@ func TestParseRoute(t *testing.T) {
 		{"packages/six/six-1.16.0.tar.gz.metadata", Route{Kind: KindMetadata, Name: "six", File: "six-1.16.0.tar.gz"}},
 		{"pypi/Six/json", Route{Kind: KindJSON, Name: "six"}},
 		{"pypi/six/1.16.0/json", Route{Kind: KindJSON, Name: "six", Version: "1.16.0"}},
+		{"pypi", Route{Kind: KindSearch}},
+		{"pypi/", Route{Kind: KindSearch}},
+		{"packages/six/six-1.16.0.tar.gz.asc", Route{Kind: KindFile, Name: "six", File: "six-1.16.0.tar.gz.asc"}},
 	}
 	for _, c := range cases {
 		got, err := ParseRoute(c.in)

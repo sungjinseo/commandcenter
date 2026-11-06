@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -19,6 +20,7 @@ import (
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
 	"commandcenter/internal/format/maven"
+	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/resolve"
@@ -247,6 +249,7 @@ var (
 	prereleaseKeys = []string{"prerelease", "isPrerelease"}
 	updatedKeys    = []string{"last_updated", "lastBlobUpdated", "last_modified"}
 	sumNames       = []string{"md5", "sha1", "sha256", "sha512"}
+	pypiAttrs      = []string{"classifiers", "description", "keywords", "summary"}
 	sortFields     = map[string]bool{"group": true, "name": true, "version": true, "repository": true, "format": true}
 )
 
@@ -261,6 +264,7 @@ type criteria struct {
 	file   func(c *comp, p string) bool   // some file of the component must pass (q and its dependency form)
 	asset  []func(c *comp, p string) bool // asset parameters: they cut a component's files
 	sums   map[string]string              // asset checksums (md5, sha1, sha256, sha512), matched in the database
+	pypi   map[string]term                // the pypi.* parameters, by their last part: matched in a file's core metadata
 	since  time.Time                      // some file modified at or after it
 	format string                         // Command Center spelling; "" any
 	sort   string
@@ -316,6 +320,14 @@ func parseCriteria(q url.Values) (criteria, error) {
 				cr.sums = map[string]string{}
 			}
 			cr.sums[s] = strings.ToLower(v)
+		}
+	}
+	for _, a := range pypiAttrs {
+		if alts := splitValue(strings.TrimSpace(q.Get("pypi." + a))); len(alts) > 0 {
+			if cr.pypi == nil {
+				cr.pypi = map[string]term{}
+			}
+			cr.pypi[a] = newTerm(alts, false)
 		}
 	}
 	if v, _ := value(prereleaseKeys); v != "" {
@@ -395,7 +407,7 @@ func parseBool(s string) (bool, error) {
 // npm.*, docker.*) implies when format is absent, as Nexus adds it.
 func impliedFormat(q url.Values) string {
 	for _, f := range []struct{ format, prefix string }{{"maven", "maven."}, {"maven", "attributes.maven2."},
-		{"maven", "assets.attributes.maven2."}, {"npm", "npm."}, {"docker", "docker."}} {
+		{"maven", "assets.attributes.maven2."}, {"npm", "npm."}, {"docker", "docker."}, {"pypi", "pypi."}} {
 		for k := range q {
 			if strings.HasPrefix(k, f.prefix) {
 				return f.format
@@ -419,10 +431,15 @@ func groupForms(c *comp) []string {
 	return []string{g}
 }
 
-// nameForms: a raw file's name with and without the leading "/".
+// nameForms: a raw file's name with and without the leading "/", a PyPI
+// project's normalized name with each of the separators PEP 503 folds, as
+// Nexus indexes it.
 func nameForms(c *comp) []string {
-	if c.format == "raw" {
+	switch c.format {
+	case "raw":
 		return []string{"/" + c.name, c.name}
+	case "pypi":
+		return []string{c.name, strings.ReplaceAll(c.name, "-", "_"), strings.ReplaceAll(c.name, "-", ".")}
 	}
 	return []string{c.name}
 }
@@ -676,6 +693,12 @@ func (h *Handler) find(ctx context.Context, repos []*repo.Repository, cr criteri
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+	if len(cr.pypi) > 0 {
+		sees := keep
+		keep = func(rp *repo.Repository, p string) bool {
+			return (sees == nil || sees(rp, p)) && h.pypiMatches(ctx, rp, p, cr.pypi)
+		}
+	}
 	s := &collector{cr: cr, win: win, keep: keep, tagged: tagged, open: map[string]*held{}}
 	for _, rp := range repos {
 		if rp.Type == "group" || (cr.format != "" && rp.Format != cr.format) || (tagged != nil && !tagged[meta.ComponentKey{Repo: rp.Name}]) {
@@ -714,6 +737,37 @@ func (h *Handler) find(ctx context.Context, repos []*repo.Repository, cr criteri
 		out[i] = e.comp
 	}
 	return out, nil
+}
+
+// pypiMatches reports whether the core metadata stored beside file p of rp
+// (a signature: beside its file) matches every term of a search's pypi.*
+// parameters. A file without it matches none. ponytail: reads a file per file
+// of the repository, only for a search with these parameters; keep the fields
+// in the row if such searches get frequent.
+func (h *Handler) pypiMatches(ctx context.Context, rp *repo.Repository, p string, terms map[string]term) bool {
+	if rp.Format != "pypi" || h.Store == nil {
+		return false
+	}
+	a, err := h.DB.GetAsset(ctx, rp.Name, strings.TrimSuffix(p, ".asc")+".metadata")
+	if err != nil {
+		return false
+	}
+	f, err := h.Store.Open(a)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, a.Size))
+	if err != nil {
+		return false
+	}
+	attrs := pypi.SearchAttributes(raw)
+	for name, t := range terms {
+		if !t.matches(attrs[name]...) {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {

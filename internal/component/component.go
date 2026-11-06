@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -291,7 +292,10 @@ func DeriveGo(p string) (name, version string, ok bool) {
 	return "", "", false
 }
 
-var pypiExts = []string{".whl", ".tar.gz", ".tar.bz2", ".zip", ".egg"}
+// pypiExts are the extensions of distribution files, the old ones a proxy
+// serves from an index too (.exe and .msi of bdist_wininst and bdist_msi).
+var pypiExts = []string{".whl", ".tar.gz", ".tar.bz2", ".zip", ".egg", ".tgz", ".tbz", ".tar.xz", ".txz", ".tar.lz", ".tlz", ".tar.lzma",
+	".tar.z", ".tz", ".taz", ".tar", ".exe", ".msi", ".dmg", ".rpm", ".deb"}
 
 // pypiSplitExt strips a known distribution extension from file.
 func pypiSplitExt(file string) (base, ext string, ok bool) {
@@ -343,7 +347,10 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		if segs[0] != "packages" || (len(segs) != 3 && len(segs) != 4) {
 			return "", "", "", false
 		}
-		file, _ := strings.CutSuffix(segs[len(segs)-1], ".metadata") // the PEP 658 sidecar goes with its file
+		file, sidecar := strings.CutSuffix(segs[len(segs)-1], ".metadata") // the PEP 658 sidecar goes with its file
+		if !sidecar {
+			file, _ = strings.CutSuffix(file, ".asc") // and so does its signature
+		}
 		if _, _, known := pypiSplitExt(file); !known {
 			return "", "", "", false
 		}
@@ -361,8 +368,8 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return "", segs[1], v, true
 	case "raw": // every file is a component of its own, named by its path
 		return "", p, "", p != ""
-	case "helm":
-		name, version, ok = SplitHelm(p)
+	case "helm": // <name>-<version>.tgz and its provenance file, <name>-<version>.tgz.prov
+		name, version, ok = SplitHelm(strings.TrimSuffix(p, ".prov"))
 		return "", name, version, ok
 	case "yum":
 		name, version, ok = SplitRPM(p)
@@ -685,19 +692,47 @@ var (
 // `<name>-<version>.tgz` file name, so no "/" and no leading ".".
 var helmNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
+// helmVersionRE is a chart version as the helm client reads one (checked
+// with helm 3.22 and 4.3, which parse it with Masterminds semver's
+// NewVersion): SemVer 2 with an optional "v", the minor and the patch
+// optional, and leading zeros allowed in the three numbers ("v1.13.2",
+// "1.2", "0.46.00"). The prerelease and the build metadata are SemVer's.
+var helmVersionRE = regexp.MustCompile(`^v?([0-9]+(?:\.[0-9]+){0,2})` +
+	`(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?` +
+	`(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
+
+// HelmVersion reports whether v is a chart version helm accepts
+// (helmVersionRE), of at most 256 bytes.
+func HelmVersion(v string) bool {
+	m := helmVersionRE.FindStringSubmatch(v)
+	if len(v) > 256 || m == nil {
+		return false
+	}
+	for _, n := range strings.Split(m[1], ".") {
+		if _, err := strconv.ParseUint(n, 10, 64); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // SplitHelm splits a chart file name, <name>-<version>.tgz, at the last "-"
 // whose suffix is a strict semver version: names may hold "-" ("ingress-nginx")
-// and so may prerelease versions ("1.0.0-rc.1"). "+" in the version may be
-// written "_", as helm package names the file.
+// and so may prerelease versions ("1.0.0-rc.1"). A file name without such a
+// "-" is split at the last one whose suffix is a version as helm reads it
+// (HelmVersion: "cert-manager-v1.13.2.tgz"). "+" in the version may be
+// written "_", as helm push names an OCI tag.
 func SplitHelm(file string) (name, version string, ok bool) {
 	stem, cut := strings.CutSuffix(file, ".tgz")
 	if !cut || strings.Contains(stem, "/") {
 		return "", "", false
 	}
-	for i := strings.LastIndexByte(stem, '-'); i > 0; i = strings.LastIndexByte(stem[:i], '-') {
-		v := strings.Replace(stem[i+1:], "_", "+", 1)
-		if semver.Valid(v) && helmNameRE.MatchString(stem[:i]) {
-			return stem[:i], v, true
+	for _, valid := range []func(string) bool{semver.Valid, HelmVersion} {
+		for i := strings.LastIndexByte(stem, '-'); i > 0; i = strings.LastIndexByte(stem[:i], '-') {
+			v := strings.Replace(stem[i+1:], "_", "+", 1)
+			if valid(v) && helmNameRE.MatchString(stem[:i]) {
+				return stem[:i], v, true
+			}
 		}
 	}
 	return "", "", false

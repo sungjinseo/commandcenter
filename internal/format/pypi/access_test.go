@@ -16,6 +16,9 @@ func TestAccessKinds(t *testing.T) {
 		{"GET", "simple/demo/", auth.Read},
 		{"HEAD", "packages/demo/demo-1.0.tar.gz", auth.Read},
 		{"POST", "", auth.Add},
+		{"POST", "pypi", auth.Read}, // pip search
+		{"POST", "pypi/", auth.Read},
+		{"DELETE", "packages/demo/demo-1.0.tar.gz", auth.Delete},
 	} {
 		if got := h.Access(httptest.NewRequest(c.method, "/", nil), nil, c.path); got != c.want {
 			t.Errorf("%s %q: %v, want %v", c.method, c.path, got, c.want)

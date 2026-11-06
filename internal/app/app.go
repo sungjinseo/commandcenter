@@ -462,6 +462,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	goH, mavenH, rawH := golang.New(store, resolver), maven.New(store, resolver), raw.New(store, resolver)
 	goH.Auth, mavenH.Auth, rawH.Auth = authn, authn, authn // overwrites need Edit
 	npmH, pypiH := npm.New(store, resolver, authn, baseURL), pypi.New(store, fetcher, baseURL)
+	pypiH.Auth = authn // overwrites need Edit
 	cargoH := cargo.New(store, fetcher, authn, baseURL)
 	helmH := helm.New(store, fetcher, authn)
 	yumH := yum.New(store, resolver, authn)

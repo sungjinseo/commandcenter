@@ -17,10 +17,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"commandcenter/internal/cleanup"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
-	"commandcenter/internal/semver"
 )
 
 // maxIndex bounds an index.yaml read back from the store (bitnami's is
@@ -243,15 +243,12 @@ func (iw *indexWriter) close(generated time.Time) error {
 	return err
 }
 
-// sortVersions orders a chart's versions newest first, as helm repo index does.
+// sortVersions orders a chart's versions newest first, as helm repo index
+// does: by SemVer precedence, read as loosely as helm reads a chart version
+// (v1.2.3, 1.2).
 func sortVersions(vs []entry) {
 	sort.SliceStable(vs, func(i, j int) bool {
-		a, okA := semver.Parse(vs[i].str("version"))
-		b, okB := semver.Parse(vs[j].str("version"))
-		if okA != okB {
-			return okA
-		}
-		return okA && semver.Compare(a, b) > 0
+		return cleanup.CompareVersions("helm", vs[i].str("version"), vs[j].str("version")) > 0
 	})
 }
 
@@ -466,7 +463,10 @@ func (h *Handler) parseUpstream(rp *repo.Repository, a meta.Asset, w io.Writer) 
 	return up, nil
 }
 
-// upstreamFor returns the upstream table of the proxy's current index.
+// upstreamFor returns the upstream table of the proxy's current index. Every
+// request for a chart of a proxy comes here, so the concurrent ones that find
+// no table (a restart, a new index) read the index once: a bitnami-sized
+// table is tens of MiB.
 func (h *Handler) upstreamFor(ctx context.Context, rp *repo.Repository) (*upstream, error) {
 	res, err := h.fetchUpstream(ctx, rp)
 	if err != nil {
@@ -475,7 +475,13 @@ func (h *Handler) upstreamFor(ctx context.Context, rp *repo.Repository) (*upstre
 	if up, ok := h.upstreams.Load(rp.Name); ok && up.(*upstream).sha == res.Asset.BlobSHA256 {
 		return up.(*upstream), nil
 	}
-	return h.parseUpstream(rp, res.Asset, io.Discard)
+	up, err, _ := h.reads.Do(rp.Name+"\x00"+res.Asset.BlobSHA256, func() (any, error) {
+		return h.parseUpstream(rp, res.Asset, io.Discard)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return up.(*upstream), nil
 }
 
 // owns reports whether rp has chart name: a hosted repository by its rows,

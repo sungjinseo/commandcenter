@@ -11,10 +11,10 @@ import (
 	"commandcenter/internal/repo"
 )
 
-// ImportComponent copies one chart version (its row, the index entry, and
-// its file) from hosted src into hosted dst, and rebuilds dst's index.yaml
-// in the same transaction under dst's lock, as an upload does
-// (repo.ComponentImporter).
+// ImportComponent copies one chart version (its row, the index entry, its
+// file and its provenance file) from hosted src into hosted dst, and
+// rebuilds dst's index.yaml in the same transaction under dst's lock, as an
+// upload does (repo.ComponentImporter).
 func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository, c component.Component, overwrite bool) ([]meta.Asset, error) {
 	if err := repo.CheckImport(src, dst, c, "helm"); err != nil {
 		return nil, err
@@ -45,6 +45,12 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		return nil, err
 	}
 	assets := []meta.Asset{file}
+	switch prov, err := h.Store.DB.GetAsset(ctx, src.Name, provKey(file.Path)); {
+	case err == nil:
+		assets = append(assets, prov)
+	case !errors.Is(err, meta.ErrNotFound):
+		return nil, err
+	}
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, assets); err != nil {
 		return nil, err
 	}
@@ -54,6 +60,11 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		}
 		if err := repo.PutImported(ctx, tx, dst.Name, assets, overwrite); err != nil {
 			return err
+		}
+		if len(assets) == 1 { // no provenance file came: that of a version it replaced must not stay
+			if _, err := tx.DeleteAsset(ctx, dst.Name, provKey(file.Path)); err != nil && !errors.Is(err, meta.ErrNotFound) {
+				return err
+			}
 		}
 		return h.rebuildIndex(ctx, tx, dst)
 	})

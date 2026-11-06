@@ -172,6 +172,13 @@ func TestPrereleasePerFormat(t *testing.T) {
 		{"go", "v2.0.0+incompatible", false},
 		{"cargo", "1.0.0", false},
 		{"cargo", "1.0.0-alpha", true},
+		{"helm", "1.0.0", false},
+		{"helm", "v1.2.3", false},
+		{"helm", "1.2", false},
+		{"helm", "1.2.3+build-5", false},
+		{"helm", "1.0.0-rc.1", true},
+		{"helm", "v1.0.0-rc.1", true},
+		{"helm", "1.2-beta", true}, // helm reads it, semver.Parse does not
 		{"pypi", "1.0", false},
 		{"pypi", "1.0.post1", false},
 		{"pypi", "1.0rc1", true},

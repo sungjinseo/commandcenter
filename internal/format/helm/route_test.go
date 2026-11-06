@@ -13,13 +13,15 @@ func TestParseRoute(t *testing.T) {
 		"demo-1.0.0.tgz":                {Kind: KindChart, File: "demo-1.0.0.tgz"},
 		"ingress-nginx-4.10.0-rc.1.tgz": {Kind: KindChart, File: "ingress-nginx-4.10.0-rc.1.tgz"},
 		"demo-1.0.0+build.tgz":          {Kind: KindChart, File: "demo-1.0.0+build.tgz"},
+		"cert-manager-v1.13.2.tgz":      {Kind: KindChart, File: "cert-manager-v1.13.2.tgz"},
+		"demo-1.0.0.tgz.prov":           {Kind: KindProv, File: "demo-1.0.0.tgz"},
 	}
 	for in, want := range cases {
 		if got, err := ParseRoute(in); err != nil || got != want {
 			t.Errorf("%s: got %+v err=%v", in, got, err)
 		}
 	}
-	for _, in := range []string{"", "charts/demo-1.0.0.tgz", "upstream/index.yaml", "demo-1.0.0.tar.gz", ".tgz", "-x.tgz", "../x.tgz", "api/charts/demo/1.0.0"} {
+	for _, in := range []string{"", "charts/demo-1.0.0.tgz", "upstream/index.yaml", "demo-1.0.0.tar.gz", ".tgz", "-x.tgz", "../x.tgz", "api/charts/demo/1.0.0", "demo-1.0.0.prov", ".tgz.prov", "charts/demo-1.0.0.tgz.prov", "index.yaml.prov"} {
 		if _, err := ParseRoute(in); repo.StatusOf(err) != 404 {
 			t.Errorf("%q: %v, want 404", in, err)
 		}

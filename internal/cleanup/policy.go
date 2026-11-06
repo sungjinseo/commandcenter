@@ -198,6 +198,9 @@ func Prerelease(format, version string) bool {
 		return strings.ContainsFunc(v, func(r rune) bool { return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' })
 	case "conan": // <version>#<rrev>: the recipe revision is not part of the version
 		version, _, _ = strings.Cut(version, "#")
+	case "helm": // helm reads 1.2-beta too, which semver.Parse does not
+		v, _, _ := strings.Cut(version, "+")
+		return strings.Contains(v, "-")
 	}
 	v, ok := semver.Parse(version)
 	return ok && !v.Release()

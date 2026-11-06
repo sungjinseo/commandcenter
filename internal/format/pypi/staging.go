@@ -12,7 +12,7 @@ import (
 )
 
 // ImportComponent copies one version of a project (the rows of its files,
-// the files and their metadata sidecars) from hosted src into hosted dst,
+// the files, their metadata sidecars and signatures) from hosted src into hosted dst,
 // under dst's project lock. A file dst has already, in any spelling of its
 // name, is a conflict whatever overwrite says, as for an upload. The simple
 // index is derived from the rows (repo.ComponentImporter).
@@ -40,7 +40,7 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 			continue
 		}
 		rows = append(rows, p)
-		for _, key := range []string{fileKey(project, p.Version), metadataKey(project, p.Version)} {
+		for _, key := range fileKeys(project, p.Version) {
 			switch a, err := h.Store.DB.GetAsset(ctx, src.Name, key); {
 			case err == nil:
 				assets = append(assets, a)

@@ -82,6 +82,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   install, bundle, search, yank) and `test/smoke/composer-smoke.sh` (Composer 2.11: upload, require, update,
   `auth.json`, audit), each against a hosted, a proxy and a group repository, with the client on a
   network that has no route to the internet and 16 clients at once on the largest document.
+- PyPI: `twine upload --sign` keeps the signature. A `gpg_signature` part is stored at `<file>.asc`,
+  served at both path forms and through groups, marked on the file's link (`data-gpg-sig`, `gpg-sig`)
+  and in the JSON API (`has_sig`), and deleted with its file. A proxy fetches one its upstream marks.
+- PyPI: `pip search` of hosted repositories and groups (XML-RPC, `POST <repository>/pypi`): name and
+  summary, one hit per version. A proxy answers nothing.
+- PyPI: `mergeMembers: true` on a group merges the project pages of its members, as Nexus does; the
+  default stays the first member that has the project.
+- PyPI: `DELETE /repository/<hosted>/packages/<project>/<file>` deletes one file, with its core
+  metadata and signature; `<file>.asc` deletes the signature alone.
+- Helm: provenance files. `PUT <chart>.tgz.prov`, the `prov` field of `POST api/charts` and the
+  component upload store one beside its chart, so `helm pull --verify` works, also through a proxy,
+  which fetches `<chart URL>.prov`. It goes with its chart. The chart must be there, with the sha256
+  the file signs.
+- Helm: `DELETE <chart>.tgz` removes a version from a hosted repository (200, 404 when gone).
+- Nexus API: search parameters `pypi.classifiers`, `pypi.description`, `pypi.keywords`, `pypi.summary`;
+  a PyPI asset's `pypi` object has `name` and `version`.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -123,6 +139,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keep only inline packages and notices of the upstream's `packages.json`.
 - NuGet search: the `versions` of a hosted hit are spelled in lower case (`1.0.0-beta`), as they are stored;
   the hit's own `version` keeps the spelling of the `.nuspec`.
+- PyPI: `writePolicy: allow` is honoured. Uploading a file the repository has, in any spelling,
+  replaces it, for a user with edit as well as add. `allow_once` (the default) still refuses it.
+- PyPI: the `/simple/` list of a proxy is its remote's (pypi.org: 48 MB, 930 000 projects, fetched
+  when the page is asked for, cached by `metadataMaxAge`, streamed) plus its cached projects, and a
+  group's its members'. Without a usable remote page it lists the cached projects as before.
+- Helm: hosted repositories take every chart version the helm client takes (`v1.2.3`, `1.2`,
+  `0.46.00`), not only strict SemVer 2. Such files in a proxy are components now: in search, in the
+  browser and in cleanup.
+- Nexus API: a PyPI file's generated `.metadata` is no asset of its component. A release of one wheel
+  is one asset, and `search/assets/download` finds it.
+- Nexus API: `DELETE /assets/{id}` deletes a hosted PyPI file or Helm chart (or provenance file)
+  through the format's handler instead of answering 400 for part of a larger component.
+- Routing rules on PyPI and Helm proxies see the request path, not the path of the file's upstream
+  URL, and refuse before the cache is read, through a group too.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -183,6 +213,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   index from before.
 - Composer proxy: `composer audit` failed on a closed network, because Packagist's `filter.summary-url` was
   passed on to the client.
+- PyPI: an upload with more than 256 form fields was refused with 413. twine sends one per
+  `Requires-Dist`, `Provides-Extra` and classifier.
+- PyPI: an ALLOW routing rule that names projects refused every file not cached yet.
+- PyPI: a sign-in or error page answered with 200 by an upstream made the project exist in the proxy,
+  and the proxy its owner in a group.
+- PyPI: REST search found a project only by its normalized name; `my_pkg` and `my.pkg` find `my-pkg`.
+  Old file types a proxy serves (`.tgz`, `.exe`, ...) are components, so cleanup reaches them.
+- Helm: a cached chart was returned before any freshness check, so `contentMaxAge` and
+  invalidate-cache did nothing and a version published again kept its old bytes.
+- Helm: a chart newer than the proxy's cached index was 404 until `metadataMaxAge` passed. The remote
+  is asked for its index again, at most once a minute per node.
+- Helm: a second chart whose file name reads the same (`demo` `1.0.0-2.3.4`, `demo-1.0.0` `2.3.4`) took
+  over the first one's file; it is 409 now.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -214,6 +257,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **HEAD on a raw or Maven proxy** no longer fills the cache when the remote answers it. A script that warms a cache with `curl -I` must GET.
 - **`http.retries` and `connection.retries`** no longer retry timeouts and refused connections. A setup that relied on riding out a refused connection needs another way.
 - **Logs**: one more JSON line per activity event on stdout (each upload, delete, sign-in...). A shipper can select `audit=true`, or drop them.
+- **A hosted PyPI repository with `writePolicy: allow`** was accepted before but refused every repeated file. It now replaces. The default `allow_once` is unchanged. Check repositories set to `allow` that relied on the refusal.
+- **Routing rules on PyPI and Helm proxies** now see the request path, not the upstream URL's path. A rule written for the upstream path (`^/packages/aa/bb/.*`, `^/charts/.*`) no longer matches and must name the request path. ALLOW rules naming projects or charts start to work; a cached file a rule refuses is no longer served through a group.
+- **A PyPI proxy's `/simple/`**: the first GET after an upgrade (and after each `metadataMaxAge`, default 24 h, when the page changed) downloads the remote's root page, 48 MB for pypi.org, into the blob store. An old copy is reclaimed by the compact task like any other. pip and uv never ask for it. A monitor polling `GET /simple/` should move to HEAD.
+- **A Helm proxy** reads its upstream table on every chart request: after a restart the first request parses the cached index once. A republished version upstream is now fetched again; before it kept its old bytes.
+- **REST**: scripts that expected `.metadata` assets in components no longer see them (they remain in `/v1/assets` and at their URLs). Scripts that relied on the 400 of `DELETE /v1/assets/{id}` for a PyPI file now delete the file.
+- **Rolling upgrade (N-1)**: an old node answers 404 for `.prov` and for `.asc` until it is upgraded, and ignores `has_sig`. Nothing is stored that an old node misreads. No schema change.
 
 ## [0.4.0] - 2026-11-05
 
