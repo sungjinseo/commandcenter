@@ -1,12 +1,14 @@
 // Package yum implements Yum/DNF (RPM) repositories (Nexus "yum"): RPM
 // files at any path under /repository/<repo>/ and the repodata/ they are
-// listed in (repomd.xml, primary, filelists, other). A hosted repository
-// takes RPMs by PUT and keeps repodata/ itself, regenerated in the
-// transaction of every upload and delete; at depth 0 one repodata/ at the
-// root lists every RPM, at depth 1 each top-level directory has its own, at
-// depth 2 each directory below those, up to depth 5 as in Nexus.
-// A proxy caches a remote repository's files at their paths; a group
-// answers from the first member that has the path (no merging, as Nexus).
+// listed in (repomd.xml, primary, filelists, other, and comps.xml when one
+// was uploaded). A hosted repository takes RPMs by PUT and keeps repodata/
+// itself, regenerated in the transaction of every upload and delete; at
+// depth 0 one repodata/ at the root lists every RPM, at depth 1 each
+// top-level directory has its own, at depth 2 each directory below those, up
+// to depth 5 as in Nexus.
+// A proxy caches a remote repository's files at their paths; a group answers
+// from the first member that has the path, and with mergeMembers lists the
+// packages of every member that has the repodata/ at that path (merge.go).
 package yum
 
 import (
@@ -15,9 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"commandcenter/internal/auth"
 	"commandcenter/internal/blob"
@@ -37,10 +43,16 @@ type Handler struct {
 	Resolver *resolve.Resolver
 	Auth     *auth.Authenticator
 	Now      func() time.Time
+
+	merges     singleflight.Group // the merges running on this node (merge.go)
+	mergeSlots chan struct{}
+	failMu     sync.Mutex
+	failed     map[string]failedMerge
 }
 
 func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticator) *Handler {
-	return &Handler{Store: store, Resolver: resolver, Auth: authn, Now: time.Now}
+	return &Handler{Store: store, Resolver: resolver, Auth: authn, Now: time.Now,
+		mergeSlots: make(chan struct{}, mergeWorkers), failed: map[string]failedMerge{}}
 }
 
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
@@ -62,7 +74,13 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		if isRepodata(p) {
 			kind = proxy.Metadata
 		}
-		res, err := h.Resolver.LookupTarget(r.Context(), rp, proxy.Target{Key: p, Remote: p, NotHTML: true}, kind)
+		var res proxy.Result
+		var err error
+		if rp.Type == "group" && rp.MergeMembers && isRepodata(p) {
+			res, err = h.mergedFile(r.Context(), rp, p)
+		} else {
+			res, err = h.Resolver.LookupTarget(r.Context(), rp, proxy.Target{Key: p, Remote: p, NotHTML: true}, kind)
+		}
 		if err != nil {
 			return err
 		}
@@ -75,6 +93,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 			return repo.WithAllow(err, "GET, HEAD")
 		}
 		return h.upload(w, r, target, p)
+	case http.MethodDelete:
+		if component.YumComps(p) {
+			target, err := repo.WriteTarget(rp)
+			if err != nil {
+				return repo.WithAllow(err, "GET, HEAD")
+			}
+			return h.deleteComps(w, r, target, p)
+		}
 	}
 	allow := "GET, HEAD"
 	if repo.AcceptsWrites(rp) {
@@ -101,17 +127,24 @@ func isRepodata(p string) bool {
 	return strings.HasPrefix(p, "repodata/") || strings.Contains(p, "/repodata/")
 }
 
-// upload takes an RPM into hosted rp at p: `PUT <dir>/<name>-<version>-<release>.<arch>.rpm`
-// with the file as the body (curl --upload-file). The file name must be
-// the one the package's header gives (its NVRA), so the path names the
-// component. The blob is written first and the header read back from it,
-// then the row, the file and dir's rebuilt repodata are recorded in one
+// upload takes an RPM into hosted rp: `PUT <dir>/<any name>.rpm` with the
+// file as the body (curl --upload-file), or a repodata/comps.xml
+// (uploadComps). The package is stored in that directory under the name its
+// header gives (its NVRA), whatever the request called it, because the path
+// names the component and every delete, import and cleanup goes from the
+// component back to the path; a 201 for another name says where in its
+// Location. Whoever may add at the requested path must also be allowed to at
+// the stored one. The blob is written first and the header read back from
+// it, then the row, the file and dir's rebuilt repodata are recorded in one
 // transaction under the repository's lock. An existing package is a 409
 // unless writePolicy is allow, when replacing it needs Edit.
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) error {
 	ctx := r.Context()
 	if rp.WritePolicy == "deny" {
 		return repo.Errorf(http.StatusBadRequest, "repository %q is read-only", rp.Name)
+	}
+	if component.YumComps(p) {
+		return h.uploadComps(w, r, rp, p)
 	}
 	if !strings.HasSuffix(p, ".rpm") || isRepodata(p) || strings.HasSuffix(p, "/.rpm") {
 		return repo.Errorf(http.StatusBadRequest, "upload a .rpm file outside repodata/: %s", p)
@@ -131,8 +164,13 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if err != nil {
 		return err
 	}
-	if path.Base(p) != pkg.NVRA() {
-		return badRPM("file name %q does not match the package: %s", path.Base(p), pkg.NVRA())
+	renamed := path.Base(p) != pkg.NVRA()
+	if renamed {
+		p = strings.TrimSuffix(p, path.Base(p)) + pkg.NVRA()
+		ctx = auth.WithPath(ctx, p)
+		if !h.Auth.Permits(ctx, rp.Name, auth.Add) {
+			return repo.Errorf(http.StatusForbidden, "user %q may not add %s", auth.FromContext(ctx).User, p)
+		}
 	}
 	now := h.Now().UTC()
 	pkg.Checksum, pkg.Location, pkg.Uploaded = sums.SHA256, p, now.Unix()
@@ -169,6 +207,9 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 		return err
 	}
 	h.Store.Emit(r, "upload", rp.Name, name+"@"+version, "")
+	if renamed {
+		w.Header().Set("Location", url.PathEscape(pkg.NVRA())) // beside the URL of the request
+	}
 	w.WriteHeader(http.StatusCreated)
 	return nil
 }

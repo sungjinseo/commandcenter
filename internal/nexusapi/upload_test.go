@@ -774,8 +774,25 @@ func TestUploadFormats(t *testing.T) {
 	if b := e.body("/repository/yum-hosted/el9/repodata/repomd.xml"); !strings.Contains(b, "primary") {
 		t.Fatalf("repomd: %s", b)
 	}
-	e.wantInvalid("*", "does not match", "ci", "yum-hosted", fld("yum.directory", "el9"),
-		fil("yum.asset", "x.rpm", rpmOf("demo", "1.0", "1", "x86_64")), fld("yum.asset.filename", "wrong-1-1.x86_64.rpm"))
+	// another file name is taken, as in Nexus; the package is stored as its header says
+	e.wantUpload(204, "ci", "yum-hosted", fld("yum.directory", "el9"),
+		fil("yum.asset", "x.rpm", rpmOf("demo", "2.0", "1", "x86_64")), fld("yum.asset.filename", "test.rpm"))
+	e.body("/repository/yum-hosted/el9/demo-2.0-1.x86_64.rpm")
+	// its comps.xml: PUT by name, gone with the asset API, repomd.xml following; generated files stay refused
+	if st, b, _ := e.send("PUT", "/repository/yum-hosted/el9/repodata/comps.xml", "ci", "", []byte("<comps/>")); st != 201 {
+		t.Fatalf("PUT comps.xml: %d %s", st, b)
+	}
+	if b := e.body("/repository/yum-hosted/el9/repodata/repomd.xml"); !strings.Contains(b, `<data type="group">`) {
+		t.Fatalf("repomd: %s", b)
+	}
+	asset := func(p string) string {
+		return v1 + "/assets/" + base64.RawURLEncoding.EncodeToString([]byte("yum-hosted:"+p))
+	}
+	e.want("DELETE", asset("el9/repodata/repomd.xml"), "ci", "", 400)
+	e.want("DELETE", asset("el9/repodata/comps.xml"), "ci", "", 204)
+	if b := e.body("/repository/yum-hosted/el9/repodata/repomd.xml"); strings.Contains(b, `<data type="group">`) {
+		t.Fatalf("repomd after the delete: %s", b)
+	}
 
 	// helm: the chart's Chart.yaml names it.
 	e.wantUpload(204, "ci", "helm-hosted", fil("helm.asset", "chart.tgz", tgzOf("demo/Chart.yaml", "apiVersion: v2\nname: demo\nversion: 0.1.0\n")))

@@ -233,10 +233,11 @@ type Repository struct {
 	Members     []string `yaml:"members" json:"members,omitempty"`
 	WriteMember string   `yaml:"writeMember" json:"writeMember,omitempty"`
 	// MergeMembers makes an npm or PyPI group answer a package from every
-	// member that has it, merged, as Nexus does. Off (the default), the
-	// first member that has the package answers alone, so a public package
-	// cannot stand in for or add versions to an internal one of the same
-	// name (dependency confusion).
+	// member that has it, merged, as Nexus does, and a yum group list the
+	// packages of every member at a path. Off (the default), the first
+	// member that has the package (yum: the path) answers alone, so a public
+	// package cannot stand in for or add versions to an internal one of the
+	// same name (dependency confusion).
 	MergeMembers bool `yaml:"mergeMembers,omitempty" json:"mergeMembers,omitempty"`
 
 	// hosted
@@ -750,8 +751,8 @@ func ValidateDefinition(r Repository) error {
 	if r.Distribution != "" && (r.Format != "apt" || r.Type == "group") {
 		errs = append(errs, fmt.Errorf("repository %q: distribution is only valid for apt hosted and proxy repositories", r.Name))
 	}
-	if r.MergeMembers && (r.Type != "group" || !slices.Contains([]string{"npm", "pypi", "r", "conda"}, r.Format)) {
-		errs = append(errs, fmt.Errorf("repository %q: mergeMembers is only valid for npm, pypi, r and conda groups", r.Name))
+	if r.MergeMembers && (r.Type != "group" || !slices.Contains([]string{"npm", "pypi", "r", "conda", "yum"}, r.Format)) {
+		errs = append(errs, fmt.Errorf("repository %q: mergeMembers is only valid for npm, pypi, r, conda and yum groups", r.Name))
 	}
 	if (r.Flat || r.EnforceDistribution) && (r.Format != "apt" || r.Type != "proxy") {
 		errs = append(errs, fmt.Errorf("repository %q: flat and enforceDistribution are only valid for apt proxy repositories", r.Name))

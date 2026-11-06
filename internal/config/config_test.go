@@ -636,18 +636,20 @@ func TestAptSettings(t *testing.T) {
 	}
 }
 
-// mergeMembers is a setting of the groups that would merge by package name.
+// mergeMembers is a setting of the groups that would merge by package name,
+// and of yum groups, which merge by path.
 func TestValidateDefinitionMergeMembers(t *testing.T) {
-	const want = "mergeMembers is only valid for npm, pypi, r and conda groups"
+	const want = "mergeMembers is only valid for npm, pypi, r, conda and yum groups"
 	for _, r := range []Repository{
 		{Name: "a", Format: "npm", Type: "hosted", MergeMembers: true},
+		{Name: "y", Format: "yum", Type: "hosted", MergeMembers: true},
 		{Name: "g", Format: "maven", Type: "group", Members: []string{"h"}, MergeMembers: true},
 	} {
 		if err := ValidateDefinition(r); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s %s: %v", r.Format, r.Type, err)
 		}
 	}
-	for _, format := range []string{"npm", "pypi", "r", "conda"} {
+	for _, format := range []string{"npm", "pypi", "r", "conda", "yum"} {
 		if err := ValidateDefinition(Repository{Name: "g", Format: format, Type: "group", Members: []string{"h"}, MergeMembers: true}); err != nil {
 			t.Errorf("%s group: %v", format, err)
 		}

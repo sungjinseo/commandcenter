@@ -13,10 +13,11 @@ import (
 )
 
 // RebuildMetadata regenerates the repodata/ of every directory of hosted rp
-// that holds packages (one for depth 0, else each directory that deep) from
-// its rows, under the repository's lock (repo.MetadataRebuilder). A package
-// not that deep (uploaded before the depth was raised) is listed nowhere.
-// The rows are first read again from the stored packages (reread).
+// that holds packages or a comps.xml (one for depth 0, else each directory
+// that deep) from its rows, under the repository's lock
+// (repo.MetadataRebuilder). A package not that deep (uploaded before the
+// depth was raised) is listed nowhere. The rows are first read again from the
+// stored packages (reread).
 func (h *Handler) RebuildMetadata(ctx context.Context, rp *repo.Repository, logf func(string, ...any)) error {
 	if rp.Format != "yum" || rp.Type != "hosted" {
 		return fmt.Errorf("rebuild metadata of %s %s repository %q: %w", rp.Format, rp.Type, rp.Name, component.ErrNotSupported)
@@ -29,12 +30,20 @@ func (h *Handler) RebuildMetadata(ctx context.Context, rp *repo.Repository, logf
 	if err := h.reread(ctx, rp, logf); err != nil {
 		return err
 	}
+	dirs := map[string]bool{}
+	err = h.Store.DB.WalkAssetPaths(ctx, rp.Name, "", func(p string) {
+		if d, ok := compsDir(rp, p); ok {
+			dirs[d] = true
+		}
+	})
+	if err != nil {
+		return err
+	}
 	return h.Store.Tx(ctx, rp, func(tx *meta.Tx) error {
 		names, err := tx.ListPackageNames(ctx, rp.Name)
 		if err != nil {
 			return err
 		}
-		dirs := map[string]bool{}
 		for _, n := range names {
 			if d, ok := repoDir(rp, n); ok {
 				dirs[d] = true

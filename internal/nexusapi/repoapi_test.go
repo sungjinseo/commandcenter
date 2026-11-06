@@ -164,6 +164,15 @@ func TestRepositoryPutKeepsCommandCenterSettings(t *testing.T) {
 	if s["yum"].(map[string]any)["repodataDepth"] != float64(1) {
 		t.Fatalf("depth reset: %v", s["yum"])
 	}
+	// Nexus's body has no mergeMembers: the JSON API sets it, a PUT keeps it
+	if st, b := e.ui("POST", "/-/api/repositories", `{"name":"yum-merged","format":"yum","type":"group","members":["yum-deep"],"mergeMembers":true}`); st != 201 {
+		t.Fatalf("create: %d %s", st, b)
+	}
+	e.want("PUT", v1+"/repositories/yum/group/yum-merged", "admin",
+		`{"name":"yum-merged","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":false},"group":{"memberNames":["yum-deep"]}}`, 204)
+	if st, b := e.ui("GET", "/-/api/repositories/yum-merged/config", ""); st != 200 || !strings.Contains(string(b), `"mergeMembers":true`) {
+		t.Fatalf("mergeMembers after a PUT: %d %s", st, b)
+	}
 }
 
 // httpClient.authentication type bearerToken: stored as the remote's bearer

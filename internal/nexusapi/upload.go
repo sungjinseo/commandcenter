@@ -123,8 +123,8 @@ var uploadSpecs = map[string]*uploadSpec{
 	"rubygems": single("rubygems", http.MethodPost, "api/v1/gems", "application/octet-stream"),
 	"helm":     single("helm", http.MethodPost, "api/charts", "application/gzip"),
 	"yum": {Format: "yum", plan: planYum,
-		Component: []uploadField{str("directory", "Directory of the package (needed when the repository's repodata depth is 1)", true)},
-		Asset:     []uploadField{str("filename", "File name: <name>-<version>-<release>.<arch>.rpm", false), fileField}},
+		Component: []uploadField{str("directory", "Directory of the package (needed when the repository has a repodata depth)", true)},
+		Asset:     []uploadField{str("filename", "File name ending in .rpm; the package is stored in the directory as <name>-<version>-<release>.<arch>.rpm", false), fileField}},
 	"r": {Format: "r", plan: planR,
 		Asset: []uploadField{str("pathId", "Directory of the package, such as src/contrib; the file name is the part's", false), fileField}},
 	// Command Center extensions: formats Nexus has no API upload for whose

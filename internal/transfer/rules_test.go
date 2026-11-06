@@ -51,6 +51,7 @@ func TestDerivedAndComponents(t *testing.T) {
 		{"npm", "demo/package.json", true}, {"npm", "@s/demo/package.json", true}, {"npm", "demo/-/package.json", false},
 		{"helm", "index.yaml", true}, {"helm", "demo-0.1.0.tgz", false},
 		{"yum", "repodata/repomd.xml", true}, {"yum", "el9/repodata/primary.xml.gz", true}, {"yum", "a.rpm", false},
+		{"yum", "repodata/comps.xml", false}, {"yum", "el9/repodata/comps.xml.gz", false}, {"yum", "repodata/abc-comps.xml", true},
 		{"apt", "dists/stable/Release", true}, {"apt", "pool/main/d/demo/demo_1.0_amd64.deb", false},
 		{"conda", "linux-64/repodata.json", true}, {"conda", "channeldata.json", true},
 		{"r", "src/contrib/PACKAGES.gz", true}, {"rubygems", "versions", true}, {"rubygems", "gems/a-1.gem", false},

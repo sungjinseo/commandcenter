@@ -76,8 +76,9 @@ type repoRequest struct {
 	NegativeCacheTTL       string   `json:"negativeCacheTTL"`
 	Members                []string `json:"members"`
 	WriteMember            string   `json:"writeMember"`
-	// MergeMembers (npm and pypi groups): answer a package from every
-	// member that has it, merged, instead of the first one alone.
+	// MergeMembers (npm, pypi and yum groups): answer a package (yum: a
+	// path's repodata/) from every member that has it, merged, instead of
+	// the first one alone.
 	MergeMembers bool `json:"mergeMembers"`
 	// RoutingRule names the proxy's routing rule; "" is none.
 	RoutingRule   string `json:"routingRule"`

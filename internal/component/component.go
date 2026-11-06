@@ -670,6 +670,17 @@ func SplitRPM(p string) (name, version string, ok bool) {
 	return stem[:j], stem[j+1:], true
 }
 
+// YumComps reports whether p is a yum repository's package group file,
+// repodata/comps.xml or comps.xml.gz in any directory: the one file under
+// repodata/ somebody uploaded, not one the server derives.
+func YumComps(p string) bool {
+	switch path.Base(p) {
+	case "comps.xml", "comps.xml.gz":
+		return path.Base(path.Dir(p)) == "repodata"
+	}
+	return false
+}
+
 // SplitDeb splits the path of a Debian package, wherever it lies (the
 // apt format's pool/<component>/<prefix>/<package>/, Nexus's
 // pool/<letter>/<package>/, a flat or vendor layout a proxy caches): the

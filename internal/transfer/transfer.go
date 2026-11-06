@@ -231,8 +231,8 @@ func derived(format, p string) bool {
 		return base == "package.json" && !strings.Contains(p, "/-/")
 	case "helm":
 		return p == "index.yaml"
-	case "yum":
-		return strings.HasPrefix(p, "repodata/") || strings.Contains(p, "/repodata/")
+	case "yum": // an uploaded comps.xml is no index document, though repomd.xml lists it
+		return (strings.HasPrefix(p, "repodata/") || strings.Contains(p, "/repodata/")) && !component.YumComps(p)
 	case "apt":
 		return strings.HasPrefix(p, "dists/")
 	case "conda":

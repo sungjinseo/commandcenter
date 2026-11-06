@@ -1275,9 +1275,9 @@ func (h *Handler) getAsset(w http.ResponseWriter, r *http.Request) {
 //   - a proxy's (any format) cached copy is dropped; the next request
 //     fetches it again; a Go version's .info, .mod and .zip go together;
 //   - a hosted Maven file goes through the Maven handler's delete, which
-//     rebuilds maven-metadata.xml; a hosted Helm chart or provenance file
-//     and a hosted PyPI file, each a file a client can address, go through
-//     their handler's delete too;
+//     rebuilds maven-metadata.xml; a hosted Helm chart or provenance file,
+//     a hosted PyPI file and a yum comps.xml, each a file a client can
+//     address, go through their handler's delete too;
 //   - a hosted file that is a component of its own (a raw file, an npm
 //     tarball, a .deb or .rpm, a .nupkg, ...) or a file of a Go version, whose
 //     files are one, goes through the component delete, which updates the
@@ -1298,7 +1298,7 @@ func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case rp.Type == "proxy":
 		h.dropCached(w, r, rp, a.Path)
-	case rp.Type == "hosted" && (rp.Format == "maven" || rp.Format == "helm" || rp.Format == "pypi"):
+	case rp.Type == "hosted" && (rp.Format == "maven" || rp.Format == "helm" || rp.Format == "pypi" || rp.Format == "yum" && component.YumComps(a.Path)):
 		h.deleteFile(w, r, rp, a.Path)
 	case rp.Type == "hosted":
 		c, err := h.ownComponent(r.Context(), rp, a.Path)
