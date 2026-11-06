@@ -136,7 +136,11 @@ func TestFormatSectionsRoundTrip(t *testing.T) {
 	} {
 		e.wantField("POST", v1+"/repositories/"+c.path, c.body, c.id)
 	}
-	e.want("POST", v1+"/repositories/yum/hosted", "admin", hosted("y3", `,"yum":{"repodataDepth":3}`), 400)
+	e.want("POST", v1+"/repositories/yum/hosted", "admin", hosted("y3", `,"yum":{"repodataDepth":6}`), 400)
+	e.want("POST", v1+"/repositories/yum/hosted", "admin", hosted("y3", `,"yum":{"repodataDepth":3,"deployPolicy":"STRICT"}`), 201)
+	if y := decodeMap(t, e.want("GET", v1+"/repositories/yum/hosted/y3", "admin", "", 200))["yum"].(map[string]any); y["repodataDepth"] != float64(3) {
+		t.Fatalf("repodataDepth: %v", y)
+	}
 	// A PUT cannot rename.
 	e.wantField("PUT", v1+"/repositories/yum/hosted/yum-h", strings.Replace(cases[3].body, `"yum-h"`, `"yum-x"`, 1), "name")
 }

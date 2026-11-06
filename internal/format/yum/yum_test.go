@@ -112,7 +112,7 @@ func rpmFile(sig, main []tv, payload string) []byte {
 
 // demoTags are the header of demo-1.0-1.el9.x86_64: every field the
 // repodata prints, i18n summary and description, dependencies of each
-// kind, files of each type and a changelog.
+// kind (the weak ones too), files of each type and a changelog.
 func demoTags() []tv {
 	return []tv{
 		{tag: tagName, val: "demo"}, {tag: tagVersion, val: "1.0"}, {tag: tagRelease, val: "1.el9"}, {tag: tagArch, val: "x86_64"},
@@ -130,11 +130,16 @@ func demoTags() []tv {
 		{tag: tagRequireVer, val: []string{"", "", "5.4.18-1", "2.0", "1:3.0", "0.1-1"}},
 		{tag: tagConflictName, val: []string{"olddemo"}}, {tag: tagConflictFlags, val: []int32{senseLess}}, {tag: tagConflictVer, val: []string{"1.0"}},
 		{tag: tagObsoleteName, val: []string{"demo-compat"}}, {tag: tagObsoleteFlags, val: []int32{0}}, {tag: tagObsoleteVer, val: []string{""}},
-		{tag: tagDirnames, val: []string{"/usr/bin/", "/etc/demo/", "/usr/share/doc/demo/", "/var/cache/"}},
-		{tag: tagBasenames, val: []string{"demo", "demo.conf", "README", "demo"}},
-		{tag: tagDirIndexes, val: []int32{0, 1, 2, 3}},
-		{tag: tagFileModes, val: []uint16{0o100755, 0o100644, 0o100644, 0o040755}},
-		{tag: tagFileFlags, val: []int32{0, 1, fileFlagGhost, 0}},
+		{tag: tagRecommendName, val: []string{"demo-plugins", "(demo-lang if glibc-langpack-en)"}},
+		{tag: tagRecommendName + 1, val: []string{"1.0-1.el9", ""}}, {tag: tagRecommendName + 2, val: []int32{senseEqual, 0}},
+		{tag: tagSuggestName, val: []string{"demo-doc"}}, {tag: tagSuggestName + 1, val: []string{""}}, {tag: tagSuggestName + 2, val: []int32{0}},
+		{tag: tagSupplementName, val: []string{"(demo-base and langpacks-de)"}}, {tag: tagSupplementName + 1, val: []string{""}}, {tag: tagSupplementName + 2, val: []int32{0}},
+		{tag: tagEnhanceName, val: []string{"demo-gui"}}, {tag: tagEnhanceName + 1, val: []string{"2"}}, {tag: tagEnhanceName + 2, val: []int32{senseGreater | senseEqual}},
+		{tag: tagDirnames, val: []string{"/usr/bin/", "/etc/demo/", "/usr/share/doc/demo/", "/var/cache/", "/etc/"}},
+		{tag: tagBasenames, val: []string{"demo", "demo.conf", "README", "demo", "demo", "state"}},
+		{tag: tagDirIndexes, val: []int32{0, 1, 2, 3, 4, 1}},
+		{tag: tagFileModes, val: []uint16{0o100755, 0o100644, 0o100644, 0o040755, 0o040755, 0o100600}},
+		{tag: tagFileFlags, val: []int32{0, 1, fileFlagGhost, 0, 0, fileFlagGhost}},
 		{tag: tagChangeTime, val: []int32{1699000000, 1698000000}},
 		{tag: tagChangeName, val: []string{"QA <qa@example.org> - 1.0-1", "QA <qa@example.org> - 0.9-1"}},
 		{tag: tagChangeText, val: []string{"- Release 1.0", "- First build"}},
@@ -180,7 +185,11 @@ func TestParse(t *testing.T) {
 		t.Fatalf("requires: %+v", p.Requires) // rpmlib() dropped, scriptlet requires are pre
 	case p.Requires[2] != (Dep{Name: "bar", Flags: "GE", Epoch: "0", Ver: "2.0"}), p.Requires[3] != (Dep{Name: "baz", Flags: "LT", Epoch: "1", Ver: "3.0"}), p.Requires[4] != (Dep{Name: "qux", Flags: "GT", Epoch: "0", Ver: "0.1", Rel: "1", Pre: true}):
 		t.Fatalf("requires: %+v", p.Requires)
-	case len(p.Files) != 4, p.Files[2] != (File{Path: "/usr/share/doc/demo/README", Type: "ghost"}), p.Files[3] != (File{Path: "/var/cache/demo", Type: "dir"}):
+	case len(p.Recommends) != 2, p.Recommends[0] != (Dep{Name: "demo-plugins", Flags: "EQ", Epoch: "0", Ver: "1.0", Rel: "1.el9"}), p.Recommends[1] != (Dep{Name: "(demo-lang if glibc-langpack-en)"}):
+		t.Fatalf("recommends: %+v", p.Recommends)
+	case len(p.Suggests) != 1, len(p.Supplements) != 1, len(p.Enhances) != 1, p.Enhances[0] != (Dep{Name: "demo-gui", Flags: "GE", Epoch: "0", Ver: "2"}):
+		t.Fatalf("weak dependencies: %+v %+v %+v", p.Suggests, p.Supplements, p.Enhances)
+	case len(p.Files) != 6, p.Files[2] != (File{Path: "/usr/share/doc/demo/README", Type: "ghost"}), p.Files[3] != (File{Path: "/var/cache/demo", Type: "dir"}):
 		t.Fatalf("files: %+v", p.Files)
 	case len(p.Changelog) != 2, p.Changelog[1] != (Changelog{Author: "QA <qa@example.org> - 0.9-1", Date: 1698000000, Text: "- First build"}):
 		t.Fatalf("changelog: %+v", p.Changelog)
@@ -191,7 +200,7 @@ func TestParse(t *testing.T) {
 		{tag: tagEpoch, val: []int32{2}}, {tag: tagLongSize, val: []int64{1 << 32}}, {tag: tagSourcePackage, val: []int32{1}},
 	}, "")
 	p, err = Parse(bytes.NewReader(src), int64(len(src)))
-	if err != nil || p.NVRA() != "tiny-2-3.src.rpm" || p.Epoch != "2" || p.SizeInstalled != 1<<32 || p.SizeArchive != 1<<33 || p.Summary != "" || len(p.Files) != 0 || p.Provides != nil {
+	if err != nil || p.NVRA() != "tiny-2-3.src.rpm" || p.Epoch != "2" || p.SizeInstalled != 1<<32 || p.SizeArchive != 1<<33 || p.Summary != "" || len(p.Files) != 0 || p.Provides != nil || p.Recommends != nil {
 		t.Fatalf("minimal: %+v %v", p, err)
 	}
 	bad := map[string][]byte{
@@ -211,6 +220,37 @@ func TestParse(t *testing.T) {
 	huge = append(huge[:leadSize+8:leadSize+8], 0, 1, 0, 0, 0x7f, 0xff, 0xff, 0xff)
 	if _, err := Parse(bytes.NewReader(huge), int64(len(huge))); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), "entries") {
 		t.Fatalf("huge: %v", err)
+	}
+}
+
+// other.xml lists what createrepo_c lists of a changelog: the newest ten
+// entries, the oldest of them first, and entries of one time a second
+// apart (the newer later), so that dnf shows them in the package's order.
+func TestChangelogAsCreaterepo(t *testing.T) {
+	times := []int32{1001, 1000, 1000, 1000, 900, 800, 700, 600, 500, 400, 300, 200} // the header: newest first
+	var names, texts []string
+	for i := range times {
+		names, texts = append(names, fmt.Sprintf("author %d", i)), append(texts, fmt.Sprintf("- entry %d", i))
+	}
+	b := rpmFile([]tv{{tag: 1000, val: []int32{1}}}, []tv{
+		{tag: tagName, val: "log"}, {tag: tagVersion, val: "1"}, {tag: tagRelease, val: "1"}, {tag: tagArch, val: "noarch"},
+		{tag: tagChangeTime, val: times}, {tag: tagChangeName, val: names}, {tag: tagChangeText, val: texts},
+	}, "")
+	p, err := Parse(bytes.NewReader(b), int64(len(b)))
+	if err != nil || len(p.Changelog) != 10 || p.Changelog[0].Text != "- entry 0" || p.Changelog[9].Date != 400 {
+		t.Fatalf("parsed changelog: %+v %v", p.Changelog, err)
+	}
+	var got []string
+	for _, m := range regexp.MustCompile(`<changelog author="author (\d+)" date="(\d+)">`).FindAllStringSubmatch(Other([]*Package{p}), -1) {
+		got = append(got, m[1]+"@"+m[2])
+	}
+	if want := "9@400 8@500 7@600 6@700 5@800 4@900 3@1000 2@1001 1@1002 0@1003"; strings.Join(got, " ") != want {
+		t.Fatalf("other.xml changelog: %v, want %s", got, want)
+	}
+	// a row of an earlier version holds every entry: the same ten are listed
+	p.Changelog = append(p.Changelog, Changelog{Author: "author 10", Date: 300, Text: "- entry 10"})
+	if n := strings.Count(Other([]*Package{p}), "<changelog "); n != 10 {
+		t.Fatalf("%d entries listed of a longer changelog", n)
 	}
 }
 
@@ -261,6 +301,7 @@ func newEnv(t *testing.T) *env {
 		{Name: "yum-allow", Format: "yum", Type: "hosted", WritePolicy: "allow"},
 		{Name: "yum-ro", Format: "yum", Type: "hosted", WritePolicy: "deny"},
 		{Name: "yum-deep", Format: "yum", Type: "hosted", WritePolicy: "allow_once", Depth: 1},
+		{Name: "yum-deep3", Format: "yum", Type: "hosted", WritePolicy: "allow_once", Depth: 3},
 		{Name: "yum-proxy", Format: "yum", Type: "proxy", Remote: e.up.URL + "/",
 			MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Minute)},
 		{Name: "yum-all", Format: "yum", Type: "group", Members: []string{"yum-hosted", "yum-proxy"}, WriteMember: "yum-hosted"},
@@ -382,8 +423,23 @@ func TestHostedUploadAndRepodata(t *testing.T) {
     <rpm:obsoletes>
       <rpm:entry name="demo-compat"/>
     </rpm:obsoletes>
+    <rpm:suggests>
+      <rpm:entry name="demo-doc"/>
+    </rpm:suggests>
+    <rpm:enhances>
+      <rpm:entry name="demo-gui" flags="GE" epoch="0" ver="2"/>
+    </rpm:enhances>
+    <rpm:recommends>
+      <rpm:entry name="demo-plugins" flags="EQ" epoch="0" ver="1.0" rel="1.el9"/>
+      <rpm:entry name="(demo-lang if glibc-langpack-en)"/>
+    </rpm:recommends>
+    <rpm:supplements>
+      <rpm:entry name="(demo-base and langpacks-de)"/>
+    </rpm:supplements>
     <file>/usr/bin/demo</file>
     <file>/etc/demo/demo.conf</file>
+    <file type="dir">/etc/demo</file>
+    <file type="ghost">/etc/demo/state</file>
   </format>
 </package>
 </metadata>
@@ -396,6 +452,8 @@ func TestHostedUploadAndRepodata(t *testing.T) {
   <file>/etc/demo/demo.conf</file>
   <file type="ghost">/usr/share/doc/demo/README</file>
   <file type="dir">/var/cache/demo</file>
+  <file type="dir">/etc/demo</file>
+  <file type="ghost">/etc/demo/state</file>
 </package>
 </filelists>
 `
@@ -403,8 +461,8 @@ func TestHostedUploadAndRepodata(t *testing.T) {
 <otherdata xmlns="http://linux.duke.edu/metadata/other" packages="1">
 <package pkgid="` + sum(demo) + `" name="demo" arch="x86_64">
   <version epoch="0" ver="1.0" rel="1.el9"/>
-  <changelog author="QA &lt;qa@example.org&gt; - 1.0-1" date="1699000000">- Release 1.0</changelog>
   <changelog author="QA &lt;qa@example.org&gt; - 0.9-1" date="1698000000">- First build</changelog>
+  <changelog author="QA &lt;qa@example.org&gt; - 1.0-1" date="1699000000">- Release 1.0</changelog>
 </package>
 </otherdata>
 `
@@ -526,6 +584,51 @@ func TestDepth(t *testing.T) {
 	}
 	if got := e.sink.Events(); len(got) != 1 || got[0] != (repotest.Event{Kind: "delete", Actor: "admin", Repo: "yum-deep", Subject: "el9/x/beta@1.0-1.el9.noarch", Detail: "assets=1"}) {
 		t.Fatalf("events: %v", got)
+	}
+}
+
+// Nexus takes a repodata depth up to 5: its documentation's layouts are
+// games/lol/ashe.rpm at depth 2 and CentOS's 7/os/x86_64/ at depth 3.
+func TestDepthThree(t *testing.T) {
+	e := newEnv(t)
+	put := func(p, name, rel string) int {
+		t.Helper()
+		return e.do("PUT", "yum-deep3", p+name+"-1.0-"+rel+".noarch.rpm", nvra(name, "1.0", rel, "noarch")).Code
+	}
+	for _, shallow := range []string{"", "7/", "7/os/"} {
+		if code := put(shallow, "demo", "1"); code != 400 {
+			t.Errorf("PUT at %q: %d", shallow, code)
+		}
+	}
+	if w := e.do("PUT", "yum-deep3", "7/os/demo-1.0-1.noarch.rpm", nvra("demo", "1.0", "1", "noarch")); !strings.Contains(w.Body.String(), "depth 3") {
+		t.Errorf("the refusal: %s", w.Body)
+	}
+	for _, c := range []struct{ dir, name, rel string }{{"7/os/x86_64/", "demo", "1"}, {"7/os/x86_64/Packages/d/", "beta", "2"}, {"7/os/aarch64/", "demo", "3"}, {"8/os/x86_64/", "demo", "4"}} {
+		if code := put(c.dir, c.name, c.rel); code != 201 {
+			t.Fatalf("PUT in %s: %d", c.dir, code)
+		}
+	}
+	_, x86 := e.repodata(t, "yum-deep3", "7/os/x86_64/")
+	if got := regexp.MustCompile(`<location href="([^"]+)"/>`).FindAllStringSubmatch(x86["primary"], -1); len(got) != 2 || got[0][1] != "Packages/d/beta-1.0-2.noarch.rpm" || got[1][1] != "demo-1.0-1.noarch.rpm" {
+		t.Fatalf("7/os/x86_64 locations: %v", got)
+	}
+	_, arm := e.repodata(t, "yum-deep3", "7/os/aarch64/")
+	if !strings.Contains(arm["primary"], `packages="1"`) || !strings.Contains(arm["primary"], `<location href="demo-1.0-3.noarch.rpm"/>`) {
+		t.Fatalf("7/os/aarch64 primary:\n%s", arm["primary"])
+	}
+	for _, p := range []string{"repodata/repomd.xml", "7/repodata/repomd.xml", "7/os/repodata/repomd.xml", "7/os/x86_64/Packages/repodata/repomd.xml"} {
+		if w := e.do("GET", "yum-deep3", p, nil); w.Code != 404 {
+			t.Errorf("%s: %d", p, w.Code)
+		}
+	}
+	// a delete rebuilds its own directory
+	c := component.Component{Repo: "yum-deep3", Format: "yum", Name: "7/os/x86_64/Packages/d/beta", Version: "1.0-2.noarch"}
+	if res, err := e.h.DeleteComponent(context.Background(), e.repos["yum-deep3"], c, "admin"); err != nil || res.Assets != 1 {
+		t.Fatalf("delete: %+v %v", res, err)
+	}
+	_, x86 = e.repodata(t, "yum-deep3", "7/os/x86_64/")
+	if !strings.Contains(x86["primary"], `packages="1"`) || strings.Contains(x86["primary"], "beta") {
+		t.Fatalf("7/os/x86_64 after the delete:\n%s", x86["primary"])
 	}
 }
 

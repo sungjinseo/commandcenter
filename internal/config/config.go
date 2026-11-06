@@ -243,9 +243,9 @@ type Repository struct {
 	VersionPolicy string `yaml:"versionPolicy" json:"versionPolicy,omitempty"` // maven only: release | snapshot | mixed
 	WritePolicy   string `yaml:"writePolicy" json:"writePolicy,omitempty"`     // allow | allow_once | deny
 	// Depth is where a yum hosted repository keeps its repodata/: 0 at the
-	// root, listing every RPM; 1 in each top-level directory, listing its
-	// RPMs (Nexus "repodata depth").
-	Depth int `yaml:"depth,omitempty" json:"depth,omitempty"` // yum hosted only: 0 | 1
+	// root, listing every RPM; 1 to 5 in each directory that many segments
+	// down, listing the RPMs under it (Nexus "repodata depth").
+	Depth int `yaml:"depth,omitempty" json:"depth,omitempty"` // yum hosted only: 0 to 5
 
 	// apt hosted: the dists/<distribution> and component the generated
 	// Release and Packages files are published under (defaults "stable"
@@ -880,8 +880,8 @@ func ValidateRepositories(list []Repository) error {
 		if r.Depth != 0 {
 			if r.Format != "yum" || r.Type != "hosted" {
 				add("repository %q: depth is only valid for yum hosted repositories", r.Name)
-			} else if r.Depth != 1 {
-				add("repository %q: depth must be 0 or 1", r.Name)
+			} else if r.Depth < 0 || r.Depth > 5 {
+				add("repository %q: depth must be 0 to 5", r.Name)
 			}
 		}
 		if names := r.CleanupPolicyNames(); len(names) > 0 {

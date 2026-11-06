@@ -81,7 +81,7 @@ type repoRequest struct {
 	RoutingRule   string `json:"routingRule"`
 	VersionPolicy string `json:"versionPolicy"`
 	WritePolicy   string `json:"writePolicy"`
-	Depth         int    `json:"depth"` // yum hosted: 0 | 1
+	Depth         int    `json:"depth"` // yum hosted: 0 to 5
 	AnonymousRead *bool  `json:"anonymousRead"`
 	// CleanupPolicy: absent (null) keeps the stored policy on update and
 	// means none on create; "" clears it; a name sets it.

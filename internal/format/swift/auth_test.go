@@ -124,4 +124,29 @@ func TestPrivileges(t *testing.T) {
 			t.Errorf("%s: not a problem: %v", c.name, hdr)
 		}
 	}
+	// SwiftPM on Linux hangs for good on a 401 with a Basic challenge, and
+	// reports "server error 401" on a Bearer one: whatever it asks for,
+	// without credentials or with wrong ones, in a repository or not.
+	for _, c := range []struct{ name, method, path, user, pw string }{
+		{"resolve, private", "GET", "swift-private/mona/LinkedList", "", ""},
+		{"resolve, no such repository", "GET", "swift-nope/mona/LinkedList", "", ""},
+		{"publish", "PUT", up + "1.3.0", "", ""},
+		{"wrong password", "GET", "swift-private/mona/LinkedList", "publisher", "nope"},
+		{"login, wrong password", "POST", "swift-hosted/login", "reader", "nope"},
+	} {
+		r, _ := http.NewRequest(c.method, ts.URL+"/repository/"+c.path, nil)
+		r.Header.Set("Accept", ctRegistry+"+json")
+		r.Header.Set("User-Agent", "SwiftPackageManager/6.2.4")
+		if c.user != "" {
+			r.SetBasicAuth(c.user, c.pw)
+		}
+		resp, err := ts.Client().Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 401 || resp.Header.Get("WWW-Authenticate") != `Bearer realm="commandcenter"` {
+			t.Errorf("SwiftPM, %s: %d %q", c.name, resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
+		}
+	}
 }

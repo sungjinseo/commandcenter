@@ -123,6 +123,13 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 	case "/v1/modules/hashicorp/consul/aws/0.10.0/download":
 		w.Header().Set("X-Terraform-Get", "git::https://github.com/hashicorp/terraform-aws-consul?ref=v0.10.0")
 		w.WriteHeader(204)
+	case "/v1/modules/hashicorp/dir/template/versions":
+		j(`{"modules":[{"versions":[{"version":"1.0.2"},{"version":"1.0.1"}]}]}`)
+	case "/v1/modules/hashicorp/dir/template/1.0.2/download": // as registry.opentofu.org answers: 200, the source in the body, no header
+		w.Header().Set("Content-Type", "application/octet-stream")
+		io.WriteString(w, "{\n  \"location\": \"git::https://github.com/hashicorp/terraform-template-dir?ref=57846988686037417e0d6eef37d8c2fbd8e026fb\"\n}\n")
+	case "/v1/modules/hashicorp/dir/template/1.0.1/download":
+		io.WriteString(w, `{"location":"`+e.arc+`/archive/consul-0.11.0.tar.gz"}`)
 	case "/v1/modules/acme/demo/aws/versions": // also hosted: the group's hosted member wins
 		j(`{"modules":[{"source":"acme/demo/aws","versions":[{"version":"9.0.0"}]}]}`)
 	case "/v1/providers/hashicorp/random/versions":
@@ -628,6 +635,26 @@ func TestProxyModules(t *testing.T) {
 	}
 	if w := e.do("GET", "tf-proxy", "v1/modules/hashicorp/consul/aws/0.9.0/download", nil); w.Code != 502 {
 		t.Fatalf("never asked before, while down: %d", w.Code)
+	}
+}
+
+// registry.opentofu.org answers a module's download endpoint with 200 and
+// {"location": ...} in the body, without X-Terraform-Get (registry.terraform.io
+// sends 204 and the header). tofu and terraform read both, and so does the
+// proxy: its own answer is the 204 with the header either way.
+func TestProxyModuleSourceInBody(t *testing.T) {
+	e := newEnv(t)
+	w := e.do("GET", "tf-proxy", "v1/modules/hashicorp/dir/template/1.0.2/download", nil)
+	if w.Code != 204 || w.Header().Get("X-Terraform-Get") != "git::https://github.com/hashicorp/terraform-template-dir?ref=57846988686037417e0d6eef37d8c2fbd8e026fb" {
+		t.Fatalf("git source in the body: %d %q %s", w.Code, w.Header().Get("X-Terraform-Get"), w.Body)
+	}
+	// an archive named in the body is cached like one named in the header
+	w = e.do("GET", "tf-proxy", "v1/modules/hashicorp/dir/template/1.0.1/download", nil)
+	if w.Code != 204 || w.Header().Get("X-Terraform-Get") != ccBase+"/repository/tf-proxy/modules/hashicorp/dir/template/1.0.1.tgz?archive=tgz" {
+		t.Fatalf("archive in the body: %d %q", w.Code, w.Header().Get("X-Terraform-Get"))
+	}
+	if w := e.do("GET", "tf-proxy", "modules/hashicorp/dir/template/1.0.1.tgz", nil); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), e.files["consul-0.11.0.tar.gz"]) {
+		t.Fatalf("archive: %d", w.Code)
 	}
 }
 

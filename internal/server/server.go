@@ -79,6 +79,19 @@ type Server struct {
 
 const realm = `Basic realm="commandcenter"`
 
+// challenge is the WWW-Authenticate of a 401 for r. SwiftPM on Linux hangs
+// for good on a Basic challenge, never reporting the 401 (seen with SwiftPM
+// 6.2.4 and a registry that answers nothing else), so it gets a Bearer one,
+// which it reports at once as bad credentials. By the client and not by the
+// repository: a request for a repository it may not read must not learn its
+// format.
+func challenge(r *http.Request) string {
+	if strings.HasPrefix(r.UserAgent(), "SwiftPackageManager/") {
+		return `Bearer realm="commandcenter"`
+	}
+	return realm
+}
+
 // UploadIdleTimeout is how long a request body may go without data, so a
 // stalled client cannot hold the connection or a per-key lock.
 const UploadIdleTimeout = 60 * time.Second
@@ -261,7 +274,7 @@ func deny(w http.ResponseWriter, r *http.Request, p auth.Principal, h repo.Handl
 		// The web UI (upload) handles 401 itself; a challenge would pop up
 		// the browser's Basic-auth dialog over it.
 		if r.Header.Get(auth.UIHeader) != "1" {
-			w.Header().Set("WWW-Authenticate", realm)
+			w.Header().Set("WWW-Authenticate", challenge(r))
 		}
 		err = repo.Errorf(http.StatusUnauthorized, "authentication required")
 	} else {
@@ -366,7 +379,7 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			writeErr(rec, r, repo.Errorf(http.StatusTooManyRequests, "too many failed sign-ins; try again in %d seconds", wait))
 		} else if err != nil {
 			if r.Header.Get(auth.UIHeader) != "1" { // the web UI handles 401 itself: no browser dialog
-				rec.Header().Set("WWW-Authenticate", realm)
+				rec.Header().Set("WWW-Authenticate", challenge(r))
 			}
 			msg := "invalid credentials"
 			if errors.Is(err, auth.ErrUserTokenRequired) {

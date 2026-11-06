@@ -121,11 +121,11 @@ func formatRequest(format, typ string, b repoBody, out map[string]any, cur *conf
 	case "yum":
 		if y := b.Yum; y != nil && typ == "hosted" {
 			if y.RepodataDepth != nil {
-				out["depth"] = *y.RepodataDepth // 0 or 1; the UI refuses others
+				out["depth"] = *y.RepodataDepth // 0 to 5; the UI refuses others
 			}
 			depth, _ := out["depth"].(int)
 			refuse(depth > 0 && strings.EqualFold(y.DeployPolicy, "PERMISSIVE"),
-				"yum.deployPolicy: at repodataDepth 1 every RPM must be in a directory (STRICT)")
+				"yum.deployPolicy: with a repodataDepth every RPM must be that many directories down (STRICT)")
 		}
 		if s := b.YumSigning; s != nil {
 			refuse(s.Keypair != nil && *s.Keypair != "", "yumSigning.keypair: yum metadata is not signed")

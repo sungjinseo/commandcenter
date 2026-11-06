@@ -25,7 +25,7 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	file := c.Name + "-" + c.Version + ".rpm"
 	dir, ok := repoDir(dst, file)
 	if !ok {
-		return nil, repo.Errorf(http.StatusBadRequest, "repository %q has depth 1: %s is not in a directory", dst.Name, file)
+		return nil, repo.Errorf(http.StatusBadRequest, "repository %q has depth %d: %s is not that many directories down", dst.Name, dst.Depth, file)
 	}
 	unlock, err := h.Store.Lock(ctx, "yum\x00"+dst.Name)
 	if err != nil {

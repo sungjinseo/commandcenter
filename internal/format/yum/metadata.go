@@ -86,6 +86,17 @@ func (w *xw) depList(name string, deps []Dep) {
 	w.WriteString("    </rpm:" + name + ">\n")
 }
 
+// file writes one <file>; a directory or ghost carries its type.
+func (w *xw) file(indent string, f File) {
+	w.WriteString(indent + "<file")
+	if f.Type != "" {
+		w.attr("type", f.Type)
+	}
+	w.WriteString(">")
+	w.text(f.Path)
+	w.WriteString("</file>\n")
+}
+
 // pkgOpen writes the <package> start tag of filelists and other.
 func (w *xw) pkgOpen(p *Package) {
 	w.WriteString("<package")
@@ -126,9 +137,13 @@ func Primary(pkgs []*Package) string {
 		w.depList("requires", p.Requires)
 		w.depList("conflicts", p.Conflicts)
 		w.depList("obsoletes", p.Obsoletes)
+		w.depList("suggests", p.Suggests)
+		w.depList("enhances", p.Enhances)
+		w.depList("recommends", p.Recommends)
+		w.depList("supplements", p.Supplements)
 		for _, f := range p.Files {
-			if f.Type == "" && primaryFileRE.MatchString(f.Path) {
-				w.elem("    ", "file", f.Path, false)
+			if primaryFileRE.MatchString(f.Path) {
+				w.file("    ", f)
 			}
 		}
 		w.WriteString("  </format>\n</package>\n")
@@ -144,18 +159,34 @@ func Filelists(pkgs []*Package) string {
 	for _, p := range pkgs {
 		w.pkgOpen(p)
 		for _, f := range p.Files {
-			w.WriteString("  <file")
-			if f.Type != "" {
-				w.attr("type", f.Type)
-			}
-			w.WriteString(">")
-			w.text(f.Path)
-			w.WriteString("</file>\n")
+			w.file("  ", f)
 		}
 		w.WriteString("</package>\n")
 	}
 	w.WriteString("</filelists>\n")
 	return w.String()
+}
+
+// changelog is what other.xml prints of p's changelog, as createrepo_c
+// does: the newest changelogLimit entries, the oldest of them first, and
+// entries of one time moved a second apart so that a client that sorts by
+// time keeps their order.
+func changelog(p *Package) []Changelog {
+	n := min(len(p.Changelog), changelogLimit)
+	out := make([]Changelog, n)
+	var last int64
+	for i, c := range p.Changelog[:n] { // the newest first
+		k := n - 1 - i
+		out[k] = c
+		if c.Date != last {
+			last = c.Date
+			continue
+		}
+		for j, t := k+1, c.Date; j < n && out[j].Date == t; j, t = j+1, t+1 {
+			out[j].Date++
+		}
+	}
+	return out
 }
 
 // Other renders other.xml: the changelogs.
@@ -164,7 +195,7 @@ func Other(pkgs []*Package) string {
 	w.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n" + `<otherdata xmlns="http://linux.duke.edu/metadata/other" packages="` + strconv.Itoa(len(pkgs)) + `">` + "\n")
 	for _, p := range pkgs {
 		w.pkgOpen(p)
-		for _, c := range p.Changelog {
+		for _, c := range changelog(p) {
 			w.WriteString("  <changelog")
 			w.attr("author", c.Author)
 			w.attr("date", strconv.FormatInt(c.Date, 10))
@@ -223,15 +254,17 @@ func Repomd(data []repoData, now time.Time) string {
 }
 
 // repoDir is the directory of rp that holds repodata/ for the file at
-// path: "" (the root) at depth 0, the first segment at depth 1. ok is
-// false when path is not under a repodata directory (depth 1, a file at
-// the root).
+// path: "" (the root) at depth 0, else the first depth segments. ok is
+// false when path is not that deep.
 func repoDir(rp *repo.Repository, path string) (dir string, ok bool) {
-	if rp.Depth == 0 {
-		return "", true
+	for range rp.Depth {
+		i := strings.IndexByte(path[len(dir):], '/')
+		if i < 0 {
+			return "", false
+		}
+		dir = path[:len(dir)+i+1]
 	}
-	dir, _, ok = strings.Cut(path, "/")
-	return dir + "/", ok
+	return dir, true
 }
 
 // packagesOf lists the rows of rp whose files are under dir (repoDir),
@@ -243,7 +276,7 @@ func packagesOf(ctx context.Context, tx *meta.Tx, rp *repo.Repository, dir strin
 	}
 	var out []*Package
 	for _, name := range names {
-		if rp.Depth == 1 && !strings.HasPrefix(name, dir) {
+		if !strings.HasPrefix(name, dir) {
 			continue
 		}
 		rows, err := tx.ListPackages(ctx, rp.Name, name)

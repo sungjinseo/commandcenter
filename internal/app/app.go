@@ -470,7 +470,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	p2H := p2.New(store, fetcher, baseURL) // proxy and group only: its proxies use the generic deleter
 	swiftH := swift.New(store, fetcher, authn, baseURL)
 	podsH := cocoapods.New(store, fetcher, baseURL)
-	hfH := huggingface.New(store, fetcher)
+	hfH := huggingface.New(store, fetcher, baseURL)
 	terraformH := terraform.New(store, fetcher, authn, baseURL)
 	dockerKey, err := tokenKey(db)
 	if err != nil {

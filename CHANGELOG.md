@@ -45,6 +45,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reaches, directly or through an index, and that went unstored and unpulled for `deployOffset` hours, then the
   layers nothing references. An image from a recent docker is an index, so deleting its tag freed almost nothing
   before; `blobstore.compact` then gives the disk space back.
+- End-to-end tests with the real clients for six more formats, in `test/smoke/`: `yum-smoke.sh` (dnf,
+  rpmbuild), `apt-smoke.sh` (apt-get, dpkg-deb), `raw-smoke.sh` (curl, wget), `terraform-smoke.sh`
+  (terraform, tofu), `huggingface-smoke.sh` (huggingface_hub, transformers), `swift-smoke.sh` (SwiftPM).
+- Yum: a repodata depth up to 5 as in Nexus (`depth`, `yum.repodataDepth`), for layouts like
+  `7/os/x86_64/`.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -71,6 +76,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   those count against the container, outside GOMEMLIMIT. The connection limit now follows the container's memory
   (limit minus GOMEMLIMIT, 160 KiB a connection, at most 1024): 307 in the default 128 MiB. `test/load/flood.sh`
   proves it.
+- Yum: primary.xml lists weak dependencies, so `dnf install` installs what a package recommends, and
+  the directories and ghosts under `/etc` and `bin/`. other.xml lists the newest 10 changelog entries,
+  oldest first, as createrepo_c does. `repository.rebuild-metadata` reads stored RPMs again to fill in
+  packages uploaded earlier.
+- APT: `apt-get update` of an empty repository works, and one right after the first upload sees it.
+- APT: in a group, a hosted member with packages answers alone for its distribution, so a proxy with
+  a suite of that name (Debian's `stable`) no longer hides its packages.
+- Terraform: a proxy of registry.opentofu.org installs modules: the source can be in the response body.
+- Hugging Face: `hf download` and `snapshot_download` of huggingface_hub 2.x work: tree listings hide
+  Xet hashes. Listings past 1000 files are no longer cut short: the next page's `Link` is kept.
+- Hugging Face: a missing file, revision or repository is a 404 with the Hub's `X-Error-Code`, so
+  clients raise the right error. A regular file has one ETag before and after it is cached.
+- Hugging Face: Xet tokens are no longer passed through and cached: any reader could get one made for
+  the `remoteAuth` account.
+- Swift: SwiftPM on Linux no longer hangs without or with wrong credentials: it gets a Bearer challenge.
+
+### Upgrade notes
+- Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
+  runs on the repository. It now reads every RPM's header under the repository's lock, so uploads to that
+  repository wait meanwhile (three ranged reads per package on S3).
+- Yum depth: create repositories of depth 2 to 5 only once every node runs this version: an older node
+  would write repodata one level down for them.
+- Hugging Face: tree listings are cached under a new key, so each is fetched once more; the old copies stay
+  until the repository is deleted. A proxy cut off from the Hub cannot serve a listing cached only before
+  the upgrade. Listings of more than 1000 files need `baseURL` to be what clients open.
 
 ## [0.4.0] - 2026-11-05
 

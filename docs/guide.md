@@ -670,7 +670,7 @@ Nexus와 다른 점:
 - 컴포넌트와 자산의 `id`는 서버가 만든 불투명한 값입니다(컴포넌트는 저장소·그룹·이름·버전, 자산은 저장소·경로를 base64url로 묶은 것). 응답에서 받은 값을 그대로 쓰면 되고, 저장소를 지우고 다시 만들어도 같은 값이 나오지만 Nexus처럼 값의 형식에 기대지는 마세요.
 - `DELETE /assets/{id}`는 포맷 규칙대로 파일 하나를 지웁니다. proxy는 캐시된 사본을 버려 다음 요청에 다시 받습니다. hosted Maven은 그 파일만 지우고 `maven-metadata.xml`을 다시 만듭니다. 파일 하나가 곧 컴포넌트인 경우(raw 파일, npm tarball, .deb, .rpm, .nupkg 등)는 컴포넌트 삭제와 같이 처리되어 색인이 갱신됩니다. 여러 파일로 된 컴포넌트의 일부(PyPI 릴리스의 파일 하나, Go 모듈 파일, docker 레이어)나 생성된 메타데이터는 `400`으로 거절하니 `DELETE /components/{id}`를 쓰세요. 컴포넌트 삭제는 웹 UI의 컴포넌트 삭제와 같은 경로로 처리되어 hosted 저장소에서만, `writePolicy: deny`가 아닐 때만 되고 활동 이벤트에 남습니다.
 - 저장소 생성·수정·삭제는 웹 UI의 저장소 API를 그대로 호출하므로 검증 규칙과 메시지가 UI와 같고, 비밀번호 또는 세션 로그인이 필요합니다(API 토큰으로는 `403`). 같은 이름이 이미 있으면 `409`가 아니라 `400` 검증 오류입니다.
-- Command Center가 지킬 수 없는 값(docker의 `httpPort`·`httpsPort`·`subdomain`·`v1Enabled: true`, `dockerProxy.cacheForeignLayers`, `nugetVersion: V2`, `removeQuarantined: true`, `yum.deployPolicy: PERMISSIVE`(깊이 1), `yumSigning.keypair` 등)은 버리지 않고 그 필드를 `id`로 한 400으로 거절합니다. PUT 본문에 해당 필드가 없는 설정(익명 읽기, yum 깊이, terraform GPG 공개 키, contentDisposition)은 그대로 유지합니다. 다른 이름을 보낸 PUT은 400(`id: name`)입니다. 그룹 응답에는 `cleanup`이 없고 `writableMember`가 항상 있습니다. `component.proprietaryComponents`는 받기만 하고 `false`로 답합니다. `httpClient.connection`과 `negativeCache.enabled`는 같은 이름의 저장소 키(`connection`, `negativeCacheEnabled`)로 옮기며, PUT에서 빼면 저장된 값을 유지하고 `connection: {}`은 지웁니다. `httpClient.authentication.type`은 `username`과 `bearerToken`을 받습니다. `ntlm`과 그 밖의 형식은 Basic으로 바꿔 보내지 않고 400으로 거부하니, NTLM 원격은 NTLM을 대신 처리하는 프록시를 앞에 두세요. `storage.strictContentTypeValidation`(hosted), `raw.contentDisposition`(`INLINE`/`ATTACHMENT`), `httpClient.blocked`·`httpClient.autoBlock`은 같은 이름의 저장소 키로 옮깁니다("저장소 키" 참고). `cleanup.policyNames`의 정책은 모두 연결되어 각각 따로 적용됩니다(저장소 키 `cleanupPolicies`). 그룹 본문의 `storage.blobStoreName`은 버립니다(그룹에는 blob store가 없습니다). 응답의 `httpClient.authentication`에는 사용자 이름만 있고 비밀번호는 나오지 않습니다.
+- Command Center가 지킬 수 없는 값(docker의 `httpPort`·`httpsPort`·`subdomain`·`v1Enabled: true`, `dockerProxy.cacheForeignLayers`, `nugetVersion: V2`, `removeQuarantined: true`, `yum.deployPolicy: PERMISSIVE`(깊이 1 이상), `yumSigning.keypair` 등)은 버리지 않고 그 필드를 `id`로 한 400으로 거절합니다. PUT 본문에 해당 필드가 없는 설정(익명 읽기, yum 깊이, terraform GPG 공개 키, contentDisposition)은 그대로 유지합니다. 다른 이름을 보낸 PUT은 400(`id: name`)입니다. 그룹 응답에는 `cleanup`이 없고 `writableMember`가 항상 있습니다. `component.proprietaryComponents`는 받기만 하고 `false`로 답합니다. `httpClient.connection`과 `negativeCache.enabled`는 같은 이름의 저장소 키(`connection`, `negativeCacheEnabled`)로 옮기며, PUT에서 빼면 저장된 값을 유지하고 `connection: {}`은 지웁니다. `httpClient.authentication.type`은 `username`과 `bearerToken`을 받습니다. `ntlm`과 그 밖의 형식은 Basic으로 바꿔 보내지 않고 400으로 거부하니, NTLM 원격은 NTLM을 대신 처리하는 프록시를 앞에 두세요. `storage.strictContentTypeValidation`(hosted), `raw.contentDisposition`(`INLINE`/`ATTACHMENT`), `httpClient.blocked`·`httpClient.autoBlock`은 같은 이름의 저장소 키로 옮깁니다("저장소 키" 참고). `cleanup.policyNames`의 정책은 모두 연결되어 각각 따로 적용됩니다(저장소 키 `cleanupPolicies`). 그룹 본문의 `storage.blobStoreName`은 버립니다(그룹에는 blob store가 없습니다). 응답의 `httpClient.authentication`에는 사용자 이름만 있고 비밀번호는 나오지 않습니다.
 - Maven 저장소의 `maven` 객체는 `versionPolicy`와 함께 저장된 `layoutPolicy`(`STRICT`/`PERMISSIVE`)와 `contentDisposition`(`INLINE`/`ATTACHMENT`)을 그대로 돌려주고, 만들기·수정 본문의 두 값은 저장소 키 `layoutPolicy`, `contentDisposition`으로 옮깁니다("저장소 키" 참고). PUT 본문에 없으면 저장된 값을 유지합니다. group 응답에는 `maven` 객체가 없고, group 본문의 `maven` 객체는 버립니다. Nexus는 `maven.versionPolicy`가 없는 생성 요청을 거부하지만 Command Center는 hosted 저장소에 `RELEASE`를 기본값으로 씁니다.
 - Maven SNAPSHOT은 타임스탬프 빌드마다 컴포넌트 하나입니다("컴포넌트는 파생 값" 참고). `version`은 빌드의 버전(`1.0-20261014.120000-3`)과, `maven.baseVersion`은 기준 버전(`1.0-SNAPSHOT`)과 따로 맞춥니다. `sort=version`은 Maven 버전 순서를 따르고(`1.0-rc1` < `1.0-SNAPSHOT`의 빌드들 < `1.0`, 빌드끼리는 timestamp와 빌드 번호 순), 컴포넌트 안에서는 분류자 없는 파일이 먼저 옵니다. 그래서 `search/assets/download?…&maven.baseVersion=1.0-SNAPSHOT&maven.extension=jar&sort=version`은 가장 새로운 빌드의 jar로 보냅니다. 이전 버전에서 `X-SNAPSHOT` 하나였던 컴포넌트의 `id`는 빌드마다 새 `id`로 바뀝니다.
 - apt 본문: hosted의 `apt.distribution`과 `aptSigning.keypair`·`aptSigning.passphrase`, proxy의 `apt.distribution`·`apt.flat`·`apt.enforceDistribution`을 같은 이름의 저장소 키로 옮깁니다(비밀번호가 걸린 키는 한 번 풀어 저장하고 비밀번호는 저장하지 않습니다). 응답의 `aptSigning`은 키가 있으면 `{"keypair":null,"passphrase":null}`, 없으면 `null`이며 키 자체는 나오지 않습니다. 수정(PUT) 본문에 `apt`·`aptSigning`이 없으면 저장된 값을 그대로 두고, Command Center 고유의 `component`도 유지합니다. Nexus와 달리 hosted 생성 때 `apt.distribution`이 없으면 400 대신 `stable`이 됩니다. proxy의 `aptSigning`(proxy 재서명)은 지원하지 않아 400입니다.
@@ -700,7 +700,7 @@ Nexus와 다른 점:
 | nuget | `asset`(.nupkg) | push와 같이 |
 | rubygems | `asset`(.gem) | gem push와 같이 |
 | helm | `asset`(차트 .tgz) | Chart.yaml의 이름·버전 |
-| yum | `directory`(선택, depth 1이면 필요), `asset`, `asset.filename` | `<directory>/<filename>` |
+| yum | `directory`(선택, depth가 있으면 필요), `asset`, `asset.filename` | `<directory>/<filename>` |
 | r | `asset`, `asset.pathId` | `<pathId>/<파일 이름>`(예: `src/contrib`) |
 | conda(Command Center 확장) | `directory`(subdir, 예: `noarch`), `asset` | `<directory>/<파일 이름>` |
 | composer(확장) | `vendor`, `package`, `version`, `asset`(zip) | `packages/upload/<vendor>/<package>/<version>`와 같이 |
@@ -1064,7 +1064,7 @@ commandcenter config apply -config /etc/commandcenter/config.yaml -f cc.yaml -pr
 | `mergeMembers` | npm·pypi group | `false` | 켜면 패키지를 가진 모든 멤버의 문서를 합쳐서 답합니다(Nexus의 group 동작). 끄면(기본값) 패키지를 가진 첫 멤버만 답하므로, 공개 저장소의 같은 이름 패키지가 내부 패키지를 대신하거나 버전을 끼워 넣지 못합니다(의존성 혼동 방지). Nexus에서 옮긴 group이 hosted의 패치 버전과 공개 버전을 함께 내주던 경우에만 켜세요. |
 | `versionPolicy` | Maven hosted, proxy | `release`(hosted) | `release`, `snapshot`, `mixed`. Maven에서만 쓸 수 있습니다. 업로드뿐 아니라 읽기에도 적용되어, 정책에 맞지 않는 경로의 GET·HEAD는 404이고 proxy는 원격에 묻지 않습니다("Maven 클라이언트 설정"의 동작 메모 참고). |
 | `layoutPolicy` | Maven hosted, proxy | `strict` | `strict`는 Maven 경로(아티팩트, 메타데이터, 체크섬, 서명, `archetype-catalog.xml`, `.meta/prefixes.txt`)만 저장하고 가져옵니다. `permissive`는 그 밖의 경로(`KEYS`, `docs/readme.txt` 등)도 저장하거나 원격에서 가져옵니다. 어느 쪽이든 `.index/`와 `.meta/` 아래 경로는 받지 않습니다. 기존 저장소는 모두 `strict`이며 이전과 같이 동작합니다. 편집할 때 생략하면 유지합니다. Nexus 호환 API의 `maven.layoutPolicy`(`STRICT`/`PERMISSIVE`)와 같습니다. |
-| `depth` | yum hosted | `0` | `repodata/` 위치: `0`은 저장소 루트에 하나, `1`은 첫 디렉터리마다("Yum 설정" 참고). |
+| `depth` | yum hosted | `0` | `0`~`5`. `0`은 저장소 루트에 하나, `1` 이상은 그만큼 내려간 디렉터리마다("Yum 설정" 참고). |
 | `distribution` | apt hosted, proxy | `stable`(hosted), 없음(proxy) | hosted는 `dists/<distribution>/` 경로와 sources.list의 suite가 됩니다. proxy는 원격의 배포판 이름이며 `enforceDistribution`과 함께 씁니다("APT 설정" 참고). |
 | `component` | apt hosted | `main` | `dists/<distribution>/<component>/` 경로와 `pool/<component>/`, sources.list의 component가 됩니다. |
 | `flat` | apt proxy | `false` | 원격이 `dists/` 없는 flat 저장소임을 나타냅니다(Nexus의 `apt.flat`). 캐시 동작은 같습니다. |
@@ -2024,14 +2024,14 @@ crate 이름은 올린 표기(대소문자 포함) 그대로 인덱스, 웹 UI(�
 ```bash
 # 업로드(add 권한): 경로는 자유. Content-Type은 확장자가 정하는 형식이 먼저이고, 확장자로 알 수 없을 때만 보낸 Content-Type을 씁니다.
 curl -u ci:PASSWORD -T installer.sh http://localhost:8081/repository/raw-hosted/tools/installer.sh
-# 다운로드(read 권한): 저장된 Content-Type으로 응답합니다. HEAD, Range, If-None-Match(ETag)도 됩니다.
+# 다운로드(read 권한): 저장된 Content-Type으로 응답합니다. HEAD, Range, If-None-Match(ETag), If-Modified-Since, If-Range도 됩니다.
 curl -O http://localhost:8081/repository/raw-hosted/tools/installer.sh
 # 삭제(delete 권한)
 curl -u ci:PASSWORD -X DELETE http://localhost:8081/repository/raw-hosted/tools/installer.sh
 ```
 
-- hosted: `writePolicy`를 Maven처럼 따릅니다. `allow_once`(기본)는 같은 경로 재업로드를 400으로 거부하고, `allow`는 덮어쓰기를 허용하되 이미 있는 파일을 덮어쓰려면 edit 권한이 필요하며(없으면 403), `deny`는 업로드·삭제를 400으로 막습니다. 경로는 Maven과 같은 규칙으로 검사합니다: `..`나 `.` 세그먼트, `//`, 역슬래시, 제어 문자, `?`·`#`·`;`, UTF-8이 아닌 바이트는 400입니다. 공백과 유니코드는 됩니다(URL 인코딩해서 보내세요).
-- 저장되는 Content-Type은 Nexus처럼 확장자가 정하는 형식이 먼저이고, 확장자로 알 수 없을 때만 업로드의 Content-Type을, 그것도 없거나 curl `--data-binary`의 기본값(`application/x-www-form-urlencoded`)·multipart이면 `application/octet-stream`을 씁니다. 이미 저장된 파일의 형식은 바뀌지 않습니다.
+- hosted: `writePolicy`를 Maven처럼 따릅니다. `allow_once`(기본)는 같은 경로 재업로드를 400으로 거부하고, `allow`는 덮어쓰기를 허용하되 이미 있는 파일을 덮어쓰려면 edit 권한이 필요하며(없으면 403), `deny`는 업로드·삭제를 400으로 막습니다. 경로는 Maven과 같은 규칙으로 검사합니다: `..`나 `.` 세그먼트, `//`, 역슬래시, 제어 문자, `?`·`#`·`;`, UTF-8이 아닌 바이트는 400입니다. 다만 인코딩하지 않은 `..`·`.`·`//`는 HTTP 라우터가 먼저 정리한 경로로 307 리다이렉트하고, `%2e%2e`처럼 인코딩한 것이 400입니다. curl은 `--path-as-is` 없이는 이런 경로를 스스로 정리해 보냅니다. 공백과 유니코드는 됩니다(URL 인코딩해서 보내세요).
+- 저장되는 Content-Type은 Nexus처럼 확장자가 정하는 형식이 먼저이고, 확장자로 알 수 없을 때만 업로드의 Content-Type을, 그것도 없거나 curl `--data-binary`의 기본값(`application/x-www-form-urlencoded`)·multipart이면 `application/octet-stream`을 씁니다. 이미 저장된 파일의 형식은 바뀌지 않습니다. 확장자 표는 이미지의 `/etc/mime.types`입니다. `.yaml`, `.log`, `.conf`, `.properties`처럼 표에 없는 확장자는 보낸 Content-Type을, 보낸 것이 없으면 `application/octet-stream`을 씁니다. Nexus처럼 내용을 보고 판단하지는 않습니다.
 - 디렉터리: `/`로 끝나는 경로(저장소 루트 `/repository/raw-hosted/` 포함)를 GET하면 먼저 그 디렉터리의 `index.html`, 다음 `index.htm`을 그 파일의 형식과 `contentDisposition`으로 내려 줍니다(hosted·proxy·group 모두. proxy는 원격의 `<디렉터리>/index.html`을 받아 캐시합니다). 그래서 문서·Javadoc·리포트 같은 정적 사이트를 raw에 둘 수 있습니다. 다만 저장소 응답에는 보안을 위해 `Content-Security-Policy: sandbox`가 붙어 사이트의 스크립트는 실행되지 않고, 브라우저에서 열려면 `contentDisposition`이 `inline`이어야 합니다. index 파일이 없으면 hosted는 웹 서버처럼 하위 항목을 HTML 목록으로 보여 줍니다. `Accept: application/json`이면 `{"path":"docs/","entries":[{"name":"a.txt","dir":false,"size":5,"lastModified":"…"},{"name":"sub","dir":true}],"truncated":false}` 형태의 JSON입니다. 한 번에 최대 1000개를 보여 주고 더 있으면 `truncated`가 true입니다. 파일이 하나도 없는 디렉터리는 404입니다(루트는 항상 200). proxy와 group은 디렉터리 목록을 제공하지 않습니다(404).
 - proxy: `remote` 아래의 어떤 경로든 원격에서 받아 캐시합니다. 원격이 보낸 Content-Type을 저장하고, 없으면 확장자로 정합니다. 다른 포맷과 달리 `text/html` 응답도 그대로 파일로 캐시합니다(raw 원격은 웹 사이트이기 때문). `contentMaxAge`(기본 영구)마다 다시 확인하고, 원격이 404/410을 준 경로는 `negativeCacheTTL` 동안 다시 묻지 않습니다. `/`로 끝나는 경로는 원격의 디렉터리 페이지를 묻지 않고(목록 페이지를 파일로 캐시하지 않기 위해) `index.html`·`index.htm`만 묻습니다.
 - group: 멤버 순서대로 처음 그 경로를 가진 멤버가 답합니다(hosted를 proxy보다 앞에 두세요). `writeMember`가 있으면 PUT·DELETE는 그 hosted 멤버로 갑니다.
@@ -2137,10 +2137,12 @@ curl -u ci:<비밀번호> -X DELETE http://localhost:8081/repository/composer-ho
 Debian·Ubuntu 패키지 저장소(Nexus의 apt 포맷)입니다. `.deb` 파일은 `pool/` 아래에, apt가 읽는 메타데이터는 `dists/<distribution>/` 아래에 두며, hosted는 `Release`, `<component>/binary-<arch>/Packages`(와 `.gz`)를 서버가 직접 만들어 유지합니다(패키지를 올리거나 지울 때마다 같은 트랜잭션에서 다시 생성). 서명 키가 있으면 `Release.gpg`(분리 서명)와 `InRelease`(클리어 서명)도 함께 만듭니다.
 
 ```bash
-# 서명 키가 있는 저장소: 공개키를 받아 signed-by로 지정합니다.
+# 서명 키가 있는 저장소: 공개키를 받아 signed-by로 지정합니다. armor 형식 그대로 .asc로 두면 gpg가 필요 없습니다.
+sudo install -d /etc/apt/keyrings
+sudo curl -fsSL http://localhost:8081/repository/apt-hosted/public.key -o /etc/apt/keyrings/commandcenter.asc
+echo "deb [signed-by=/etc/apt/keyrings/commandcenter.asc] http://localhost:8081/repository/apt-hosted stable main" | sudo tee /etc/apt/sources.list.d/commandcenter.list
+# gpg가 있으면 바이너리 키링으로 바꿔 쓸 수도 있습니다. apt-key는 Debian 13에 없습니다.
 curl -fsSL http://localhost:8081/repository/apt-hosted/public.key | sudo gpg --dearmor -o /usr/share/keyrings/commandcenter.gpg
-echo "deb [signed-by=/usr/share/keyrings/commandcenter.gpg] http://localhost:8081/repository/apt-hosted stable main" | sudo tee /etc/apt/sources.list.d/commandcenter.list
-# (옛 방식) sudo apt-key add 로 공개키를 등록해도 됩니다: curl -fsSL .../public.key | sudo apt-key add -
 
 # 서명 키가 없는 저장소: trusted=yes 로 서명 검사를 건너뜁니다(내부망 전용으로만 권장).
 echo "deb [trusted=yes] http://localhost:8081/repository/apt-hosted stable main" | sudo tee /etc/apt/sources.list.d/commandcenter.list
@@ -2152,7 +2154,7 @@ curl -u ci:<비밀번호> -H 'Content-Type: multipart/form-data' --data-binary @
 curl -u ci:<비밀번호> -F file=@hello_1.0_amd64.deb http://localhost:8081/repository/apt-hosted/
 ```
 
-- hosted는 올린 `.deb`(ar 아카이브)의 `control` 파일을 읽어 `Package`, `Version`, `Architecture`, `Maintainer`, `Depends`, `Description` 등 모든 필드를 `Packages` 항목으로 저장하고, 파일은 PUT 경로와 무관하게 Debian pool 규칙대로 `pool/<component>/<첫 글자 또는 lib?>/<패키지>/<패키지>_<버전>_<아키텍처>.deb`에 둡니다(버전의 `:`는 dpkg처럼 `%3a`로 씀). `Packages`에는 `Filename`, `Size`, `MD5sum`, `SHA1`, `SHA256`가 붙습니다. `Architecture: all` 패키지는 모든 아키텍처의 `Packages`에 함께 나오고, `Release`의 `Architectures`는 저장된 패키지에서 도출합니다(아키텍처별 패키지가 하나도 없으면 `all`만 나오므로 클라이언트 아키텍처의 패키지를 하나는 올려 두세요). 업로드 본문은 `maxUploadMiB`를 따릅니다.
+- hosted는 올린 `.deb`(ar 아카이브)의 `control` 파일을 읽어 `Package`, `Version`, `Architecture`, `Maintainer`, `Depends`, `Description` 등 모든 필드를 `Packages` 항목으로 저장하고, 파일은 PUT 경로와 무관하게 Debian pool 규칙대로 `pool/<component>/<첫 글자 또는 lib?>/<패키지>/<패키지>_<버전>_<아키텍처>.deb`에 둡니다(버전의 `:`는 dpkg처럼 `%3a`로 씀). `Packages`에는 `Filename`, `Size`, `MD5sum`, `SHA1`, `SHA256`가 붙습니다. `Architecture: all` 패키지는 모든 아키텍처의 `Packages`에 함께 나오고, `Release`의 `Architectures`는 저장된 패키지에서 도출합니다(아키텍처별 패키지가 하나도 없으면 `all`만 나오며, apt는 그래도 그 목록을 읽습니다). 업로드 본문은 `maxUploadMiB`를 따릅니다.
 - `POST /`의 본문이 경계(boundary)가 있는 multipart 폼이면 `file` 필드를, 없으면 첫 파일 부분을 패키지로 읽습니다. 그 밖의 본문은 Content-Type과 관계없이 패키지 자체로 읽습니다. Nexus 문서의 curl 예(`-H "Content-Type: multipart/form-data" --data-binary @파일`)는 경계가 없으므로 본문 그대로 처리됩니다.
 - **control 아카이브는 무압축 `control.tar`와 gzip·xz·zstd·bzip2·lzma로 압축한 `control.tar.gz`·`.xz`·`.zst`·`.bz2`·`.lzma`를 모두 읽습니다.** Debian `dpkg-deb`의 기본값(xz)과 Ubuntu 21.10 이후의 기본값(zstd)으로 만든 패키지도 그대로 올릴 수 있습니다. 압축을 푼 control 아카이브는 64 MiB, `control` 파일은 1 MiB까지만 읽습니다. 압축 해제 창(xz 사전·zstd window)을 8 MiB보다 크게 선언한 아카이브(`xz -7` 이상, `zstd --ultra`·`--long=24` 이상 등), xz BCJ 필터나 zstd 사전(dictionary)을 쓴 아카이브, 그 밖의 압축(`.lz4` 등)은 400입니다. 패키지 이름은 소문자·숫자·`+.-` 두 글자 이상, 버전은 숫자로 시작해야 합니다(Debian 정책).
 - 저장소 설정 `distribution`(기본 `stable`)과 `component`(기본 `main`)가 `dists/<distribution>/<component>/…` 경로와 sources.list의 suite·component가 됩니다. `signingKey`에는 OpenPGP 개인키를 ASCII armor로 넣습니다. RSA(2048비트 이상), ECDSA(P-256·P-384·P-521), Ed25519(gpg 2.3 이후의 기본값)를 모두 쓸 수 있고, 키에 서명용 부키가 있으면 gpg처럼 폐기되거나 만료되지 않은 가장 최근의 서명 부키로, 없으면 주키로 서명합니다. 주키를 따로 보관하려고 `gpg --armor --export-secret-subkeys`로 내보낸 키도 됩니다. 비밀번호가 걸린 키는 UI·API에서 `signingKeyPassphrase`(Nexus API는 `aptSigning.passphrase`)와 함께 넣으면 서버가 한 번 풀어 암호화 저장하며 비밀번호는 저장하지 않습니다(gpg 2.1 이후가 내보내는 AES 보호를 풉니다. gpg 1.x의 CAST5 보호, v5/v6 키는 거부합니다). 설정 파일 `repositories:`에는 비밀번호 없는 키만 넣을 수 있습니다. 예: `gpg --batch --passphrase '' --quick-gen-key 'CC <apt@example.com>' ed25519 sign never` 뒤 `gpg --armor --export-secret-keys apt@example.com`. 키는 원격 인증 정보처럼 암호화되어 저장되고 API·UI에는 설정 여부(`signingKeySet`)만 나오며, 공개키는 `/repository/<저장소>/public.key`로 제공합니다. 키가 없으면 서명 파일 없이 제공하므로 클라이언트에 `[trusted=yes]`가 필요합니다.
@@ -2161,7 +2163,7 @@ curl -u ci:<비밀번호> -F file=@hello_1.0_amd64.deb http://localhost:8081/rep
 - 스냅샷(hosted 전용): `curl -u ci:<비밀번호> -X MKCOL …/repository/apt-hosted/snapshots/rel-2026-10`(add 권한)은 그 순간의 `dists/`를 `snapshots/<id>/` 아래에 고정합니다. `PUT`에 `Architectures: amd64`·`Components: main` 형식 본문을 주면 그 아키텍처의 `Packages`만 고정합니다(`Release`는 그대로 복사되므로 클라이언트는 `[arch=amd64]`로 맞추세요). `DELETE`(delete 권한)로 지웁니다. 클라이언트는 `deb [signed-by=…] …/repository/apt-hosted/snapshots/rel-2026-10 stable main`처럼 씁니다. 스냅샷 아래의 패키지 경로는 지금의 pool에서 내려 주므로, 그 사이 지운 패키지는 404입니다. 같은 id가 있으면 409이고, 활동 이벤트는 `snapshot.create`·`snapshot.delete`입니다. proxy에는 스냅샷이 없습니다(MKCOL 405).
 - `writePolicy`: `allow_once`(기본)는 같은 패키지·버전·아키텍처 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.
 - proxy의 `remote`는 `dists/`와 `pool/`이 있는 저장소 URL(예: `https://deb.debian.org/debian/`, `https://archive.ubuntu.com/ubuntu/`)이나 flat 저장소 URL입니다. 원격이 주는 파일을 경로 그대로 캐시하며 `.deb`·`.udeb`만 영구 캐시하고(`contentMaxAge`) 나머지(`dists/` 아래 전부, flat 저장소 루트의 `Release`·`Packages` 등)는 메타데이터로 `metadataMaxAge`마다 다시 확인합니다. `Release`나 `InRelease`를 다시 받았는데 내용이 바뀌었으면 같은 디렉터리에 캐시된 다른 메타데이터(`Packages`, `Release.gpg` 등. `by-hash/`와 패키지는 제외)를 만료시켜 다음 요청에서 다시 확인하므로, 체크섬이 서로 맞지 않는 조합(Hash Sum mismatch)을 내주지 않습니다. 원격의 서명(`InRelease`, `Release.gpg`)은 손대지 않고 그대로 전달하므로 클라이언트는 배포판의 키링(`debian-archive-keyring`)으로 그대로 검증합니다: `deb http://localhost:8081/repository/apt-proxy bookworm main`. proxy 설정 `distribution`은 원격의 배포판 이름이고, `enforceDistribution: true`이면 다른 `dists/<이름>/` 요청을 원격에 묻지 않고 404로 답합니다(group 안에서도 같음). `flat: true`는 원격이 dists/ 없는 flat 저장소임을 나타냅니다(Nexus 호환 정보). 캐시된 패키지는 경로와 상관없이 파일 이름(`<패키지>_<버전>_<아키텍처>.deb`)으로 컴포넌트가 되므로 flat·벤더 레이아웃 원격의 패키지도 컴포넌트 목록·검색·Cleanup에 나옵니다. 원격이 응답하지 않으면 만료된 메타데이터를 `Warning: 110`과 함께 제공합니다.
-- group은 경로마다 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다(raw와 같은 규칙). hosted 멤버들의 `Packages`를 합치지는 않으므로(Nexus도 같음) 같은 distribution 이름을 쓰는 hosted 두 개를 한 group에 넣으면 앞 멤버의 `dists/`만 보입니다. hosted와 proxy를 섞을 때는 distribution 이름이 겹치지 않게 하고(예: hosted `stable`, proxy `bookworm`) sources.list에 group URL로 두 줄을 쓰면 됩니다. `public.key`는 키가 있는 첫 멤버의 것이고, `writeMember`가 있으면 group에 올린 패키지는 그 hosted로 갑니다.
+- group은 경로마다 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다(raw와 같은 규칙). hosted 멤버들의 `Packages`를 합치지는 않으므로(Nexus도 같음) 같은 distribution 이름을 쓰는 hosted 두 개를 한 group에 넣으면 앞 멤버의 `dists/`만 보입니다. hosted와 proxy를 섞을 때는 distribution 이름이 겹치지 않게 하고(예: hosted `stable`, proxy `bookworm`) sources.list에 group URL로 두 줄을 쓰면 됩니다. `public.key`는 키가 있는 첫 멤버의 것이고, `writeMember`가 있으면 group에 올린 패키지는 그 hosted로 갑니다. hosted 멤버에 패키지가 있으면 그 distribution(`dists/<distribution>/`)은 그 멤버의 것이어서, 멤버에 없는 파일(서명 없는 저장소의 `InRelease` 등)을 뒤 멤버에 묻지 않습니다. 그래서 Debian 미러 proxy에 같은 이름의 suite(`stable`)가 있어도 hosted 패키지가 가려지지 않습니다. 패키지가 하나도 없는 hosted 멤버는 답하지 않으므로, group을 통한 그 distribution의 `apt update`는 첫 업로드 뒤부터 됩니다(저장소 자신의 주소로는 첫 업로드 전에도 됩니다).
 - 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(apt hosted·proxy 모두 가능)으로 하며, 지우면 `dists/`가 바로 갱신됩니다. 컴포넌트는 `.deb` 파일 하나이며 그룹 자리에 아키텍처, 이름에 패키지, 버전에 Debian 버전이 들어갑니다(Cleanup `namePattern`은 `amd64:hello`처럼 `아키텍처:패키지`에 맞춥니다). 역할 권한 대상으로 `format:apt`를 쓸 수 있고, 컴포넌트 메타데이터 탭은 Description·Maintainer·Homepage와 Depends(`depends`), Pre-Depends, Recommends, Suggests를 보여 줍니다.
 
 ### Yum 설정
@@ -2170,28 +2172,36 @@ Yum/DNF(RPM) 저장소(Nexus의 yum 포맷)입니다. `.rpm` 파일과 그 목�
 
 ```ini
 # /etc/yum.repos.d/cc.repo
-[cc-el9]
-name=Command Center el9
-baseurl=http://localhost:8081/repository/yum-hosted/el9/
+[cc]
+name=Command Center
+baseurl=http://localhost:8081/repository/yum-hosted/
 enabled=1
-gpgcheck=1            # 서명된 RPM은 그대로 검증됩니다
+# 서명된 RPM은 그대로 검증됩니다. 서명하지 않은 RPM을 올린다면 0으로 둡니다.
+gpgcheck=1
 gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-mine
-repo_gpgcheck=0       # repomd.xml은 서명하지 않으므로 0으로 둡니다
+# hosted의 repomd.xml은 서명하지 않으므로 0으로 둡니다.
+repo_gpgcheck=0
 ```
+
+`.repo` 파일에서는 값 뒤에 주석을 붙일 수 없습니다. `gpgcheck=1  # 설명`처럼 쓰면 dnf는 명령마다 `Invalid configuration value`를 출력하고 그 값을 무시한 채 `[main]`의 값을 씁니다. 주석은 따로 한 줄로 쓰세요.
 
 ```bash
 # 올리기: 파일 PUT(curl). add 권한이 필요합니다. 파일 이름은 패키지의 <이름>-<버전>-<릴리스>.<아키>.rpm 이어야 합니다.
 curl -u ci:<비밀번호> --upload-file demo-1.0-1.el9.x86_64.rpm http://localhost:8081/repository/yum-hosted/el9/
-dnf --repo cc-el9 makecache && dnf install demo
+# 컴포넌트 업로드 API(Nexus와 같은 필드)
+curl -u ci:<비밀번호> -F yum.directory=el9 -F yum.asset=@demo-1.0-1.el9.x86_64.rpm -F yum.asset.filename=demo-1.0-1.el9.x86_64.rpm 'http://localhost:8081/service/rest/v1/components?repository=yum-hosted'
+dnf --repo cc makecache && dnf install demo
 ```
 
-- hosted는 올린 RPM의 헤더를 읽어 name, epoch/version/release, arch, summary, description, license, url, vendor, group, buildhost, sourcerpm, provides/requires/conflicts/obsoletes, 파일 목록, changelog를 저장하고 `primary.xml.gz`(`checksum type="sha256" pkgid="YES"`, `header-range`), `filelists.xml.gz`, `other.xml.gz`, `repomd.xml`을 다시 만듭니다. 파일 이름이 헤더의 `<이름>-<버전>-<릴리스>.<아키>.rpm`과 다르거나, RPM이 아니거나, `repodata/` 아래이면 400입니다. 업로드 본문은 `maxUploadMiB`를 따릅니다. 첫 업로드 전에는 `repodata/repomd.xml`이 404입니다.
-- `depth`(hosted 전용, 기본 0): `repodata/`를 두는 위치입니다. `0`이면 저장소 루트에 하나를 두고 모든 경로의 RPM을 나열하며, `1`이면 첫 디렉터리마다(`el8/`, `el9/` …) 각각 두고 그 아래 RPM만 나열합니다(Nexus의 repodata depth). `depth: 1`에서는 루트에 바로 올릴 수 없고(400) `baseurl`은 `…/yum-hosted/el9/`처럼 디렉터리까지 적습니다. `location href`는 그 디렉터리 기준 상대 경로입니다.
+- hosted는 올린 RPM의 헤더를 읽어 name, epoch/version/release, arch, summary, description, license, url, vendor, group, buildhost, sourcerpm, provides/requires/conflicts/obsoletes, 약한 의존성(recommends/suggests/supplements/enhances), 파일 목록, 최근 changelog 10개(createrepo_c의 기본값과 같습니다)를 저장하고 `primary.xml.gz`(`checksum type="sha256" pkgid="YES"`, `header-range`), `filelists.xml.gz`, `other.xml.gz`, `repomd.xml`을 다시 만듭니다. 파일 이름이 헤더의 `<이름>-<버전>-<릴리스>.<아키>.rpm`과 다르거나, RPM이 아니거나, `repodata/` 아래이면 400입니다. 업로드 본문은 `maxUploadMiB`를 따릅니다. 첫 업로드 전에는 `repodata/repomd.xml`이 404입니다.
+- `depth`(hosted 전용, 기본 0, 최대 5): `repodata/`를 두는 위치입니다(Nexus의 repodata depth). `0`이면 저장소 루트에 하나를 두고 모든 경로의 RPM을 나열합니다. `1`이면 첫 디렉터리마다(`el8/`, `el9/` …), `3`이면 세 단계 아래 디렉터리마다(`7/os/x86_64/` …) 각각 두고 그 아래 RPM만 나열합니다. depth보다 얕은 경로에는 올릴 수 없고(400) `baseurl`은 `…/yum-hosted/7/os/x86_64/`처럼 그 디렉터리까지 적습니다. `location href`는 그 디렉터리 기준 상대 경로입니다. 패키지가 있는 저장소의 depth를 높이면 그보다 얕은 경로의 패키지는 어느 `repodata/`에도 나오지 않습니다.
 - `writePolicy`: `allow_once`(기본)는 같은 패키지(이름·버전·릴리스·아키 같음) 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요, repodata도 갱신), `deny`는 읽기 전용(400)입니다.
 - `repomd.xml`은 서명하지 않으므로 클라이언트의 `.repo`에 `repo_gpgcheck=0`을 두세요. `gpgcheck=1`은 RPM 자체의 서명을 검사하므로 서명된 패키지를 올리면 그대로 동작합니다.
 - proxy의 `remote`는 미러의 URL이며 요청 경로를 그대로 원격에 붙여 캐시합니다(예: `remote: https://dl.rockylinux.org/pub/`, `baseurl=http://localhost:8081/repository/yum-proxy/rocky/9/BaseOS/x86_64/os/`). `repodata/` 아래 파일은 `metadataMaxAge`마다 다시 확인하고, RPM은 `contentMaxAge`(기본 영구)로 캐시합니다. 원격의 디렉터리 목록(HTML)은 파일로 캐시하지 않고 404로 답합니다. 내용을 바꾸지 않으므로 미러의 `repomd.xml` 서명(`repomd.xml.asc`)도 그대로 전달되어 `repo_gpgcheck=1`을 쓸 수 있습니다.
-- group은 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다. Nexus와 같이 멤버의 `repodata/`를 병합하지 않으므로 hosted와 proxy의 패키지를 한 `baseurl`로 합치려 하지 말고, 디렉터리(`depth: 1`)나 저장소별로 `.repo` 항목을 나누세요. `writeMember`가 있으면 group에 올린 RPM은 그 hosted로 갑니다.
+- group은 멤버 순서상 그 경로를 처음 가진 멤버가 답합니다. 멤버의 `repodata/`를 병합하지 않습니다(Nexus의 yum group은 같은 경로를 쓰는 멤버를 병합하므로 이 점이 다릅니다). 그래서 hosted와 proxy의 패키지를 한 `baseurl`로 합치려 하지 말고, 디렉터리(`depth`)나 저장소별로 `.repo` 항목을 나누세요. `writeMember`가 있으면 group에 올린 RPM은 그 hosted로 갑니다.
 - 컴포넌트는 디렉터리를 포함한 이름(`el9/x/demo`)과 `<버전>-<릴리스>.<아키>`(`1.0-1.el9.x86_64`)로 나타나며, 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: yum`, hosted·proxy 모두)으로 하고 지우면 `repodata/`가 바로 갱신됩니다. 역할 권한 대상으로 `format:yum`을 쓸 수 있고, 컴포넌트 메타데이터 탭은 summary·description, license, url, requires/provides를 보여 줍니다.
+- 이전 버전에서 올린 패키지는 약한 의존성 없이 저장되어 있습니다. `repository.rebuild-metadata` 작업을 실행하면 저장된 RPM을 다시 읽어 채웁니다.
+- Nexus와 다른 점: 파일 이름은 패키지의 NVRA여야 합니다(Nexus 문서의 `…/yum-hosted/test.rpm`은 400입니다). `repodata/comps.xml` 업로드(패키지 그룹)는 받지 않습니다(400). `deployPolicy: PERMISSIVE`여도 RPM이 아닌 파일은 올릴 수 없습니다. RPM 경로로 보내는 HTTP `DELETE`는 405이므로 컴포넌트 삭제 API를 쓰세요. proxy는 `repodata/`를 바꾸지 않으므로 원격 메타데이터의 절대 URL(`xml:base`)도 그대로 전달됩니다.
 
 ### Conda 설정
 
@@ -2334,8 +2344,9 @@ swift package-registry set https://cc.example.com/repository/swift-all          
 swift package-registry set --scope mona https://cc.example.com/repository/swift-all   # 특정 scope만 이 레지스트리로
 
 # 로그인: 레지스트리 URL 뒤에 /login 을 붙여 줍니다. 인증 정보는 호스트 단위로 저장됩니다.
-swift package-registry login https://cc.example.com/repository/swift-all/login --username ci --password <비밀번호>
-swift package-registry login https://cc.example.com/repository/swift-all/login --token <API 토큰>
+# --no-confirm 은 ~/.netrc 에 저장해도 되는지 묻지 않게 합니다. 터미널이 없는 CI에서는 꼭 필요합니다.
+swift package-registry login https://cc.example.com/repository/swift-all/login --username ci --password <비밀번호> --no-confirm
+swift package-registry login https://cc.example.com/repository/swift-all/login --token <API 토큰> --no-confirm
 
 # 올리기: add 권한이 필요합니다. 패키지 루트의 package-metadata.json 이 있으면 metadata로 함께 보냅니다.
 swift package-registry publish mona.LinkedList 1.1.1 --url https://cc.example.com/repository/swift-hosted
@@ -2351,9 +2362,13 @@ targets: [
 ]
 ```
 
-- 위 `swift package-registry` 명령은 레지스트리 명세를 따라 적었습니다. 실제 SwiftPM 클라이언트로는 아직 검증하지 않았습니다.
+- 위 명령은 SwiftPM 6.2로 확인했습니다(`test/smoke/swift-smoke.sh`). `publish`와 `archive-source`는 `zip` 명령을 부르는데 공식 `swift` 이미지에는 없으므로(`zip: not found`) 먼저 설치하세요.
+- 터미널이 없는 곳에서 `--no-confirm` 없이 `login`하면 `Credentials not saved. Exiting...`만 남기고 저장하지 않은 채 종료 코드 0으로 끝납니다.
+- `login`의 URL에 `/login`이 없거나 URL을 생략하면 SwiftPM이 저장소 주소로 POST 하여 `NSURLErrorDomain -1007`로 실패합니다.
+- SwiftPM은 `login`이 `~/.swiftpm/configuration/registries.json`에 적은 `authentication` 항목이 있는 호스트에만 자격 증명을 보냅니다. `~/.netrc`만 있으면 보내지 않습니다. 자격 증명이 없거나 틀리면 `missing or invalid authentication credentials`로 실패합니다.
+- 서명은 `publish`의 `--private-key-path`(PKCS#8 DER)와 `--cert-chain-paths`(DER)로 합니다. Command Center는 서명을 저장해 전달하기만 하고, 검증과 신뢰 판단은 클라이언트가 합니다.
 - 패키지는 identifier `scope.name`으로 가리킵니다. scope는 영숫자와 하이픈(처음·끝·연속 금지, 39자 이하), name은 영숫자와 하이픈·밑줄(처음·끝·연속 금지, 100자 이하)이며 대소문자를 구분하지 않습니다. 버전은 SemVer 2.0.0(`v` 접두사 없음)이어야 하고 어긋나면 404입니다.
-- SwiftPM은 레지스트리를 HTTPS로 엽니다. 운영에서는 `baseURL`을 `https://`로 두고 TLS를 끝내는 리버스 프록시 뒤에서 운영하세요. 시험용 http 저장소는 `swift package-registry set --allow-insecure-http`(SwiftPM 5.9 이상)로만 쓸 수 있습니다.
+- SwiftPM은 레지스트리를 HTTPS로 엽니다. 운영에서는 `baseURL`을 `https://`로 두고 TLS를 끝내는 리버스 프록시 뒤에서 운영하세요. 시험용 http 저장소는 `swift package-registry set --allow-insecure-http`(SwiftPM 5.9 이상)로 쓸 수 있습니다. 다만 `login`은 https만 받으므로(`Error: invalid URL`) http에서는 익명 읽기로 받는 것만 됩니다. `publish`는 https로 하세요.
 - hosted는 올린 zip에서 `Package.swift`와 `Package@swift-X.Y.swift`를 찾아 `.package(url:/id:/path: …)` 의존성(`from:`, `exact:`, `.upToNextMajor(…)` 등 요구 조건은 쓴 그대로)과 metadata(description, licenseURL, readmeURL, repositoryURLs)를 저장하고, 파일은 `<scope>/<name>/<버전>/source-archive.zip`에 둡니다. SwiftPM은 받은 아카이브의 최상위 디렉터리 한 단계를 벗겨 내므로 zip은 `swift package archive-source`처럼 하나의 최상위 디렉터리 아래(`<이름>/Package.swift`)에 패키지를 담아야 하며, 그렇지 않거나 zip이 아니면 400입니다. 업로드 본문은 `maxUploadMiB`를 따릅니다.
 - 아카이브 응답에는 `Digest: sha-256=…`, 릴리스 메타데이터에는 checksum과 latest/successor/predecessor `Link`가 붙고, 서명(`source-archive-signature`)을 함께 올리면 `signing`으로 제공합니다. 다른 API 버전(`application/vnd.swift.registry.v2…`)을 요구하면 406, 오류는 모두 `application/problem+json`입니다.
 - `writePolicy`: `allow_once`(기본)는 같은 버전 재게시를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.
@@ -2403,14 +2418,17 @@ export HF_TOKEN=<Command Center API 토큰>
 - 파일(`<repo id>/resolve/<리비전>/<경로>`, `datasets/<repo id>/resolve/…`, `spaces/…`)은 Hub가 주는 CDN 리다이렉트를 따라가 받아 **커밋 sha 아래 영구 캐시**합니다(`contentMaxAge`). 브랜치·태그는 revision 문서로 커밋을 찾고 그 문서는 `metadataMaxAge`마다 다시 확인하므로 브랜치가 움직이면 새 커밋의 파일을 받으며, 이전 커밋 파일은 그대로 남습니다. 응답에는 `X-Repo-Commit`, `ETag`·`X-Linked-Etag`(파일 내용의 sha256, Hub의 LFS 값과 같음), `X-Linked-Size`, `Content-Length`가 붙고 Range(이어받기)를 지원합니다. 캐시에 없는 LFS 파일의 HEAD는 Hub의 헤더로 답하고 내려받지 않습니다.
 - **토큰**: gated·비공개 모델은 저장소의 `remoteAuth.bearerToken`에 Hub 읽기 토큰을 넣습니다. gated 모델은 그 토큰 계정이 Hub에서 접근 승인을 받아 두어야 합니다. 토큰은 `remote` 호스트에만 보내고 리다이렉트된 CDN에는 보내지 않으며, 클라이언트의 Authorization은 Hub로 전달하지 않습니다. 토큰 계정이 볼 수 있는 모델은 이 저장소를 읽을 수 있는 모든 사용자에게 보이므로 읽기 권한을 제한하세요.
 - **큰 파일**: proxy는 파일을 원본에서 끝까지 받아 캐시한 뒤 보냅니다. 받는 시간이 클라이언트의 대기 시간(기본 `HF_HUB_DOWNLOAD_TIMEOUT` 10초, 재시도 5회)보다 길면 클라이언트는 실패하지만 proxy의 다운로드는 계속되므로 다시 실행하면 캐시에서 받습니다. 수 GB 모델은 `HF_HUB_DOWNLOAD_TIMEOUT`을 크게 잡거나 미리 한 번 받아 두세요. 한 파일은 30분 안에 원본에서 받아져야 하며, 디스크는 모델 크기만큼 필요합니다.
-- 지원하지 않는 것: `/`가 든 리비전(`refs/pr/1`), `POST …/paths-info`(405), Xet 전송(클라이언트가 HTTP로 받습니다), 업로드.
+- 지원하지 않는 것: `/`가 든 리비전(`refs/pr/1`), `POST …/paths-info`(`HfApi.get_paths_info`. 쓰기 요청으로 다루므로 익명은 401입니다), 업로드, Xet 전송. tree 목록에서 `xetHash`를 빼고 `xet-read-token`은 404로 답하므로 `hf_xet`이 설치되어 있어도 클라이언트는 HTTP로 받습니다. huggingface_hub 0.36, 1.0, 2.4로 확인했습니다.
+- 허브에서 직접 받은 적 있는 캐시(`HF_HOME`)에 tree 목록(`trees/<커밋>.json`)이 남아 있으면 클라이언트가 그 안의 Xet 해시를 따라가 404로 실패합니다. 이때는 `HF_HUB_DISABLE_XET=1`을 설정하거나 그 캐시를 지우세요.
+- 파일이 1000개가 넘는 저장소의 tree 목록은 페이지로 나뉩니다. 다음 페이지 주소(`Link`)는 `baseURL`로 만들므로 `baseURL`이 클라이언트가 여는 주소와 같아야 합니다.
+- 없는 파일·리비전·저장소는 허브처럼 `X-Error-Code`(`EntryNotFound`, `RevisionNotFound`, `RepoNotFound`)가 붙은 404로 답합니다. 그래서 `file_exists`, `repo_exists`와 transformers의 선택 파일 확인이 그대로 동작합니다.
 - **정리**: 컴포넌트는 `<repo id>@<커밋 sha>`이고 데이터셋·스페이스는 그룹이 `datasets`·`spaces`입니다(라벨 `datasets/org/ds@<sha>`, Cleanup `namePattern`은 `datasets:org/ds`). 한 커밋의 파일(하위 디렉터리 포함)이 한 컴포넌트입니다. Cleanup 정책(`format: huggingface`, 예: `lastDownloadedDays`)으로 오래 쓰지 않은 모델을 지우며 api 문서는 남습니다. 역할 권한 대상으로 `format:huggingface`를 쓸 수 있고, 메타데이터 탭은 `pipeline_tag (library_name)`, license, Hub 페이지 주소를 보여 줍니다.
 
 ### Terraform 설정
 
-Command Center는 Terraform/OpenTofu 레지스트리 프로토콜(modules.v1, providers.v1)을 `terraform` 형식 저장소로 제공합니다. hosted는 모듈 아카이브와 프로바이더 릴리스를 업로드받고, proxy는 registry.terraform.io를 캐시하며, group은 모듈·프로바이더마다 그것을 가진 첫 멤버가 답합니다. 아래 명령은 레지스트리 프로토콜을 재현한 테스트로만 확인했고, 실제 `terraform`·`tofu` 클라이언트로는 아직 검증하지 않았습니다.
+Command Center는 Terraform/OpenTofu 레지스트리 프로토콜(modules.v1, providers.v1)을 `terraform` 형식 저장소로 제공합니다. hosted는 모듈 아카이브와 프로바이더 릴리스를 업로드받고, proxy는 registry.terraform.io를 캐시하며, group은 모듈·프로바이더마다 그것을 가진 첫 멤버가 답합니다. 아래 명령은 실제 `terraform` 1.17과 `tofu` 1.13으로 확인했습니다(`test/smoke/terraform-smoke.sh`).
 
-**HTTPS가 필요합니다.** Terraform은 레지스트리를 호스트 이름으로만 찾으며 항상 `https://<호스트>/.well-known/terraform.json`을 읽습니다. 따라서 Command Center를 클라이언트가 신뢰하는 인증서로 HTTPS(기본 443 포트, 다른 포트라면 소스 주소에 `호스트:포트`)로 노출해야 하고, 일반 설정 `baseURL`도 그 https 주소로 맞춰야 합니다. HTTP로는 동작하지 않습니다.
+**HTTPS가 필요합니다.** Terraform은 레지스트리를 호스트 이름으로만 찾으며 항상 `https://<호스트>/.well-known/terraform.json`을 읽습니다. 따라서 Command Center를 클라이언트가 신뢰하는 인증서로 HTTPS(기본 443 포트, 다른 포트라면 소스 주소에 `호스트:포트`)로 노출해야 하고, 일반 설정 `baseURL`도 그 https 주소로 맞춰야 합니다. HTTP로는 동작하지 않습니다. 사설 CA의 인증서라면 클라이언트 시스템의 신뢰 저장소에 넣거나 `SSL_CERT_FILE`로 지정합니다.
 
 **루트 디스커버리는 기본 저장소를 가리킵니다.** 호스트 루트의 `/.well-known/terraform.json`은 terraform 저장소 하나만 가리킵니다. 일반 설정 `terraformDefaultRepository`에 지정한 저장소이며, 지정하지 않았으면 이름순으로 첫 terraform 저장소입니다. 한 호스트에는 저장소 하나만 노출되므로 hosted와 proxy를 묶은 group을 기본 저장소로 두는 것을 권장합니다. 저장소마다 `/repository/<repo>/.well-known/terraform.json`도 응답하지만 Terraform은 루트만 읽습니다. 디스커버리 문서는 인증 없이 공개됩니다.
 
@@ -2471,7 +2489,7 @@ curl -fsS -X PUT -H "$H" --data-binary @terraform-registry-manifest.json        
 
 **writePolicy.** allow_once는 같은 파일의 재업로드는 그대로 받고 내용이 다르면 409로 거부합니다. allow는 덮어쓰기에 edit 권한이 필요하고, deny는 읽기 전용입니다.
 
-**registry.terraform.io 프록시.** remote를 `https://registry.terraform.io/`로 둔 proxy는 원격 디스커버리를 읽고 버전 목록을 metadataMaxAge 동안 캐시합니다. 모듈의 http(s) 아카이브 주소는 프록시 경로로 바꾸어 요청이 올 때 받아 캐시합니다. 프로바이더의 download_url, shasums_url, shasums_signature_url도 프록시 경로로 바꾸어 요청이 올 때 받으며, zip은 shasum으로 검증합니다. 원격 자격 증명은 레지스트리 호스트에만 보내고 releases.hashicorp.com이나 GitHub에는 보내지 않습니다. 원격이 내려가도 이미 캐시된 모듈과 프로바이더는 설치됩니다.
+**registry.terraform.io 프록시.** remote를 `https://registry.terraform.io/`로 둔 proxy는 원격 디스커버리를 읽고 버전 목록을 metadataMaxAge 동안 캐시합니다. 모듈의 http(s) 아카이브 주소는 프록시 경로로 바꾸어 요청이 올 때 받아 캐시합니다. 프로바이더의 download_url, shasums_url, shasums_signature_url도 프록시 경로로 바꾸어 요청이 올 때 받으며, zip은 shasum으로 검증합니다. 원격 자격 증명은 레지스트리 호스트에만 보내고 releases.hashicorp.com이나 GitHub에는 보내지 않습니다. 원격이 내려가도 이미 캐시된 모듈과 프로바이더는 설치됩니다. OpenTofu 레지스트리도 remote를 `https://registry.opentofu.org/`로 두면 같습니다.
 
 **git:: 소스의 한계.** 업스트림이 `git::`처럼 http(s) 아카이브가 아닌 소스를 주면(registry.terraform.io 공개 모듈 대부분이 GitHub `git::`입니다) 그대로 전달하므로 캐시되지 않으며, 클라이언트가 그 Git 호스트에 직접 접근할 수 있어야 합니다. 폐쇄망에서는 그런 모듈을 아카이브로 받아 hosted에 올려 사용합니다.
 

@@ -671,9 +671,9 @@ function setupSnippets(r) {
       return out;
     }
     case "yum": {
-      const base = url.replace(/\/$/, "") + (hosted ? (r.depth === 1 ? "/<dir>" : "") : "/<path on the mirror>");
+      const base = url.replace(/\/$/, "") + (hosted ? (r.depth > 0 ? "/<dir>" : "") : "/<path on the mirror>");
       const out = [[r.name + ".repo", "[" + r.name + "]\nname=" + r.name + "\nbaseurl=" + base + "/\nenabled=1\ngpgcheck=1\nrepo_gpgcheck=0"]];
-      if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <name>-<version>-<release>.<arch>.rpm " + url + (r.depth === 1 ? "<dir>/" : "")]);
+      if (hosted || r.writeMember) out.push(["upload", "curl -u ci -T <name>-<version>-<release>.<arch>.rpm " + url + (r.depth > 0 ? "<dir>/" : "")]);
       return out;
     }
     case "rubygems": {

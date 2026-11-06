@@ -94,6 +94,12 @@ type Target struct {
 	// is not found without a lookup, so a proxy asks no remote, and a group
 	// asks its other members.
 	Skip func(rp *repo.Repository) bool
+
+	// Keep, if set, is given the header of the remote's answer when a fetch
+	// has stored its body, just before the asset is recorded: for what a
+	// format keeps of the answer beside the asset (the Link to a listing's
+	// next page), there for whoever then finds the asset on any node.
+	Keep func(http.Header)
 }
 
 type Fetcher struct {
@@ -360,6 +366,9 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 			// A repository deleted or re-created during the download must not receive the asset.
 			if cerr := f.Store.Current(rp); cerr != nil {
 				return Result{}, cerr
+			}
+			if t.Keep != nil {
+				t.Keep(resp.Header)
 			}
 			err = f.Store.DB.PutAsset(ctx, na)
 		}
