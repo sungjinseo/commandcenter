@@ -1,6 +1,8 @@
 package repo
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 
 	"commandcenter/internal/blob"
 	"commandcenter/internal/config"
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 )
 
@@ -614,4 +617,67 @@ func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 func ServeText(w http.ResponseWriter, r *http.Request, body, contentType string, modTime time.Time) {
 	w.Header().Set("Content-Type", contentType)
 	http.ServeContent(w, r, "", modTime, strings.NewReader(body))
+}
+
+// ServeBytes is ServeText for a document that is already bytes, not copied:
+// many clients at once on a document of megabytes add up.
+func ServeBytes(w http.ResponseWriter, r *http.Request, body []byte, contentType string, modTime time.Time) {
+	w.Header().Set("Content-Type", contentType)
+	http.ServeContent(w, r, "", modTime, bytes.NewReader(body))
+}
+
+// ServeStream serves a generated document as write produces it, for one too
+// large to hold per request: a proxy's rewritten upstream metadata, which any
+// number of clients may ask for at once. Last-Modified and If-Modified-Since
+// work as in http.ServeContent (a zero modTime has neither), a HEAD does not
+// call write, and there is no Range. An error before the first output (the
+// first 32 KiB are buffered) is returned for the caller's error page; a later
+// one cuts the connection, so a short document cannot look complete.
+func ServeStream(w http.ResponseWriter, r *http.Request, contentType string, modTime time.Time, write func(io.Writer) error) error {
+	hd := w.Header()
+	if !modTime.IsZero() {
+		hd.Set("Last-Modified", modTime.UTC().Format(http.TimeFormat))
+		if t, err := http.ParseTime(r.Header.Get("If-Modified-Since")); err == nil && modTime.Truncate(time.Second).Compare(t) <= 0 {
+			w.WriteHeader(http.StatusNotModified)
+			return nil
+		}
+	}
+	hd.Set("Content-Type", contentType)
+	if r.Method == http.MethodHead {
+		return nil
+	}
+	out := &streamWriter{w: w}
+	bw := bufio.NewWriterSize(out, 32<<10)
+	err := write(bw)
+	if err == nil {
+		err = bw.Flush()
+	}
+	switch {
+	case err == nil, out.err != nil, r.Context().Err() != nil:
+		return nil // done, or the client is gone
+	case !out.started:
+		hd.Del("Last-Modified")
+		hd.Del("Content-Type")
+		hd.Del("Warning")
+		return err
+	}
+	slog.Error("response failed after output started", "path", logsafe.Path(r.URL.Path), "err", logsafe.Err(err))
+	panic(http.ErrAbortHandler)
+}
+
+// streamWriter records whether output reached the client and whether writing
+// to it failed.
+type streamWriter struct {
+	w       io.Writer
+	started bool
+	err     error
+}
+
+func (s *streamWriter) Write(p []byte) (int, error) {
+	s.started = true
+	n, err := s.w.Write(p)
+	if err != nil {
+		s.err = err
+	}
+	return n, err
 }

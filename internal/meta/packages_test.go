@@ -2,6 +2,8 @@ package meta
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
@@ -29,6 +31,9 @@ func TestTxPackagesAndDistTags(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if vs, err := db.ListPackageVersions(ctx, "r", "nope"); err != nil || len(vs) != 0 {
+		t.Fatalf("versions of nothing: %v %v", vs, err)
 	}
 	pkgs, err := db.ListPackages(ctx, "r", "a")
 	if err != nil || len(pkgs) != 2 || pkgs[0].Version != "1.0.0" || pkgs[1].Attrs != `{"v":2}` || !pkgs[0].CreatedAt.Equal(t0) || pkgs[0].Format != "npm" {
@@ -248,5 +253,52 @@ func TestTxDeletes(t *testing.T) {
 	}
 	if as, _ := db.ListAssets(ctx, "r", ""); len(as) != 2 || as[0].Path != "a/-/a-2.0.0.tgz" || as[1].Path != "b/-/b-1.0.0.tgz" {
 		t.Fatalf("assets = %+v", as)
+	}
+}
+
+// TestEachPackage: the rows of the given versions in that order, across
+// batches, and a version that is not there is skipped.
+func TestEachPackage(t *testing.T) {
+	db := openTest(t)
+	var want []string
+	for i := range 200 {
+		v := fmt.Sprintf("1.0.%d", i)
+		if err := db.Tx(ctx, func(tx *Tx) error {
+			return tx.InsertPackage(ctx, Package{Repo: "r", Format: "x", Name: "a", Version: v, Attrs: `{"n":"` + v + `"}`, CreatedAt: time.UnixMilli(int64(1000 + i))})
+		}); err != nil {
+			t.Fatal(err)
+		}
+		want = append(want, v)
+	}
+	vs, err := db.ListPackageVersions(ctx, "r", "a")
+	if err != nil || len(vs) != len(want) {
+		t.Fatalf("versions: %v %v", vs, err)
+	}
+	for i, p := range vs {
+		if p.Version != want[i] || p.Attrs != "" || p.Name != "a" || p.CreatedAt.UnixMilli() != int64(1000+i) {
+			t.Fatalf("version %d: %+v", i, p)
+		}
+	}
+	slices.Reverse(want)
+	ask := append(slices.Clone(want[:100]), "9.9.9")
+	ask = append(ask, want[100:]...)
+	var got []string
+	err = db.EachPackage(ctx, "r", "a", ask, func(p Package) error {
+		if p.Attrs != `{"n":"`+p.Version+`"}` || p.Repo != "r" || p.Name != "a" || p.Format != "x" {
+			t.Errorf("row: %+v", p)
+		}
+		got = append(got, p.Version)
+		return nil
+	})
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("each: %v %v", got, err)
+	}
+	stop := errors.New("stop")
+	n := 0
+	if err := db.EachPackage(ctx, "r", "a", want, func(Package) error { n++; return stop }); !errors.Is(err, stop) || n != 1 {
+		t.Fatalf("stop: %v after %d", err, n)
+	}
+	if err := db.EachPackage(ctx, "r", "a", nil, func(Package) error { t.Fatal("called"); return nil }); err != nil {
+		t.Fatal(err)
 	}
 }

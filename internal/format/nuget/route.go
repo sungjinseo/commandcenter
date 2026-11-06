@@ -63,9 +63,11 @@ func ParseRoute(path string) (Route, error) {
 		return Route{Kind: KindIndex}, nil
 	case path == "query":
 		return Route{Kind: KindSearch}, nil
-	case path == "api/v2/package":
+	// dotnet nuget push and nuget.exe PUT to the resource's URL with a "/"
+	// appended; curl -T sends it as written.
+	case path == "api/v2/package", path == "api/v2/package/":
 		return Route{Kind: KindPublish}, nil
-	case path == "api/v2/symbolpackage":
+	case path == "api/v2/symbolpackage", path == "api/v2/symbolpackage/":
 		return Route{Kind: KindSymbols}, nil
 	}
 	if rest, ok := strings.CutPrefix(path, "api/v2/package/"); ok {

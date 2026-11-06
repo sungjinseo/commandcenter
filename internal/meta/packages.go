@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -188,6 +189,79 @@ FROM packages WHERE repo = ? AND name = ? ORDER BY created_at, version`, repo, n
 		}
 		p.Yanked, p.CreatedAt = yanked != 0, fromMs(created)
 		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListPackageVersions returns the rows of a package without their attrs, for
+// what needs no more of a package with thousands of versions (the attrs are
+// megabytes per request), in ListPackages's order.
+func (d *DB) ListPackageVersions(ctx context.Context, repo, name string) ([]Package, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT version, created_at FROM packages WHERE repo = ? AND name = ? ORDER BY created_at, version`, repo, name)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Package
+	for rows.Next() {
+		p := Package{Repo: repo, Name: name}
+		var created int64
+		if err := rows.Scan(&p.Version, &created); err != nil {
+			return nil, err
+		}
+		p.CreatedAt = fromMs(created)
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// EachPackage calls fn with the rows of the given versions of a package, in
+// that order, reading them in batches: a document of a package with thousands
+// of versions holds a batch at a time, and no connection while fn writes to a
+// client. A version that is gone by then is skipped.
+func (d *DB) EachPackage(ctx context.Context, repo, name string, versions []string, fn func(Package) error) error {
+	const batch = 64
+	for len(versions) > 0 {
+		n := min(batch, len(versions))
+		found, err := d.packagesIn(ctx, repo, name, versions[:n])
+		if err != nil {
+			return err
+		}
+		for _, v := range versions[:n] {
+			if p, ok := found[v]; ok {
+				if err := fn(p); err != nil {
+					return err
+				}
+			}
+		}
+		versions = versions[n:]
+	}
+	return nil
+}
+
+func (d *DB) packagesIn(ctx context.Context, repo, name string, versions []string) (map[string]Package, error) {
+	args := make([]any, 0, len(versions)+2)
+	args = append(args, repo, name)
+	for _, v := range versions {
+		args = append(args, v)
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(versions)), ",")
+	rows, err := d.sql.QueryContext(ctx, `SELECT format, version, attrs, yanked, created_at FROM packages
+WHERE repo = ? AND name = ? AND version IN (`+marks+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]Package, len(versions))
+	for rows.Next() {
+		p := Package{Repo: repo, Name: name}
+		var yanked int
+		var created int64
+		if err := rows.Scan(&p.Format, &p.Version, &p.Attrs, &yanked, &created); err != nil {
+			return nil, err
+		}
+		p.Yanked, p.CreatedAt = yanked != 0, fromMs(created)
+		out[p.Version] = p
 	}
 	return out, rows.Err()
 }

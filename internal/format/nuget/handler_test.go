@@ -10,7 +10,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/textproto"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -87,16 +89,20 @@ func zipBytes(t *testing.T, files map[string]string) []byte {
 	return buf.Bytes()
 }
 
-// form wraps a package as dotnet nuget push sends it: one multipart part
-// named "package" with the file name package.nupkg.
+// form wraps a package as dotnet nuget push sends it (NuGet 7.9): one
+// multipart part named "package" whose disposition carries the file name
+// package.nupkg twice, unquoted, and a quoted boundary.
 func form(t *testing.T, filename string, pkg []byte) ([]byte, string) {
 	t.Helper()
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
-	fw, _ := mw.CreateFormFile("package", filename)
+	fw, _ := mw.CreatePart(textproto.MIMEHeader{
+		"Content-Type":        {"application/octet-stream"},
+		"Content-Disposition": {"form-data; name=package; filename=" + filename + "; filename*=utf-8''" + filename},
+	})
 	fw.Write(pkg)
 	mw.Close()
-	return buf.Bytes(), mw.FormDataContentType()
+	return buf.Bytes(), `multipart/form-data; boundary="` + mw.Boundary() + `"`
 }
 
 type env struct {
@@ -108,6 +114,7 @@ type env struct {
 	queries atomic.Pointer[string]
 	down    atomic.Bool
 	now     time.Time
+	search  string // when set, the upstream's answer to every search
 }
 
 // upstream is a fake V3 feed as api.nuget.org lays one out: a service
@@ -152,6 +159,10 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 		j(`{"@id":"` + up + `/reg-gz/newtonsoft.json/page/13.0.1/13.0.1.json","@type":"catalog:CatalogPage","count":1,"lower":"13.0.1","upper":"13.0.1","parent":"` + up + `/reg-gz/newtonsoft.json/index.json","items":[` + upLeaf(up, "13.0.1") + `]}`)
 	case p == "/reg-gz/newtonsoft.json/13.0.1.json":
 		j(upLeaf(up, "13.0.1"))
+	case p == "/search" && e.search != "":
+		j(e.search)
+	case p == "/reg-gz/big/index.json" && e.search != "":
+		j(e.search)
 	case p == "/search":
 		q := r.URL.RawQuery
 		e.queries.Store(&q)
@@ -226,11 +237,12 @@ func (e *env) doAs(p auth.Principal, method, repoName, path string, body []byte,
 	return w
 }
 
-// push sends pkg as dotnet nuget push does and returns the response.
+// push sends pkg as dotnet nuget push does and returns the response: the
+// client PUTs to the PackagePublish resource with a "/" appended.
 func (e *env) push(t *testing.T, repoName string, pkg []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	body, ct := form(t, "package.nupkg", pkg)
-	return e.do("PUT", repoName, "api/v2/package", body, "Content-Type", ct)
+	return e.do("PUT", repoName, "api/v2/package/", body, "Content-Type", ct, "X-NuGet-Client-Version", "7.9.0", "User-Agent", "NuGet xplat/7.9.0 (LINUX)")
 }
 
 func decode(t *testing.T, w *httptest.ResponseRecorder, v any) {
@@ -489,8 +501,10 @@ func TestHostedRejections(t *testing.T) {
 	if w := e.do("PUT", "nuget-hosted", "api/v2/package", body, "Content-Type", ct); w.Code != 400 || !strings.Contains(w.Body.String(), ".snupkg") {
 		t.Fatalf("snupkg: %d %s", w.Code, w.Body)
 	}
-	if w := e.do("PUT", "nuget-hosted", "api/v2/symbolpackage", body, "Content-Type", ct); w.Code != 400 || !strings.Contains(w.Body.String(), ".snupkg") {
-		t.Fatalf("symbolpackage: %d %s", w.Code, w.Body)
+	for _, path := range []string{"api/v2/symbolpackage", "api/v2/symbolpackage/"} {
+		if w := e.do("PUT", "nuget-hosted", path, body, "Content-Type", ct); w.Code != 400 || !strings.Contains(w.Body.String(), ".snupkg") {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body)
+		}
 	}
 	if w := e.do("GET", "nuget-hosted", "api/v2/symbolpackage", nil); w.Code != 405 || w.Header().Get("Allow") != "PUT" {
 		t.Fatalf("GET symbolpackage: %d", w.Code)
@@ -509,7 +523,7 @@ func TestHostedRejections(t *testing.T) {
 	}
 	// the push endpoint's methods: a proxy takes none
 	for _, c := range []struct{ method, repoName, path, allow string }{
-		{"POST", "nuget-hosted", "api/v2/package", "PUT"}, {"GET", "nuget-hosted", "api/v2/package", "PUT"},
+		{"POST", "nuget-hosted", "api/v2/package", "PUT"}, {"GET", "nuget-hosted", "api/v2/package", "PUT"}, {"DELETE", "nuget-hosted", "api/v2/package/", "PUT"},
 		{"PUT", "nuget-hosted", "api/v2/package/demo/1.0.0", "DELETE"},
 		{"PUT", "nuget-proxy", "api/v2/package", ""}, {"DELETE", "nuget-proxy", "api/v2/package/demo/1.0.0", ""},
 		{"PUT", "nuget-proxy-first", "api/v2/package", ""},
@@ -520,7 +534,7 @@ func TestHostedRejections(t *testing.T) {
 			t.Errorf("%s %s %s: %d Allow %q, want %q", c.method, c.repoName, c.path, w.Code, w.Header().Get("Allow"), c.allow)
 		}
 	}
-	// a raw body (curl -T) works too
+	// a raw body (curl -T, to the URL as written) works too
 	if w := e.do("PUT", "nuget-hosted", "api/v2/package", nupkg(t, "Demo", "1.0.0", ""), "Content-Type", "application/octet-stream"); w.Code != 201 {
 		t.Fatalf("raw body: %d %s", w.Code, w.Body)
 	}
@@ -706,6 +720,173 @@ func TestProxy(t *testing.T) {
 }
 
 // A wrong remote (no service index) is a 502 that says so, not an empty feed.
+// TestRewriteJSON: only string values that start with an upstream base change;
+// keys, numbers of any size, escapes and the document's order stay.
+func TestRewriteJSON(t *testing.T) {
+	up := upstream{regs: []string{"https://up/reg-gz/", "https://up/reg/"}, flats: []string{"https://up/flat/"}}
+	in := `{"@id":"https://up/reg-gz/a/index.json","https://up/reg/key":"keep",
+"n":12345678901234567890,"f":1.50,"t":true,"z":null,"e":[],"o":{},
+"list":["https://up/flat/a/1/a.nupkg",7,[{"x":"https://up/catalog/a.json"}],"https://up/reg/a/1.json"],
+"s":"a\"b\n\u00e9 \ud83d\ude00","not":"see https://up/reg/a"}`
+	var out bytes.Buffer
+	if err := rewriteJSON(&out, strings.NewReader(in), up, "http://cc/r"); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"@id":"http://cc/r/registration/a/index.json","https://up/reg/key":"keep",` +
+		`"n":12345678901234567890,"f":1.50,"t":true,"z":null,"e":[],"o":{},` +
+		`"list":["http://cc/r/v3-flatcontainer/a/1/a.nupkg",7,[{"x":"https://up/catalog/a.json"}],"http://cc/r/registration/a/1.json"],` +
+		`"s":"a\"b\né 😀","not":"see https://up/reg/a"}`
+	if out.String() != want {
+		t.Fatalf("got  %s\nwant %s", out.String(), want)
+	}
+	if !json.Valid(out.Bytes()) {
+		t.Fatalf("not JSON: %s", out.String())
+	}
+	for name, bad := range map[string]string{
+		"truncated": `{"a":[1,`, "not JSON": `plain`, "deep": strings.Repeat("[", maxJSONDepth+1),
+	} {
+		out.Reset()
+		if err := rewriteJSON(&out, strings.NewReader(bad), up, "http://cc/r"); err == nil {
+			t.Errorf("%s: no error, wrote %q", name, out.String())
+		}
+	}
+	for _, scalar := range []string{`"x"`, `7`, `null`} {
+		out.Reset()
+		if err := rewriteJSON(&out, strings.NewReader(scalar), up, "http://cc/r"); err != nil || out.String() != scalar {
+			t.Errorf("%s: %q %v", scalar, out.String(), err)
+		}
+	}
+}
+
+// TestSearchMemory: a search with take=1000 is 10 MiB from nuget.org, and
+// decoding it per request took a 128 MiB server down at 2 clients. Through a
+// proxy or a group a request now holds one hit at a time; the merged page and
+// its count are as before.
+func TestSearchMemory(t *testing.T) {
+	e := newEnv(t)
+	var b strings.Builder
+	b.WriteString(`{"totalHits":3000,"context":{"@vocab":"http://schema.nuget.org/schema#"},"data":[`)
+	for i := range 3000 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		id := fmt.Sprintf("Pkg.%04d", i)
+		fmt.Fprintf(&b, `{"@id":"%s/reg/%s/index.json","@type":"Package","registration":"%s/reg/%s/index.json","id":"%s","version":"1.0.0","description":"A package","tags":["a","b"],"authors":["x"],"totalDownloads":%d,"versions":[`, e.up, id, e.up, id, id, 9000000000+i)
+		for v := range 20 {
+			if v > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `{"version":"1.0.%d","downloads":%d,"@id":"%s/reg/%s/1.0.%d.json"}`, v, v, e.up, id, v)
+		}
+		b.WriteString(`]}`)
+	}
+	b.WriteString(`]}`)
+	e.search = b.String()
+	if w := e.push(t, "nuget-hosted", nupkg(t, "Pkg.0001", "9.0.0", "")); w.Code != 201 {
+		t.Fatal(w.Code)
+	}
+	if w := e.do("GET", "nuget-proxy", "query?q=pkg&take=1000", nil); w.Code != 200 { // the fetch is not what is measured
+		t.Fatal(w.Code)
+	}
+	if w := e.do("GET", "nuget-all", "query?q=pkg&take=1000", nil); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	for _, repoName := range []string{"nuget-proxy", "nuget-all"} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/repository/"+repoName+"/query?q=pkg&take=1000", nil)
+		e.h.Serve(discardBody{w}, r, e.repos[repoName], "query")
+		runtime.ReadMemStats(&after)
+		// some 6 times; decoding the answer took 18 and more
+		if got := after.TotalAlloc - before.TotalAlloc; w.Code != 200 || got > 12*uint64(len(e.search)) && !raceEnabled {
+			t.Errorf("%s: %d, allocated %d MiB for a %d MiB answer", repoName, w.Code, got>>20, len(e.search)>>20)
+		}
+	}
+	// the page of the merge: hosted first, the upstream's ids that are new, cut
+	// to skip and take, totalHits last and counting the merge
+	var res searchResult
+	decode(t, e.do("GET", "nuget-all", "query?q=pkg&skip=1&take=2", nil), &res)
+	if got := res.ids(); got != "Pkg.0000@1.0.0,Pkg.0002@1.0.0" || res.TotalHits != 3000 {
+		t.Fatalf("page: %d %q", res.TotalHits, got)
+	}
+	if !strings.HasPrefix(res.Data[0].Registration, ccBase+"/repository/nuget-all/registration/") {
+		t.Fatalf("not rewritten: %+v", res.Data[0])
+	}
+	if w := e.do("GET", "nuget-all", "query?q=pkg&take=1000", nil); w.Code != 200 || !json.Valid(w.Body.Bytes()) {
+		t.Fatalf("whole merge: %d, valid %v", w.Code, json.Valid(w.Body.Bytes()))
+	} else if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || res.TotalHits != 3000 || len(res.Data) != 1000 {
+		t.Fatalf("whole merge: %v %d hits, %d data", err, res.TotalHits, len(res.Data))
+	}
+	// a registration document from upstream that is not JSON: a 502 with the reason
+	e.search = `{"items":[`
+	if w := e.do("GET", "nuget-proxy", "registration/big/index.json", nil); w.Code != 502 || !strings.Contains(w.Body.String(), "not JSON") {
+		t.Fatalf("broken registration: %d %s", w.Code, w.Body)
+	}
+}
+
+// discardBody keeps the status and headers of a response, not its body.
+type discardBody struct{ *httptest.ResponseRecorder }
+
+func (d discardBody) Write(p []byte) (int, error) { return len(p), nil }
+
+// TestHostedManyVersions: what needs the versions of a package does not read
+// the metadata of each (the flat container, which every restore asks for, a
+// leaf, a search), and the registration index of 300 versions is whole and in
+// order. Holding all rows per request took a 128 MiB server down at 32 clients
+// on a package with 1500 versions.
+func TestHostedManyVersions(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	const n = 300
+	attrs := func(v string) string {
+		b, _ := json.Marshal(pkgAttrs{ID: "Many", Version: v, Description: strings.Repeat("x", 8<<10), Tags: []string{}, DependencyGroups: []depGroup{}, Listed: true})
+		return string(b)
+	}
+	for i := range n {
+		v := fmt.Sprintf("1.%d.0", i)
+		err := e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
+			return tx.InsertPackage(ctx, meta.Package{Repo: "nuget-hosted", Format: "nuget", Name: "many", Version: v, Attrs: attrs(v), CreatedAt: e.now})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{"v3-flatcontainer/many/index.json", "registration/many/1.5.0.json", "query?q=many&take=20"} {
+		for _, repoName := range []string{"nuget-hosted", "nuget-all"} {
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			w := e.do("GET", repoName, path, nil)
+			runtime.ReadMemStats(&after)
+			if got := after.TotalAlloc - before.TotalAlloc; w.Code != 200 || got > n*(8<<10)/2 && !raceEnabled {
+				t.Errorf("%s %s: %d, allocated %d KiB; the versions' metadata is %d KiB", repoName, path, w.Code, got>>10, n*8)
+			}
+		}
+	}
+	var ri regIndex
+	decode(t, e.do("GET", "nuget-hosted", "registration/many/index.json", nil), &ri)
+	if len(ri.Items) != 1 || ri.Count != 1 || len(ri.Type) != 3 || ri.ID != ccBase+"/repository/nuget-hosted/registration/many/index.json" {
+		t.Fatalf("index: %+v", ri.ID)
+	}
+	page := ri.Items[0]
+	if page.Count != n || page.Lower != "1.0.0" || page.Upper != fmt.Sprintf("1.%d.0", n-1) || len(page.Items) != n || page.Parent != ri.ID {
+		t.Fatalf("page: %d %s %s %d", page.Count, page.Lower, page.Upper, len(page.Items))
+	}
+	for i, leaf := range page.Items {
+		if want := fmt.Sprintf("1.%d.0", i); leaf.CatalogEntry.Version != want {
+			t.Fatalf("leaf %d: %s, want %s", i, leaf.CatalogEntry.Version, want)
+		}
+	}
+	// no such version, no such document
+	for _, path := range []string{"registration/many/9.9.9.json", "registration/many/page/1.0.0/1.1.0.json", "registration/nope/index.json", "registration/nope/1.0.0.json"} {
+		if w := e.do("GET", "nuget-hosted", path, nil); w.Code != 404 {
+			t.Errorf("%s: %d", path, w.Code)
+		}
+	}
+}
+
 func TestProxyWrongRemote(t *testing.T) {
 	e := newEnv(t)
 	cfg := config.Repository{Name: "bad-proxy", Format: "nuget", Type: "proxy", Remote: e.up + "/nothing/",

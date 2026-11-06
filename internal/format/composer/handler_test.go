@@ -7,9 +7,11 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -74,6 +76,7 @@ type env struct {
 	query atomic.Pointer[string]
 	zips  map[string][]byte
 	now   time.Time
+	docs  map[string]string // more upstream documents, by path
 }
 
 // upstream is a fake Packagist: a v2 root with the v1 keys Packagist still
@@ -91,7 +94,9 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 	switch p := r.URL.Path; {
 	case p == "/packages.json":
 		j(`{"packages":{},"metadata-url":"/p2/%package%.json","providers-url":"/p/%package%$%hash%.json","notify-batch":"` + up + `/downloads/",
-"search":"` + up + `/search.json?q=%query%&type=%type%","list":"` + up + `/packages/list.json","security-advisories":{"api-url":"` + up + `/api/security-advisories/"},"minified":"composer/2.0"}`)
+"search":"` + up + `/search.json?q=%query%&type=%type%","list":"` + up + `/packages/list.json","security-advisories":{"api-url":"` + up + `/api/security-advisories/"},"minified":"composer/2.0",
+"metadata-changes-url":"` + up + `/metadata/changes.json","providers-api":"` + up + `/providers/%package%.json","providers":[],"warning":"Support for Composer 1 has been shut down","warning-versions":"<1.999",
+"filter":{"metadata":true,"lists":{"malware":{"enabled":true}},"summary-url":"` + up + `/lists/all/summary.json"},"some-later-api":"` + up + `/later/"}`)
 	case p == "/p2/monolog/monolog.json":
 		j(`{"minified":"composer/2.0","packages":{"monolog/monolog":[
 {"name":"monolog/monolog","description":"Sends your logs","version":"3.5.0","version_normalized":"3.5.0.0","license":["MIT"],"type":"library",
@@ -106,6 +111,8 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 		j(`{"packages":{"acme/demo":[{"name":"acme/demo","description":"upstream demo","version":"9.0.0","version_normalized":"9.0.0.0","dist":` + dist("demo-9") + `}]}}`)
 	case p == "/p2/acme/demo~dev.json":
 		j(`{"packages":{"acme/demo":[]}}`)
+	case e.docs[p] != "":
+		j(e.docs[p])
 	case strings.HasPrefix(p, "/zips/"):
 		b := e.zips[strings.TrimSuffix(strings.TrimPrefix(p, "/zips/"), ".zip")]
 		if b == nil {
@@ -207,10 +214,42 @@ type p2 struct {
 	} `json:"packages"`
 }
 
+// metadata reads a metadata file as Composer does: a minified one is expanded
+// (each version adds what differs from the one before, "__unset" removes).
 func (e *env) metadata(t *testing.T, repoName, name string, dev bool) p2 {
 	t.Helper()
+	var raw struct {
+		Minified string                      `json:"minified"`
+		Packages map[string][]map[string]any `json:"packages"`
+	}
+	decode(t, e.do("GET", repoName, metadataPath(name, dev), nil), &raw)
+	if raw.Minified == "composer/2.0" {
+		for pkg, versions := range raw.Packages {
+			prev := map[string]any{}
+			for i, v := range versions {
+				full := map[string]any{}
+				for k, val := range prev {
+					full[k] = val
+				}
+				for k, val := range v {
+					if val == "__unset" {
+						delete(full, k)
+					} else {
+						full[k] = val
+					}
+				}
+				raw.Packages[pkg][i], prev = full, full
+			}
+		}
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var d p2
-	decode(t, e.do("GET", repoName, metadataPath(name, dev), nil), &d)
+	if err := json.Unmarshal(b, &d); err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
 	return d
 }
 
@@ -391,19 +430,26 @@ func TestProxy(t *testing.T) {
 	if rt["metadata-url"] != base+"/p2/%package%.json" || rt["search"] != base+"/search.json?q=%query%&type=%type%" {
 		t.Fatalf("root: %v", rt)
 	}
-	for _, k := range []string{"providers-url", "notify-batch", "list", "security-advisories", "minified"} {
+	for _, k := range []string{"providers-url", "notify-batch", "list", "security-advisories", "minified", "metadata-changes-url", "providers-api", "providers", "filter", "some-later-api"} {
 		if _, ok := rt[k]; ok {
 			t.Errorf("root keeps %s: %v", k, rt[k])
 		}
+	}
+	if w.Body.String() != "" && strings.Contains(w.Body.String(), e.up) {
+		t.Errorf("the root points past the proxy: %s", w.Body)
+	}
+	if rt["warning"] != "Support for Composer 1 has been shut down" || rt["warning-versions"] != "<1.999" {
+		t.Errorf("the upstream's notice is gone: %v", rt)
 	}
 	if rt["available-packages"] != nil {
 		t.Fatalf("a proxy lists no available-packages: %v", rt)
 	}
 
-	// metadata: expanded, sources dropped, dist URLs on the proxy
+	// metadata: minified as the upstream wrote it, sources dropped, dist URLs
+	// on the proxy
 	d := e.metadata(t, "composer-proxy", "monolog/monolog", false)
 	vs := d.Packages["monolog/monolog"]
-	if d.Minified != "" || len(vs) != 2 {
+	if d.Minified != "composer/2.0" || len(vs) != 2 {
 		t.Fatalf("p2: %+v", d)
 	}
 	ref := func(name string) string { return sha1hex([]byte(e.up + "/zips/" + name + ".zip")) }
@@ -455,6 +501,196 @@ func TestProxy(t *testing.T) {
 		t.Fatalf("DeriveAsset(%s) = %s %s %v", path, n, v, ok)
 	}
 }
+
+// TestProxyMetadataShapes: what upstream metadata files really hold. An entry
+// without a dist inherits the one before and keeps its rewritten URL, "__unset"
+// and null dists stay, keys around "packages" are left out, and a broken file
+// is a 502 until output has started, when the connection is cut.
+func TestProxyMetadataShapes(t *testing.T) {
+	e := newEnv(t)
+	url := func(name string) string { return e.up + "/zips/" + name + ".zip" }
+	refOf := func(name string) string { return sha1hex([]byte(url(name))) }
+	e.docs = map[string]string{
+		"/p2/a/shapes.json": `{"security-advisories":{"x":[1]},"packages":{"other/one":[{"version":"1.0.0"}],"a/shapes":[
+{"name":"a/shapes","version":"3.0.0","version_normalized":"3.0.0.0","source":{"type":"git"},"dist":{"type":"zip","url":"` + url("shapes") + `","shasum":""}},
+{"version":"2.0.0","version_normalized":"2.0.0.0","source":"__unset"},
+{"version":"1.0.0","version_normalized":"1.0.0.0","dist":"__unset"},
+{"version":"v0.9","dist":null},
+{"version":"0.8.0","dist":{"type":"zip","url":"` + url("shapes") + `"}}]},"minified":"composer/2.0","filter":{"y":2}}`,
+		"/p2/a/empty.json":    `{"packages":[]}`,
+		"/p2/a/garbage.json":  `{"packages":{"a/garbage":[{"version":`,
+		"/p2/a/notarray.json": `{"packages":{"a/notarray":{"1.0":{}}}}`,
+		"/p2/a/late.json":     `{"packages":{"a/late":[{"name":"a/late","description":"` + strings.Repeat("x", 64<<10) + `"},{`,
+		"/p2/a/plain.json":    `{"packages":{"a/plain":[{"name":"a/plain","version":"1.0.0","dist":{"type":"zip","url":"` + url("plain") + `"}}]}}`,
+	}
+	e.zips["shapes"] = zipBytes(t, map[string]string{"composer.json": "{}"})
+	base := ccBase + "/repository/composer-proxy"
+	var raw struct {
+		Minified string `json:"minified"`
+		Packages map[string][]map[string]any
+		Extra    any `json:"filter"`
+		Sec      any `json:"security-advisories"`
+	}
+	decode(t, e.do("GET", "composer-proxy", "p2/a/shapes.json", nil), &raw)
+	vs := raw.Packages["a/shapes"]
+	if raw.Minified != "composer/2.0" || raw.Extra != nil || raw.Sec != nil || len(raw.Packages) != 1 || len(vs) != 5 {
+		t.Fatalf("file: %+v", raw)
+	}
+	wantURL := base + "/dist/a/shapes/3.0.0.0/" + refOf("shapes") + ".zip"
+	if d, _ := vs[0]["dist"].(map[string]any); d["url"] != wantURL || d["type"] != "zip" || vs[0]["source"] != nil {
+		t.Fatalf("first: %+v", vs[0])
+	}
+	if _, ok := vs[1]["dist"]; ok || vs[1]["source"] != nil {
+		t.Fatalf("inheriting: %+v", vs[1])
+	}
+	if vs[2]["dist"] != "__unset" {
+		t.Fatalf("unset: %+v", vs[2])
+	}
+	if d, ok := vs[3]["dist"]; !ok || d != nil {
+		t.Fatalf("null: %+v", vs[3])
+	}
+	// no version_normalized: derived from version
+	if d, _ := vs[4]["dist"].(map[string]any); d["url"] != base+"/dist/a/shapes/0.8.0.0/"+refOf("shapes")+".zip" {
+		t.Fatalf("derived: %+v", vs[4])
+	}
+	// the dist of an inheriting version resolves, from the file, by its ref
+	if w := e.do("GET", "composer-proxy", "dist/a/shapes/3.0.0.0/"+refOf("shapes")+".zip", nil); w.Code != 200 {
+		t.Fatalf("dist: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("GET", "composer-proxy", "p2/a/empty.json", nil); w.Code != 200 || w.Body.String() != `{"packages":{"a/empty":[]}}` {
+		t.Fatalf("empty: %d %s", w.Code, w.Body)
+	}
+	for _, name := range []string{"garbage", "notarray"} {
+		if w := e.do("GET", "composer-proxy", "p2/a/"+name+".json", nil); w.Code != 502 || !strings.Contains(w.Body.String(), "not JSON") {
+			t.Errorf("%s: %d %s", name, w.Code, w.Body)
+		}
+	}
+	// not minified: nothing says it is
+	if w := e.do("GET", "composer-proxy", "p2/a/plain.json", nil); w.Code != 200 || strings.Contains(w.Body.String(), "minified") {
+		t.Fatalf("plain: %d %s", w.Code, w.Body)
+	}
+	// the file's time, and a conditional request that reads nothing
+	w := e.do("GET", "composer-proxy", "p2/a/plain.json", nil)
+	modified := w.Header().Get("Last-Modified")
+	r := httptest.NewRequest("GET", "/repository/composer-proxy/p2/a/plain.json", nil)
+	r.Header.Set("If-Modified-Since", modified)
+	cond := httptest.NewRecorder()
+	e.h.Serve(cond, r, e.repos["composer-proxy"], "p2/a/plain.json")
+	if modified == "" || cond.Code != 304 {
+		t.Fatalf("conditional: %q %d", modified, cond.Code)
+	}
+	defer func() {
+		if p := recover(); p != http.ErrAbortHandler {
+			t.Fatalf("broken after output: recovered %v", p)
+		}
+	}()
+	e.do("GET", "composer-proxy", "p2/a/late.json", nil)
+	t.Fatal("broken after output: no abort")
+}
+
+// TestProxyMetadataMemory: decoding and expanding the file per request took a
+// 128 MiB server down at 8 clients on aws/aws-sdk-php (1.6 MiB). A request now
+// allocates a few times the file and holds one version at a time; a request
+// through a group the same, and a conditional one next to nothing.
+func TestProxyMetadataMemory(t *testing.T) {
+	e := newEnv(t)
+	var b strings.Builder
+	b.WriteString(`{"minified":"composer/2.0","packages":{"aws/sdk":[{"name":"aws/sdk","description":"An SDK","license":["Apache-2.0"],"type":"library","autoload":{"psr-4":{"Aws\\\\":"src/"}},"require":{"php":">=8.1","ext-json":"*"}`)
+	for i := 3000; i > 0; i-- {
+		if i < 3000 {
+			b.WriteString(`,{`)
+		} else {
+			b.WriteString(`,`)
+		}
+		fmt.Fprintf(&b, `"version":"3.%d.0","version_normalized":"3.%d.0.0","time":"2026-01-02T00:00:00+00:00","source":{"type":"git","url":"https://github.com/aws/sdk.git","reference":"%040d"},"dist":{"type":"zip","url":"https://api.github.com/repos/aws/sdk/zipball/%040d","reference":"%040d","shasum":""}}`, i, i, i, i, i)
+	}
+	b.WriteString(`]}}`)
+	big := b.String()
+	e.docs = map[string]string{"/p2/aws/sdk.json": big}
+	allocated := func(repoName string, hdr ...string) uint64 {
+		t.Helper()
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/repository/"+repoName+"/p2/aws/sdk.json", nil)
+		if len(hdr) == 2 {
+			r.Header.Set(hdr[0], hdr[1])
+		}
+		e.h.Serve(discardBody{w}, r, e.repos[repoName], "p2/aws/sdk.json")
+		runtime.ReadMemStats(&after)
+		if want := 200; len(hdr) == 2 {
+			want = 304
+			if w.Code != want {
+				t.Fatalf("%s: %d", repoName, w.Code)
+			}
+		} else if w.Code != want {
+			t.Fatalf("%s: %d", repoName, w.Code)
+		}
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	e.do("HEAD", "composer-proxy", "p2/aws/sdk.json", nil) // the fetch is not what is measured
+	// some 8 times the file; expanding it took 21
+	limit := 12 * uint64(len(big))
+	if got := allocated("composer-proxy"); got > limit && !raceEnabled {
+		t.Errorf("proxy: allocated %d KiB for a %d KiB file", got>>10, len(big)>>10)
+	}
+	if got := allocated("composer-all"); got > limit && !raceEnabled {
+		t.Errorf("group: allocated %d KiB for a %d KiB file", got>>10, len(big)>>10)
+	}
+	modified := e.do("HEAD", "composer-proxy", "p2/aws/sdk.json", nil).Header().Get("Last-Modified")
+	if got := allocated("composer-proxy", "If-Modified-Since", modified); got > uint64(len(big))/2 && !raceEnabled {
+		t.Errorf("conditional: allocated %d KiB for a %d KiB file", got>>10, len(big)>>10)
+	}
+}
+
+// TestHostedManyVersions: the metadata of 300 versions is written a batch of
+// rows at a time, whole, highest version first and with the dev versions apart;
+// a search reads only the newest row of a package.
+func TestHostedManyVersions(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	const n = 300
+	insert := func(v string) {
+		t.Helper()
+		b, _ := json.Marshal(entry{"name": "acme/many", "version": v, "version_normalized": v, "description": strings.Repeat("x", 8<<10), "dist": entry{"type": "zip", "shasum": "abc"}})
+		err := e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
+			return tx.InsertPackage(ctx, meta.Package{Repo: "composer-hosted", Format: "composer", Name: "acme/many", Version: v, Attrs: string(b), CreatedAt: e.now})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range n {
+		insert(fmt.Sprintf("1.%03d.0.0", i))
+	}
+	insert("dev-main")
+	d := e.metadata(t, "composer-hosted", "acme/many", false)
+	vs := d.Packages["acme/many"]
+	if len(vs) != n || vs[0].Normalized != fmt.Sprintf("1.%03d.0.0", n-1) || vs[n-1].Normalized != "1.000.0.0" {
+		t.Fatalf("versions: %d, first %+v", len(vs), vs[0].Normalized)
+	}
+	if v := vs[0]; v.Dist.Type != "zip" || v.Dist.Shasum != "abc" || v.Dist.URL != ccBase+"/repository/composer-hosted/dist/acme/many/"+v.Normalized+".zip" {
+		t.Fatalf("dist: %+v", v.Dist)
+	}
+	dev := e.metadata(t, "composer-all", "acme/many", true).Packages["acme/many"]
+	if len(dev) != 1 || dev[0].Version != "dev-main" || dev[0].Dist.URL != ccBase+"/repository/composer-all/dist/acme/many/dev-main.zip" {
+		t.Fatalf("dev: %+v", dev)
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	w := e.do("GET", "composer-hosted", "search.json?q=acme", nil)
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; w.Code != 200 || got > n*(8<<10)/2 && !raceEnabled {
+		t.Errorf("search: %d, allocated %d KiB; the versions' metadata is %d KiB", w.Code, got>>10, n*8)
+	}
+}
+
+// discardBody keeps the status and headers of a response, not its body.
+type discardBody struct{ *httptest.ResponseRecorder }
+
+func (d discardBody) Write(p []byte) (int, error) { return len(p), nil }
 
 func TestProxyNotV2(t *testing.T) {
 	e := newEnv(t)

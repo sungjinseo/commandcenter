@@ -1,11 +1,13 @@
 package nuget
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
@@ -115,15 +117,27 @@ func (h *Handler) readDoc(a meta.Asset) ([]byte, error) {
 	return raw, nil
 }
 
-// fetchDoc fetches a metadata document of rp's remote into key and reads it.
-func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url string) (doc, error) {
+// fetchFile fetches a metadata document of rp's remote into key, within maxDoc.
+func (h *Handler) fetchFile(ctx context.Context, rp *repo.Repository, key, url string) (proxy.Result, error) {
 	t := proxy.Target{Key: key, URL: url, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
+	if err != nil {
+		return res, err
+	}
+	if res.Asset.Size > maxDoc {
+		return res, repo.Errorf(http.StatusBadGateway, "upstream document %s is over %d MiB", res.Asset.Path, maxDoc>>20)
+	}
+	return res, nil
+}
+
+// fetchDoc fetches a metadata document of rp's remote into key and reads it.
+func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url string) (doc, error) {
+	res, err := h.fetchFile(ctx, rp, key, url)
 	if err != nil {
 		return doc{}, err
 	}
 	raw, err := h.readDoc(res.Asset)
-	return doc{raw, res}, err
+	return doc{body: raw, res: res}, err
 }
 
 // proxyFlatIndex serves the upstream flat container index of id, as is.
@@ -171,27 +185,23 @@ func (h *Handler) proxyRegistration(ctx context.Context, serving, rp *repo.Repos
 	if up.reg == "" {
 		return doc{}, repo.Errorf(http.StatusBadGateway, "remote repository has no RegistrationsBaseUrl resource")
 	}
-	d, err := h.fetchDoc(ctx, rp, regPrefix+rt.ID+"/"+rt.Rest, up.reg+rt.ID+"/"+rt.Rest)
+	res, err := h.fetchFile(ctx, rp, regPrefix+rt.ID+"/"+rt.Rest, up.reg+rt.ID+"/"+rt.Rest)
 	if err != nil {
 		return doc{}, err
 	}
-	d.body, err = rewrite(d.body, up, h.repoURL(serving))
-	if err != nil {
-		return doc{}, repo.Errorf(http.StatusBadGateway, "upstream registration of %q is not JSON: %v", rt.ID, err)
-	}
-	return d, nil
+	return h.rewritten(res, up, h.repoURL(serving), fmt.Sprintf("registration of %q", rt.ID)), nil
 }
 
-// proxySearch forwards a search to the upstream (cached under a key made
-// of the query, for metadataMaxAge) and rewrites its URLs to serving.
+// searchFile forwards a search to the upstream, the answer cached under a key
+// made of the query, for metadataMaxAge.
 // ponytail: every distinct query leaves a small cached asset under query/.
-func (h *Handler) proxySearch(ctx context.Context, serving, rp *repo.Repository, q query) (doc, error) {
+func (h *Handler) searchFile(ctx context.Context, rp *repo.Repository, q query) (proxy.Result, upstream, error) {
 	up, _, err := h.upstreamFor(ctx, rp)
 	if err != nil {
-		return doc{}, err
+		return proxy.Result{}, up, err
 	}
 	if up.search == "" {
-		return doc{}, repo.Errorf(http.StatusBadGateway, "remote repository has no SearchQueryService resource")
+		return proxy.Result{}, up, repo.Errorf(http.StatusBadGateway, "remote repository has no SearchQueryService resource")
 	}
 	qs := q.encode()
 	sum := sha256.Sum256([]byte(qs))
@@ -199,50 +209,169 @@ func (h *Handler) proxySearch(ctx context.Context, serving, rp *repo.Repository,
 	if strings.Contains(up.search, "?") {
 		sep = "&"
 	}
-	d, err := h.fetchDoc(ctx, rp, "query/"+hex.EncodeToString(sum[:8])+".json", up.search+sep+qs)
+	res, err := h.fetchFile(ctx, rp, "query/"+hex.EncodeToString(sum[:8])+".json", up.search+sep+qs)
+	return res, up, err
+}
+
+// proxySearch serves a proxy's search answer with its URLs rewritten to serving.
+func (h *Handler) proxySearch(ctx context.Context, serving, rp *repo.Repository, q query) (doc, error) {
+	res, up, err := h.searchFile(ctx, rp, q)
 	if err != nil {
 		return doc{}, err
 	}
-	d.body, err = rewrite(d.body, up, h.repoURL(serving))
-	if err != nil {
-		return doc{}, repo.Errorf(http.StatusBadGateway, "upstream search result is not JSON: %v", err)
-	}
-	return d, nil
+	return h.rewritten(res, up, h.repoURL(serving), "search result"), nil
 }
 
-// rewrite replaces, in every string of the JSON document raw, an upstream
-// registration or flat container base with the proxy's (base), so clients
-// follow registration pages, dependency registrations and packageContent
-// through the proxy. Everything else (catalog URLs, say) is kept.
-func rewrite(raw []byte, up upstream, base string) ([]byte, error) {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil, err
+// rewritten is a cached upstream document written through rewriteJSON.
+func (h *Handler) rewritten(res proxy.Result, up upstream, base, what string) doc {
+	return doc{res: res, write: func(w io.Writer) error {
+		f, err := h.Store.Open(res.Asset)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := rewriteJSON(w, f, up, base); err != nil {
+			return repo.Errorf(http.StatusBadGateway, "upstream %s is not JSON: %v", what, err)
+		}
+		return nil
+	}}
+}
+
+// writeUpstreamHits reads a proxy member's cached search answer as a stream,
+// one hit at a time, and writes those onPage takes with their URLs rewritten.
+func (h *Handler) writeUpstreamHits(w io.Writer, src searchSource, base string, onPage func(id string) bool) error {
+	f, err := h.Store.Open(src.file.Asset)
+	if err != nil {
+		return err
 	}
-	var walk func(any) any
-	walk = func(x any) any {
-		switch t := x.(type) {
-		case map[string]any:
-			for k, e := range t {
-				t[k] = walk(e)
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	if _, err := dec.Token(); err != nil { // the opening brace
+		return err
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if key != "data" {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return err
 			}
-		case []any:
-			for i, e := range t {
-				t[i] = walk(e)
+			continue
+		}
+		if _, err := dec.Token(); err != nil { // the opening bracket
+			return err
+		}
+		for dec.More() {
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return err
 			}
-		case string:
-			for _, b := range up.regs {
-				if rest, ok := strings.CutPrefix(t, b); ok {
-					return base + "/" + regPrefix + rest
-				}
+			var hit struct {
+				ID string `json:"id"`
 			}
-			for _, b := range up.flats {
-				if rest, ok := strings.CutPrefix(t, b); ok {
-					return base + "/" + flatPrefix + rest
-				}
+			if err := json.Unmarshal(raw, &hit); err != nil {
+				return err
+			}
+			if !onPage(hit.ID) {
+				continue
+			}
+			if err := rewriteJSON(w, bytes.NewReader(raw), src.up, base); err != nil {
+				return err
 			}
 		}
-		return x
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
 	}
-	return json.Marshal(walk(v))
+	return nil
+}
+
+// maxJSONDepth bounds the nesting rewriteJSON follows (the decoder keeps a
+// stack entry per level, so a document of brackets must not grow it).
+const maxJSONDepth = 64
+
+// rewriteJSON copies the JSON document src to w token by token, holding none
+// of it, and replaces in every string value an upstream registration or flat
+// container base with the proxy's (base), so clients follow registration
+// pages, dependency registrations and packageContent through the proxy.
+// Everything else (catalog URLs, say) is kept. Decoding whole documents here
+// took a 128 MiB server down: at 64 clients on registration pages, and at 2
+// on a search with take=1000.
+func rewriteJSON(w io.Writer, src io.Reader, up upstream, base string) error {
+	type frame struct {
+		object bool
+		n      int // the keys and values (object) or elements (array) so far
+	}
+	dec := json.NewDecoder(src)
+	dec.UseNumber()
+	var stack []frame
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tok.(json.Delim); ok && (d == '}' || d == ']') {
+			if _, err := io.WriteString(w, d.String()); err != nil {
+				return err
+			}
+			if stack = stack[:len(stack)-1]; len(stack) == 0 {
+				return nil
+			}
+			continue
+		}
+		key := false
+		if len(stack) > 0 {
+			f := &stack[len(stack)-1]
+			key = f.object && f.n%2 == 0
+			if f.n > 0 && (key || !f.object) {
+				io.WriteString(w, ",")
+			}
+			f.n++
+		}
+		switch v := tok.(type) {
+		case json.Delim:
+			if len(stack) == maxJSONDepth {
+				return fmt.Errorf("nesting deeper than %d", maxJSONDepth)
+			}
+			io.WriteString(w, v.String())
+			stack = append(stack, frame{object: v == '{'})
+			continue
+		case string:
+			if !key {
+				tok = up.toProxy(v, base)
+			}
+		}
+		b, err := json.Marshal(tok)
+		if err != nil {
+			return err
+		}
+		if key {
+			b = append(b, ':')
+		}
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+		if len(stack) == 0 {
+			return nil
+		}
+	}
+}
+
+// toProxy is s with an upstream registration or flat container base replaced
+// by the proxy's.
+func (up upstream) toProxy(s, base string) string {
+	for _, b := range up.regs {
+		if rest, ok := strings.CutPrefix(s, b); ok {
+			return base + "/" + regPrefix + rest
+		}
+	}
+	for _, b := range up.flats {
+		if rest, ok := strings.CutPrefix(s, b); ok {
+			return base + "/" + flatPrefix + rest
+		}
+	}
+	return s
 }

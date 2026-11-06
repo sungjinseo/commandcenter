@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"commandcenter/internal/auth"
 	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
@@ -36,13 +38,16 @@ type Handler struct {
 
 	mu    sync.Mutex
 	cache map[string]cacheEntry // a group's merged versions and names, by group name and document
+	sf    singleflight.Group    // one merge at a time per group and document
 }
 
-// cacheEntry is a merged group document, good for groupCacheTTL for one
-// incarnation of the group.
+// cacheEntry is a merged group document of one incarnation of the group,
+// good while state, which names what it was merged from, is the same, or
+// for groupCacheTTL when it has none.
 type cacheEntry struct {
 	gen   uint64
 	at    time.Time
+	state string
 	body  []byte
 	stale bool
 }
@@ -110,7 +115,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 			if err != nil {
 				return err
 			}
-			serveDoc(w, r, d, ctText, h.Now())
+			serveDoc(w, r, d, ctText)
 			return nil
 		}
 		res, err := h.versionsAsset(ctx, rp)
@@ -119,11 +124,18 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		}
 		return h.serveAssetDoc(w, r, res)
 	case KindNames:
+		if rp.Type == "proxy" {
+			res, err := h.fetch(ctx, rp, namesKey, proxy.Metadata)
+			if err != nil {
+				return err
+			}
+			return h.serveAssetDoc(w, r, res)
+		}
 		d, err := h.names(ctx, rp)
 		if err != nil {
 			return err
 		}
-		serveDoc(w, r, d, ctText, h.Now())
+		serveDoc(w, r, d, ctText)
 		return nil
 	case KindInfo:
 		d, err := h.info(ctx, rp, rt.Name)
@@ -133,7 +145,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		if d.body == nil { // a proxy's cached copy
 			return h.serveAssetDoc(w, r, d.res)
 		}
-		serveDoc(w, r, d, ctText, h.Now())
+		serveDoc(w, r, d, ctText)
 		return nil
 	case KindSpecs:
 		d, err := h.specs(ctx, rp, rt.File)
@@ -141,7 +153,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 			return err
 		}
 		if d.body != nil {
-			repo.ServeText(w, r, string(d.body), ctGzip, h.Now())
+			serveBuilt(w, r, d.body, ctGzip)
 			return nil
 		}
 		proxy.SetStaleHeader(w, d.res)
@@ -154,7 +166,7 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 			return err
 		}
 		if body != nil {
-			repo.ServeText(w, r, string(body), ctBinary, h.Now())
+			serveBuilt(w, r, body, ctBinary)
 			return nil
 		}
 		proxy.SetStaleHeader(w, res)
@@ -175,22 +187,30 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 			return err
 		}
 		proxy.SetStaleHeader(w, res)
-		repo.ServeText(w, r, string(body), ctBinary, h.Now())
+		serveBuilt(w, r, body, ctBinary)
 		return nil
 	}
 	return fmt.Errorf("unknown route kind %d", rt.Kind)
 }
 
-// serveDoc serves a generated document with the validators Bundler checks
-// when it fetches increments: the ETag is the md5 of the whole body (older
-// Bundler compares it to its file's), Repr-Digest its sha-256 (newer
-// Bundler verifies it after appending a Range answer).
-func serveDoc(w http.ResponseWriter, r *http.Request, d doc, ct string, modTime time.Time) {
+// serveBuilt serves a document built for this request. It has no modification
+// time: gem revalidates its copy of an index by time alone, so naming the time
+// of the answer made a request in the same second as a push or a yank a 304
+// with the old document.
+func serveBuilt(w http.ResponseWriter, r *http.Request, body []byte, ct string) {
+	repo.ServeBytes(w, r, body, ct, time.Time{})
+}
+
+// serveDoc serves a generated document, without a modification time (see
+// serveBuilt), with the validators Bundler checks when it fetches increments:
+// the ETag is the md5 of the whole body (older Bundler compares it to its
+// file's), Repr-Digest its sha-256 (newer Bundler verifies it after appending
+// a Range answer).
+func serveDoc(w http.ResponseWriter, r *http.Request, d doc, ct string) {
 	sum := sha256.Sum256(d.body)
 	setValidators(w, md5hex(d.body), hex.EncodeToString(sum[:]))
 	proxy.SetStaleHeader(w, d.res)
-	w.Header().Set("Content-Type", ct)
-	http.ServeContent(w, r, "", modTime, bytes.NewReader(d.body))
+	repo.ServeBytes(w, r, d.body, ct, time.Time{})
 }
 
 func setValidators(w http.ResponseWriter, md5Hex, sha256Hex string) {
@@ -274,61 +294,125 @@ func (h *Handler) versionsAsset(ctx context.Context, rp *repo.Repository) (proxy
 	return proxy.Result{}, fmt.Errorf("unknown repository type %q", rp.Type)
 }
 
-// versionsBody is rp's versions file read whole: a group's merge, else
-// the asset's content.
-func (h *Handler) versionsBody(ctx context.Context, rp *repo.Repository) (doc, error) {
+// versionsFile is a member's versions file as a group's merge takes it: the
+// stored file of a hosted repository or a proxy, which the merge reads as a
+// stream (a rubygems.org proxy's is some 24 MiB), or a member group's merge.
+type versionsFile struct {
+	asset meta.Asset // hosted, proxy
+	body  []byte     // group
+	id    string     // differs when the content does
+	stale bool
+}
+
+func (h *Handler) memberVersions(ctx context.Context, rp *repo.Repository) (versionsFile, error) {
 	if rp.Type == "group" {
-		return h.groupVersions(ctx, rp)
+		d, err := h.groupVersions(ctx, rp)
+		return versionsFile{body: d.body, id: md5hex(d.body), stale: d.res.Stale}, err
 	}
 	res, err := h.versionsAsset(ctx, rp)
-	if err != nil {
-		return doc{}, err
+	if err == nil && res.Asset.Size > maxIndex {
+		err = repo.Errorf(http.StatusBadGateway, "document %s is over %d MiB", res.Asset.Path, maxIndex>>20)
 	}
-	body, err := h.readDoc(res.Asset)
-	return doc{body, res}, err
+	return versionsFile{asset: res.Asset, id: res.Asset.BlobSHA256, stale: res.Stale}, err
 }
 
-// groupVersions merges the online members' versions files (mergeVersions),
-// cached for groupCacheTTL per incarnation of the group. The result is not
-// append-only across members' changes: Bundler notices by the validators
-// and downloads the whole file again.
+// groupVersions merges the online members' versions files (mergeVersions).
+// The merge is kept until a member's file changes, so a push or a yank
+// shows at once (Bundler finds a gem only through this file), on every
+// node. It only grows when the last member's file does, so Bundler gets a
+// 304 or the appended part; after any other change it notices by the
+// validators and downloads the whole file again. Only the merged file is
+// held in memory: `gem install` and Bundler ask for it first, and reading
+// the members whole took some 200 MiB for a group with a rubygems.org
+// proxy.
 func (h *Handler) groupVersions(ctx context.Context, rp *repo.Repository) (doc, error) {
-	return h.cached(rp, versionsKey, func() (doc, error) {
-		var bodies [][]byte
-		var res proxy.Result
-		for _, m := range rp.OnlineMembers() {
-			d, err := h.versionsBody(ctx, m)
-			if err != nil {
-				return doc{}, memberFailure(rp, m, err)
-			}
-			bodies = append(bodies, d.body)
-			res.Stale = res.Stale || d.res.Stale
+	members := rp.OnlineMembers()
+	files := make([]versionsFile, len(members))
+	var state strings.Builder
+	stale := false
+	for i, m := range members {
+		f, err := h.memberVersions(ctx, m)
+		if err != nil {
+			return doc{}, memberFailure(rp, m, err)
 		}
-		return doc{mergeVersions(bodies, h.Now()), res}, nil
+		files[i] = f
+		stale = stale || f.stale
+		state.WriteString(m.Name + "\x00" + f.id + "\x00")
+	}
+	d, err := h.cached(ctx, rp, versionsKey, state.String(), func(context.Context) (doc, error) {
+		var out bytes.Buffer
+		owned := map[string]bool{}
+		if len(files) == 0 {
+			out.WriteString(versionsHeader(h.Now()))
+		}
+		for i, f := range files {
+			var r io.ReadSeeker = bytes.NewReader(f.body)
+			size := len(f.body)
+			if members[i].Type != "group" {
+				blob, err := h.Store.Open(f.asset)
+				if err != nil {
+					return doc{}, memberFailure(rp, members[i], err)
+				}
+				defer blob.Close()
+				r, size = blob, int(f.asset.Size)
+			}
+			out.Grow(size)
+			if err := mergeVersions(&out, r, owned, i == 0, i == len(files)-1); err != nil {
+				return doc{}, memberFailure(rp, members[i], err)
+			}
+		}
+		return doc{body: out.Bytes()}, nil
 	})
+	d.res.Stale = stale
+	return d, err
 }
 
-func (h *Handler) cached(rp *repo.Repository, key string, build func() (doc, error)) (doc, error) {
+// cached returns a group's merged document from memory, building it when
+// there is none for state, which names what the document is merged from
+// (without one, a document is good for groupCacheTTL). One document is
+// built at a time per group, since each takes the memory of a whole merge:
+// a request that arrives meanwhile waits for that build, and looks again
+// when it was of another state. The build is detached from its first
+// caller, so one cancelled client does not fail the others.
+func (h *Handler) cached(ctx context.Context, rp *repo.Repository, key, state string, build func(context.Context) (doc, error)) (doc, error) {
 	k := rp.Name + "\x00" + key
-	now := h.Now()
-	h.mu.Lock()
-	e, ok := h.cache[k]
-	h.mu.Unlock()
-	if ok && e.gen == rp.Gen && now.Sub(e.at) < groupCacheTTL {
-		return doc{e.body, proxy.Result{Stale: e.stale}}, nil
+	for {
+		h.mu.Lock()
+		e, ok := h.cache[k]
+		h.mu.Unlock()
+		if ok && e.gen == rp.Gen && e.state == state && (state != "" || h.Now().Sub(e.at) < groupCacheTTL) {
+			return doc{e.body, proxy.Result{Stale: e.stale}}, nil
+		}
+		ch := h.sf.DoChan(fmt.Sprintf("%s\x00%d", k, rp.Gen), func() (any, error) {
+			h.mu.Lock()
+			delete(h.cache, k) // the old document is not held while the next one is built
+			h.mu.Unlock()
+			d, err := build(context.WithoutCancel(ctx))
+			if err != nil {
+				return nil, err
+			}
+			e := cacheEntry{gen: rp.Gen, at: h.Now(), state: state, body: d.body, stale: d.res.Stale}
+			h.mu.Lock()
+			h.cache[k] = e
+			h.mu.Unlock()
+			return e, nil
+		})
+		select {
+		case r := <-ch:
+			if r.Err != nil {
+				return doc{}, r.Err
+			}
+			if e := r.Val.(cacheEntry); e.state == state {
+				return doc{e.body, proxy.Result{Stale: e.stale}}, nil
+			}
+		case <-ctx.Done():
+			return doc{}, ctx.Err()
+		}
 	}
-	d, err := build()
-	if err != nil {
-		return doc{}, err
-	}
-	h.mu.Lock()
-	h.cache[k] = cacheEntry{gen: rp.Gen, at: now, body: d.body, stale: d.res.Stale}
-	h.mu.Unlock()
-	return d, nil
 }
 
 // names is the names file: a hosted repository's gems, a proxy's cached
-// copy, or the union of a group's members' (cached as the versions are).
+// copy, or the union of a group's members' (cached for groupCacheTTL).
 func (h *Handler) names(ctx context.Context, rp *repo.Repository) (doc, error) {
 	switch rp.Type {
 	case "hosted":
@@ -337,7 +421,7 @@ func (h *Handler) names(ctx context.Context, rp *repo.Repository) (doc, error) {
 	case "proxy":
 		return h.fetchDoc(ctx, rp, namesKey)
 	case "group":
-		return h.cached(rp, namesKey, func() (doc, error) {
+		return h.cached(ctx, rp, namesKey, "", func(ctx context.Context) (doc, error) {
 			seen := map[string]bool{}
 			var names []string
 			var res proxy.Result
@@ -365,14 +449,14 @@ func (h *Handler) names(ctx context.Context, rp *repo.Repository) (doc, error) {
 func (h *Handler) info(ctx context.Context, rp *repo.Repository, name string) (doc, error) {
 	switch rp.Type {
 	case "hosted":
-		rs, err := rows(ctx, h.Store.DB, rp.Name, name)
+		body, err := hostedInfo(ctx, h.Store.DB, rp.Name, name)
 		if err != nil {
 			return doc{}, err
 		}
-		if len(rs) == 0 {
+		if body == nil {
 			return doc{}, repo.ErrNotFound
 		}
-		return doc{body: infoDoc(rs)}, nil
+		return doc{body: body}, nil
 	case "proxy":
 		res, err := h.fetch(ctx, rp, infoPrefix+name, proxy.Metadata)
 		return doc{res: res}, err
@@ -416,21 +500,15 @@ func (h *Handler) specs(ctx context.Context, rp *repo.Repository, file string) (
 	return doc{}, fmt.Errorf("unknown repository type %q", rp.Type)
 }
 
-// hostedSpecs builds a specs index from every row of a hosted repository.
+// hostedSpecs builds a specs index from the versions of a hosted repository.
 func (h *Handler) hostedSpecs(ctx context.Context, rp *repo.Repository, file string) ([]byte, error) {
-	names, err := h.Store.DB.ListPackageNames(ctx, rp.Name)
+	var entries []specEntry
+	err := h.Store.DB.WalkPackageVersions(ctx, rp.Name, func(name, version string) {
+		v, platform := splitRowVersion(version)
+		entries = append(entries, specEntry{name, v, platform})
+	})
 	if err != nil {
 		return nil, err
-	}
-	var entries []specEntry
-	for _, name := range names {
-		rs, err := rows(ctx, h.Store.DB, rp.Name, name)
-		if err != nil {
-			return nil, err
-		}
-		for _, r := range rs {
-			entries = append(entries, specEntry{name, r.version, r.platform})
-		}
 	}
 	return specsDoc(file, entries)
 }
@@ -446,16 +524,15 @@ func (h *Handler) file(ctx context.Context, rp *repo.Repository, rt Route) (prox
 			return proxy.Result{Asset: a}, nil, err
 		}
 		for _, c := range candidates(rt.Full) {
-			rs, err := rows(ctx, h.Store.DB, rp.Name, c[0])
+			p, err := h.Store.DB.GetPackage(ctx, rp.Name, c[0], c[1])
+			if errors.Is(err, meta.ErrNotFound) {
+				continue
+			}
 			if err != nil {
 				return proxy.Result{}, nil, err
 			}
-			for _, r := range rs {
-				if r.pkg.Version == c[1] {
-					body, err := gemspecRz(r.attrs)
-					return proxy.Result{}, body, err
-				}
-			}
+			body, err := gemspecRz(newRow(p).attrs())
+			return proxy.Result{}, body, err
 		}
 		return proxy.Result{}, nil, repo.ErrNotFound
 	case "proxy":
@@ -622,9 +699,8 @@ func (h *Handler) has(ctx context.Context, rp *repo.Repository, name string) (bo
 	var err error
 	switch rp.Type {
 	case "hosted":
-		var pkgs []meta.Package
-		pkgs, err = h.Store.DB.ListPackages(ctx, rp.Name, name)
-		return len(pkgs) > 0, err
+		st, err := h.Store.DB.PackageStamp(ctx, rp.Name, name)
+		return st.Count > 0, err
 	case "proxy":
 		_, err = h.fetch(ctx, rp, infoPrefix+name, proxy.Metadata)
 	case "group":

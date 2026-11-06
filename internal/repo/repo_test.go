@@ -301,3 +301,74 @@ func TestMembersOffline(t *testing.T) {
 		t.Error("outer: a nested group with an online member serves")
 	}
 }
+
+// TestServeStream: what a client sees of a document written as a stream.
+func TestServeStream(t *testing.T) {
+	modified := time.Date(2026, 1, 2, 3, 4, 5, 500, time.UTC)
+	serve := func(method string, hdr map[string]string, modTime time.Time, write func(io.Writer) error) (*httptest.ResponseRecorder, error) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(method, "/x", nil)
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		return w, ServeStream(w, r, "application/json", modTime, write)
+	}
+	body := func(w io.Writer) error { _, err := io.WriteString(w, "{}"); return err }
+	w, err := serve("GET", nil, modified, body)
+	if err != nil || w.Code != 200 || w.Body.String() != "{}" || w.Header().Get("Content-Type") != "application/json" || w.Header().Get("Last-Modified") != "Fri, 02 Jan 2026 03:04:05 GMT" {
+		t.Fatalf("GET: %v %d %v %q", err, w.Code, w.Header(), w.Body)
+	}
+	if w, err := serve("GET", nil, time.Time{}, body); err != nil || w.Header().Get("Last-Modified") != "" {
+		t.Fatalf("no time: %v %v", err, w.Header())
+	}
+	wrote := false
+	counted := func(w io.Writer) error { wrote = true; return body(w) }
+	since := map[string]string{"If-Modified-Since": "Fri, 02 Jan 2026 03:04:05 GMT"}
+	if w, err := serve("GET", since, modified, counted); err != nil || w.Code != 304 || wrote {
+		t.Fatalf("not modified: %v %d, written %v", err, w.Code, wrote)
+	}
+	if w, _ := serve("GET", map[string]string{"If-Modified-Since": "Fri, 02 Jan 2026 03:04:04 GMT"}, modified, counted); w.Code != 200 || !wrote {
+		t.Fatalf("modified: %d, written %v", w.Code, wrote)
+	}
+	wrote = false
+	if w, err := serve("HEAD", nil, modified, counted); err != nil || w.Code != 200 || wrote || w.Body.Len() != 0 {
+		t.Fatalf("HEAD: %v %d, written %v", err, w.Code, wrote)
+	}
+	// a failure while the output is still buffered is the caller's to report
+	bad := errors.New("bad document")
+	w, err = serve("GET", nil, modified, func(w io.Writer) error {
+		io.WriteString(w, "{")
+		return bad
+	})
+	if !errors.Is(err, bad) || w.Body.Len() != 0 || w.Header().Get("Last-Modified") != "" || w.Header().Get("Content-Type") != "" {
+		t.Fatalf("early failure: %v %q %v", err, w.Body, w.Header())
+	}
+	// a later one cuts the connection: a short document must not look complete
+	defer func() {
+		if p := recover(); p != http.ErrAbortHandler {
+			t.Fatalf("late failure: recovered %v", p)
+		}
+	}()
+	serve("GET", nil, modified, func(w io.Writer) error {
+		io.WriteString(w, strings.Repeat("x", 64<<10))
+		return bad
+	})
+	t.Fatal("late failure: no abort")
+}
+
+// A client that went away is nothing to report, even with output started.
+func TestServeStreamClientGone(t *testing.T) {
+	w := &failingWriter{ResponseRecorder: httptest.NewRecorder()}
+	r := httptest.NewRequest("GET", "/x", nil)
+	err := ServeStream(w, r, "application/json", time.Time{}, func(dst io.Writer) error {
+		_, err := io.WriteString(dst, strings.Repeat("x", 64<<10))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+type failingWriter struct{ *httptest.ResponseRecorder }
+
+func (*failingWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }

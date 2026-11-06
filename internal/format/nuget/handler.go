@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -36,10 +37,13 @@ func New(store *repo.Store, fetcher *proxy.Fetcher, authn *auth.Authenticator, b
 }
 
 // doc is a derived JSON document and, for a proxy, the cached upstream
-// asset it came from (its staleness and modification time).
+// asset it came from (its staleness and modification time). A proxy's
+// registration and search documents have write instead of body: they are
+// written as they are read.
 type doc struct {
-	body []byte
-	res  proxy.Result
+	body  []byte
+	res   proxy.Result
+	write func(io.Writer) error
 }
 
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) {
@@ -112,7 +116,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		return err
 	}
 	proxy.SetStaleHeader(w, d.res)
-	repo.ServeText(w, r, string(d.body), ctJSON, d.res.Asset.LastModified)
+	if d.write != nil {
+		return repo.ServeStream(w, r, ctJSON, d.res.Asset.LastModified, d.write)
+	}
+	repo.ServeBytes(w, r, d.body, ctJSON, d.res.Asset.LastModified)
 	return nil
 }
 
@@ -170,7 +177,7 @@ func (h *Handler) serviceIndex(ctx context.Context, rp *repo.Repository) (doc, e
 		add(base+"/api/v2/package", "PackagePublish/2.0.0")
 	}
 	body, err := json.Marshal(map[string]any{"version": "3.0.0", "resources": resources})
-	return doc{body, res}, err
+	return doc{body: body, res: res}, err
 }
 
 // row is one stored version of a hosted package.
@@ -180,27 +187,35 @@ type row struct {
 	pkg   meta.Package
 }
 
-// rows lists the versions of id in hosted rp, oldest version first. A row
-// whose attrs cannot be read (never written by this build) still lists
-// with its id and version.
-func (h *Handler) rows(ctx context.Context, rp *repo.Repository, id string) ([]row, error) {
-	pkgs, err := h.Store.DB.ListPackages(ctx, rp.Name, id)
+// newRow reads a stored version. A row whose attrs cannot be read (never
+// written by this build) still lists with its id and version.
+func newRow(p meta.Package) (row, bool) {
+	v, ok := parseVersion(p.Version)
+	if !ok {
+		return row{}, false
+	}
+	r := row{v: v, pkg: p}
+	if json.Unmarshal([]byte(p.Attrs), &r.attrs) != nil || r.attrs.ID == "" {
+		r.attrs = pkgAttrs{ID: p.Name, Version: v.String(), Tags: []string{}, DependencyGroups: []depGroup{}, Listed: true}
+	}
+	return r, true
+}
+
+// versionsOf lists the versions of id in hosted rp, oldest first, without
+// their metadata: the rows of a package with thousands of versions are
+// megabytes, which took a 128 MiB server down at some clients at once.
+func (h *Handler) versionsOf(ctx context.Context, rp *repo.Repository, id string) ([]version, error) {
+	stored, err := h.Store.DB.ListPackageVersions(ctx, rp.Name, id)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]row, 0, len(pkgs))
-	for _, p := range pkgs {
-		v, ok := parseVersion(p.Version)
-		if !ok {
-			continue
+	out := make([]version, 0, len(stored))
+	for _, p := range stored {
+		if v, ok := parseVersion(p.Version); ok {
+			out = append(out, v)
 		}
-		r := row{v: v, pkg: p}
-		if json.Unmarshal([]byte(p.Attrs), &r.attrs) != nil || r.attrs.ID == "" {
-			r.attrs = pkgAttrs{ID: p.Name, Version: v.String(), Tags: []string{}, DependencyGroups: []depGroup{}, Listed: true}
-		}
-		out = append(out, r)
 	}
-	sort.Slice(out, func(i, j int) bool { return compareVersions(out[i].v, out[j].v) < 0 })
+	sort.Slice(out, func(i, j int) bool { return compareVersions(out[i], out[j]) < 0 })
 	return out, nil
 }
 
@@ -209,16 +224,16 @@ func (h *Handler) rows(ctx context.Context, rp *repo.Repository, id string) ([]r
 func (h *Handler) flatIndex(ctx context.Context, rp *repo.Repository, id string) (doc, error) {
 	switch rp.Type {
 	case "hosted":
-		rows, err := h.rows(ctx, rp, id)
+		stored, err := h.versionsOf(ctx, rp, id)
 		if err != nil {
 			return doc{}, err
 		}
-		if len(rows) == 0 {
+		if len(stored) == 0 {
 			return doc{}, repo.ErrNotFound
 		}
-		versions := make([]string, 0, len(rows))
-		for _, r := range rows {
-			versions = append(versions, r.v.key())
+		versions := make([]string, 0, len(stored))
+		for _, v := range stored {
+			versions = append(versions, v.key())
 		}
 		body, err := json.Marshal(map[string]any{"versions": versions})
 		return doc{body: body}, err
@@ -258,25 +273,33 @@ func (h *Handler) flatFile(ctx context.Context, rp *repo.Repository, rt Route) (
 func (h *Handler) registration(ctx context.Context, serving, rp *repo.Repository, rt Route) (doc, error) {
 	switch rp.Type {
 	case "hosted":
-		rows, err := h.rows(ctx, rp, rt.ID)
+		base := h.repoURL(serving)
+		if rt.Rest == "index.json" {
+			versions, err := h.versionsOf(ctx, rp, rt.ID)
+			if err != nil {
+				return doc{}, err
+			}
+			if len(versions) == 0 {
+				return doc{}, repo.ErrNotFound
+			}
+			return doc{write: func(w io.Writer) error { return h.writeRegistrationIndex(ctx, w, base, rp, rt.ID, versions) }}, nil
+		}
+		if rt.Version == "" {
+			return doc{}, repo.ErrNotFound
+		}
+		p, err := h.Store.DB.GetPackage(ctx, rp.Name, rt.ID, rt.Version)
+		if errors.Is(err, meta.ErrNotFound) {
+			return doc{}, repo.ErrNotFound
+		}
 		if err != nil {
 			return doc{}, err
 		}
-		if len(rows) == 0 {
+		r, ok := newRow(p)
+		if !ok {
 			return doc{}, repo.ErrNotFound
 		}
-		base := h.repoURL(serving)
-		if rt.Rest == "index.json" {
-			body, err := json.Marshal(h.registrationIndex(base, rt.ID, rows))
-			return doc{body: body}, err
-		}
-		for _, r := range rows {
-			if r.v.key() == rt.Version {
-				body, err := json.Marshal(h.registrationLeaf(base, rt.ID, r))
-				return doc{body: body}, err
-			}
-		}
-		return doc{}, repo.ErrNotFound
+		body, err := json.Marshal(h.registrationLeaf(base, rt.ID, r))
+		return doc{body: body}, err
 	case "proxy":
 		return h.proxyRegistration(ctx, serving, rp, rt)
 	case "group":
@@ -289,23 +312,51 @@ func (h *Handler) registration(ctx context.Context, serving, rp *repo.Repository
 	return doc{}, fmt.Errorf("unknown repository type %q", rp.Type)
 }
 
-// registrationIndex is registration/<id>/index.json with every version in
-// one inline page, as NuGet.Protocol reads it: items[].items[] each with a
-// catalogEntry and packageContent, the page's count, lower and upper.
-func (h *Handler) registrationIndex(base, id string, rows []row) map[string]any {
+// writeRegistrationIndex writes registration/<id>/index.json with every
+// version in one inline page, as NuGet.Protocol reads it: items[].items[] each
+// with a catalogEntry and packageContent, the page's count, lower and upper.
+// The leaves are written as a batch of rows at a time.
+func (h *Handler) writeRegistrationIndex(ctx context.Context, w io.Writer, base string, rp *repo.Repository, id string, versions []version) error {
 	index := base + "/" + regPrefix + id + "/index.json"
-	items := make([]map[string]any, 0, len(rows))
-	for _, r := range rows {
-		items = append(items, h.registrationLeaf(base, id, r))
+	lower, upper := versions[0].key(), versions[len(versions)-1].key()
+	head, err := json.Marshal(map[string]any{
+		"@id": index + "#page/" + lower + "/" + upper, "@type": "catalog:CatalogPage",
+		"count": len(versions), "lower": lower, "upper": upper, "parent": index,
+	})
+	if err != nil {
+		return err
 	}
-	page := map[string]any{
-		"@id": index + "#page/" + rows[0].v.key() + "/" + rows[len(rows)-1].v.key(), "@type": "catalog:CatalogPage",
-		"count": len(items), "items": items, "lower": rows[0].v.key(), "upper": rows[len(rows)-1].v.key(), "parent": index,
+	root, err := json.Marshal(map[string]any{"@id": index, "@type": []string{"catalog:CatalogRoot", "PackageRegistration", "catalog:Permalink"}, "count": 1})
+	if err != nil {
+		return err
 	}
-	return map[string]any{
-		"@id": index, "@type": []string{"catalog:CatalogRoot", "PackageRegistration", "catalog:Permalink"},
-		"count": 1, "items": []map[string]any{page},
+	// the objects are closed by hand: "items" is added to each
+	fmt.Fprintf(w, `%s,"items":[%s,"items":[`, root[:len(root)-1], head[:len(head)-1])
+	keys := make([]string, 0, len(versions))
+	for _, v := range versions {
+		keys = append(keys, v.key())
 	}
+	n := 0
+	err = h.Store.DB.EachPackage(ctx, rp.Name, id, keys, func(p meta.Package) error {
+		r, ok := newRow(p)
+		if !ok {
+			return nil
+		}
+		leaf, err := json.Marshal(h.registrationLeaf(base, id, r))
+		if err != nil {
+			return err
+		}
+		if n++; n > 1 {
+			io.WriteString(w, ",")
+		}
+		_, err = w.Write(leaf)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, "]}]}")
+	return err
 }
 
 // registrationLeaf is one version: the item of the registration page, also
@@ -393,32 +444,95 @@ func (h *Handler) search(ctx context.Context, serving, rp *repo.Repository, q qu
 		// Each member is asked for skip+take, merged in member order with
 		// the first member keeping an id, and the page is cut from the merge.
 		// ponytail: a proxy member is asked for all of skip+take every page.
-		all := query{q: q.q, take: min(q.skip+q.take, maxTake), prerelease: q.prerelease}
-		var hits []hit
-		seen := map[string]bool{}
-		for _, m := range rp.OnlineMembers() {
-			d, err := h.search(ctx, serving, m, all)
-			if err != nil {
-				return doc{}, memberFailure(rp, m, err)
-			}
-			var got struct {
-				Data []map[string]any `json:"data"`
-			}
-			if err := json.Unmarshal(d.body, &got); err != nil {
-				return doc{}, memberFailure(rp, m, err)
-			}
-			for _, data := range got.Data {
-				id, _ := data["id"].(string)
-				if id = strings.ToLower(id); id == "" || seen[id] {
-					continue
-				}
-				seen[id] = true
-				hits = append(hits, hit{id: id, data: data})
-			}
+		sources, err := h.searchSources(ctx, serving, rp, query{q: q.q, take: min(q.skip+q.take, maxTake), prerelease: q.prerelease})
+		if err != nil {
+			return doc{}, err
 		}
-		return searchDoc(hits, q)
+		base := h.repoURL(serving)
+		return doc{write: func(w io.Writer) error { return h.writeMerged(w, sources, base, q) }}, nil
 	}
 	return doc{}, fmt.Errorf("unknown repository type %q", rp.Type)
+}
+
+// searchSource is what one member of a group answers a search with: a hosted
+// member's hits, or a proxy member's cached upstream answer. A failing member
+// fails the search here, before anything is written.
+type searchSource struct {
+	hits []hit
+	file proxy.Result
+	up   upstream
+}
+
+func (h *Handler) searchSources(ctx context.Context, serving, rp *repo.Repository, q query) ([]searchSource, error) {
+	var out []searchSource
+	for _, m := range rp.OnlineMembers() {
+		var src []searchSource
+		var err error
+		switch m.Type {
+		case "hosted":
+			var hits []hit
+			hits, err = h.hostedSearch(ctx, serving, m, q)
+			src = []searchSource{{hits: hits}}
+		case "proxy":
+			var s searchSource
+			s.file, s.up, err = h.searchFile(ctx, m, q)
+			src = []searchSource{s}
+		case "group":
+			src, err = h.searchSources(ctx, serving, m, q)
+		default:
+			err = fmt.Errorf("unknown repository type %q", m.Type)
+		}
+		if err != nil {
+			return nil, memberFailure(rp, m, err)
+		}
+		out = append(out, src...)
+	}
+	return out, nil
+}
+
+// writeMerged writes a group's search answer from its members' in order, the
+// first keeping an id: the upstream answers are read one hit at a time, so
+// take=1000 (10 MiB from nuget.org) is not in memory, and totalHits comes last.
+func (h *Handler) writeMerged(w io.Writer, sources []searchSource, base string, q query) error {
+	seen := map[string]bool{}
+	total, written := 0, 0
+	// onPage counts a hit and says whether it goes on the page, ready for it.
+	onPage := func(id string) bool {
+		if id = strings.ToLower(id); id == "" || seen[id] {
+			return false
+		}
+		seen[id] = true
+		if total++; total <= q.skip || written == q.take {
+			return false
+		}
+		if written++; written > 1 {
+			io.WriteString(w, ",")
+		}
+		return true
+	}
+	io.WriteString(w, `{"data":[`)
+	for _, src := range sources {
+		for _, hit := range src.hits {
+			if !onPage(hit.id) {
+				continue
+			}
+			data, err := json.Marshal(hit.data)
+			if err != nil {
+				return err
+			}
+			if _, err := w.Write(data); err != nil {
+				return err
+			}
+		}
+		if src.file.Asset.BlobSHA256 == "" {
+			continue
+		}
+		if err := h.writeUpstreamHits(w, src, base, onPage); err != nil {
+			return repo.Errorf(http.StatusBadGateway, "upstream search result is not JSON: %v", err)
+		}
+	}
+	_, err := fmt.Fprintf(w, `],"totalHits":%d}`, total)
+	return err
 }
 
 // searchDoc cuts the page q asks for from hits and writes the response.
@@ -436,9 +550,10 @@ func searchDoc(hits []hit, q query) (doc, error) {
 
 // hostedSearch matches q against the package ids of hosted rp ("packageid:x"
 // and "id:x" match an id exactly) and lists each match with its versions,
-// prerelease ones only when asked, the newest as the hit's version.
-// ponytail: one ListPackages per matching id; a search index if feeds
-// grow past a few thousand packages.
+// prerelease ones only when asked, the newest as the hit's version, whose
+// metadata the hit shows.
+// ponytail: two queries per matching id; a search index if feeds grow past a
+// few thousand packages.
 func (h *Handler) hostedSearch(ctx context.Context, serving, rp *repo.Repository, q query) ([]hit, error) {
 	text, exact := q.q, false
 	for _, p := range []string{"packageid:", "id:"} {
@@ -458,24 +573,34 @@ func (h *Handler) hostedSearch(ctx context.Context, serving, rp *repo.Repository
 		if exact && id != text {
 			continue
 		}
-		rows, err := h.rows(ctx, rp, id)
+		stored, err := h.versionsOf(ctx, rp, id)
 		if err != nil {
 			return nil, err
 		}
 		var versions []map[string]any
-		var latest *row
-		for i := range rows {
-			r := &rows[i]
-			if r.v.prerelease() && !q.prerelease {
+		var newest string
+		for _, v := range stored {
+			if v.prerelease() && !q.prerelease {
 				continue
 			}
 			versions = append(versions, map[string]any{
-				"version": r.attrs.Version, "downloads": 0,
-				"@id": base + "/" + regPrefix + id + "/" + r.v.key() + ".json",
+				"version": v.String(), "downloads": 0,
+				"@id": base + "/" + regPrefix + id + "/" + v.key() + ".json",
 			})
-			latest = r
+			newest = v.key()
 		}
-		if latest == nil {
+		if newest == "" {
+			continue
+		}
+		p, err := h.Store.DB.GetPackage(ctx, rp.Name, id, newest)
+		if errors.Is(err, meta.ErrNotFound) { // deleted since the list
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		latest, ok := newRow(p)
+		if !ok {
 			continue
 		}
 		a := latest.attrs
@@ -515,9 +640,8 @@ func (h *Handler) has(ctx context.Context, rp *repo.Repository, id string) (bool
 	var err error
 	switch rp.Type {
 	case "hosted":
-		var pkgs []meta.Package
-		pkgs, err = h.Store.DB.ListPackages(ctx, rp.Name, id)
-		return len(pkgs) > 0, err
+		st, err := h.Store.DB.PackageStamp(ctx, rp.Name, id)
+		return st.Count > 0, err
 	case "proxy":
 		_, err = h.proxyFlatIndex(ctx, rp, id)
 	case "group":

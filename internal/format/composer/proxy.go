@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -107,13 +108,15 @@ func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url st
 		return doc{}, err
 	}
 	raw, err := h.readDoc(res.Asset)
-	return doc{raw, res}, err
+	return doc{body: raw, res: res}, err
 }
 
-// droppedRootKeys are what a proxy's packages.json leaves out of the
-// upstream's: the v1 provider protocol, download notifications and the
-// upstream's own APIs, which would point clients past the proxy.
-var droppedRootKeys = []string{"providers-url", "provider-includes", "providers-lazy-url", "providers-api", "notify-batch", "security-advisories", "list", "minified"}
+// keptRootKeys are what a proxy's packages.json keeps of the upstream's: inline
+// packages and notices. The rest is the v1 provider protocol, download
+// notifications and the upstream's own APIs, and what a later Packagist adds
+// (the filter lists' summary-url made composer audit fail on a closed network),
+// which would point clients past the proxy.
+var keptRootKeys = []string{"packages", "minified", "available-packages", "available-package-patterns", "warning", "warning-versions", "info", "info-versions", "warnings", "infos"}
 
 // proxyRoot is the upstream packages.json with metadata-url and search
 // pointing at the proxy. Inline packages (a Satis repository without
@@ -124,14 +127,13 @@ func (h *Handler) proxyRoot(ctx context.Context, rp *repo.Repository) (doc, erro
 		return doc{}, err
 	}
 	out := map[string]any{}
-	for k, v := range up.root {
-		out[k] = v
-	}
-	inline, _ := out["packages"].(map[string]any)
-	for _, k := range droppedRootKeys {
-		if k != "minified" || len(inline) == 0 { // minified describes the inline packages only
-			delete(out, k)
+	for _, k := range keptRootKeys {
+		if v, ok := up.root[k]; ok {
+			out[k] = v
 		}
+	}
+	if inline, _ := out["packages"].(map[string]any); len(inline) == 0 {
+		delete(out, "minified") // it describes the inline packages only
 	}
 	base := h.repoURL(rp)
 	for k, v := range rootDoc(base) {
@@ -145,112 +147,240 @@ func (h *Handler) proxyRoot(ctx context.Context, rp *repo.Repository) (doc, erro
 		out[k] = v
 	}
 	body, err := json.Marshal(out)
-	return doc{body, res}, err
+	return doc{body: body, res: res}, err
 }
 
-// proxyDoc fetches (or reads from the cache) the upstream metadata of name
-// and returns its versions, expanded when the upstream minified them.
-func (h *Handler) proxyDoc(ctx context.Context, rp *repo.Repository, name string, dev bool) ([]entry, proxy.Result, error) {
+// metadataFile fetches (or finds in the cache) the upstream metadata file of
+// name. The file is not read: Packagist's largest are over 1 MiB, and holding
+// one per request took a 128 MiB server down at 8 clients at once.
+func (h *Handler) metadataFile(ctx context.Context, rp *repo.Repository, name string, dev bool) (proxy.Result, error) {
 	up, _, err := h.upstreamFor(ctx, rp)
 	if err != nil {
-		return nil, proxy.Result{}, err
+		return proxy.Result{}, err
 	}
 	pkg := name
 	if dev {
 		pkg += "~dev"
 	}
-	d, err := h.fetchDoc(ctx, rp, metadataPath(name, dev), fill(up.metadataURL, pkg, "", ""))
+	t := proxy.Target{Key: metadataPath(name, dev), URL: fill(up.metadataURL, pkg, "", ""), Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
 	if err != nil {
-		return nil, d.res, err
+		return res, err
 	}
-	var parsed struct {
-		Packages map[string][]entry `json:"packages"`
-		Minified string             `json:"minified"`
+	if res.Asset.Size > maxDoc {
+		return res, repo.Errorf(http.StatusBadGateway, "upstream document %s is over %d MiB", res.Asset.Path, maxDoc>>20)
 	}
-	if err := json.Unmarshal(d.body, &parsed); err != nil {
-		return nil, d.res, repo.Errorf(http.StatusBadGateway, "upstream metadata of %q is not JSON: %v", name, err)
-	}
-	versions := parsed.Packages[name]
-	if parsed.Minified == "composer/2.0" {
-		versions = expand(versions)
-	}
-	return versions, d.res, nil
+	return res, nil
 }
 
-// expand undoes Composer's metadata minification: each version after the
-// first lists only the fields that differ from the one before, "__unset"
-// marking a removed field.
-func expand(versions []entry) []entry {
-	out := make([]entry, 0, len(versions))
-	var prev entry
-	for _, v := range versions {
-		e := entry{}
-		for k, val := range prev {
-			e[k] = val
-		}
-		for k, val := range v {
-			if s, ok := val.(string); ok && s == "__unset" {
-				delete(e, k)
-				continue
-			}
-			e[k] = val
-		}
-		out = append(out, e)
-		prev = e
+// rawEntry is one version as a metadata file lists it; a minified file lists
+// only the fields that differ from the version before, "__unset" marking a
+// removed one.
+type rawEntry = map[string]json.RawMessage
+
+// errStop ends eachVersion early.
+var errStop = errors.New("stop")
+
+// eachVersion reads the metadata file r as a stream and calls fn with each
+// version of name in it, holding one at a time. It returns the file's
+// "minified" value, which comes before or after the versions.
+func eachVersion(r io.Reader, name string, fn func(rawEntry) error) (minified string, err error) {
+	dec := json.NewDecoder(r)
+	if _, err := dec.Token(); err != nil { // the opening brace
+		return "", err
 	}
-	return out
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return minified, err
+		}
+		switch key {
+		case "minified":
+			err = dec.Decode(&minified)
+		case "packages":
+			err = eachPackageVersion(dec, name, fn)
+		default:
+			var skip json.RawMessage
+			err = dec.Decode(&skip)
+		}
+		if err != nil {
+			return minified, err
+		}
+	}
+	_, err = dec.Token()
+	return minified, err
+}
+
+// eachPackageVersion reads the value of "packages": an object of version
+// lists, or the empty array PHP writes for an empty one.
+func eachPackageVersion(dec *json.Decoder, name string, fn func(rawEntry) error) error {
+	open, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if open == json.Delim('[') {
+		for dec.More() {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+		return err
+	}
+	if open != json.Delim('{') {
+		return fmt.Errorf("packages is %v, not an object", open)
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if key != name {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return err
+			}
+			continue
+		}
+		if open, err := dec.Token(); err != nil {
+			return err
+		} else if open != json.Delim('[') {
+			return fmt.Errorf("the versions of %s are %v, not an array", name, open)
+		}
+		for dec.More() {
+			var e rawEntry
+			if err := dec.Decode(&e); err != nil {
+				return err
+			}
+			if err := fn(e); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
+	}
+	_, err = dec.Token()
+	return err
 }
 
 // proxyMetadata serves the upstream metadata of a package with every dist
 // URL rewritten to serving (dist/<name>/<version>/<sha1 of the upstream
 // URL>.zip) and the source entries dropped, so Composer never reaches
-// past the proxy or into git.
+// past the proxy or into git. The file stays minified as the upstream wrote
+// it: Composer expands it, as it does Packagist's.
 func (h *Handler) proxyMetadata(ctx context.Context, serving, rp *repo.Repository, rt Route) (doc, error) {
-	versions, res, err := h.proxyDoc(ctx, rp, rt.Name, rt.Dev)
+	res, err := h.metadataFile(ctx, rp, rt.Name, rt.Dev)
 	if err != nil {
 		return doc{}, err
 	}
 	base := h.repoURL(serving)
-	out := make([]entry, 0, len(versions))
-	for _, e := range versions {
-		delete(e, "source")
-		if _, ref, ok := distRef(e); ok {
-			d := entry{} // a copy: expanded entries may share one dist map
-			for k, v := range e["dist"].(map[string]any) {
-				d[k] = v
-			}
-			d["url"] = base + "/" + distPrefix + rt.Name + "/" + normalizedOf(e) + "/" + ref + ".zip"
-			e["dist"] = d
+	return doc{res: res, write: func(w io.Writer) error {
+		f, err := h.Store.Open(res.Asset)
+		if err != nil {
+			return err
 		}
-		out = append(out, e)
-	}
-	body, err := json.Marshal(map[string]any{"packages": map[string]any{rt.Name: out}})
-	return doc{body, res}, err
+		defer f.Close()
+		if err := writeMetadata(w, f, rt.Name, base); err != nil {
+			return repo.Errorf(http.StatusBadGateway, "upstream metadata of %q is not JSON: %v", rt.Name, err)
+		}
+		return nil
+	}}, nil
 }
 
-// distRef returns an entry's upstream dist URL and its sha1 (the proxy's
-// file name for it).
-func distRef(e entry) (url, ref string, ok bool) {
-	d, _ := e["dist"].(map[string]any)
-	url, _ = d["url"].(string)
-	if url == "" {
-		return "", "", false
+// writeMetadata copies the versions of name in the metadata file src to w,
+// rewriting them for the proxy at base.
+func writeMetadata(w io.Writer, src io.Reader, name, base string) error {
+	head, err := json.Marshal(name)
+	if err != nil {
+		return err
 	}
-	sum := sha1.Sum([]byte(url))
-	return url, hex.EncodeToString(sum[:]), true
+	fmt.Fprintf(w, `{"packages":{%s:[`, head)
+	normalized, n := "", 0
+	minified, err := eachVersion(src, name, func(e rawEntry) error {
+		delete(e, "source")
+		normalized = entryVersion(e, normalized)
+		if err := rewriteDist(e, base+"/"+distPrefix+name+"/"+normalized+"/"); err != nil {
+			return err
+		}
+		b, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		if n++; n > 1 {
+			io.WriteString(w, ",")
+		}
+		_, err = w.Write(b)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	io.WriteString(w, "]}")
+	if minified != "" {
+		m, err := json.Marshal(minified)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, `,"minified":%s`, m)
+	}
+	_, err = io.WriteString(w, "}")
+	return err
 }
 
-// normalizedOf is an entry's version_normalized, derived from version when
-// the upstream left it out.
-func normalizedOf(e entry) string {
-	if v, _ := e["version_normalized"].(string); v != "" {
+// entryVersion is the normalized version of an entry: its version_normalized,
+// derived from version when the upstream left that out, or the previous
+// entry's when a minified entry has neither.
+func entryVersion(e rawEntry, previous string) string {
+	var v string
+	if json.Unmarshal(e["version_normalized"], &v) == nil && v != "" {
 		return v
 	}
-	v, _ := e["version"].(string)
+	if json.Unmarshal(e["version"], &v) != nil || v == "" {
+		return previous
+	}
 	if n, ok := Normalize(v); ok {
 		return n
 	}
 	return v
+}
+
+// distURL is the part of an entry's dist the proxy uses. Unmarshal fails on
+// "__unset" and leaves it empty for a null.
+type distURL struct {
+	URL    string `json:"url"`
+	Shasum string `json:"shasum"`
+}
+
+// distOf returns an entry's dist, if it has one with a URL, and the sha1 of
+// that URL (the proxy's file name for it).
+func distOf(e rawEntry) (d distURL, ref string, ok bool) {
+	if json.Unmarshal(e["dist"], &d) != nil || d.URL == "" {
+		return distURL{}, "", false
+	}
+	sum := sha1.Sum([]byte(d.URL))
+	return d, hex.EncodeToString(sum[:]), true
+}
+
+// rewriteDist points the entry's dist, if it has one with a URL, at prefix
+// and the sha1 of the upstream URL.
+func rewriteDist(e rawEntry, prefix string) error {
+	_, ref, ok := distOf(e)
+	if !ok {
+		return nil
+	}
+	var d rawEntry
+	if err := json.Unmarshal(e["dist"], &d); err != nil {
+		return err
+	}
+	u, err := json.Marshal(prefix + ref + ".zip")
+	if err != nil {
+		return err
+	}
+	d["url"] = u
+	e["dist"], err = json.Marshal(d)
+	return err
 }
 
 // proxyDist serves a cached archive, fetched from the upstream dist URL
@@ -265,27 +395,34 @@ func (h *Handler) proxyDist(ctx context.Context, rp *repo.Repository, rt Route) 
 	if !errors.Is(err, repo.ErrNotFound) {
 		return proxy.Result{}, err
 	}
-	versions, _, err := h.proxyDoc(ctx, rp, rt.Name, IsDev(rt.Version))
+	file, err := h.metadataFile(ctx, rp, rt.Name, IsDev(rt.Version))
 	if err != nil {
 		return proxy.Result{}, err
 	}
-	var upstreamURL, shasum string
-	for _, e := range versions {
-		if u, ref, ok := distRef(e); ok && ref == rt.Ref {
-			d := e["dist"].(map[string]any)
-			shasum, _ = d["shasum"].(string)
-			upstreamURL = u
-			break
-		}
+	f, err := h.Store.Open(file.Asset)
+	if err != nil {
+		return proxy.Result{}, err
 	}
-	if upstreamURL == "" {
+	defer f.Close()
+	var found distURL
+	_, err = eachVersion(f, rt.Name, func(e rawEntry) error {
+		if d, ref, ok := distOf(e); ok && ref == rt.Ref {
+			found = d
+			return errStop
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errStop) {
+		return proxy.Result{}, repo.Errorf(http.StatusBadGateway, "upstream metadata of %q is not JSON: %v", rt.Name, err)
+	}
+	if found.URL == "" {
 		return proxy.Result{}, repo.ErrNotFound
 	}
-	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, URL: upstreamURL, NotHTML: true}, proxy.Content)
+	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, URL: found.URL, NotHTML: true}, proxy.Content)
 	if err != nil {
 		return proxy.Result{}, err
 	}
-	if shasum != "" && !strings.EqualFold(shasum, res.Asset.SHA1) {
+	if found.Shasum != "" && !strings.EqualFold(found.Shasum, res.Asset.SHA1) {
 		if err := h.Store.Delete(ctx, rp.Name, key); err != nil && !errors.Is(err, repo.ErrNotFound) {
 			return proxy.Result{}, err
 		}

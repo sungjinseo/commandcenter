@@ -77,6 +77,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `maxConnectionPoolSize`.
 - `POST /v1/blobstores/file` takes a relative path (under `<dataDir>/blobstores`), `maxConnectionPoolSize` on S3 stores,
   a comma list in `repositoryName` of the Maven snapshot tasks, `nx-privileges-*` as the roles domain.
+- Real-client end-to-end tests for NuGet, RubyGems and Composer: `test/smoke/nuget-smoke.sh` (.NET SDK 10:
+  pack, push, restore, search, delete), `test/smoke/rubygems-smoke.sh` (RubyGems 4 and Bundler 4: push,
+  install, bundle, search, yank) and `test/smoke/composer-smoke.sh` (Composer 2.11: upload, require, update,
+  `auth.json`, audit), each against a hosted, a proxy and a group repository, with the client on a
+  network that has no route to the internet and 16 clients at once on the largest document.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -107,6 +112,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   answers 200; otherwise it is the GET it was. Pull replication still fills the cache.
 - Timeouts, refused connections and unresolvable names are no longer retried (`http.retries`, `connection.retries`).
 - The SMTP test send works while e-mail is switched off.
+- RubyGems groups: the merged `versions` file is kept until a member's file changes instead of for a
+  minute, so a pushed or yanked version shows to Bundler through the group at once, on every node. Its
+  header is the first member's: Bundler gets a 304 while nothing changed and only the new lines when the
+  last member (the proxy) grew. It used to download the whole file (24 MiB with a rubygems.org proxy) on
+  every run.
+- RubyGems documents built per request (specs indexes, gemspecs, dependency API, hosted `info/`, group
+  `versions` and `names`) carry no `Last-Modified`.
+- Composer proxies serve package metadata minified as the upstream wrote it (Composer expands it), and
+  keep only inline packages and notices of the upstream's `packages.json`.
+- NuGet search: the `versions` of a hosted hit are spelled in lower case (`1.0.0-beta`), as they are stored;
+  the hit's own `version` keeps the spelling of the `.nuspec`.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -153,6 +169,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `blobsOlderThan: ""` was refused. Sub-minute durations read as 0 in the Nexus API, which a read-then-write stored as
   "always revalidate"; they now round up.
 - `GET /v1/repositories/{name}` ignored a grant on a group that contains the repository.
+- NuGet: `dotnet nuget push` got 404. The client sends its PUT to the push URL with a `/` appended
+  (`api/v2/package/`), which was not a known path.
+- A few concurrent clients with read access could kill a server in the default 128 MiB container: 2 on a
+  NuGet search with `take=1000`, 8 on a large Composer proxy metadata file (Packagist's
+  `aws/aws-sdk-php`), 64 on NuGet registration pages. These documents are now written as they are read.
+- A hosted NuGet, RubyGems or Composer package with many versions no longer takes every row into memory
+  per request: at 1500 versions 8 to 32 clients could kill a 128 MiB server, and now 64 stay under 90 MiB.
+- RubyGems: the first `gem install` or `bundle install` through a group with a rubygems.org proxy took
+  about 200 MiB to merge the `versions` files and killed a server in the default 128 MiB container, whatever
+  the member order. The members are read as streams and one merge is built at a time.
+- RubyGems hosted: `gem list -r` and `gem search` within a second of a push or yank got a 304 and showed the
+  index from before.
+- Composer proxy: `composer audit` failed on a closed network, because Packagist's `filter.summary-url` was
+  passed on to the client.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`

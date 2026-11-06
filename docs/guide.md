@@ -431,7 +431,7 @@ nginx는 기본적으로 요청 본문을 끝까지 받은 다음 서버로 넘�
 
 ### 리소스
 
-- **메모리**: 기본 구성은 컨테이너 한도 128 MiB에 `GOMEMLIMIT=80MiB`이며, 이 구성의 측정값은 "소개"의 메모리 사용량에 있습니다. `docker stats`의 값에는 큰 파일을 읽고 쓸 때의 커널 파일 캐시가 들어가 한도에 가까워 보일 수 있지만, 커널이 회수하는 메모리입니다. 한도를 올릴 때는 `GOMEMLIMIT`도 함께 올리되 한도보다 충분히 낮게 두세요("메모리 설정" 참고).
+- **메모리**: 기본 구성은 컨테이너 한도 128 MiB에 `GOMEMLIMIT=80MiB`이며, 이 구성의 측정값은 "소개"의 메모리 사용량에 있습니다. `docker stats`의 값에는 큰 파일을 읽고 쓸 때의 커널 파일 캐시가 들어가 한도에 가까워 보일 수 있지만, 커널이 회수하는 메모리입니다. 한도를 올릴 때는 `GOMEMLIMIT`도 함께 올리되 한도보다 충분히 낮게 두세요("메모리 설정" 참고). 프록시의 큰 메타데이터(Composer 패키지 메타데이터, NuGet registration·검색, RubyGems `versions`)와 버전이 많은 hosted 패키지의 메타데이터는 요청마다 메모리에 다 올리지 않습니다. 128 MiB 한도에서 클라이언트 64개가 동시에 버전 1500개인 hosted 패키지의 문서를 받거나 Packagist의 가장 큰 메타데이터를 받아도 메모리 부족으로 종료되지 않는 것을 확인했습니다. 다만 rubygems.org proxy를 둔 group이 여럿이면 group마다 병합 파일(약 24 MiB)을 메모리에 두므로 한도를 함께 올리세요.
 - **CPU**: 대부분 업로드 해시 계산(sha256, sha1, md5, sha512)과 bcrypt 비밀번호 확인에 씁니다. CPU 한도를 낮게 걸면 로그인과 큰 업로드가 느려집니다.
 - **디스크**: 같은 blob store 안에서는 같은 내용을 한 번만 저장하므로(hosted와 proxy가 같은 파일을 공유) 필요한 용량은 hosted 패키지와 proxy 캐시를 합친 크기입니다. 디스크가 차면 업로드가 실패합니다.
 
@@ -2073,19 +2073,24 @@ helm cm-push demo-1.0.0.tgz cc-hosted      # helm-push 플러그인. 응답 201 
 NuGet V3 피드(Nexus의 nuget 포맷)입니다. `dotnet restore`, `nuget.exe`, Visual Studio가 쓰는 서비스 인덱스 `index.json`, flat container(`v3-flatcontainer/`), registration(`registration/`), 검색(`query`), push API(`api/v2/package`)를 `/repository/<저장소>/` 아래에서 제공합니다. 모든 문서는 `baseURL`로 만든 절대 URL을 담으므로 `baseURL`이 클라이언트가 여는 주소와 같아야 합니다.
 
 ```bash
-dotnet nuget add source http://localhost:8081/repository/nuget-all/index.json -n cc \
-  -u ci -p <비밀번호 또는 API 토큰> --store-password-in-clear-text   # 읽기에 인증이 필요할 때
+# 최근 dotnet(.NET SDK 10으로 확인)은 http:// 소스를 오류로 거부합니다. HTTPS가 아니면
+# --allow-insecure-connections 를 붙입니다(NuGet.Config의 allowInsecureConnections="true").
+dotnet nuget add source http://localhost:8081/repository/nuget-all/index.json -n cc --allow-insecure-connections \
+  -u ci -p <비밀번호 또는 API 토큰> --store-password-in-clear-text   # -u/-p 는 읽기에 인증이 필요할 때
 dotnet restore
+dotnet package search demo --source cc
 
 # 올리기: API 키 자리에 API 토큰을 씁니다("API 토큰 발급" 참고). add 권한이 필요합니다.
-dotnet nuget push Demo.Pkg.1.0.0.nupkg -s http://localhost:8081/repository/nuget-hosted/index.json -k <API 토큰>
-nuget push Demo.Pkg.1.0.0.nupkg -Source http://localhost:8081/repository/nuget-hosted/index.json -ApiKey <API 토큰>
+dotnet nuget push Demo.Pkg.1.0.0.nupkg -s http://localhost:8081/repository/nuget-hosted/index.json -k <API 토큰> --allow-insecure-connections
+dotnet nuget push Demo.Pkg.1.0.0.nupkg -s cc -k <API 토큰>   # 등록한 소스 이름으로. group이면 writeMember로 갑니다
 curl -u ci:<비밀번호> -T Demo.Pkg.1.0.0.nupkg http://localhost:8081/repository/nuget-hosted/api/v2/package   # 파일을 본문으로 보내도 됩니다
-dotnet nuget delete Demo.Pkg 1.0.0 -s http://localhost:8081/repository/nuget-hosted/index.json -k <API 토큰> --non-interactive   # delete 권한
+dotnet nuget delete Demo.Pkg 1.0.0 -s cc -k <API 토큰> --non-interactive   # delete 권한. http 소스는 URL이 아니라 등록한 이름으로 지정합니다
 ```
 
 - hosted는 올린 `.nupkg`(zip)의 루트에서 `.nuspec`(1 MiB 이하)을 읽어 `id`, `version`, `description`, `authors`, `license`/`licenseUrl`, `projectUrl`, `tags`, 대상 프레임워크별 `dependencies`를 저장하고, 파일은 `<id>/<버전>/<id>.<버전>.nupkg`와 `.nuspec`로 둡니다(id는 소문자, 버전은 NuGet 정규화: 앞의 0 제거, `1.0`→`1.0.0`, 네 번째 자리 0 제거, 빌드 메타데이터 제거). registration과 flat container는 이 행에서 바로 만들므로 따로 인덱스 파일이 없습니다. zip이 아니거나 `.nuspec`이 없으면 400, 심볼 패키지(`.snupkg`)는 400으로 거부하며(서비스 인덱스에 `SymbolPackagePublish`가 없어 `dotnet nuget push`는 `.snupkg`를 건너뜁니다) 업로드 본문은 `maxUploadMiB`를 따릅니다.
-- push 인증은 `X-NuGet-ApiKey` 헤더의 API 토큰(`-k`/`-ApiKey`), 또는 Basic(비밀번호나 토큰)입니다. `dotnet nuget push`는 먼저 `index.json`을 읽으므로 익명 읽기가 꺼진 저장소에는 `dotnet nuget add source`에 사용자/비밀번호도 넣어 두세요.
+- 제공하는 V3 리소스는 `PackageBaseAddress/3.0.0`, `RegistrationsBaseUrl`(3.6.0까지), `SearchQueryService`(3.5.0까지), `PackagePublish/2.0.0`입니다. `dotnet restore`는 flat container를, `dotnet package search`는 검색을, `dotnet package search --exact-match`·`dotnet list package --outdated`·버전을 적지 않은 `dotnet add package`는 registration을 읽습니다. 자동 완성(`SearchAutocompleteService`)과 V2(OData) 피드는 제공하지 않으므로 `nuget.exe`와 Visual Studio에서도 V3 주소(`index.json`)를 쓰세요. 실제 클라이언트 시험은 dotnet CLI로 합니다(`test/smoke/nuget-smoke.sh`).
+- 취약점 정보(`VulnerabilityInfo`)도 제공하지 않습니다. 그래서 Command Center만 소스로 쓰면 `dotnet restore`는 취약한 패키지에 대해 경고(NU1901~NU1904)를 내지 않습니다. 인터넷에 닿는 곳에서는 `NuGet.Config`의 `<auditSources>`에 `https://api.nuget.org/v3/index.json`을 넣으면 소스는 그대로 두고 경고를 받을 수 있습니다.
+- push 인증은 `X-NuGet-ApiKey` 헤더의 API 토큰(`-k`/`-ApiKey`), 또는 Basic(비밀번호나 토큰)입니다. `dotnet nuget push`는 먼저 `index.json`을 읽으므로 익명 읽기가 꺼진 저장소에는 `dotnet nuget add source`에 사용자/비밀번호도 넣어 두세요. API 키는 환경 변수 `NUGET_API_KEY`로 줄 수도 있습니다.
 - `writePolicy`: `allow_once`(기본)는 같은 버전 재push를 409로 거부(`--skip-duplicate`가 이를 인식), `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.
 - proxy의 `remote`는 V3 서비스 인덱스 URL입니다(예: `https://api.nuget.org/v3/index.json`; 그 디렉터리 URL도 됩니다). 서비스 인덱스·flat container 목록·registration·검색 결과는 `metadataMaxAge`마다 다시 확인하고, 문서 안의 registration·flat container URL을 proxy 주소로 바꿔 제공합니다(여러 페이지로 나뉜 registration은 클라이언트가 따라올 때 그 페이지만 가져옵니다). `.nupkg`/`.nuspec`은 처음 받을 때 캐시합니다(`contentMaxAge`). 원격이 응답하지 않으면 캐시된 문서를 `Warning: 110`과 함께 제공하고, 캐시에 없는 것은 502입니다. `remote`에 서비스 인덱스가 없으면 502로 그 URL을 알려 줍니다.
 - group은 멤버 순서상 그 패키지 id를 처음 가진 멤버만으로 답합니다(hosted를 proxy보다 앞에 두세요). 소유 멤버에 없는 버전은 뒤 멤버에 있어도 404입니다. 검색은 멤버 결과를 합치되 같은 id는 앞 멤버 것만 냅니다. `writeMember`가 있으면 group에 push한 패키지는 그 hosted로 갑니다.
@@ -2096,24 +2101,26 @@ dotnet nuget delete Demo.Pkg 1.0.0 -s http://localhost:8081/repository/nuget-hos
 RubyGems 저장소(Nexus의 rubygems 포맷)입니다. Bundler와 RubyGems 3 이상의 `gem`이 쓰는 compact index(`versions`, `names`, `info/<gem>`), 옛 `gem`이 쓰는 Marshal 인덱스(`specs.4.8.gz`, `latest_specs.4.8.gz`, `prerelease_specs.4.8.gz`, `quick/Marshal.4.8/<gem>.gemspec.rz`, `api/v1/dependencies`), gem 파일(`gems/<이름>-<버전>[-<플랫폼>].gem`), push API(`api/v1/gems`, `api/v1/gems/yank`)를 `/repository/<저장소>/` 아래에서 제공합니다. compact index에는 URL이 들어가지 않으므로 `baseURL`과 무관합니다.
 
 ```bash
-gem sources --add http://localhost:8081/repository/gems-all/ --remove https://rubygems.org/
+gem sources --add http://localhost:8081/repository/gems-all/    # 먼저 추가하고
+gem sources --remove https://rubygems.org/                       # 그다음에 기본 소스를 뺍니다(한 명령에 함께 쓰면 --remove가 실패합니다)
 bundle config set --global mirror.https://rubygems.org http://localhost:8081/repository/gems-all/   # Gemfile의 source는 그대로 두고 미러로 쓸 때
 bundle config set --global http://localhost:8081/repository/gems-all/ ci:<비밀번호 또는 API 토큰>   # 읽기에 인증이 필요할 때
 bundle install
 
 # 올리기: API 키 자리에 API 토큰을 씁니다("API 토큰 발급" 참고). add 권한이 필요합니다.
-gem push demo-1.0.0.gem --host http://localhost:8081/repository/gems-hosted --key cc   # ~/.gem/credentials 에 ":cc: <API 토큰>" 한 줄
+# ~/.gem/credentials 에 ":cc: <API 토큰>" 한 줄을 넣고 chmod 0600 합니다(다른 사용자가 읽을 수 있으면 gem이 거부합니다).
+gem push demo-1.0.0.gem --host http://localhost:8081/repository/gems-hosted --key cc
 GEM_HOST_API_KEY=<API 토큰> gem push demo-1.0.0.gem --host http://localhost:8081/repository/gems-hosted
 curl -u ci:<비밀번호> -H 'Content-Type: application/octet-stream' --data-binary @demo-1.0.0.gem http://localhost:8081/repository/gems-hosted/api/v1/gems
 gem yank demo -v 1.0.0 --host http://localhost:8081/repository/gems-hosted --key cc   # delete 권한. 플랫폼 gem은 -p java 를 붙입니다
 ```
 
 - hosted는 올린 `.gem`(tar)의 `metadata.gz`(YAML Gem::Specification, 압축 해제 8 MiB 이하)를 읽어 `name`, `version`, `platform`, `authors`, `summary`, `description`, `homepage`, `licenses`, `required_ruby_version`, `required_rubygems_version`, `dependencies`(runtime/development), `metadata`, sha256를 저장하고, 파일은 `gems/<이름>-<버전>[-<플랫폼>].gem`에 둡니다. 버전은 Gem::Version 규칙대로 `-`를 `.pre.`로 바꾸고(`1.0.0-rc1` → `1.0.0.pre.rc1`), 컴포넌트 버전은 플랫폼을 포함합니다(`1.0.0-java`). `info/<gem>`, `names`, specs 인덱스, `gemspec.rz`, `api/v1/dependencies`는 행에서 바로 만들고, `versions`만 파일로 두어 push·삭제 때 같은 트랜잭션에서 줄을 덧붙입니다(append-only: Bundler는 `Range`로 늘어난 부분만 받고, `ETag`는 파일 전체의 md5, `Repr-Digest`는 sha-256으로 검증합니다). tar가 아니거나 `metadata.gz`가 없거나 이름·버전·플랫폼이 올바르지 않으면 400이며 업로드 본문은 `maxUploadMiB`를 따릅니다.
-- push 인증은 `gem push`가 보내는 `Authorization: <API 키>`(API 토큰 그대로), 또는 Basic(비밀번호나 토큰)입니다. Bundler는 `bundle config set <저장소 URL> 사용자:비밀번호`로 인증 정보를 둡니다.
+- push 인증은 `gem push`가 보내는 `Authorization: <API 키>`(API 토큰 그대로), 또는 Basic(비밀번호나 토큰)입니다. 키는 credentials 파일(`gem env`의 CREDENTIALS FILE. `~/.gem/credentials`가 있으면 그 파일)의 `--key` 이름이나 `GEM_HOST_API_KEY`로 줍니다. 키 없이 `gem push`를 하면 `gem`이 사용자 이름과 비밀번호를 물어 `POST api/v1/api_key`로 키를 받으려 하는데(`gem signin`과 같은 흐름) 이 API는 없어 404로 끝납니다. `gem signin --host <URL>`은 쓰지 마세요. RubyGems 4.0은 이때 입력한 비밀번호를 rubygems.org로 먼저 보냅니다. Bundler는 `bundle config set <저장소 URL> 사용자:비밀번호`로 인증 정보를 둡니다.
 - `writePolicy`: `allow_once`(기본)는 같은 버전 재push를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요, `versions`에 새 md5 줄 추가), `deny`는 읽기 전용(400)입니다.
 - `gem yank`(`DELETE api/v1/gems/yank`, delete 권한)는 그 버전을 삭제합니다(파일과 행을 지우고 `versions`에 `-<버전>` 줄을 덧붙임). 없는 버전은 404입니다.
 - proxy의 `remote`는 `https://rubygems.org/`(또는 다른 RubyGems 서버의 루트 URL)입니다. `versions`(약 20 MiB)·`names`·`info/*`·specs 인덱스·`api/v1/dependencies` 응답은 `metadataMaxAge`마다 다시 확인하고, `.gem`과 `gemspec.rz`는 처음 받을 때 캐시합니다(`contentMaxAge`). 내용을 바꾸지 않고 그대로 전달하므로 Bundler의 증분 받기도 그대로 동작하며, 256 MiB를 넘는 인덱스 문서는 502입니다. 원격이 응답하지 않으면 캐시된 문서를 `Warning: 110`과 함께 제공하고, 캐시에 없는 것은 502입니다. rubygems.org는 `api/v1/dependencies`를 더 이상 제공하지 않으므로(404) 옛 `gem`은 다른 서버의 proxy에서만 이 API를 씁니다.
-- group은 `versions`와 `names`를 멤버 순서대로 병합합니다. 앞 멤버가 가진 gem 이름은 뒤 멤버의 버전을 숨기므로(내부 gem이 공개 저장소의 같은 이름에 가려지지 않도록) hosted를 proxy보다 앞에 두세요. 병합 결과는 group마다 60초 동안 메모리에 캐시합니다. `info/<gem>`, `gems/`, `quick/`는 그 이름을 처음 가진 멤버만으로 답하고 소유 멤버에 없는 버전은 뒤 멤버에 있어도 404입니다. `api/v1/dependencies`는 앞 멤버가 답한 gem을 빼고 다음 멤버에 묻습니다. `specs.4.8.gz` 등 Marshal 인덱스는 병합하지 않고 그 파일을 처음 가진 멤버 것을 그대로 냅니다. `writeMember`가 있으면 group에 push한 gem은 그 hosted로 갑니다.
+- group은 `versions`와 `names`를 멤버 순서대로 병합합니다. 앞 멤버가 가진 gem 이름은 뒤 멤버의 버전을 숨기므로(내부 gem이 공개 저장소의 같은 이름에 가려지지 않도록) hosted를 proxy보다 앞에 두세요. `versions` 병합 결과는 멤버의 `versions` 파일이 바뀔 때까지 메모리에 두므로 push와 yank가 group에 바로, 모든 노드에서 보입니다(Bundler는 이 파일로만 gem을 찾습니다). 머리줄(`created_at`)은 첫 멤버 것을 그대로 쓰므로 멤버가 바뀌지 않으면 Bundler는 304를 받고, 마지막 멤버(proxy)에 줄이 늘면 늘어난 부분만 받습니다. hosted 멤버가 바뀐 뒤에는 Bundler가 파일 전체를 한 번 다시 받습니다. rubygems.org proxy를 둔 group 하나는 병합 파일(약 24 MiB)을 메모리에 두고 다시 만드는 동안 그 두 배를 쓰며, 기본 128 MiB 한도 안에서 동작합니다(`test/smoke/rubygems-smoke.sh`). `names` 병합은 group마다 60초 동안 캐시합니다. `info/<gem>`, `gems/`, `quick/`는 그 이름을 처음 가진 멤버만으로 답하고 소유 멤버에 없는 버전은 뒤 멤버에 있어도 404입니다. `api/v1/dependencies`는 앞 멤버가 답한 gem을 빼고 다음 멤버에 묻습니다. `specs.4.8.gz` 등 Marshal 인덱스는 병합하지 않고 그 파일을 처음 가진 멤버 것을 그대로 내므로, group에 대한 `gem search`와 `gem list -r`은 첫 멤버의 gem만 보여 줍니다. `writeMember`가 있으면 group에 push한 gem은 그 hosted로 갑니다.
 - 삭제는 `gem yank`, 웹 UI·API의 컴포넌트 삭제, Cleanup 정책(`format: rubygems`, hosted·proxy 모두)으로 하며 지우면 모든 인덱스가 바로 갱신됩니다. 컴포넌트는 gem 이름과 `<버전>[-<플랫폼>]`으로 나타나고(prerelease 판정은 버전에 글자가 있는지로 하므로 `1.0.0-java`는 release), 역할 권한 대상으로 `format:rubygems`를 쓸 수 있습니다. 컴포넌트 메타데이터 탭은 summary·description, licenses, homepage, `source_code_uri`와 runtime/development dependencies를 보여 줍니다.
 
 ### Composer 설정
@@ -2122,6 +2129,7 @@ Composer v2 저장소(Nexus의 composer 포맷은 proxy만 있지만 여기서�
 
 ```bash
 # 프로젝트에 저장소 추가(또는 ~/.composer/config.json에 -g로 전역 설정)
+composer config -g secure-http false               # http:// 주소일 때만. Composer는 HTTPS가 아닌 저장소를 거부합니다
 composer config repositories.commandcenter composer http://localhost:8081/repository/composer-all/
 composer config -g repo.packagist false            # Packagist 대신 proxy/group만 쓸 때
 composer config -g http-basic.localhost:8081 ci <비밀번호 또는 API 토큰>   # 읽기에 인증이 필요할 때
@@ -2133,11 +2141,15 @@ curl -u ci:<비밀번호> -T demo-1.2.0.zip http://localhost:8081/repository/com
 curl -u ci:<비밀번호> -X DELETE http://localhost:8081/repository/composer-hosted/packages/upload/acme/demo/1.2.0   # delete 권한
 ```
 
+인증 정보는 프로젝트(또는 `COMPOSER_HOME`)의 `auth.json`에 써도 됩니다: `{"http-basic": {"localhost:8081": {"username": "ci", "password": "<비밀번호 또는 API 토큰>"}}}`. API 토큰은 `{"bearer": {"localhost:8081": "<API 토큰>"}}`로도 줄 수 있습니다. 키는 포트를 포함한 호스트입니다.
+
 - hosted는 올린 zip의 `composer.json`(1 MiB 이하)을 읽어 `name`이 URL의 `<vendor>/<package>`와 같은지 확인하고, 버전은 URL 것을 Composer 규칙으로 정규화합니다(`v1.2`→`1.2.0.0`, `1.0.0-beta1`→`1.0.0.0-beta1`, `dev-main`은 그대로, `1.x-dev`→`1.9999999.9999999.9999999-dev`; `composer.json`에 `version`이 있으면 같은 값이어야 합니다). 파일은 `dist/<vendor>/<package>/<정규화 버전>.zip`에 두고 메타데이터는 행에서 바로 만듭니다. `packages.json`의 `available-packages`에 저장소의 패키지 목록을 실으므로 Composer는 여기 있는 패키지만 이 저장소에 묻습니다. zip이 아니거나 `composer.json`이 없으면 400이며 업로드 본문은 `maxUploadMiB`를 따릅니다. `/`가 든 브랜치 버전(`dev-feature/x`)은 올릴 수 없습니다.
 - `writePolicy`: `allow_once`(기본)는 같은 버전 재업로드를 409로 거부, `allow`는 덮어쓰기 허용(edit 권한 필요), `deny`는 읽기 전용(400)입니다.
-- proxy의 `remote`는 Composer 저장소 루트입니다(예: `https://repo.packagist.org/`, Satis·Private Packagist도 됩니다; `packages.json`까지 적어도 됩니다). `packages.json`·패키지 메타데이터·검색 결과는 `metadataMaxAge`마다 다시 확인하고, `metadata-url`·`search`를 proxy 주소로 바꾸며 v1 `providers-url`과 `notify-batch`·`security-advisories`는 뺍니다. 각 버전의 `dist.url`은 `dist/<vendor>/<package>/<버전>/<원본 URL의 sha1>.zip`으로 바꾸고 `source`(git)는 제거하므로 Composer는 proxy만 봅니다. zip은 처음 요청될 때 원본 URL(GitHub 등)에서 받아 영구 캐시하며 메타데이터의 `shasum`이 있으면 검증합니다(불일치는 502). `remote`에 `packages.json`이 없거나 `metadata-url`이 없는 v1 전용 저장소면 502로 알려 줍니다.
+- proxy의 `remote`는 Composer 저장소 루트입니다(예: `https://repo.packagist.org/`, Satis·Private Packagist도 됩니다; `packages.json`까지 적어도 됩니다). `packages.json`·패키지 메타데이터·검색 결과는 `metadataMaxAge`마다 다시 확인합니다. `packages.json`은 `metadata-url`·`search`를 proxy 주소로 바꾸고, 원격의 나머지 키 중 인라인 패키지(`packages`, `minified`, `available-packages`, `available-package-patterns`)와 안내문(`warning`, `info` 등)만 남깁니다. v1 `providers-url`, `notify-batch`, `security-advisories`, `filter`처럼 Composer를 원격으로 보낼 수 있는 키는 빼며, 나중에 원격에 생기는 키도 같습니다. 패키지 메타데이터는 원격이 쓴 minified 형태 그대로 두고(Composer가 펼칩니다) 다음 설명대로 URL만 바꿉니다. 각 버전의 `dist.url`은 `dist/<vendor>/<package>/<버전>/<원본 URL의 sha1>.zip`으로 바꾸고 `source`(git)는 제거하므로 Composer는 proxy만 봅니다. zip은 처음 요청될 때 원본 URL(GitHub 등)에서 받아 영구 캐시하며 메타데이터의 `shasum`이 있으면 검증합니다(불일치는 502). `remote`에 `packages.json`이 없거나 `metadata-url`이 없는 v1 전용 저장소면 502로 알려 줍니다.
 - group은 멤버 순서상 그 패키지를 처음 가진 멤버만으로 답합니다(hosted를 proxy보다 앞에 두세요). 검색은 멤버 결과를 합치되 같은 이름은 앞 멤버 것만 냅니다. `writeMember`가 있으면 group에 올린 패키지는 그 hosted로 갑니다.
 - 삭제는 `DELETE packages/upload/<vendor>/<package>/<버전>`(delete 권한), 웹 UI·API의 컴포넌트 삭제, Cleanup 정책(composer hosted·proxy)으로 합니다. 역할 권한 대상으로 `format:composer`를 쓸 수 있고, 컴포넌트 메타데이터 탭은 description·license·homepage·`support.source`와 `require`(scope require)·`require-dev`(scope require-dev, optional)를 보여 줍니다.
+- `composer search <단어>`(전체 검색)는 `search.json`으로 동작하고 group에서는 hosted의 결과가 먼저 나옵니다. 이름만 찾는 `composer search --only-name`과 `composer show --available`은 `packages.json`의 `available-packages`가 있는 hosted에서만 결과가 나오고, proxy와 group에서는 나오지 않습니다(Packagist의 `list` API를 제공하지 않습니다). 저장소를 여러 개 쓰면 Composer는 그 패키지를 처음 가진 저장소의 버전만 봅니다. `composer config repositories.<이름>`은 새 저장소를 목록 맨 앞에 넣으므로(Composer 2.11) 순서가 중요하면 `composer.json`의 `repositories` 배열을 직접 적으세요.
+- **보안 권고는 전달하지 않습니다.** 이 저장소들만 쓰면 `composer audit`는 권고가 있는 패키지에도 "No security vulnerability advisories found"라고 답하고, Composer 기본값인 `audit.block-insecure`도 그런 버전을 막지 못합니다. Packagist에 직접 연결하면 같은 버전을 설치하지 않습니다. 권고를 확인하려면 인터넷에 닿고 Packagist가 켜진 곳에서 `composer audit --locked`를 실행하세요.
 
 ### APT 설정
 
@@ -2891,8 +2903,8 @@ docker compose start
 - **Conan·R·Git LFS의 알려진 제한**: Conan v1 API에는 `remove_files`와 `packages/delete`가 없어 리비전 없는 Conan 1.x의 `conan remove -p`와 원격에만 있는 파일을 지우는 재업로드가 실패합니다(Conan 2와 리비전을 켠 Conan 1은 해당 없음). R group은 미러의 `PACKAGES.rds`를 읽지 않고 병합한 `PACKAGES`에서 `.gz`·`.rds`를 만듭니다. R hosted는 `.zip`과 `.tgz`를 `bin/windows`와 `bin/macosx` 아래에서만 받고, `src/contrib/Meta/archive.rds`를 만들지 않으므로 `remotes::install_version`은 인덱스에 있는 버전만 찾습니다(renv는 `src/contrib/Archive/<패키지>/`도 찾습니다). Git LFS는 hosted만 되고 잠금(`locks`) API는 501입니다("Conan 설정", "R 설정", "Git LFS 설정" 참고).
 - **Docker의 알려진 제한**: OCI 1.1의 referrers API(`GET /v2/<이름>/referrers/<digest>`)가 없습니다(404). oras 같은 클라이언트는 명세의 대체 방식(`sha256-<digest>` 태그의 인덱스)으로 넘어가며 그 태그는 태그 목록에 보입니다. 태그만 지울 수는 없습니다(`DELETE …/manifests/<태그>`는 400). 이미지 인덱스(멀티 아키텍처 이미지, 그리고 BuildKit이 provenance를 붙여 push한 이미지)를 지우면 인덱스와 태그만 지워지고 그 아래 플랫폼별 매니페스트와 레이어는 남습니다. 공간은 예약 작업 `docker.gc`와 그 뒤의 `blobstore.compact`로 돌려받습니다("예약 작업" 참고). proxy의 태그 목록은 500페이지·4 MiB까지 받습니다("Docker 설정" 참고).
 - **p2·Swift·CocoaPods·HuggingFace의 알려진 제한**: p2는 Nexus와 같이 proxy·group만 되고(hosted 없음), 복합 사이트의 `.xml.xz` 문서는 풀지 않고 그대로 전달하므로 그 안의 자식 위치는 바뀌지 않습니다. Swift의 `swift package-registry` 명령은 레지스트리 명세를 따라 적은 것으로 실제 SwiftPM 클라이언트로는 아직 검증하지 않았고, SwiftPM은 레지스트리를 HTTPS로 열므로 운영에서는 `baseURL`을 `https://`로 두어야 합니다. CocoaPods는 트렁크 CDN 소스만 proxy하며 `source.git`(svn·hg 포함) Pod는 proxy하지 않으므로 클라이언트가 원본 git 서버에 직접 접속해야 합니다. HuggingFace는 한 파일을 원본에서 30분 안에 받아야 하고, 큰 파일의 첫 요청은 클라이언트가 먼저 시간 초과할 수 있으므로 `HF_HUB_DOWNLOAD_TIMEOUT`을 늘리세요. `/`가 든 리비전(`refs/pr/*`), `POST …/paths-info`, Xet 전송, 업로드는 지원하지 않습니다("p2 설정", "Swift 설정", "CocoaPods 설정", "HuggingFace 설정" 참고).
-- **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브의 압축 해제 창이 8 MiB를 넘는 `.deb`(`xz -7` 이상 등)를 400으로 거부합니다. Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
-- **RubyGems·Composer·Conda의 알려진 제한**: RubyGems group은 `versions`·`names`만 병합하고 Marshal 인덱스(`specs.4.8.gz` 등)는 그 파일을 처음 가진 멤버 것을 그대로 냅니다. Conda hosted는 `repodata.json.bz2`·`.zst`·`.jlap`를 만들지 않습니다(클라이언트는 `repodata.json`으로 넘어갑니다). Composer는 v1 `providers-url`과 `notify-batch`·`security-advisories`를 제공하지 않으며(Composer 2 전용), `/`가 든 브랜치 버전은 올릴 수 없습니다("RubyGems 설정", "Composer 설정", "Conda 설정" 참고).
+- **NuGet·APT·Yum의 알려진 제한**: APT hosted는 control 아카이브의 압축 해제 창이 8 MiB를 넘는 `.deb`(`xz -7` 이상 등)를 400으로 거부합니다. Yum hosted는 `repomd.xml`을 서명하지 않으므로 클라이언트 `.repo`에 `repo_gpgcheck=0`이 필요합니다. NuGet은 심볼 패키지(`.snupkg`)를 400으로 거부합니다. NuGet은 V2(OData) 피드, 자동 완성(`SearchAutocompleteService`), 취약점 정보(`VulnerabilityInfo`)를 제공하지 않습니다. apt·yum group은 멤버의 `Packages`·`repodata/`를 병합하지 않고 그 경로를 처음 가진 멤버가 답합니다("NuGet 설정", "APT 설정", "Yum 설정" 참고).
+- **RubyGems·Composer·Conda의 알려진 제한**: RubyGems group은 `versions`·`names`만 병합하고 Marshal 인덱스(`specs.4.8.gz` 등)는 그 파일을 처음 가진 멤버 것을 그대로 냅니다. 그래서 group에 대한 `gem search`·`gem list -r`은 첫 멤버의 gem만 보여 주고, RubyGems 3.2 미만의 `gem install`(Ruby 2.7 이하, dependency API와 Marshal 인덱스만 씀)은 group에서 뒤 멤버(proxy)의 gem을 찾지 못합니다. 이런 클라이언트는 proxy 저장소를 직접 쓰거나 Bundler를 쓰세요. `gem signin`(`api/v1/api_key`)은 제공하지 않습니다. Conda hosted는 `repodata.json.bz2`·`.zst`·`.jlap`를 만들지 않습니다(클라이언트는 `repodata.json`으로 넘어갑니다). Composer는 v1 `providers-url`과 `notify-batch`·`security-advisories`를 제공하지 않으며(Composer 2 전용), `/`가 든 브랜치 버전은 올릴 수 없습니다("RubyGems 설정", "Composer 설정", "Conda 설정" 참고). 이름 검색용 `list` API와 보안 권고도 제공하지 않아 `composer search --only-name`은 proxy와 group에서 결과가 없고, `composer audit`는 권고를 찾지 못합니다("Composer 설정" 참고).
 - **여러 대의 쓰기 처리량**: 같은 PostgreSQL DB와 공유 스토리지로 여러 대를 함께 띄울 수 있지만(active-active), 쓰기는 DB에서 하나씩 처리되므로 노드를 늘려도 쓰기 처리량은 늘지 않습니다. 차트와 compose가 띄우는 PostgreSQL은 Pod(컨테이너) 하나라 고가용성이 아니므로, 고가용성에는 복제 구성된 PostgreSQL이나 관리형 서비스를 씁니다("고가용성(여러 노드)" 참고).
 - HTTPS를 직접 받지 않습니다. 리버스 프록시에서 TLS를 끝내세요("TLS와 리버스 프록시" 참고). 다운그레이드는 지원하지 않습니다("업그레이드" 참고).
 - **의도적으로 넣지 않은 것**: 저장소·사용자 **할당량(quota)**(blob store의 소프트 쿼터는 있습니다), 에디션(Pro/OSS) 구분, **SMTP의 PLAIN 외 인증**(LOGIN, CRAM-MD5, OAuth), TLS 검증 생략 옵션, **AD 확장 매칭 필터**(`:1.2.840…:=`), LDAP 부분 일치·비교 필터, LDAP 중첩 그룹 해석, LDAP 사용자 자동 삭제·토큰 자동 폐기.

@@ -49,10 +49,10 @@ Everything an in-house package repository needs, in one binary, with no editions
 | raw | ✅ | ✅ | ✅ | curl, browsers (directory listings) |
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
 | Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) |
-| NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) ※ |
+| NuGet | ✅ | ✅ | ✅ | dotnet CLI (V3) |
 | APT | ✅ | ✅ | ✅ | apt (signed Release) ※ |
-| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) ※ |
-| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) ※ |
+| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
+| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
 | Conda | ✅ | ✅ | ✅ | conda, mamba ※ |
 | Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) ※ |
 | R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL ※ |

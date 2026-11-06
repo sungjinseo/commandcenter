@@ -9,13 +9,16 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -173,6 +176,8 @@ type env struct {
 	down  atomic.Bool
 	now   time.Time
 	gems  map[string][]byte // upstream gems by file name
+	// versions, when set, is the upstream versions file instead of upVersions.
+	versions atomic.Pointer[string]
 }
 
 const upVersions = "created_at: 2026-01-01T00:00:00Z\n---\nrack 2.2.8,3.0.0 1111\ndemo 9.0.0 2222\n"
@@ -190,6 +195,10 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 	}
 	switch p := r.URL.Path; {
 	case p == "/versions":
+		if v := e.versions.Load(); v != nil {
+			text(*v)
+			return
+		}
 		text(upVersions)
 	case p == "/names":
 		text("---\ndemo\nrack\n")
@@ -478,6 +487,23 @@ func TestLegacyIndexes(t *testing.T) {
 	if w := e.do("GET", "gems-hosted", "api/v1/dependencies?gems=a/b", nil); w.Code != 400 {
 		t.Fatalf("bad gem name: %d", w.Code)
 	}
+	// gem keeps a copy of each index and asks again with If-Modified-Since,
+	// the time it wrote the copy. The index is built for each request and
+	// named the time of the answer: `gem list -r` within the second of a
+	// yank (or a push) got a 304 and listed what its copy had.
+	asked := e.now.UTC().Format(http.TimeFormat)
+	if w := e.do("DELETE", "gems-hosted", "api/v1/gems/yank?gem_name=ab&version=0.1.0", nil); w.Code != 200 {
+		t.Fatalf("yank: %d %s", w.Code, w.Body)
+	}
+	for _, file := range []string{"specs.4.8.gz", "latest_specs.4.8.gz", "prerelease_specs.4.8.gz"} {
+		w := e.do("GET", "gems-hosted", file, nil, "If-Modified-Since", asked)
+		if w.Code != 200 || w.Header().Get("Last-Modified") != "" {
+			t.Fatalf("%s asked again in the same second: %d Last-Modified %q", file, w.Code, w.Header().Get("Last-Modified"))
+		}
+		if got := specsOf(t, loadGz(t, w.Body.Bytes())); strings.Contains(got, "ab-0.1.0") {
+			t.Errorf("%s after the yank: %q", file, got)
+		}
+	}
 }
 
 // TestHostedRejections: what a push refuses, and the write policies.
@@ -685,8 +711,8 @@ func TestGroup(t *testing.T) {
 	if w := e.do("GET", "gems-all", "versions", nil, "Range", "bytes=10-"); w.Code != 206 || w.Body.String() != want[10:] {
 		t.Fatalf("range: %d %q", w.Code, w.Body)
 	}
-	// proxy first: its demo hides the hosted one
-	if got := e.get(t, "gems-proxy-first", "versions"); got != "created_at: 2026-10-27T12:01:00Z\n---\nrack 2.2.8,3.0.0 1111\ndemo 9.0.0 2222\n" {
+	// proxy first: its demo hides the hosted one, and its header is the group's
+	if got := e.get(t, "gems-proxy-first", "versions"); got != upVersions {
 		t.Fatalf("proxy first: %q", got)
 	}
 	if got := e.get(t, "gems-proxy-first", "info/demo"); got != "---\n9.0.0 |checksum:cc\n" {
@@ -734,22 +760,241 @@ func TestGroup(t *testing.T) {
 	if !reflect.DeepEqual(v, wantDeps) || *e.deps.Load() != "rack" {
 		t.Fatalf("dependencies: %#v (asked %q)", v, *e.deps.Load())
 	}
-	// the merge is cached per group for a minute
+	// a push shows in the merged versions at once (Bundler finds a gem only
+	// there); the merged names are cached per group for a minute
 	if w := e.do("POST", "gems-hosted", "api/v1/gems", gem(t, "other", "0.1.0", "", false)); w.Code != 200 {
 		t.Fatal(w.Code)
 	}
-	if got := e.get(t, "gems-all", "versions"); got != want {
-		t.Fatalf("cached: %q", got)
+	if got := e.get(t, "gems-all", "versions"); !strings.HasPrefix(got, strings.TrimSuffix(want, "rack 2.2.8,3.0.0 1111\n")+"other 0.1.0 ") {
+		t.Fatalf("after a push: %q", got)
+	}
+	if got := e.get(t, "gems-all", "names"); got != "---\ndemo\nrack\n" {
+		t.Fatalf("cached names: %q", got)
 	}
 	e.now = e.now.Add(2 * time.Minute)
-	if got := e.get(t, "gems-all", "versions"); !strings.Contains(got, "\nother 0.1.0 ") {
-		t.Fatalf("after the cache: %q", got)
+	if got := e.get(t, "gems-all", "names"); got != "---\ndemo\nother\nrack\n" {
+		t.Fatalf("names after the cache: %q", got)
 	}
 	// a failing member is a 502, never skipped
 	e.down.Store(true)
 	e.now = e.now.Add(2 * time.Hour)
 	if w := e.do("GET", "gems-all", "info/zzz", nil); w.Code != 502 {
 		t.Fatalf("member down: %d", w.Code)
+	}
+}
+
+// TestGroupVersionsIncrements: Bundler keeps its copy of the versions file
+// and asks for what was appended: a Range from its last byte and an
+// If-None-Match with the ETag. A group's merge is the same until a member's
+// file changes (304) and grows by what its last member's gained (206, with
+// the digest of the whole file). It used to carry the time of the merge, so
+// every run a minute after the last downloaded the whole file again (24 MiB
+// with a rubygems.org proxy). Bundler then asks only for the info files
+// whose checksum in versions changed, so a push to a member or a yank shows
+// in the merge at once: it took up to a minute, in which `bundle install`
+// could not find the version just pushed.
+func TestGroupVersionsIncrements(t *testing.T) {
+	e := newEnv(t)
+	if w := e.push(t, "gems-hosted", gem(t, "demo", "1.0.0", "", false)); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	w := e.do("GET", "gems-all", "versions", nil)
+	have, etag := w.Body.String(), w.Header().Get("ETag")
+	if w.Code != 200 || !strings.HasSuffix(have, "\nrack 2.2.8,3.0.0 1111\n") || etag == "" {
+		t.Fatalf("versions: %d %q %q", w.Code, etag, have)
+	}
+	tail := fmt.Sprintf("bytes=%d-", len(have)-1)
+	e.now = e.now.Add(2 * time.Minute)
+	if w := e.do("GET", "gems-all", "versions", nil, "Range", tail, "If-None-Match", etag); w.Code != 304 {
+		t.Fatalf("unchanged members: %d %q (was %q)", w.Code, w.Header().Get("ETag"), etag)
+	}
+	grown := upVersions + "rack 3.1.0 3333\n"
+	e.versions.Store(&grown)
+	e.now = e.now.Add(2 * time.Hour) // past the proxy's metadataMaxAge: it fetches its remote's file again
+	w = e.do("GET", "gems-all", "versions", nil, "Range", tail, "If-None-Match", etag)
+	full := have + "rack 3.1.0 3333\n"
+	sum := sha256.Sum256([]byte(full))
+	if w.Code != 206 || w.Body.String() != full[len(have)-1:] || w.Header().Get("ETag") != `"`+md5hex([]byte(full))+`"` ||
+		w.Header().Get("Repr-Digest") != "sha-256=:"+base64.StdEncoding.EncodeToString(sum[:])+":" {
+		t.Fatalf("the last member grew: %d %q %v", w.Code, w.Body, w.Header())
+	}
+	if w := e.push(t, "gems-hosted", gem(t, "demo", "1.1.0", "", false)); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	if got, line := e.get(t, "gems-all", "versions"), "\ndemo 1.1.0 "+md5hex([]byte(e.get(t, "gems-all", "info/demo")))+"\n"; !strings.Contains(got, line) {
+		t.Fatalf("after a push: no %q in %q", line, got)
+	}
+	if w := e.do("DELETE", "gems-all", "api/v1/gems/yank", []byte("gem_name=demo&version=1.1.0"), "Content-Type", "application/x-www-form-urlencoded"); w.Code != 200 {
+		t.Fatalf("yank: %d %s", w.Code, w.Body)
+	}
+	if got, line := e.get(t, "gems-all", "versions"), "\ndemo -1.1.0 "+md5hex([]byte(e.get(t, "gems-all", "info/demo")))+"\n"; !strings.Contains(got, line) {
+		t.Fatalf("after a yank: no %q in %q", line, got)
+	}
+}
+
+// TestGroupVersionsMemory: `gem install` (HEAD) and Bundler (GET) ask a
+// group for its versions file first. Merging a rubygems.org-sized member (24
+// MiB, 200 000 gems) took some 200 MiB, which killed a server in the default
+// 128 MiB container: the merge now allocates little more than the merged
+// file, once however many clients ask at the same time.
+func TestGroupVersionsMemory(t *testing.T) {
+	e := newEnv(t)
+	var b strings.Builder
+	b.WriteString("created_at: 2026-01-01T00:00:00Z\n---\n")
+	for i := 0; i < 60000; i++ {
+		fmt.Fprintf(&b, "gem%05d 0.1.0,0.2.0,0.3.0,1.0.0,1.0.1-java,1.1.0,2.0.0 %032x\n", i, i)
+	}
+	b.WriteString("demo 9.0.0 2222\n")
+	big := b.String() // 4.6 MiB
+	e.versions.Store(&big)
+	if w := e.push(t, "gems-hosted", gem(t, "demo", "1.0.0", "", false)); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	hostedLine := "demo 1.0.0 " + md5hex([]byte(e.get(t, "gems-hosted", "info/demo"))) + "\n"
+	if w := e.do("HEAD", "gems-proxy", "versions", nil); w.Code != 200 { // the proxy's copy is cached: the merge is what is measured
+		t.Fatal(w.Code)
+	}
+	allocated := func(requests int) uint64 {
+		t.Helper()
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		var wg sync.WaitGroup
+		for range requests {
+			wg.Go(func() {
+				if w := e.do("HEAD", "gems-all", "versions", nil); w.Code != 200 || w.Header().Get("Content-Length") != fmt.Sprint(len(big)-len("demo 9.0.0 2222\n")+len(hostedLine)) {
+					t.Errorf("HEAD versions: %d %v", w.Code, w.Header())
+				}
+			})
+		}
+		wg.Wait()
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	limit := 3 * uint64(len(big)) // the merged file once
+	if got := allocated(1); got > limit && !raceEnabled {
+		t.Fatalf("one request allocated %d MiB for a %d MiB versions file", got>>20, len(big)>>20)
+	}
+	// the merge itself: the hosted line, then the proxy's lines without its demo
+	got := e.get(t, "gems-all", "versions")
+	want := "created_at: 2026-10-27T12:01:00Z\n---\n" + hostedLine + strings.TrimSuffix(big[strings.Index(big, "---\n")+4:], "demo 9.0.0 2222\n")
+	if got != want {
+		t.Fatalf("merged versions: %d bytes, want %d; starts %q", len(got), len(want), got[:min(len(got), 120)])
+	}
+	// a push to the hosted member: the merge is built again, once
+	if w := e.push(t, "gems-hosted", gem(t, "demo", "1.1.0", "", false)); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	hostedLine += "demo 1.1.0 " + md5hex([]byte(e.get(t, "gems-hosted", "info/demo"))) + "\n"
+	if got := allocated(8); got > limit && !raceEnabled {
+		t.Fatalf("8 requests at once allocated %d MiB for a %d MiB versions file", got>>20, len(big)>>20)
+	}
+	// the big member first: every gem of it is an owner of its name, which
+	// takes little more than the map of names (it took 26 times the file)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	if w := e.do("HEAD", "gems-proxy-first", "versions", nil); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	runtime.ReadMemStats(&after)
+	if got := after.TotalAlloc - before.TotalAlloc; got > 3*limit && !raceEnabled {
+		t.Fatalf("a big first member allocated %d MiB for a %d MiB versions file", got>>20, len(big)>>20)
+	}
+	if got := e.get(t, "gems-proxy-first", "versions"); !strings.Contains(got, "\ndemo 9.0.0 2222\n") || strings.Contains(got, "demo 1.0.0") {
+		t.Fatalf("the first member's demo must hide the hosted one: %q", got[max(0, len(got)-120):])
+	}
+}
+
+// TestHostedManyVersions: what needs the versions of a gem, or one version, does
+// not read the attrs of each: the specs indexes and a gemspec. The compact
+// index reads them one at a time. Holding all rows decoded per request took a
+// 128 MiB server down at 32 clients on a gem with 1500 versions.
+func TestHostedManyVersions(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	const n = 300
+	for i := range n {
+		v := fmt.Sprintf("1.%d.0", i)
+		a := gemAttrs{Name: "many", Version: v, Authors: []string{"x"}, Summary: "s", Description: strings.Repeat("x", 8<<10), Licenses: []string{}, Dependencies: []gemDep{}, Metadata: map[string]string{}, SHA256: "aa"}
+		b, _ := json.Marshal(a)
+		err := e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
+			return tx.InsertPackage(ctx, meta.Package{Repo: "gems-hosted", Format: "rubygems", Name: "many", Version: v, Attrs: string(b), CreatedAt: e.now.Add(time.Duration(i) * time.Second)})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{"specs.4.8.gz", "latest_specs.4.8.gz", "quick/Marshal.4.8/many-1.5.0.gemspec.rz"} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		w := e.do("GET", "gems-hosted", path, nil)
+		runtime.ReadMemStats(&after)
+		if got := after.TotalAlloc - before.TotalAlloc; w.Code != 200 || got > n*(8<<10) && !raceEnabled {
+			t.Errorf("%s: %d, allocated %d KiB; the versions' attrs are %d KiB", path, w.Code, got>>10, n*8)
+		}
+	}
+	if w := e.do("GET", "gems-hosted", "quick/Marshal.4.8/many-9.9.9.gemspec.rz", nil); w.Code != 404 {
+		t.Fatalf("no such version: %d", w.Code)
+	}
+	// the info file a request gets is the one the versions file's checksum is of
+	got := e.get(t, "gems-hosted", "info/many")
+	rs, err := rows(ctx, e.h.Store.DB, "gems-hosted", "many")
+	if err != nil || got != string(infoDoc(rs)) || strings.Count(got, "\n") != n+1 {
+		t.Fatalf("info: %d lines, %v", strings.Count(got, "\n"), err)
+	}
+	// versions created in the same millisecond: by version, not as strings
+	for _, v := range []string{"3.10.0", "3.9.0"} {
+		b, _ := json.Marshal(gemAttrs{Name: "same", Version: v, Dependencies: []gemDep{}, SHA256: "aa"})
+		if err := e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
+			return tx.InsertPackage(ctx, meta.Package{Repo: "gems-hosted", Format: "rubygems", Name: "same", Version: v, Attrs: string(b), CreatedAt: e.now})
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := e.get(t, "gems-hosted", "info/same"); got != "---\n3.9.0 |checksum:aa\n3.10.0 |checksum:aa\n" {
+		t.Fatalf("same time: %q", got)
+	}
+	if got := strings.Count(specsOf(t, loadGz(t, []byte(e.get(t, "gems-hosted", "specs.4.8.gz")))), "many-"); got != n {
+		t.Fatalf("specs: %d versions", got)
+	}
+}
+
+// TestMergeVersions: the first member's header is the group's, a member
+// that is not the last owns the gems it has a version left of, and a line
+// may be as long as a gem with thousands of versions.
+func TestMergeVersions(t *testing.T) {
+	long := "sorbet-static " + strings.Repeat("0.5.1-x86_64-linux,", 20000) + "0.6.0 ffff\n" // 380 KiB
+	cases := []struct {
+		name    string
+		members []string
+		want    string
+	}{
+		{"first member owns", []string{"created_at: x\n---\na 1.0 m1\nb 1.0 m2\n", "created_at: y\n---\na 9.0 m3\nc 1.0 m4\n"}, "created_at: x\n---\na 1.0 m1\nb 1.0 m2\nc 1.0 m4\n"},
+		{"appended lines of one member stay", []string{"---\na 1.0 m1\na 1.1 m2\n", "---\na 9.0 m3\n"}, "---\na 1.0 m1\na 1.1 m2\n"},
+		{"all versions removed: not owned", []string{"---\na 1.0 m1\na -1.0 m2\nb 1.0,2.0 m3\nb -1.0 m4\n", "---\na 9.0 m5\nb 9.0 m6\n"}, "---\na 1.0 m1\na -1.0 m2\nb 1.0,2.0 m3\nb -1.0 m4\na 9.0 m5\n"},
+		{"removed in a list, then back", []string{"---\na 1.0,2.0 m1\na 2.0,-1.0,-2.0 m2\nb 1.0 m3\nb -1.0,1.0 m4\n", "---\na 9.0 m5\nb 9.0 m6\n"}, "---\na 1.0,2.0 m1\na 2.0,-1.0,-2.0 m2\nb 1.0 m3\nb -1.0,1.0 m4\na 9.0 m5\n"},
+		{"a platform's dash is no removal", []string{"---\na 1.0-java m1\n", "---\na 9.0 m5\n"}, "---\na 1.0-java m1\n"},
+		{"no header, no final newline", []string{"a 1.0 m1", "b 1.0 m2\njunk\n\n"}, "---\na 1.0 m1\nb 1.0 m2\n"},
+		{"the last member owns nothing", []string{"---\na 1.0 m1\n", "---\nb 1.0 m2\n", "---\nb 2.0 m3\n"}, "---\na 1.0 m1\nb 1.0 m2\n"},
+		{"long line", []string{"---\na 1.0 m1\n", "created_at: y\n---\n" + long}, "---\na 1.0 m1\n" + long},
+		{"empty members", []string{"", "created_at: y\n---\n"}, "---\n"},
+	}
+	for _, c := range cases {
+		var out bytes.Buffer
+		owned := map[string]bool{}
+		for i, m := range c.members {
+			if err := mergeVersions(&out, strings.NewReader(m), owned, i == 0, i == len(c.members)-1); err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+		}
+		if out.String() != c.want {
+			t.Errorf("%s: %q, want %q", c.name, out.String()[:min(out.Len(), 200)], c.want[:min(len(c.want), 200)])
+		}
+	}
+	if err := mergeVersions(&bytes.Buffer{}, strings.NewReader("a "+strings.Repeat("1", maxVersionsLine)), map[string]bool{}, true, true); err == nil {
+		t.Fatal("a line over the limit was merged")
 	}
 }
 
