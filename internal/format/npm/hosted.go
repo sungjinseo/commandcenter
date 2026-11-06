@@ -19,9 +19,12 @@ import (
 )
 
 // publish handles `npm publish` and whole-document updates such as `npm deprecate`.
-// New versions must carry their tarball; existing versions can only change metadata.
-// published is called once for each new version after the transaction committed
-// (a deprecation-only publish adds none).
+// New versions must carry their tarball; existing versions can only change
+// metadata, unless rp's writePolicy is allow: then a version that comes with
+// a tarball again is published again, replacing its tarball and manifest,
+// which needs Edit as well as Add (as replacing a file does in the other
+// formats). published is called once for each version published after the
+// transaction committed (a deprecation-only publish adds none).
 func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.Repository, name string, r *http.Request, published func(version string)) error {
 	unlock, err := h.Store.Lock(ctx, "npm\x00"+rp.Name+"\x00"+name)
 	if err != nil {
@@ -80,7 +83,7 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 		old[p.Version] = p
 	}
 	// Every version is checked before any tarball is walked.
-	var fresh []string // new versions
+	var fresh []string // the versions published now
 	for _, v := range sortedKeys(doc.Versions) {
 		var vm versionManifest
 		if err := json.Unmarshal(doc.Versions[v], &vm); err != nil {
@@ -91,13 +94,15 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 		}
 		sums, hasTarball := tarballs[TarballFile(name, v)]
 		if _, ok := old[v]; ok {
-			if hasTarball {
+			if !hasTarball {
+				continue
+			}
+			if rp.WritePolicy != "allow" {
 				return repo.Errorf(http.StatusForbidden, "cannot publish over the previously published version %s", v)
 			}
-			continue
 		}
-		// Only new versions are checked: rows stored by older builds
-		// keep loading and can still be deprecated (QA M-5).
+		// Only versions published now are checked: rows stored by older
+		// builds keep loading and can still be deprecated (QA M-5).
 		if vm.Name != name {
 			return repo.Errorf(http.StatusBadRequest, "version %s: manifest name %q does not match package name %q", v, vm.Name, name)
 		}
@@ -117,7 +122,7 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 		}
 		fresh = append(fresh, v)
 	}
-	// New versions' tarballs are read back before the transaction, so the
+	// Their tarballs are read back before the transaction, so the
 	// walk never holds the database write lock. They share one budget, so a
 	// document of many versions costs no more than one large tarball.
 	left := maxTarballBytes
@@ -126,9 +131,10 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 			return err
 		}
 	}
-	// A new version is newer than every stored one, by a millisecond if the
-	// clock has not moved on: unpublish refuses to delete a version newer than
-	// the _rev a client read (packumentRev).
+	// A version published now is newer than every stored one, by a millisecond
+	// if the clock has not moved on: unpublish refuses to delete a version
+	// newer than the _rev a client read (packumentRev), one published again
+	// (writePolicy allow) included.
 	// ponytail: only stored versions count, so the newest version, deleted and
 	// published again before the clock passes its first publish time, is no
 	// newer than a _rev read in between. A per-package high-water mark fixes it.
@@ -149,7 +155,9 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 		}
 		for _, v := range sortedKeys(doc.Versions) {
 			raw := doc.Versions[v]
-			if p, ok := old[v]; ok {
+			file := TarballFile(name, v)
+			sums, again := tarballs[file]
+			if p, ok := old[v]; ok && !again {
 				attrs, err := applyDeprecation(raw, p.Attrs)
 				if err != nil {
 					return err
@@ -161,10 +169,15 @@ func (h *Handler) publish(ctx context.Context, w http.ResponseWriter, rp *repo.R
 					return err
 				}
 				continue
+			} else if ok {
+				// Published again: the row goes and comes back with the new
+				// manifest and publish time, the tarball is replaced below.
+				if err := tx.DeletePackage(ctx, rp.Name, name, v); err != nil {
+					return err
+				}
+				edited = true
 			}
-			file := TarballFile(name, v)
-			sums := tarballs[file]
-			attrs, err := withServerDist(raw, file, sums)
+			attrs, err := withServerDist(raw, file, sums, auth.FromContext(ctx).User)
 			if err != nil {
 				return err
 			}
@@ -337,6 +350,10 @@ func (h *Handler) writePackument(ctx context.Context, tx *meta.Tx, rp *repo.Repo
 	return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, PackumentKey(name), "application/json", sums))
 }
 
+// hoisted are the manifest fields a package document repeats at its top, from
+// its latest version, for tools that read only that level.
+var hoisted = []string{"description", "readme", "maintainers", "author", "license", "keywords", "repository", "homepage", "bugs"}
+
 // buildPackument writes the npm package document for the given rows. Tarball
 // URLs inside the stored manifests are replaced when the document is served.
 func buildPackument(w io.Writer, name string, pkgs []meta.Package, tags []meta.DistTag) error {
@@ -348,6 +365,20 @@ func buildPackument(w io.Writer, name string, pkgs []meta.Package, tags []meta.D
 	tw.Value(packumentRev(pkgs))
 	tw.Key("name")
 	tw.Value(name)
+	var latest map[string]json.RawMessage
+	for _, t := range tags {
+		for _, p := range pkgs {
+			if t.Tag == "latest" && p.Version == t.Version {
+				json.Unmarshal([]byte(p.Attrs), &latest) // stored by a build that wrote objects
+			}
+		}
+	}
+	for _, k := range hoisted {
+		if v, ok := latest[k]; ok {
+			tw.Key(k)
+			tw.RawValue(v)
+		}
+	}
 	tw.Key("dist-tags")
 	tw.Begin(true)
 	for _, t := range tags {

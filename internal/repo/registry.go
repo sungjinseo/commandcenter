@@ -432,6 +432,13 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	gens := r.gens()
 	if def.Remote != cur.Remote {
 		gens[name] = gen
+		if def.Format == "npm" {
+			// As Nexus does: the old remote's package documents would be
+			// served until their max age. What the new one lacks stays.
+			if err := r.db.InvalidateCache(ctx, []string{name}); err != nil {
+				return config.Repository{}, err
+			}
+		}
 	}
 	r.snap.Store(newSnapshot(list, gens))
 	r.written(ctx)

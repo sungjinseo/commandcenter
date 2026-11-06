@@ -201,6 +201,10 @@ func Prerelease(format, version string) bool {
 	case "helm": // helm reads 1.2-beta too, which semver.Parse does not
 		v, _, _ := strings.Cut(version, "+")
 		return strings.Contains(v, "-")
+	case "npm": // a version that is no semver (1.0-rc1, in a proxy's cache) with a "-", as Nexus reads it
+		if _, ok := semver.Parse(version); !ok {
+			return strings.Contains(version, "-")
+		}
 	}
 	v, ok := semver.Parse(version)
 	return ok && !v.Release()

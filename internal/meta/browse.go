@@ -137,6 +137,33 @@ AND `+contains("lower(name)")+` ORDER BY name LIMIT ?`, repo, q, limit+1)
 	return names, truncated, nil
 }
 
+// WalkLatestPackages calls fn with the version the dist-tag "latest" of each
+// package of repo points at, by name, for at most limit packages whose name
+// or version document contains q (case-insensitive; "" matches all), until
+// fn returns false: what an npm search looks through. It holds one row at a
+// time; fn runs while the query holds a connection.
+func (d *DB) WalkLatestPackages(ctx context.Context, repo, q string, limit int, fn func(Package) bool) error {
+	rows, err := d.sql.QueryContext(ctx, `SELECT p.name, p.version, p.attrs, p.created_at FROM packages p
+JOIN dist_tags t ON t.repo = p.repo AND t.name = p.name AND t.version = p.version AND t.tag = 'latest'
+WHERE p.repo = ? AND (`+contains("lower(p.name)")+` OR `+contains("lower(p.attrs)")+`) ORDER BY p.name LIMIT ?`, repo, q, q, limit)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		p := Package{Repo: repo}
+		var created int64
+		if err := rows.Scan(&p.Name, &p.Version, &p.Attrs, &created); err != nil {
+			return err
+		}
+		p.CreatedAt = fromMs(created)
+		if !fn(p) {
+			return nil
+		}
+	}
+	return rows.Err()
+}
+
 // RepoStat is the asset count and total size of one repository.
 type RepoStat struct{ Assets, Bytes int64 }
 
@@ -204,6 +231,15 @@ func (d *DB) BlobInUseInRepos(ctx context.Context, sha string, repos []string) (
 		return false, nil
 	}
 	return err == nil, err
+}
+
+// PruneTokens deletes owner's tokens whose id starts with idPrefix, but the
+// keep that were used, or created, last.
+func (d *DB) PruneTokens(ctx context.Context, owner, idPrefix string, keep int) error {
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM tokens WHERE "user" = ? AND starts_with(id, ?) AND id NOT IN (
+  SELECT id FROM tokens WHERE "user" = ? AND starts_with(id, ?) ORDER BY GREATEST(created_at, last_used_at) DESC, id LIMIT ?)`,
+		owner, idPrefix, owner, idPrefix, keep)
+	return err
 }
 
 // Token is a token's metadata (never its secret or hash).

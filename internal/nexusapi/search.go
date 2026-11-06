@@ -20,6 +20,7 @@ import (
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
 	"commandcenter/internal/format/maven"
+	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -260,6 +261,7 @@ var gavRE = regexp.MustCompile(`^([^\s:]+):([^\s:]+)(?::([^\s:]+))?(?::([^\s:]+)
 // of its files. Parameters Command Center does not know are ignored, as
 // Nexus ignores them.
 type criteria struct {
+	npm    map[string]term                // assets.attributes.npm.<field>: of a hosted package's manifest
 	comp   []func(c *comp) bool           // all must hold, on any one of the component's files
 	file   func(c *comp, p string) bool   // some file of the component must pass (q and its dependency form)
 	asset  []func(c *comp, p string) bool // asset parameters: they cut a component's files
@@ -328,6 +330,14 @@ func parseCriteria(q url.Values) (criteria, error) {
 				cr.pypi = map[string]term{}
 			}
 			cr.pypi[a] = newTerm(alts, false)
+		}
+	}
+	for k := range q {
+		if field, ok := strings.CutPrefix(k, "assets.attributes.npm."); ok {
+			if cr.npm == nil {
+				cr.npm = map[string]term{}
+			}
+			cr.npm[field] = newTerm(splitValue(strings.TrimSpace(q.Get(k))), false)
 		}
 	}
 	if v, _ := value(prereleaseKeys); v != "" {
@@ -407,7 +417,7 @@ func parseBool(s string) (bool, error) {
 // npm.*, docker.*) implies when format is absent, as Nexus adds it.
 func impliedFormat(q url.Values) string {
 	for _, f := range []struct{ format, prefix string }{{"maven", "maven."}, {"maven", "attributes.maven2."},
-		{"maven", "assets.attributes.maven2."}, {"npm", "npm."}, {"docker", "docker."}, {"pypi", "pypi."}} {
+		{"maven", "assets.attributes.maven2."}, {"npm", "npm."}, {"npm", "assets.attributes.npm."}, {"docker", "docker."}, {"pypi", "pypi."}} {
 		for k := range q {
 			if strings.HasPrefix(k, f.prefix) {
 				return f.format
@@ -715,6 +725,20 @@ func (h *Handler) find(ctx context.Context, repos []*repo.Repository, cr criteri
 				return nil, err
 			}
 		}
+		if cr.npm != nil {
+			paths, err := h.npmManifestPaths(ctx, rp, cr.npm)
+			if err != nil {
+				return nil, err
+			}
+			for p := range s.sums {
+				if !paths[p] {
+					delete(s.sums, p)
+				}
+			}
+			if s.sums == nil {
+				s.sums = paths
+			}
+		}
 		if (s.sums != nil && len(s.sums) == 0) || (s.recent != nil && len(s.recent) == 0) {
 			continue
 		}
@@ -768,6 +792,36 @@ func (h *Handler) pypiMatches(ctx context.Context, rp *repo.Repository, p string
 		}
 	}
 	return true
+}
+
+// npmManifestPaths returns the tarballs of the versions of hosted rp whose
+// manifests match every term (npm.ManifestField; a field it does not know
+// matches nothing). A proxy keeps no manifests per version, so it has none.
+// ponytail: reads every version's row per search, for a parameter scripts
+// rarely use; attributes per asset if it comes to matter.
+func (h *Handler) npmManifestPaths(ctx context.Context, rp *repo.Repository, terms map[string]term) (map[string]bool, error) {
+	paths := map[string]bool{}
+	names, err := h.DB.ListPackageNames(ctx, rp.Name)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		rows, err := h.DB.ListPackages(ctx, rp.Name, name)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			ok := true
+			for field, t := range terms {
+				vals := npm.ManifestField(row.Attrs, field)
+				ok = ok && len(vals) > 0 && t.matches(vals...)
+			}
+			if ok {
+				paths[npm.TarballKey(name, npm.TarballFile(name, row.Version))] = true
+			}
+		}
+	}
+	return paths, nil
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {

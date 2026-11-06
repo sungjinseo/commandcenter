@@ -777,3 +777,44 @@ func TestRegistrySigningKey(t *testing.T) {
 		t.Fatalf("set again: %v", err)
 	}
 }
+
+// npm-08: a new remote of an npm proxy makes its cached content stale at
+// once, as in Nexus (the old remote's documents would be served until their
+// max age); another format keeps it, and another setting changes nothing.
+func TestRemoteChangeInvalidatesNpmProxy(t *testing.T) {
+	reg, db := newRegistry(t)
+	ctx := context.Background()
+	for _, def := range []config.Repository{
+		{Name: "n", Format: "npm", Type: "proxy", Remote: "https://a.example/"},
+		{Name: "m", Format: "maven", Type: "proxy", Remote: "https://a.example/"},
+	} {
+		if err := reg.Create(ctx, def); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.PutAsset(ctx, meta.Asset{Repo: def.Name, Path: "x", BlobSHA256: "a", CheckedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checked := func(name string) bool {
+		t.Helper()
+		a, err := db.GetAsset(ctx, name, "x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return !a.CheckedAt.IsZero()
+	}
+	if err := reg.Update(ctx, "n", config.Repository{Remote: "https://a.example/", MetadataMaxAge: config.Duration(time.Hour)}, ClearSecrets{}); err != nil {
+		t.Fatal(err)
+	}
+	if !checked("n") {
+		t.Fatal("another setting made the cache stale")
+	}
+	for _, name := range []string{"n", "m"} {
+		if err := reg.Update(ctx, name, config.Repository{Remote: "https://b.example/"}, ClearSecrets{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if checked("n") || !checked("m") {
+		t.Fatalf("after the new remote: npm checked %v, maven checked %v", checked("n"), checked("m"))
+	}
+}

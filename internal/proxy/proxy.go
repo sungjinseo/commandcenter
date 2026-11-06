@@ -137,8 +137,7 @@ type Target struct {
 	// decides which group member owns a package (npm packument, PyPI project
 	// page), so that an internal registry that refuses or errs (403, 400,
 	// 451, ...) fails closed instead of letting a later member's same-named
-	// package stand in (resolve.Owner). A 404 or 410 is a miss for it even
-	// when cached, unlike any other asset's: the package left this member.
+	// package stand in (resolve.Owner).
 	DeniedIsFailure bool
 
 	// Skip, if set, tells the resolver which hosted or proxy repositories do
@@ -434,9 +433,10 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{Asset: na}, nil
 
 	// A cached asset the remote no longer has stays served, marked stale and
-	// asked about again next time, as in Nexus; the document that decides a
-	// group's owner goes: then a later member, or nobody, owns the package.
-	case (status == http.StatusNotFound || status == http.StatusGone) && (!cached || t.DeniedIsFailure),
+	// asked about again next time, as in Nexus. So does the document that
+	// decides a group's owner: an internal registry's 404 must not hand a
+	// package to a later, public member. Deleting the copy moves it on.
+	case (status == http.StatusNotFound || status == http.StatusGone) && !cached,
 		t.DeniedIsNotFound && !cached && status == http.StatusUnauthorized,
 		!cached && remoteMiss(status) && !t.DeniedIsFailure:
 		// A 404 from a remote that was replaced meanwhile must not outlive the change.

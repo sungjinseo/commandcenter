@@ -36,7 +36,7 @@ var types = map[string]typeDef{
 	TypeCompact: {name: "Compact blob store", params: compactParams, run: runCompact, fields: blobStoreFields},
 	TypeCleanup: {name: "Cleanup repositories", params: cleanupParamsOf, run: runCleanup, fields: cleanupFields},
 	TypeRebuild: {name: "Rebuild repository metadata", params: rebuildParamsOf, run: runRebuild, fields: []ParamSpec{
-		{Name: "repo", Type: "repository", Help: "a Maven hosted or proxy, or an apt, yum, helm or conda hosted repository; empty: every one"},
+		{Name: "repo", Type: "repository", Help: "a Maven hosted or proxy, or an apt, yum, helm, conda or npm hosted repository; empty: every one"},
 		{Name: "format", Type: "format", Help: "with an empty repo: only repositories of this format"},
 		{Name: "resetProxyMetadata", Type: "bool", Help: "apt proxies too: drop their cached metadata, so it is fetched again (after a change of the remote)"},
 		{Name: "groupId", Type: "string", Help: "Maven hosted only: rebuild this groupId (its plugins, and with cascadeRebuild its GAs)"},

@@ -313,8 +313,8 @@ func TestFetchCachedRemoteLost(t *testing.T) {
 		}
 		c.t = c.t.Add(2 * time.Hour)
 		rm.status.Store(status)
-		if _, err := f.FetchTarget(ctx, rp, tg, Metadata); !errors.Is(err, repo.ErrNotFound) {
-			t.Fatalf("%d: owner document: %v", status, err)
+		if res, err := f.FetchTarget(ctx, rp, tg, Metadata); err != nil || !res.Stale {
+			t.Fatalf("%d: owner document: %+v %v", status, res, err)
 		}
 	}
 }

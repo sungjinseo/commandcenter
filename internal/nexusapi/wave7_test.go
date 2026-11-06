@@ -860,8 +860,8 @@ func TestTagsDomain(t *testing.T) {
 }
 
 // A cached file whose remote now says 404 or 410 stays served, marked stale;
-// a file never cached is still a 404. The document that decides a group's
-// owner is not such a file: when it goes, the package goes.
+// a file never cached is still a 404. So does the document that decides a
+// group's owner: an internal registry's 404 hands nothing to a public member.
 func TestCachedAssetTheRemoteLost(t *testing.T) {
 	for _, status := range []int{http.StatusNotFound, http.StatusGone} {
 		u := newUpstream(t, status, map[string]string{"/f.txt": "cached body"})
@@ -907,10 +907,10 @@ func TestCachedAssetTheRemoteLost(t *testing.T) {
 	internal.mu.Lock()
 	delete(internal.files, "/lp")
 	internal.mu.Unlock()
-	if b := e.want("GET", "/repository/npm-all/lp", "", "", 200); !strings.Contains(string(b), "public") {
-		t.Fatalf("the package left the internal registry: %s", b)
+	if b := e.want("GET", "/repository/npm-all/lp", "", "", 200); !strings.Contains(string(b), "internal") {
+		t.Fatalf("the internal registry's 404 handed the package over: %s", b)
 	}
-	e.want("GET", "/repository/npm-internal/lp", "", "", 404)
+	e.want("GET", "/repository/npm-internal/lp", "", "", 200)
 }
 
 // A store's probe fails after it opened: Blob Stores Ready and the store's

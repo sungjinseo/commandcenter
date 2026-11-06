@@ -311,6 +311,8 @@ func TestTasksCompatSchedulesAndTypes(t *testing.T) {
 			"repository.apt.rebuild.metadata", "repository.rebuild-metadata", "map[format:apt resetProxyMetadata:true]"},
 		{`{"type":"repository.apt.rebuild.metadata","name":"a2","frequency":{"schedule":"manual"},"properties":{"repositoryName":"apt-proxy","resetProxyMetadata":"true"}}`,
 			"repository.apt.rebuild.metadata", "repository.rebuild-metadata", "map[format:apt repo:apt-proxy resetProxyMetadata:true]"},
+		{`{"type":"repository.npm.reindex","name":"n","frequency":{"schedule":"manual"},"properties":{"repositoryName":"*"}}`,
+			"repository.npm.reindex", "repository.rebuild-metadata", "map[format:npm]"},
 		{`{"type":"blobstore.metrics.reconcile","name":"r","frequency":{"schedule":"manual"},"properties":{"blobstoreName":"(All Blob Stores)"}}`,
 			"blobstore.metrics.reconcile", "blobstore.recalculate-size", "map[]"},
 		{`{"type":"blobstore.compact","name":"c","frequency":{"schedule":"manual"},"properties":{"blobstoreName":"(All Blob Stores)","blobsOlderThan":"0"}}`,

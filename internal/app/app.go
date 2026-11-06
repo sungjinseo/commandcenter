@@ -517,6 +517,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	taskSvc := &tasks.Service{DB: db, Deleters: deleters, Maven: mavenH, Metrics: recorder, Log: log, Store: store,
 		Rebuilders: map[string]repo.MetadataRebuilder{"apt": aptH, "yum": yumH, "helm": helmH, "conda": condaH, "r": rH},
 		RunTimeout: time.Duration(cfg.TaskRunTimeoutHours) * time.Hour}
+	taskSvc.Rebuilders["npm"] = npmH
 	taskSvc.OwnerGone = authn.TokenOwnerGone // security.purge-api-keys
 	taskSvc.Docker = dockerH                 // docker.gc
 	if err := taskSvc.Seed(context.Background()); err != nil {

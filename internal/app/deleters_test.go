@@ -6,16 +6,19 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
+	"commandcenter/internal/config"
 	"commandcenter/internal/format/cargo"
 	"commandcenter/internal/format/helm"
 	"commandcenter/internal/format/maven"
@@ -205,4 +208,50 @@ func npmTarball(name, version string) string {
 	tw.Close()
 	zw.Close()
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+// npm-21: repository.rebuild-metadata regenerates npm package documents from
+// the rows, as the reconcile task's log tells an admin to run it, and Nexus's
+// repository.npm.reindex is that task for npm repositories.
+func TestRebuildNpmMetadata(t *testing.T) {
+	cfg := testConfig(t, `  - { name: npm-hosted, format: npm, type: hosted }
+`)
+	h, _ := bcrypt.GenerateFromPassword([]byte("pw"), bcrypt.MinCost)
+	cfg.Users = append(cfg.Users, config.User{Name: "root", PasswordHash: string(h), Roles: []string{"admin"}})
+	a, err := New(cfg, quiet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	ts := httptest.NewServer(a.Handler)
+	defer ts.Close()
+	pub := `{"name":"pkg","versions":{"1.0.0":{"name":"pkg","version":"1.0.0"}},"dist-tags":{"latest":"1.0.0"},"_attachments":{"pkg-1.0.0.tgz":{"data":"` + npmTarball("pkg", "1.0.0") + `"}}}`
+	mustDo(t, 201, "PUT", ts.URL+"/repository/npm-hosted/pkg", "root", pub, false)
+	for _, c := range []struct{ typ, props string }{
+		{"repository.rebuild-metadata", `{"repository":"npm-hosted"}`},
+		{"repository.npm.reindex", `{"repositoryName":"npm-hosted"}`},
+		{"repository.npm.reindex", `{"repositoryName":"*"}`},
+	} {
+		if err := a.DB.DeleteAsset(context.Background(), "npm-hosted", "pkg/package.json"); err != nil {
+			t.Fatal(err)
+		}
+		mustDo(t, 404, "GET", ts.URL+"/repository/npm-hosted/pkg", "", "", false)
+		var created struct{ ID string }
+		out := mustDo(t, 201, "POST", ts.URL+"/service/rest/v1/tasks", "root", `{"type":"`+c.typ+`","name":"`+c.typ+c.props[2:6]+`","frequency":{"schedule":"manual"},"properties":`+c.props+`}`, false)
+		if err := json.Unmarshal([]byte(out), &created); err != nil {
+			t.Fatal(err)
+		}
+		mustDo(t, 204, "POST", ts.URL+"/service/rest/v1/tasks/"+created.ID+"/run", "root", "", false)
+		var item struct{ LastRunResult, CurrentState string }
+		for i := 0; i < 200 && (item.LastRunResult == "" || item.CurrentState == "RUNNING"); i++ {
+			time.Sleep(50 * time.Millisecond)
+			json.Unmarshal([]byte(mustDo(t, 200, "GET", ts.URL+"/service/rest/v1/tasks/"+created.ID, "root", "", false)), &item)
+		}
+		if item.LastRunResult != "OK" {
+			t.Fatalf("%s %s: %+v", c.typ, c.props, item)
+		}
+		if out := mustDo(t, 200, "GET", ts.URL+"/repository/npm-hosted/pkg", "", "", false); !strings.Contains(out, `"dist-tags":{"latest":"1.0.0"}`) || !strings.Contains(out, "pkg-1.0.0.tgz") {
+			t.Fatalf("%s: the rebuilt document: %s", c.typ, out)
+		}
+	}
 }

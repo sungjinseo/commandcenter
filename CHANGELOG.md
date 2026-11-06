@@ -98,6 +98,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Helm: `DELETE <chart>.tgz` removes a version from a hosted repository (200, 404 when gone).
 - Nexus API: search parameters `pypi.classifiers`, `pypi.description`, `pypi.keywords`, `pypi.summary`;
   a PyPI asset's `pypi` object has `name` and `version`.
+- npm: `npm search` (`GET /-/v1/search`) on hosted, proxy and group repositories. Hosted looks through name, description and
+  keywords of each package's `latest`, with Nexus's qualifiers; a proxy passes the request on, uncached; a group lists its
+  members' hits in order, each name once.
+- npm: `mergeMembers` on a group now merges: every member's versions, dist-tags and time, the first member winning, `latest` the
+  highest of the members', tarballs from the first member that has the file. The default stays the first member alone.
+- npm proxy: remotes that keep tarballs elsewhere (GitHub Packages, GitLab). A tarball not found at `<name>/-/<file>` is fetched
+  from the URL the package document names; the routing rule sees the request path. A URL ending in a hash is offered as
+  `<base>-<version>.tgz`, and the hash is still answered for lockfiles written through Nexus.
+- npm: documents have an `ETag` and answer `If-None-Match` and `If-Modified-Since` with 304, so a warm client cache does not
+  download them again.
+- npm: `DELETE <package>` and `DELETE <package>/-/<file>` without a revision, as Nexus takes them.
+- `repository.rebuild-metadata` regenerates npm package documents; Nexus's `repository.npm.reindex` creates that task.
+- Nexus API: tarball assets carry `npm: {name, version}` and `contentType: application/x-tgz`; search takes
+  `assets.attributes.npm.author`, `.description`, `.keywords` and `.license` (hosted repositories).
+- `test/smoke/npm-smoke.sh` runs yarn classic, yarn berry and pnpm through the group as well as npm, against the public registry
+  and a fake remote.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -117,7 +133,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name. The key `mergeMembers` lists every member's builds again; it also lists every member's
   versions in an R group. A failing member is left out only when no later member answers.
 - A cached proxy file whose remote now answers 404 or 410 is served, with `Warning: 110` and a WARN line, as in Nexus; it
-  was a 404. npm packuments and PyPI project pages keep going away. Delete what must go.
+  was a 404. npm packuments and PyPI project pages too: a proxied internal registry's 404 no longer hands a
+  package to the next group member. Delete what must go.
 - `PUT /v1/security/realms/active`: a list that names no token realm leaves the `token` realm as it is, so Nexus's default
   list no longer stops every API token. Turn it off with `PUT /-/api/realms`.
 - Task states in the Nexus API: `DISABLED` reads `WAITING`, a queued run `RUNNING`, a stopped run's result `CANCELED`; a
@@ -153,6 +170,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   through the format's handler instead of answering 400 for part of a larger component.
 - Routing rules on PyPI and Helm proxies see the request path, not the path of the file's upstream
   URL, and refuse before the cache is read, through a group too.
+- npm honours `writePolicy`: `deny` refuses publish, dist-tag changes and deprecation with 400 (they were accepted), `allow` lets a
+  publish replace a version (it needs edit as well as add). `allow_once`, the default, is unchanged.
+- npm proxy: versions the remote no longer lists stay in the document while their tarball is cached, and a remote 404 or 410 for
+  a cached document or tarball answers the copy, as Nexus does. Delete the cached assets to forget them.
+- npm: a user keeps the 100 tokens from `npm login` used last; older ones are revoked at the next login. Tokens made by hand do
+  not count.
+- npm proxy: a changed `remote` makes the cached content stale at once, as Nexus does.
+- npm proxy: a scoped package's document is requested as `@scope%2fname`, as the npm client does.
+- npm: `_npmUser.name` of a published version is the authenticated user, and a hosted document repeats the description, license
+  and the like of `latest` at its top.
+- Nexus API: an npm package document is listed as path `/<package>` with that download URL (it was `/<package>/package.json`).
+- Cleanup: an npm version that is no SemVer and contains `-` is a prerelease, as Nexus reads it.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -226,6 +255,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is asked for its index again, at most once a minute per node.
 - Helm: a second chart whose file name reads the same (`demo` `1.0.0-2.3.4`, `demo-1.0.0` `2.3.4`) took
   over the first one's file; it is 409 now.
+- npm proxy: a sign-in or error page answered with 200 was cached as a package document or a tarball, and the tarball stayed until
+  an admin deleted it. Nothing that is not a package document or a gzip file matching the document's checksums is cached now; the
+  client gets 502 or the copy cached before.
+- npm: the download URL of a package document in `/v1/assets` and the HTML browse answered 404.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -249,7 +282,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Conda groups list less.** An internal package now hides every public build of that name. A client
   that was getting a public build of a colliding name now gets the internal one, or none on a platform
   the internal package does not have. Set `mergeMembers: true` on the group to keep the old merge.
-- **Proxies keep serving what the remote lost.** An expired cached file whose remote answers 404 or 410 was a 404 and now is the cached copy with `Warning: 110`, a WARN log per request and a remote request per request, for as long as the remote says so. A package withdrawn upstream stays downloadable by its URL until it is deleted (`DELETE /v1/assets/{id}`, the component, or a cleanup policy); the firewall still applies. `invalidate-cache` does not remove it. npm packuments and PyPI project pages are unchanged: they go, with a recorded miss.
+- **Proxies keep serving what the remote lost.** An expired cached file whose remote answers 404 or 410 was a 404 and now is the cached copy with `Warning: 110`, a WARN log per request and a remote request per request, for as long as the remote says so. A package withdrawn upstream stays downloadable by its URL until it is deleted (`DELETE /v1/assets/{id}`, the component, or a cleanup policy); the firewall still applies. `invalidate-cache` does not remove it. npm packuments and PyPI project pages too, so a package stays with its group member until the copy is deleted there.
 - **A realm list no longer turns API tokens off.** Use `PUT /-/api/realms`. Check any script that removes the token ids to disable tokens.
 - **Monitoring**: `DISABLED` is gone from the task API; a run of a disabled task is 405 where it ran; a store's `unavailable` can now be true for a store that is open; `Blob Stores Ready` can fail when an S3 replica is down, even though the primary works.
 - **Rolling upgrade**: older nodes do not apply new S3 settings in place. Finish the upgrade before rotating S3 keys; such a node uses the old keys until restarted.
@@ -263,6 +296,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A Helm proxy** reads its upstream table on every chart request: after a restart the first request parses the cached index once. A republished version upstream is now fetched again; before it kept its old bytes.
 - **REST**: scripts that expected `.metadata` assets in components no longer see them (they remain in `/v1/assets` and at their URLs). Scripts that relied on the 400 of `DELETE /v1/assets/{id}` for a PyPI file now delete the file.
 - **Rolling upgrade (N-1)**: an old node answers 404 for `.prov` and for `.asc` until it is upgraded, and ignores `has_sig`. Nothing is stored that an old node misreads. No schema change.
+- **An npm repository with `writePolicy: deny` becomes read-only for clients.** It was not before, whatever the UI said. Check such
+  repositories before upgrading. One with `allow` now takes a re-publish.
+- **A proxy no longer follows a removal at the remote.** A version or package unpublished upstream stays installable from the
+  proxy if its tarball was cached. That is what Nexus does and what the owner asked for; to forget one, delete its tarball and the package document
+  (`DELETE /service/rest/v1/assets/{id}`), and the firewall still blocks what it knows.
+- A remote whose tarballs are not gzip can no longer be proxied (no real registry was found to do that; clients would need a plain tar).
+- Hosted documents get the hoisted fields at their next write, or at once with `repository.rebuild-metadata` (`format: npm`).
+- Scripts that read `/v1/assets` and match `/<name>/package.json` see `/<name>`. The old URL keeps answering.
+- Nothing to migrate; `schemaVersion` is unchanged. An older node in a rolling upgrade serves as before; a `login-` token works on it.
 
 ## [0.4.0] - 2026-11-05
 

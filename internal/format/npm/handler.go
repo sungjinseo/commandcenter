@@ -2,14 +2,19 @@ package npm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"commandcenter/internal/auth"
 	"commandcenter/internal/logsafe"
@@ -26,10 +31,17 @@ type Handler struct {
 	Auth     *auth.Authenticator
 	BaseURL  func() string // live: read per request (plan 12)
 	Now      func() time.Time
+	flights  singleflight.Group // exclusive
 }
 
 func New(store *repo.Store, resolver *resolve.Resolver, authn *auth.Authenticator, baseURL func() string) *Handler {
-	return &Handler{Store: store, Resolver: resolver, Auth: authn, BaseURL: baseURL, Now: time.Now}
+	h := &Handler{Store: store, Auth: authn, BaseURL: baseURL, Now: time.Now}
+	if resolver != nil { // its own copy: the other formats' proxies just fetch
+		r := *resolver
+		r.Proxy = h.proxyLookup
+		h.Resolver = &r
+	}
+	return h
 }
 
 // Access implements repo.AccessDecider.
@@ -42,7 +54,7 @@ func (h *Handler) Access(r *http.Request, rp *repo.Repository, path string) auth
 			// The handler answers it itself: logout needs only the
 			// caller's own token.
 			return auth.Public
-		case KindWhoami, KindPing, KindAudit:
+		case KindWhoami, KindPing, KindAudit, KindSearch:
 			// A public ping or audit would tell a hidden repository from
 			// a missing one.
 			return auth.Read
@@ -146,6 +158,7 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	}
 	hd := w.Header()
 	hd.Del("Last-Modified")
+	hd.Del("ETag")
 	hd.Del("Warning")
 	hd.Del("Content-Type")
 	h.WriteError(w, r, err)
@@ -158,6 +171,8 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		return nil
 	case KindAudit:
 		return h.audit(w, r, rp, rt.Path)
+	case KindSearch:
+		return h.search(w, r, rp)
 	case KindRev:
 		// npm reads a 404 here as "already deleted" and reports success
 		// (QA H-2): unpublish deletes for real or fails visibly (QA N-10).
@@ -184,6 +199,11 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	case http.MethodGet, http.MethodHead:
 		return h.read(w, r, rp, rt)
 	case http.MethodPut, http.MethodDelete:
+		if r.Method == http.MethodDelete && (rt.Kind == KindPackument || rt.Kind == KindTarball) && repo.AcceptsWrites(rp) {
+			// Nexus also deletes without a revision (a cleanup script's
+			// `curl -X DELETE <package or tarball URL>`): unpublish, unchecked.
+			return h.unpublish(w, r, rp, Route{Kind: KindRev, Package: rt.Package, File: rt.File})
+		}
 		target, err := repo.WriteTarget(rp)
 		if err != nil {
 			return repo.WithAllow(err, allowed(rp, rt.Kind))
@@ -193,9 +213,15 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	return repo.MethodNotAllowed(allowed(rp, rt.Kind), "method %s not allowed", r.Method)
 }
 
-// write handles publishing and dist-tag changes on a hosted repository.
+// write handles publishing and dist-tag changes on a hosted repository. Its
+// writePolicy decides as in the other formats: deny refuses every write
+// (unpublish checks it itself), and only allow lets a publish replace a
+// version (publish).
 func (h *Handler) write(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
 	ctx := r.Context()
+	if rp.WritePolicy == "deny" && (rt.Kind == KindPackument || rt.Kind == KindDistTag) {
+		return repo.Errorf(http.StatusBadRequest, "repository %q is read-only", rp.Name)
+	}
 	switch {
 	case rt.Kind == KindPackument && r.Method == http.MethodPut:
 		if err := h.publish(ctx, w, rp, rt.Package, r, func(v string) {
@@ -225,33 +251,17 @@ func (h *Handler) write(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	return repo.MethodNotAllowed(allowed(rp, rt.Kind), "method %s not allowed here", r.Method)
 }
 
-func (h *Handler) tarballURL(rp *repo.Repository, name string) func(file string) string {
+// tarballURL returns what a read of rp puts into a version's dist.tarball,
+// given the URL stored there.
+func (h *Handler) tarballURL(rp *repo.Repository, name string) func(version, upstream string) string {
 	prefix := h.baseURL() + "/repository/" + rp.Name + "/" + name + "/-/"
-	return func(file string) string { return prefix + file }
-}
-
-// packumentTarget is the cache key and upstream request of a package document.
-func packumentTarget(name string) proxy.Target {
-	return proxy.Target{Key: PackumentKey(name), Remote: name, Header: http.Header{"Accept": {"application/json"}}, DeniedIsFailure: true}
-}
-
-// packument resolves the stored package document for name in rp and the
-// repository it comes from. A group answers with the first member that has
-// the package, alone (resolve.Owner): no later member's versions, dist-tags
-// or tarballs are mixed in (dependency confusion, QA M-4, N-1, N-11).
-func (h *Handler) packument(ctx context.Context, rp *repo.Repository, name string) (*repo.Repository, proxy.Result, error) {
-	return h.Resolver.Owner(ctx, rp, packumentTarget(name), proxy.Metadata)
+	return func(version, upstream string) string { return prefix + tarballName(name, version, upstream) }
 }
 
 func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
 	ctx := r.Context()
 	if rt.Kind == KindTarball {
-		// A group takes tarballs only from the member that owns the
-		// package, so a later member's version is not served even by its
-		// direct URL (QA N-1). A member that has the tarball needs no
-		// packument (resolve.OwnerFile).
-		key := TarballKey(rt.Package, rt.File)
-		res, err := h.Resolver.OwnerFile(ctx, rp, proxy.Target{Key: key, Remote: key}, packumentTarget(rt.Package))
+		res, err := h.tarball(ctx, rp, rt.Package, rt.File)
 		if err != nil {
 			return err
 		}
@@ -263,6 +273,10 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 	}
 	if rt.Kind != KindPackument && rt.Kind != KindVersion && rt.Kind != KindDistTags {
 		return repo.MethodNotAllowed(allowed(rp, rt.Kind), "method %s not allowed", r.Method)
+	}
+	if rt.Kind == KindVersion && rt.Version == "package.json" {
+		// The document's stored path, which listings and the UI link to.
+		rt.Kind = KindPackument
 	}
 
 	src := rp
@@ -277,22 +291,34 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 		}
 		src = target
 	}
-	owner, res, err := h.packument(ctx, src, rt.Package)
+	members, err := h.docs(ctx, src, rt.Package)
 	if err != nil {
 		return err
 	}
-	a := res.Asset
-	f, err := h.Store.Open(a)
-	if err != nil {
-		return err
+	// One document, or those a group with mergeMembers merges.
+	docs := make([]io.ReadSeeker, len(members))
+	hosted := false
+	var modified time.Time
+	for i, m := range members {
+		f, err := h.Store.Open(m.res.Asset)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		docs[i] = f
+		proxy.SetStaleHeader(w, m.res)
+		hosted = hosted || m.repo.Type == "hosted"
+		if lm := m.res.Asset.LastModified; lm.After(modified) {
+			modified = lm
+		}
 	}
-	defer f.Close()
-	proxy.SetStaleHeader(w, res)
 	w.Header().Set("Content-Type", "application/json")
-	if !a.LastModified.IsZero() {
-		w.Header().Set("Last-Modified", a.LastModified.UTC().Format(http.TimeFormat))
+	if !modified.IsZero() {
+		w.Header().Set("Last-Modified", modified.UTC().Format(http.TimeFormat))
 	}
-	if rt.Kind == KindDistTags || owner.Type == "hosted" {
+	etag := h.documentETag(rp, rt, members)
+	w.Header().Set("ETag", etag)
+	if rt.Kind == KindDistTags || hosted {
 		// npm caches responses with Last-Modified heuristically, so
 		// `npm dist-tag ls` right after `npm dist-tag add` saw the old tags,
 		// and a warm cache kept offering an unpublished version. Dist-tags
@@ -303,31 +329,77 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request, rp *repo.Reposito
 		}
 		w.Header().Set("Cache-Control", cc)
 	}
-	if r.Method == http.MethodHead {
-		// A HEAD answers what the GET would: a missing version or tag is 404.
-		if rt.Kind == KindVersion {
-			if err := writeVersionDoc(f, rt.Version, h.tarballURL(rp, rt.Package), io.Discard); err != nil {
-				return err
-			}
-		}
-		w.WriteHeader(http.StatusOK)
+	if notModified(r, etag, modified) {
+		w.Header().Del("Content-Type")
+		w.WriteHeader(http.StatusNotModified)
 		return nil
 	}
-	switch rt.Kind {
-	case KindVersion:
-		return writeVersionDoc(f, rt.Version, h.tarballURL(rp, rt.Package), w)
-	case KindDistTags:
-		tags, err := readDistTags(f)
-		if err != nil {
+	url := h.tarballURL(rp, rt.Package)
+	head := r.Method == http.MethodHead
+	switch {
+	case rt.Kind == KindVersion:
+		// A HEAD answers what the GET would: a missing version or tag is 404.
+		out := io.Writer(w)
+		if head {
+			out = io.Discard
+		}
+		err = writeVersion(docs, rt.Version, url, out)
+	case head:
+	case len(docs) == 1 && rt.Kind == KindPackument:
+		err = rewritePackument(docs[0], w, url)
+	default:
+		var tags []tagPair
+		if tags, err = mergedTags(docs); err != nil {
 			return err
 		}
-		return writeDistTags(w, tags)
+		if rt.Kind == KindDistTags {
+			err = writeDistTags(w, tags)
+		} else {
+			err = mergeDocs(w, docs, tags, nil, url)
+		}
 	}
-	return rewritePackument(f, w, h.tarballURL(rp, rt.Package))
+	if err == nil && head {
+		w.WriteHeader(http.StatusOK)
+	}
+	return err
+}
+
+// documentRev is mixed into the ETags of the documents: change it when what
+// a read makes of a stored document changes, so a client's copy is not kept.
+const documentRev = "1"
+
+// documentETag identifies what a read answers: the stored documents it is
+// made from, and what it does with them (the repository and the base URL go
+// into the tarball URLs).
+func (h *Handler) documentETag(rp *repo.Repository, rt Route, members []member) string {
+	s := sha256.New()
+	for _, v := range []string{documentRev, h.baseURL(), rp.Name, strconv.Itoa(int(rt.Kind)), rt.Version} {
+		io.WriteString(s, v+"\x00")
+	}
+	for _, m := range members {
+		io.WriteString(s, m.res.Asset.BlobSHA256+"\x00")
+	}
+	return `"` + hex.EncodeToString(s.Sum(nil))[:32] + `"`
+}
+
+// notModified evaluates a GET or HEAD's conditions on a document with these
+// validators: If-None-Match, else If-Modified-Since (RFC 9110 13.2.2).
+func notModified(r *http.Request, etag string, modified time.Time) bool {
+	if inm := r.Header.Get("If-None-Match"); inm != "" {
+		for _, v := range strings.Split(inm, ",") {
+			if v = strings.TrimPrefix(strings.TrimSpace(v), "W/"); v == etag || v == "*" {
+				return true
+			}
+		}
+		return false
+	}
+	t, err := http.ParseTime(r.Header.Get("If-Modified-Since"))
+	return err == nil && !modified.IsZero() && !modified.Truncate(time.Second).After(t)
 }
 
 // login implements npm's legacy (CouchDB-style) login: it checks the password
-// and answers with a new API token.
+// and answers with a new API token (the older ones of a user who logs in
+// again and again go: auth.MaxLoginTokens).
 func (h *Handler) login(w http.ResponseWriter, r *http.Request, user string) error {
 	var body struct {
 		Name     string `json:"name"`
@@ -349,7 +421,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request, user string) err
 	if err != nil {
 		return repo.Errorf(http.StatusUnauthorized, "invalid user name or password")
 	}
-	_, tok, err := h.Auth.CreateTokenFor(r.Context(), p) // "ldap:<id>" for an LDAP user
+	tok, err := h.Auth.CreateLoginToken(r.Context(), p) // "ldap:<id>" for an LDAP user
 	if err != nil {
 		return err
 	}
@@ -408,10 +480,15 @@ func allowed(rp *repo.Repository, kind Kind) string {
 	switch kind {
 	case KindPackument:
 		if writable {
-			return "GET, HEAD, PUT"
+			return "GET, HEAD, PUT, DELETE"
 		}
 		return "GET, HEAD"
-	case KindVersion, KindTarball, KindDistTags:
+	case KindTarball:
+		if writable {
+			return "GET, HEAD, DELETE"
+		}
+		return "GET, HEAD"
+	case KindVersion, KindDistTags:
 		return "GET, HEAD"
 	case KindDistTag:
 		if writable {

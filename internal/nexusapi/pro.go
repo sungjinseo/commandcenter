@@ -294,6 +294,7 @@ var nexusTaskAliases = map[string]struct {
 	params map[string]any
 }{
 	"repository.apt.rebuild.metadata": {"repository.rebuild-metadata", map[string]any{"format": "apt"}},
+	"repository.npm.reindex":          {"repository.rebuild-metadata", map[string]any{"format": "npm"}},
 }
 
 // nexusTaskID is the Nexus type id of t: its alias when its parameters

@@ -43,7 +43,7 @@ func TestGroupFailsClosedWhenEarlierMemberOffline(t *testing.T) {
 	off := false
 	e.repos["npm-hosted"].Online = &off // npm-all holds the same pointer
 	for _, p := range []string{"left-pad", "left-pad/latest", "-/package/left-pad/dist-tags", "left-pad/-/left-pad-1.1.0.tgz"} {
-		if w := e.do("GET", "npm-all", p, "", anon); w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), "remote-tgz") {
+		if w := e.do("GET", "npm-all", p, "", anon); w.Code != http.StatusServiceUnavailable || w.Body.String() == remoteTgz {
 			t.Errorf("%s: %d %q, want 503", p, w.Code, w.Body.String())
 		}
 	}
@@ -71,7 +71,7 @@ func TestGroupFailsClosedWhenEarlierMemberErrors(t *testing.T) {
 	groupOf(e, "g-broken-first", broken, e.repos["npm-proxy"])
 	for _, p := range []string{"left-pad", "left-pad/latest", "-/package/left-pad/dist-tags", "left-pad/-/left-pad-1.1.0.tgz"} {
 		w := e.do("GET", "g-broken-first", p, "", anon)
-		if w.Code < 500 || strings.Contains(w.Body.String(), "remote-tgz") || strings.Contains(w.Body.String(), "1.1.0") {
+		if w.Code < 500 || w.Body.String() == remoteTgz || strings.Contains(w.Body.String(), "1.1.0") {
 			t.Errorf("%s: %d %q, want 5xx", p, w.Code, w.Body.String())
 		}
 	}
@@ -103,7 +103,7 @@ func TestGroupFallsThroughOnEarlierMemberNotFound(t *testing.T) {
 	if w.Code != 200 || get(jsonBody(t, w), "dist-tags", "latest") != "1.1.0" {
 		t.Fatalf("packument: %d %s", w.Code, w.Body.String())
 	}
-	if w := e.do("GET", "npm-all", "left-pad/-/left-pad-1.1.0.tgz", "", anon); w.Code != 200 || w.Body.String() != "remote-tgz" {
+	if w := e.do("GET", "npm-all", "left-pad/-/left-pad-1.1.0.tgz", "", anon); w.Code != 200 || w.Body.String() != remoteTgz {
 		t.Fatalf("tarball: %d %q", w.Code, w.Body.String())
 	}
 }
@@ -126,7 +126,8 @@ func cacheProxyTarball(t *testing.T, e *env) {
 type fakeUpstream struct{ status, docs atomic.Int32 }
 
 // upstreamMember is an npm proxy member named name, with npm-proxy's
-// settings, on a fakeUpstream serving files.
+// settings, on a fakeUpstream serving files. A document's tarball URLs are
+// the upstream's own, as a registry writes them.
 func upstreamMember(t *testing.T, e *env, name string, files map[string]string) (*repo.Repository, *fakeUpstream) {
 	t.Helper()
 	u := &fakeUpstream{}
@@ -141,7 +142,7 @@ func upstreamMember(t *testing.T, e *env, name string, files map[string]string) 
 		case !ok:
 			http.NotFound(w, r)
 		default:
-			io.WriteString(w, body)
+			io.WriteString(w, strings.ReplaceAll(body, "https://registry.npmjs.org", "http://"+r.Host))
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -153,11 +154,11 @@ func upstreamMember(t *testing.T, e *env, name string, files map[string]string) 
 }
 
 // upEnv is newEnv plus g-up = npm-hosted, npm-up, where npm-up serves left-pad
-// with 1.1.0 as "up-tgz".
+// with 1.1.0 as upTgz.
 func upEnv(t *testing.T) (*env, *fakeUpstream) {
 	t.Helper()
 	e := newEnv(t)
-	up, u := upstreamMember(t, e, "npm-up", map[string]string{"/left-pad": leftPad, "/" + tgz110: "up-tgz"})
+	up, u := upstreamMember(t, e, "npm-up", map[string]string{"/left-pad": leftPad, "/" + tgz110: upTgz})
 	groupOf(e, "g-up", e.repos["npm-hosted"], up)
 	return e, u
 }
@@ -166,7 +167,7 @@ func upEnv(t *testing.T) (*env, *fakeUpstream) {
 // tarball fetches the tarball, not the packument first.
 func TestGroupTarballColdCacheFetchesNoPackument(t *testing.T) {
 	e, u := upEnv(t)
-	if w := e.do("GET", "g-up", tgz110, "", anon); w.Code != 200 || w.Body.String() != "up-tgz" {
+	if w := e.do("GET", "g-up", tgz110, "", anon); w.Code != 200 || w.Body.String() != upTgz {
 		t.Fatalf("tarball: %d %q", w.Code, w.Body.String())
 	}
 	if n := u.docs.Load(); n != 0 {
@@ -183,7 +184,7 @@ func TestGroupTarballServedWhileUpstreamDown(t *testing.T) {
 		t.Fatalf("caching: %d %s", w.Code, w.Body.String())
 	}
 	u.status.Store(http.StatusServiceUnavailable)
-	if w := e.do("GET", "g-up", tgz110, "", anon); w.Code != 200 || w.Body.String() != "up-tgz" {
+	if w := e.do("GET", "g-up", tgz110, "", anon); w.Code != 200 || w.Body.String() != upTgz {
 		t.Fatalf("upstream down: %d %q", w.Code, w.Body.String())
 	}
 }
@@ -199,7 +200,7 @@ func TestGroupTarballServedAfterUpstreamRemovedPackage(t *testing.T) {
 	}
 	u.status.Store(http.StatusNotFound)
 	e.h.Resolver.Fetcher.Now = func() time.Time { return time.Now().Add(2 * time.Hour) } // past metadataMaxAge
-	if w := e.do("GET", "g-up", tgz110, "", anon); w.Code != 200 || w.Body.String() != "up-tgz" {
+	if w := e.do("GET", "g-up", tgz110, "", anon); w.Code != 200 || w.Body.String() != upTgz {
 		t.Fatalf("package removed upstream: %d %q", w.Code, w.Body.String())
 	}
 }
@@ -235,21 +236,21 @@ func TestGroupTarballOwnerRuleHoldsForCachedTarballs(t *testing.T) {
 // the package passes the request on.
 func TestGroupTarballFromProxyThatIsNotLast(t *testing.T) {
 	e := newEnv(t)
-	has, u := upstreamMember(t, e, "npm-has", map[string]string{"/left-pad": leftPad, "/" + tgz110: "has-tgz"})
+	has, u := upstreamMember(t, e, "npm-has", map[string]string{"/left-pad": leftPad, "/" + tgz110: hasTgz})
 	owns, _ := upstreamMember(t, e, "npm-owns", map[string]string{"/left-pad": leftPad})
 	lacks, _ := upstreamMember(t, e, "npm-lacks", nil)
 	for _, c := range []struct {
 		m    *repo.Repository
 		code int
 		body string
-	}{{has, 200, "has-tgz"}, {owns, 404, ""}, {lacks, 200, "remote-tgz"}} {
+	}{{has, 200, hasTgz}, {owns, 404, ""}, {lacks, 200, remoteTgz}} {
 		g := groupOf(e, "g-"+c.m.Name, e.repos["npm-hosted"], c.m, e.repos["npm-proxy"])
 		if w := e.do("GET", g.Name, tgz110, "", anon); w.Code != c.code || c.body != "" && w.Body.String() != c.body {
 			t.Errorf("%s: %d %q, want %d %q", g.Name, w.Code, w.Body.String(), c.code, c.body)
 		}
 	}
 	u.status.Store(http.StatusServiceUnavailable)
-	if w := e.do("GET", "g-npm-has", tgz110, "", anon); w.Code != 200 || w.Body.String() != "has-tgz" {
+	if w := e.do("GET", "g-npm-has", tgz110, "", anon); w.Code != 200 || w.Body.String() != hasTgz {
 		t.Fatalf("cached in npm-has, upstream down: %d %q", w.Code, w.Body.String())
 	}
 }

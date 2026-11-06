@@ -881,9 +881,14 @@ func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[s
 	if rp.Type == "proxy" {
 		verified = rfc3339(a.CheckedAt) // the last time the remote was consulted
 	}
-	attrs := map[string]string{}
-	if rp.Format == "maven" {
+	attrs, listed, contentType := map[string]string{}, a.Path, a.ContentType
+	switch rp.Format {
+	case "maven":
 		attrs = maven2Attributes(a.Path) // a SNAPSHOT build's own version
+	case "npm":
+		if attrs, listed = npmAttributes(a.Path); len(attrs) > 0 {
+			contentType = "application/x-tgz" // what a remote or a client declared says nothing
+		}
 	}
 	if rp.Format == "pypi" {
 		if _, name, version, ok := component.DeriveAsset("pypi", a.Path); ok {
@@ -892,18 +897,34 @@ func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[s
 	}
 	return map[string]any{
 		"id":           assetID(rp.Name, a.Path),
-		"path":         "/" + a.Path,
-		"downloadUrl":  h.repoURL(cmp.Or(via, rp.Name)) + "/" + escapePath(a.Path),
+		"path":         "/" + listed,
+		"downloadUrl":  h.repoURL(cmp.Or(via, rp.Name)) + "/" + escapePath(listed),
 		"repository":   rp.Name,
 		"format":       nexusFormat(rp.Format),
 		"checksum":     sums,
-		"contentType":  a.ContentType,
+		"contentType":  contentType,
 		"lastModified": rfc3339(a.LastModified), "blobCreated": rfc3339(a.CreatedAt), "lastDownloaded": rfc3339(a.LastDownloaded),
 		"blobUpdated": rfc3339(a.LastModified), "lastVerified": verified,
 		"fileSize": a.Size, "blobStoreName": repo.StoreOf(rp.Repository),
 		"uploader": nil, "uploaderIp": nil, // not recorded
 		nexusFormat(rp.Format): attrs,
 	}
+}
+
+// npmAttributes is an npm asset's "npm" object, as Nexus lists it (a
+// tarball's full name and version), and the path it is listed under: a
+// package document's is the package's URL.
+func npmAttributes(p string) (map[string]string, string) {
+	if g, n, v, ok := component.DeriveNpm(p); ok {
+		if g != "" {
+			n = g + "/" + n
+		}
+		return map[string]string{"name": n, "version": v}, p
+	}
+	if name, ok := strings.CutSuffix(p, "/package.json"); ok && !strings.Contains(name, "/-/") {
+		return map[string]string{}, name
+	}
+	return map[string]string{}, p
 }
 
 // maven2Attributes is a Maven asset's "maven2" object, as Nexus lists it:
