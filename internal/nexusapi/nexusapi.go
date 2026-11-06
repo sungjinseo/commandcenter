@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -342,7 +343,9 @@ func (h *Handler) usage(ctx context.Context) map[string]meta.RepoUsage {
 	return u
 }
 
-// minutes renders a config duration as Nexus does: minutes, -1 for never.
+// minutes renders a config duration as Nexus does: minutes, -1 for never,
+// rounded up: 0 means "always ask the remote", so a native 30s must not read
+// as 0 and come back from a client's read-then-write as that.
 func minutes(d config.Duration) int {
 	switch {
 	case d == config.Never:
@@ -350,7 +353,7 @@ func minutes(d config.Duration) int {
 	case d.Off():
 		return 0
 	}
-	return int(time.Duration(d) / time.Minute)
+	return int((time.Duration(d) + time.Minute - 1) / time.Minute)
 }
 
 func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
@@ -448,11 +451,11 @@ func (h *Handler) listRepositories(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// getRepository answers a repository the caller may list, itself or through
+// a group that contains it.
 func (h *Handler) getRepository(w http.ResponseWriter, r *http.Request) {
-	if rp := h.readable(principal(r), r.PathValue("name")); rp != nil {
+	if rp := h.lookupRepo(w, r, r.PathValue("name")); rp != nil {
 		writeJSON(w, http.StatusOK, h.repoJSON(rp, h.usage(r.Context())))
-	} else {
-		h.hidden(w, principal(r))
 	}
 }
 
@@ -714,14 +717,18 @@ func (h *Handler) createRepository(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateRepository(w http.ResponseWriter, r *http.Request) {
-	if !h.signedIn(w, r) { // the UI checks repository-admin edit
+	name := r.PathValue("name")
+	// Before anything looks at the stored repository: a caller without the
+	// right gets one answer whether it exists or not. The UI checks again,
+	// with the password or session login a change also needs.
+	if p := principal(r); !h.Auth.CanAdminRepo(p, name, h.repoFormatOf(name), auth.Edit) {
+		deny(w, p)
 		return
 	}
 	b, ok := decodeRepoBody(w, r)
 	if !ok || !supportedAuth(w, b) {
 		return
 	}
-	name := r.PathValue("name")
 	var cur *config.Repository // nil: the UI answers 404
 	if rp := h.Repos.Get(name); rp != nil {
 		cur = &rp.Repository
@@ -1323,9 +1330,11 @@ func (h *Handler) statusWritable(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// statusCheck is the UI's health checks in Nexus's shape.
+// statusCheck is the UI's health checks in Nexus's shape, for an admin or a
+// holder of the metrics privilege (the UI checks the same).
 func (h *Handler) statusCheck(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if p := principal(r); !h.Auth.CanReadMetrics(p) {
+		deny(w, p)
 		return
 	}
 	status, body := h.call(r, http.MethodGet, "/-/api/status/checks", nil)
@@ -1435,7 +1444,7 @@ type blobStoreRow struct {
 	Quota     *uiQuota `json:"quota"`
 	Violated  bool     `json:"quotaViolated"`
 
-	Unavailable string `json:"unavailable"` // why it did not open on this node
+	Unavailable string `json:"unavailable"` // why it did not open on this node, or why its probe failed
 }
 
 // quotaStatus: GET /blobstores/{name}/quota-status.
@@ -1472,10 +1481,11 @@ func (h *Handler) createFileBlobStore(w http.ResponseWriter, r *http.Request) {
 	if !decodeSmall(w, r, &b) {
 		return
 	}
-	if b.Path == b.Name { // Nexus's default, relative to its work directory: the default location here
-		b.Path = ""
+	req := map[string]any{"name": b.Name, "path": b.Path, "type": "file", "quota": b.SoftQuota.ui()}
+	if b.Path != "" && !filepath.IsAbs(b.Path) { // Nexus's are relative to its blobs directory: blobstores/ here
+		req["path"], req["relativePath"] = "", b.Path
 	}
-	status, body := h.call(r, http.MethodPost, "/-/api/blobstores", map[string]any{"name": b.Name, "path": b.Path, "type": "file", "quota": b.SoftQuota.ui()})
+	status, body := h.call(r, http.MethodPost, "/-/api/blobstores", req)
 	if status != http.StatusCreated {
 		writeUIError(w, status, body)
 		return
@@ -1495,7 +1505,7 @@ func (h *Handler) updateFileBlobStore(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if b.Path != "" && b.Path != filePath(bs) { // all nodes share the path: it cannot move
+	if b.Path != "" && filepath.Clean(b.Path) != filePath(bs) { // all nodes share the path: it cannot move
 		writeValidation(w, []string{"path: the path of blob store " + strconv.Quote(bs.Name) + " cannot be changed"})
 		return
 	}
@@ -1521,9 +1531,9 @@ func (h *Handler) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(body, &res)
 	items := []map[string]any{}
-	typ := r.URL.Query().Get("type") // Nexus's type id, or Command Center's
+	typ := r.URL.Query().Get("type") // the id an item is labelled with, or Command Center's
 	for _, t := range res.Tasks {
-		if typ == "" || typ == t.Type || typ == nexusTaskType(t.Type) {
+		if typ == "" || typ == t.Type || typ == nexusTaskID(t) {
 			items = append(items, nexusTaskItem(t))
 		}
 	}

@@ -201,3 +201,37 @@ func TestPurgeScopeKeptOnUpdate(t *testing.T) {
 		t.Fatalf("new task: %s", tk.Params)
 	}
 }
+
+// core-35: repositoryName takes several names with commas: each runs, what a
+// group or "*" would skip is skipped; a name that is no Maven repository is
+// refused when the task is made, and skipped if it went later.
+func TestPurgeCommaList(t *testing.T) {
+	h := newHarness(t)
+	v := h.seedBuilds(t, 90, 80, 70)
+	ctx := context.Background()
+	for raw, want := range map[string]string{
+		`{"repository":"mvn-none,missing"}`:               `"missing" does not exist`,
+		`{"repository":"mvn-none,crates"}`:                `"crates" is cargo`,
+		`{"repository":"mvn-none,mvn","scope":"version"}`: "scope version takes one",
+	} {
+		if _, err := h.s.Create(ctx, Def{Name: "list", Type: TypePurge, Schedule: "manual", Params: json.RawMessage(raw)}); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v", raw, err)
+		}
+	}
+	out, tk := h.run(t, TypePurge, `{"repository":" mvn-none , mvn-ro,mvn-group,mvn-none","minimumRetained":1}`)
+	if out.Result != ResultOK || !strings.Contains(out.Message, "removed 2 of 3 SNAPSHOT builds") { // mvn-none once, though named twice
+		t.Fatalf("%+v\n%s", out, tk.LastLog)
+	}
+	if got := h.builds(t); got != v[2] {
+		t.Fatalf("left: %s", got)
+	}
+	if !strings.Contains(tk.LastLog, "mvn-ro: skipped") {
+		t.Fatalf("log:\n%s", tk.LastLog)
+	}
+	// A name that went since the task was made is skipped.
+	p := purgeParams{Repository: "mvn-none,gone-since", Scope: ScopeBuild}
+	got, err := h.s.purgeTargets(p, newRunLog(h.s.log(), h.s.now))
+	if err != nil || len(got) != 1 || got[0].Name != "mvn-none" {
+		t.Fatalf("targets: %v %v", got, err)
+	}
+}

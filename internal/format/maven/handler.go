@@ -112,8 +112,15 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 		if p.Metadata {
 			kind = proxy.Metadata
 		}
-		res, err = h.Resolver.LookupTarget(ctx, rp, t, kind)
+		lookup := ctx
+		if p.Hash == "" { // a checksum is computed from the file
+			lookup = proxy.ForHead(r)
+		}
+		res, err = h.Resolver.LookupTarget(lookup, rp, t, kind)
 		a = res.Asset
+		if res.Head != nil {
+			a.Repo = res.Head.Repo
+		}
 	}
 	if err != nil {
 		repo.WriteError(w, r, err)
@@ -132,6 +139,11 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 			disposition = "inline"
 		}
 		repo.SetContentDisposition(w, disposition, p.Path)
+	}
+	if res.Head != nil {
+		res.Head.ContentType = ContentType(p.Main)
+		proxy.ServeHead(w, r, h.Store, res.Head)
+		return
 	}
 	if p.Hash != "" {
 		repo.ServeText(w, r, checksum(a, p.Hash), "text/plain", a.LastModified)

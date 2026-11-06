@@ -289,7 +289,8 @@ func TestRunNowQueuedAcrossNodes(t *testing.T) {
 		t.Fatalf("%d runs after another tick", n)
 	}
 	// A run that starts another way (run now when the lock is free) answers
-	// a queued request too.
+	// a queued request too. No tick may be left to take the request first.
+	h.s.Stop()
 	if err := h.db.QueueTaskRun(context.Background(), tk.ID, "carol", h.clock.Now()); err != nil {
 		t.Fatal(err)
 	}

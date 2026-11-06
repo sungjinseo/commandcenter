@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,10 +51,60 @@ type Stats interface {
 }
 
 // Result is a cached asset; Stale is set when the remote could not be reached
-// and an expired copy is returned instead.
+// or no longer has it and an expired copy is returned instead. For a lookup
+// under ForHead, Head instead answers an asset that is not cached.
 type Result struct {
 	Asset meta.Asset
 	Stale bool
+	Head  *Head
+}
+
+// Head is a remote's answer to a HEAD of an asset that is not cached: nothing
+// was fetched or stored.
+type Head struct {
+	Repo, Key     string // the proxy that asked, and the asset
+	ContentType   string
+	ContentLength int64 // -1: not said
+	LastModified  string
+}
+
+type headKey struct{}
+
+// FillOnHead marks ctx of a HEAD that is there to fill the cache (pull
+// replication's prefetch): ForHead leaves it the GET it has always been.
+func FillOnHead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, headKey{}, false)
+}
+
+// ForHead is r's context for looking up one file: on a client's HEAD, a proxy
+// that does not hold the file asks its remote with a HEAD and stores nothing
+// (Result.Head, ServeHead). Only for a handler that serves the asset as it is,
+// not one that reads it: a checksum, a rewritten document. GET and a HEAD
+// under FillOnHead are not affected.
+func ForHead(r *http.Request) context.Context {
+	ctx := r.Context()
+	if _, marked := ctx.Value(headKey{}).(bool); marked || r.Method != http.MethodHead {
+		return ctx
+	}
+	return context.WithValue(ctx, headKey{}, true)
+}
+
+// ServeHead answers a HEAD from h; the firewall decides as for a download.
+func ServeHead(w http.ResponseWriter, r *http.Request, s *repo.Store, h *Head) {
+	if s.Firewall != nil {
+		if err := s.Firewall(r.Context(), h.Repo, h.Key); err != nil {
+			repo.WriteError(w, r, err)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", cmp.Or(h.ContentType, "application/octet-stream"))
+	if h.ContentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(h.ContentLength, 10))
+	}
+	if h.LastModified != "" {
+		w.Header().Set("Last-Modified", h.LastModified)
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // Target names an asset to fetch. Key is where it is cached in the repository,
@@ -86,7 +137,8 @@ type Target struct {
 	// decides which group member owns a package (npm packument, PyPI project
 	// page), so that an internal registry that refuses or errs (403, 400,
 	// 451, ...) fails closed instead of letting a later member's same-named
-	// package stand in (resolve.Owner).
+	// package stand in (resolve.Owner). A 404 or 410 is a miss for it even
+	// when cached, unlike any other asset's: the package left this member.
 	DeniedIsFailure bool
 
 	// Skip, if set, tells the resolver which hosted or proxy repositories do
@@ -167,6 +219,11 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 	f.count(rp.Name, false)
 	if err := f.blocked(rp, now); err != nil {
 		return f.stale(rp, t.Key, a, cached, err)
+	}
+	if ask, _ := ctx.Value(headKey{}).(bool); ask && !cached {
+		if h := f.headRemote(ctx, rp, t); h != nil {
+			return Result{Head: h}, nil
+		}
 	}
 	// The flight is detached from the caller so one cancelled client does not abort
 	// a download that other waiters share. This caller may still stop waiting early.
@@ -272,14 +329,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 	}
 	defer func() { <-f.sem }()
 
-	target := t.URL
-	if target == "" {
-		u := *rp.RemoteURL
-		u.Path = rp.RemoteURL.Path + t.Remote
-		u.RawPath = ""
-		target = u.String()
-	}
-	req, err := f.newRequest(ctx, rp, target, t.Header)
+	req, err := f.newRequest(ctx, rp, targetURL(rp, t), t.Header)
 	if err != nil {
 		return Result{}, err
 	}
@@ -383,7 +433,10 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		}
 		return Result{Asset: na}, nil
 
-	case status == http.StatusNotFound || status == http.StatusGone,
+	// A cached asset the remote no longer has stays served, marked stale and
+	// asked about again next time, as in Nexus; the document that decides a
+	// group's owner goes: then a later member, or nobody, owns the package.
+	case (status == http.StatusNotFound || status == http.StatusGone) && (!cached || t.DeniedIsFailure),
 		t.DeniedIsNotFound && !cached && status == http.StatusUnauthorized,
 		!cached && remoteMiss(status) && !t.DeniedIsFailure:
 		// A 404 from a remote that was replaced meanwhile must not outlive the change.
@@ -400,6 +453,50 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{}, ErrRateLimited
 	}
 	return f.stale(rp, t.Key, a, cached, fmt.Errorf("remote status %d", resp.StatusCode))
+}
+
+// targetURL is where t is on rp's remote.
+func targetURL(rp *repo.Repository, t Target) string {
+	if t.URL != "" {
+		return t.URL
+	}
+	u := *rp.RemoteURL
+	u.Path = rp.RemoteURL.Path + t.Remote
+	u.RawPath = ""
+	return u.String()
+}
+
+// headRemote asks rp's remote about t with a HEAD. Only a plain 200 answers
+// the client: for anything else (a remote that takes no HEAD or answers it
+// differently than a GET, a 404, an error) it returns nil, and the GET that
+// follows decides with all its rules, records a miss and counts for auto-block.
+func (f *Fetcher) headRemote(ctx context.Context, rp *repo.Repository, t Target) *Head {
+	select {
+	case f.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil
+	}
+	defer func() { <-f.sem }()
+	req, err := f.newRequest(ctx, rp, targetURL(rp, t), t.Header)
+	if err != nil {
+		return nil
+	}
+	req.Method = http.MethodHead
+	t0 := time.Now()
+	resp, err := f.client(rp).Do(req)
+	if err != nil {
+		return nil
+	}
+	resp.Body.Close()
+	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if resp.StatusCode != http.StatusOK || t.NotHTML && mt == "text/html" {
+		return nil
+	}
+	if f.Stats != nil {
+		f.Stats.Upstream(rp.Name, true, time.Since(t0))
+	}
+	return &Head{Repo: rp.Name, Key: t.Key, ContentType: resp.Header.Get("Content-Type"), ContentLength: resp.ContentLength,
+		LastModified: resp.Header.Get("Last-Modified")}
 }
 
 // bodyIdle is how long a read of a remote body may wait for data before its

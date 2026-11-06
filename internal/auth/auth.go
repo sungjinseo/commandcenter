@@ -845,9 +845,9 @@ func (a *Authenticator) CanApp(p Principal, domain, action string) bool {
 }
 
 // AppDomains are the application privilege domains ("app:<domain>",
-// Nexus nx-<domain>-*) and the actions each delegates. The last five are
-// open to every signed-in user here; they are accepted, so Nexus roles
-// that hold them migrate, and grant nothing more.
+// Nexus nx-<domain>-*) and the actions each delegates. The last five, and
+// reading tags, are open to every signed-in user here; they are accepted, so
+// Nexus roles that hold them migrate, and grant nothing more.
 var AppDomains = map[string][]string{
 	"users":      {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
 	"roles":      {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
@@ -855,6 +855,7 @@ var AppDomains = map[string][]string{
 	"settings":   {meta.ActionRead},
 	"tasks":      {meta.ActionRead, meta.ActionRun},
 	"blobstores": {meta.ActionRead},
+	"tags":       {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
 
 	"search":        {meta.ActionRead},
 	"healthcheck":   {meta.ActionRead},

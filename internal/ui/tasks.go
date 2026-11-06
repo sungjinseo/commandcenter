@@ -26,6 +26,7 @@ func (u *UI) taskRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /-/api/tasks/{id}/runs/{run}", u.getTaskRun)
 	mux.HandleFunc("POST /-/api/tasks/{id}/run", u.runTask)
 	mux.HandleFunc("POST /-/api/tasks/{id}/stop", u.stopTask)
+	mux.HandleFunc("PUT /-/api/tasks/scheduler", u.pauseScheduler)
 	mux.HandleFunc("POST /-/api/gc", u.runGC)
 }
 
@@ -140,7 +141,38 @@ func (u *UI) listTasks(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tasks.Types() {
 		types = append(types, typeJSON{t, tasks.TypeName(t), tasks.Params(t)})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"tasks": out, "types": types, "running": running})
+	paused, err := u.Tasks.Paused(r.Context())
+	if err != nil {
+		u.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": out, "types": types, "running": running, "paused": paused})
+}
+
+// pauseScheduler is PUT /-/api/tasks/scheduler {"paused": bool} (interactive
+// admin): while paused no scheduled or queued run starts, on any node; a run
+// in progress goes on, and an administrator's run now still runs. Tasks that
+// fall due meanwhile run once on resuming.
+func (u *UI) pauseScheduler(w http.ResponseWriter, r *http.Request) {
+	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) || !u.tasksAvailable(w) {
+		return
+	}
+	var body struct {
+		Paused *bool `json:"paused"`
+	}
+	if !decodeBody(w, r, &body) {
+		return
+	}
+	if body.Paused == nil {
+		writeError(w, http.StatusBadRequest, "paused is required")
+		return
+	}
+	if err := u.Tasks.SetPaused(r.Context(), *body.Paused); err != nil {
+		u.fail(w, r, err)
+		return
+	}
+	u.emit(r, "task.scheduler", "", "scheduler", fmt.Sprintf("paused: %v", *body.Paused))
+	writeJSON(w, http.StatusOK, map[string]any{"paused": *body.Paused})
 }
 
 func (u *UI) getTask(w http.ResponseWriter, r *http.Request) {
@@ -324,17 +356,27 @@ func (u *UI) writeRun(w http.ResponseWriter, r *http.Request, out tasks.Outcome,
 }
 
 // stopTask stops the running task: 202 when it was running (its run then
-// records Stopped), 409 when it is not, 404 for an unknown task.
+// records Stopped) or a run of it was queued (dropped: nothing ran, nothing
+// is recorded), 409 when neither, 404 for an unknown task.
 func (u *UI) stopTask(w http.ResponseWriter, r *http.Request) {
 	if _, ok := u.requireAppInteractive(w, r, "tasks", meta.ActionRun); !ok || !u.tasksAvailable(w) {
 		return
 	}
 	id := r.PathValue("id")
-	if _, err := u.Tasks.Get(r.Context(), id); err != nil {
+	t, err := u.Tasks.Get(r.Context(), id)
+	if err != nil {
 		u.writeTaskError(w, r, err)
 		return
 	}
 	if !u.Tasks.StopRun(id) {
+		if !t.QueuedAt.IsZero() {
+			if err := u.DB.UnqueueTask(r.Context(), id); err != nil {
+				u.fail(w, r, err)
+				return
+			}
+			writeJSON(w, http.StatusAccepted, map[string]any{"stopping": true})
+			return
+		}
 		writeJSON(w, http.StatusConflict, map[string]any{"error": "the task is not running", "running": u.Tasks.Running()})
 		return
 	}

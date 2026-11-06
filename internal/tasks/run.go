@@ -178,9 +178,16 @@ func (s *Service) baseContext() context.Context {
 //
 // A task whose next run passed while no node ran the scheduler (all of
 // them were down) runs once at the first tick, however many runs it
-// missed, and its next run is then computed from that time (core-47).
+// missed, and its next run is then computed from that time (core-47). While
+// the scheduler is paused (SetPaused) nothing starts here.
 func (s *Service) RunDue(ctx context.Context) {
 	if !s.DB.Leader() {
+		return
+	}
+	if paused, err := s.Paused(ctx); err != nil || paused {
+		if err != nil && ctx.Err() == nil {
+			s.log().Warn("scheduler: could not read whether it is paused", "err", logsafe.Err(err))
+		}
 		return
 	}
 	queued, err := s.DB.QueuedTasks(ctx)
@@ -217,6 +224,24 @@ func (s *Service) RunDue(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// pausedKey is the setting that pauses the scheduler (Nexus: its scheduler
+// capability switched off), read at every tick by whichever node leads.
+const pausedKey = "tasks.paused"
+
+// Paused reports whether the scheduler is paused.
+func (s *Service) Paused(ctx context.Context) (bool, error) {
+	var paused bool
+	_, err := s.DB.GetSettingJSON(ctx, pausedKey, &paused)
+	return paused, err
+}
+
+// SetPaused pauses or resumes the scheduler on every node. A run in progress
+// goes on and a run now is still taken; queued and due runs wait. Resuming,
+// a task that fell due runs once (core-47).
+func (s *Service) SetPaused(ctx context.Context, paused bool) error {
+	return s.DB.SetSettingJSON(ctx, pausedKey, paused)
 }
 
 // RunNow runs task id for actor and returns when it is done; next_run is

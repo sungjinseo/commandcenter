@@ -326,8 +326,12 @@ func translatePriv(p nxPriv, repos repoKnown) (*grant, error) {
 }
 
 // addApp adds an application privilege of domain: "metrics" is the
-// metrics target, the rest "app:<domain>".
+// metrics target, the rest "app:<domain>". Privileges live in roles here
+// (the "priv:" roles), so the privileges domain is the roles domain.
 func addApp(g *grant, domain string, actions []string) error {
+	if domain == "privileges" {
+		domain = "roles"
+	}
 	if domain == "metrics" {
 		for _, a := range actions {
 			if u := strings.ToUpper(a); u != "READ" && u != "ALL" && u != "*" {
@@ -457,7 +461,7 @@ var appBuiltins = func() map[string]nxPriv {
 		"nx-tasks-run":        {Domain: "tasks", Actions: []string{"START", "STOP"}},
 		"nx-tasks-all":        {Domain: "tasks", Actions: []string{"ALL"}},
 	}
-	for _, d := range []string{"users", "roles", "selectors"} {
+	for _, d := range []string{"users", "roles", "privileges", "selectors", "tags"} {
 		for _, a := range []string{"create", "read", "update", "delete", "all"} {
 			m["nx-"+d+"-"+a] = nxPriv{Domain: d, Actions: []string{strings.ToUpper(a)}}
 		}

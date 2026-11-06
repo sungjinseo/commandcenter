@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"commandcenter/internal/sysinfo"
 )
 
 // Blob store groups: a Store whose blobs live in its member stores (file or
@@ -405,13 +407,14 @@ func probe(target string, err error) Probe {
 }
 
 // Health checks the store's backend: a directory store that its tmp accepts
-// a file, an S3 store that its bucket and each failover bucket lists, a
-// group each member's, a GCS store that its bucket answers.
+// a file and its disk has room, an S3 store that its bucket and each failover
+// bucket lists, a group each member's, a GCS store that its bucket answers.
 func (s *Store) Health() []Probe {
 	switch be := s.be.(type) {
-	case *s3:
-		out := []Probe{probe("primary "+be.cfg.Location(), be.check())}
-		for i, f := range be.failover {
+	case *s3Live:
+		b := be.cur.Load()
+		out := []Probe{probe("primary "+b.cfg.Location(), b.check())}
+		for i, f := range b.failover {
 			out = append(out, probe(fmt.Sprintf("failover %d %s", i+1, f.cfg.Location()), f.check()))
 		}
 		return out
@@ -433,6 +436,9 @@ func (s *Store) Health() []Probe {
 	if err == nil {
 		f.Close()
 		err = os.Remove(f.Name())
+	}
+	if _, free, ok := sysinfo.DiskUsage(filepath.Join(s.root, "tmp")); err == nil && ok && free == 0 {
+		err = ErrDiskFull
 	}
 	return []Probe{probe("directory "+s.root, err)}
 }

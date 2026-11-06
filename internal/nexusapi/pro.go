@@ -283,6 +283,7 @@ func (h *Handler) deleteCleanupPolicy(w http.ResponseWriter, r *http.Request) {
 // uiTask is what the Nexus task views take from the UI's task JSON.
 type uiTask struct {
 	ID, Name, Type, Status, LastMessage, LastResult, NextRun, LastRun string
+	Queued                                                            bool
 	Params                                                            map[string]any
 }
 
@@ -345,16 +346,26 @@ func TaskTypeRefusal(id string) string {
 	return "Command Center has no task of this type"
 }
 
+// nexusTaskItem is t as Nexus's API shows a task. Its states have no
+// "disabled": such a task waits. A queued run reads RUNNING: it was started
+// and has not ended, and a script that polls for WAITING must not go on
+// before it ran.
 func nexusTaskItem(t uiTask) map[string]any {
 	var result any
 	switch t.LastResult {
-	case "OK":
+	case tasks.ResultOK:
 		result = "OK"
-	case "Failed":
+	case tasks.ResultFailed:
 		result = "FAILED"
+	case tasks.ResultStopped:
+		result = "CANCELED"
+	}
+	state := "WAITING"
+	if t.Status == "Running" || t.Queued {
+		state = "RUNNING"
 	}
 	return map[string]any{"id": t.ID, "name": t.Name, "type": nexusTaskID(t), "message": t.LastMessage,
-		"currentState": strings.ToUpper(t.Status), "lastRunResult": result, "nextRun": nullable(t.NextRun), "lastRun": nullable(t.LastRun)}
+		"currentState": state, "lastRunResult": result, "nextRun": nullable(t.NextRun), "lastRun": nullable(t.LastRun)}
 }
 
 func taskPath(id string) string { return "/-/api/tasks/" + url.PathEscape(id) }
@@ -485,7 +496,9 @@ func (tt taskTypes) params(i int, props, fixed map[string]any) (map[string]any, 
 		case t.Type == "repository.rebuild-metadata" && name == "rebuildAptMetadataFullRebuild":
 			continue // Command Center always rebuilds apt metadata from its rows
 		case t.Type == "blobstore.compact" && name == "blobsOlderThan":
-			if v != "0" && v != float64(0) {
+			s, isString := v.(string)
+			given := v != nil && (!isString || strings.TrimSpace(s) != "") // an empty optional value, as for the others below
+			if given && s != "0" && v != float64(0) {
 				errs = append(errs, fmt.Sprintf("properties.blobsOlderThan: %v: Command Center keeps no deleted blobs: compaction removes "+
 					"the blobs no asset references once they are an hour old; only 0 is supported", v))
 			}
@@ -830,7 +843,17 @@ func (h *Handler) deleteTask(w http.ResponseWriter, r *http.Request) {
 	h.noContent(w, r, http.MethodDelete, taskPath(r.PathValue("id")), http.StatusNoContent)
 }
 
+// runTask answers 405 for a disabled task, as Nexus does; the UI's run of
+// one goes ahead.
 func (h *Handler) runTask(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.app(w, r, "tasks", meta.ActionRun); !ok {
+		return
+	}
+	if t, err := h.DB.GetTask(r.Context(), r.PathValue("id")); err == nil && !t.Enabled {
+		w.Header().Set("Allow", "")
+		writeMessage(w, http.StatusMethodNotAllowed, "the task is disabled: enable it to run it")
+		return
+	}
 	h.noContent(w, r, http.MethodPost, taskPath(r.PathValue("id"))+"/run", http.StatusAccepted)
 }
 

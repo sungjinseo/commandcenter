@@ -32,11 +32,13 @@ func (u *UI) repoAdminRoutes(mux *http.ServeMux) {
 
 // invalidateCache makes a proxy's cached content stale and forgets its
 // misses; a group does so for every proxy it reaches (repo.Registry.InvalidateCache).
+// It takes the edit right on the repository named, as in Nexus: a group's
+// holder needs none on its members, and nothing but a revalidation follows.
 func (u *UI) invalidateCache(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	name := r.PathValue("name")
+	if !u.requireRepoAdmin(w, r, name, u.repoFormat(name), auth.Edit, true) {
 		return
 	}
-	name := r.PathValue("name")
 	proxies, err := u.Repos.InvalidateCache(r.Context(), name)
 	if err != nil {
 		u.writeRepoError(w, r, err)

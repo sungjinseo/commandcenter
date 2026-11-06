@@ -124,3 +124,45 @@ func TestBlobStoreGroupKeepsQuota(t *testing.T) {
 		t.Fatalf("group after update: quota %+v group %+v", got.Quota, got.Group)
 	}
 }
+
+// core-26: the S3 row takes new settings with its secret sealed and its quota
+// kept; only an S3 store does.
+func TestUpdateBlobStoreS3(t *testing.T) {
+	db, err := Open(metatest.URL(t, t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.SetSecretKey(bytes.Repeat([]byte("k"), 32)); err != nil {
+		t.Fatal(err)
+	}
+	cfg := blob.S3Config{Bucket: "test", Prefix: "cc", AccessKey: "old", SecretKey: "old-secret"}
+	q := &Quota{Type: QuotaSpaceUsed, LimitBytes: 5}
+	if err := db.CreateBlobStore(ctx, BlobStore{Name: "s", Path: "blobstores/s", Type: BlobStoreS3, S3: &cfg, Quota: q}); err != nil {
+		t.Fatal(err)
+	}
+	next := cfg
+	next.AccessKey, next.SecretKey, next.Endpoint, next.PathStyle, next.MaxConnections = "new", "new-secret", "http://minio:9000", true, 4
+	if err := db.UpdateBlobStoreS3(ctx, "s", next); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetBlobStore(ctx, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.S3 == nil || got.S3.AccessKey != "new" || got.S3.SecretKey != "new-secret" || got.S3.Endpoint != "http://minio:9000" || !got.S3.PathStyle ||
+		got.S3.MaxConnections != 4 || got.S3.Bucket != "test" || got.Quota == nil || got.Quota.LimitBytes != 5 {
+		t.Fatalf("stored: %+v %+v", got.S3, got.Quota)
+	}
+	if n, err := db.SealSecrets(ctx); err != nil || n != 0 {
+		t.Fatalf("SealSecrets = %d, %v: the secret was stored in plain text", n, err)
+	}
+	if err := db.CreateBlobStore(ctx, BlobStore{Name: "f", Path: "blobstores/f"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"f", "missing"} {
+		if err := db.UpdateBlobStoreS3(ctx, name, next); !errors.Is(err, ErrNotFound) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

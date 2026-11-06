@@ -129,7 +129,16 @@ type SMTP struct {
 	Password string `json:"password"`
 	From     string `json:"from"`
 	Enabled  bool   `json:"enabled"`
+	// SubjectPrefix goes before every message's subject (Nexus's
+	// subjectPrefix), with a space between them.
+	SubjectPrefix string `json:"subjectPrefix,omitempty"`
+	// TrustStore false verifies TLS against the system roots alone (Nexus's
+	// nexusTrustStoreEnabled); nil or true trusts the SSL trust store too.
+	TrustStore *bool `json:"trustStore,omitempty"`
 }
+
+// MaxSubjectPrefix bounds SMTP.SubjectPrefix.
+const MaxSubjectPrefix = 200
 
 // ValidateSMTP checks c. A disabled configuration may be partial; an enabled
 // one needs a host, a port, a known security mode and a valid From address.
@@ -138,6 +147,9 @@ type SMTP struct {
 func ValidateSMTP(c SMTP) error {
 	if strings.ContainsFunc(c.Host, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) {
 		return fmt.Errorf("smtp host must not contain spaces or control characters")
+	}
+	if len(c.SubjectPrefix) > MaxSubjectPrefix || strings.ContainsFunc(c.SubjectPrefix, unicode.IsControl) {
+		return fmt.Errorf("smtp subject prefix must be at most %d bytes without control characters", MaxSubjectPrefix)
 	}
 	if !c.Enabled {
 		return nil

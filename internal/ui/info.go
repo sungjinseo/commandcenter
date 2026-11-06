@@ -360,11 +360,53 @@ func (u *UI) checkRepositories() (bool, string) {
 	return true, fmt.Sprintf("%d repositories, all group members exist", len(s.Sorted))
 }
 
+// statusChecks answers an admin or a holder of the metrics privilege, as
+// Nexus's status check does.
 func (u *UI) statusChecks(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	p, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	if !u.Auth.CanReadMetrics(p) {
+		writeError(w, http.StatusForbidden, "admin only")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"checks": u.healthChecks(r.Context())})
+}
+
+// minCPUs is the fewest CPUs at which uploads (hashing), password checks
+// (bcrypt) and requests do not take turns on one.
+const minCPUs = 2
+
+// checkCPUs is the "Available CPUs" check for n CPUs: the ones this process
+// may use (its GOMAXPROCS, which follows a container's CPU limit). It has
+// Nexus's name for monitoring that looks for it, and warns where Nexus, for a
+// JVM, fails below 4: a server on one CPU is slower, not broken, and a check
+// that stays red would teach people to ignore the others.
+func checkCPUs(n int) (bool, string) {
+	msg := fmt.Sprintf("%d CPUs available to this process", n)
+	if n < minCPUs {
+		return true, fmt.Sprintf("%s: warning, at least %d are recommended", msg, minCPUs)
+	}
+	return true, msg
+}
+
+// checkStoresReady is the "Blob Stores Ready" check: every store this node
+// has opened answers its probe.
+func (u *UI) checkStoresReady() (bool, string) {
+	if u.Store == nil {
+		return true, "blob stores are not available in this process"
+	}
+	bad := u.storeProblems()
+	if len(bad) == 0 {
+		return true, fmt.Sprintf("all %d blob stores answer", len(u.Store.StoreNames()))
+	}
+	names := make([]string, 0, len(bad))
+	for n, why := range bad {
+		names = append(names, fmt.Sprintf("%q (%s)", n, why))
+	}
+	sort.Strings(names)
+	return false, fmt.Sprintf("%d of %d blob stores do not answer: %s", len(bad), len(u.Store.StoreNames())+len(u.Store.UnopenedStores()), strings.Join(names, ", "))
 }
 
 // healthChecks runs the status checks.
@@ -411,7 +453,25 @@ func (u *UI) healthChecks(rctx context.Context) []check {
 	if u.Auth.Snapshot().RealmEnabled(meta.RealmCrowd) {
 		checks = append(checks, runCheck("Crowd reachable", u.crowdCheck(rctx)))
 	}
-	checks = append(checks, u.quotaChecks(rctx)...)
+	quotas := u.quotaChecks(rctx)
+	checks = append(checks, quotas...)
+	// Nexus's names, for monitoring that keys on them.
+	checks = append(checks, runCheck("Blob Stores Ready", u.checkStoresReady), quotaAggregate(quotas),
+		runCheck("Available CPUs", func() (bool, string) { return checkCPUs(runtime.GOMAXPROCS(0)) }))
+	if u.Tasks != nil {
+		checks = append(checks, runCheck("Scheduler", func() (bool, string) {
+			ctx, cancel := context.WithTimeout(rctx, 2*time.Second)
+			defer cancel()
+			paused, err := u.Tasks.Paused(ctx)
+			switch {
+			case err != nil:
+				return false, "cannot read the scheduler's state: " + err.Error()
+			case paused:
+				return false, "paused: no scheduled task starts until it is resumed"
+			}
+			return true, "running"
+		}))
+	}
 	return checks
 }
 

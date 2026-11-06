@@ -57,6 +57,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `<Package>_<Version>`; `.zip` goes under `bin/windows` and `.tgz` under `bin/macosx`.
 - `repository.rebuild-metadata` rebuilds the index files of R hosted repositories.
 - A conda proxy lets a channel's `index.html` pages through, as metadata.
+- S3 blob stores: `PUT /service/rest/v1/blobstores/s3/{name}` and `PUT /-/api/blobstores/{name}` with `s3` change the
+  credentials, endpoint, region, path style and connection pool: keys can be rotated. The bucket must list with the new
+  settings first, an empty secret keeps the stored one (a new endpoint needs it again), and every live node uses them
+  when the PUT answers. Bucket, prefix, encryption and failover buckets stay fixed.
+- Health checks under Nexus's names beside Command Center's: `Blob Stores Ready`, with a per-store probe (temp file and
+  free space, or the bucket lists; 2 s timeout, 30 s cache, on each node) that also feeds `unavailable` in the blob store
+  lists, `Blob Stores Quota` and `Available CPUs`, and `Scheduler`.
+- The leader checks soft quotas every minute without a client asking: a WARN line while a store is over, one event per flip.
+- `PUT /-/api/tasks/scheduler {"paused": true}` holds scheduled and queued runs on every node; an administrator's run
+  now still runs; `paused` is in `GET /-/api/tasks`.
+- One JSON line per activity event on stdout (`"audit":true`), independent of the log level, for a log shipper; the
+  events table keeps its windows.
+- Support bundle: `task-logs/` with the latest run logs, `?sections=` with Nexus's flag names, and
+  `POST /service/rest/v1/support/supportzip`. `GET /service/rest/v1/system/node`.
+- `app:tags` delegates creating, editing and deleting tags, tokens included (`nx-tags-*`), so that CI making a tag per
+  build needs no admin account. The web UI's role editor does not offer it yet.
+- E-mail: `subjectPrefix` (setting and use), `nexusTrustStoreEnabled` kept and honoured; `import-nexus -config` carries them
+  and `maxConnectionPoolSize`.
+- `POST /v1/blobstores/file` takes a relative path (under `<dataDir>/blobstores`), `maxConnectionPoolSize` on S3 stores,
+  a comma list in `repositoryName` of the Maven snapshot tasks, `nx-privileges-*` as the roles domain.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -75,6 +95,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   builds that member lists, so a newer public build no longer beats an internal package of the same
   name. The key `mergeMembers` lists every member's builds again; it also lists every member's
   versions in an R group. A failing member is left out only when no later member answers.
+- A cached proxy file whose remote now answers 404 or 410 is served, with `Warning: 110` and a WARN line, as in Nexus; it
+  was a 404. npm packuments and PyPI project pages keep going away. Delete what must go.
+- `PUT /v1/security/realms/active`: a list that names no token realm leaves the `token` realm as it is, so Nexus's default
+  list no longer stops every API token. Turn it off with `PUT /-/api/realms`.
+- Task states in the Nexus API: `DISABLED` reads `WAITING`, a queued run `RUNNING`, a stopped run's result `CANCELED`; a
+  run of a disabled task is 405 there. A stop drops a queued run.
+- The metrics privilege opens `/service/rest/metrics/*` (threads too) and `/v1/status/check`.
+- `invalidate-cache` and `rebuild-index` take repository-admin edit, not admin.
+- A HEAD of a raw or Maven file a proxy does not hold asks the remote with a HEAD and stores nothing, when the remote
+  answers 200; otherwise it is the GET it was. Pull replication still fills the cache.
+- Timeouts, refused connections and unresolvable names are no longer retried (`http.retries`, `connection.retries`).
+- The SMTP test send works while e-mail is switched off.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -116,6 +148,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and purge-unused skipped them and the cache only grew.
 - An R group left out a member whose remote has only `PACKAGES.gz`, such as a Nexus hosted repository.
 - R packages a proxy caches outside CRAN's directories were not components.
+- The repository PUT of the Nexus API told a caller without rights whether a repository exists.
+- `GET /v1/tasks?type=` missed alias ids and listed apt rebuilds under the Maven rebuild id.
+- `blobsOlderThan: ""` was refused. Sub-minute durations read as 0 in the Nexus API, which a read-then-write stored as
+  "always revalidate"; they now round up.
+- `GET /v1/repositories/{name}` ignored a grant on a group that contains the repository.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -139,6 +176,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Conda groups list less.** An internal package now hides every public build of that name. A client
   that was getting a public build of a colliding name now gets the internal one, or none on a platform
   the internal package does not have. Set `mergeMembers: true` on the group to keep the old merge.
+- **Proxies keep serving what the remote lost.** An expired cached file whose remote answers 404 or 410 was a 404 and now is the cached copy with `Warning: 110`, a WARN log per request and a remote request per request, for as long as the remote says so. A package withdrawn upstream stays downloadable by its URL until it is deleted (`DELETE /v1/assets/{id}`, the component, or a cleanup policy); the firewall still applies. `invalidate-cache` does not remove it. npm packuments and PyPI project pages are unchanged: they go, with a recorded miss.
+- **A realm list no longer turns API tokens off.** Use `PUT /-/api/realms`. Check any script that removes the token ids to disable tokens.
+- **Monitoring**: `DISABLED` is gone from the task API; a run of a disabled task is 405 where it ran; a store's `unavailable` can now be true for a store that is open; `Blob Stores Ready` can fail when an S3 replica is down, even though the primary works.
+- **Rolling upgrade**: older nodes do not apply new S3 settings in place. Finish the upgrade before rotating S3 keys; such a node uses the old keys until restarted.
+- **`commandcenter config apply`** still refuses a changed `s3` ("cannot be changed"), so export again after changing a store through the API.
+- **HEAD on a raw or Maven proxy** no longer fills the cache when the remote answers it. A script that warms a cache with `curl -I` must GET.
+- **`http.retries` and `connection.retries`** no longer retry timeouts and refused connections. A setup that relied on riding out a refused connection needs another way.
+- **Logs**: one more JSON line per activity event on stdout (each upload, delete, sign-in...). A shipper can select `audit=true`, or drop them.
 
 ## [0.4.0] - 2026-11-05
 

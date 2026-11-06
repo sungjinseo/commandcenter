@@ -196,6 +196,17 @@ func TestTasksCompat(t *testing.T) {
 	e.want("POST", v1+"/tasks", "ci", body, 403)
 	e.want("DELETE", v1+"/tasks/"+id, "ci", "", 403)
 
+	// A disabled task reads WAITING and does not run through this API.
+	e.get(v1+"/tasks/"+id, "admin", &item)
+	if item["currentState"] != "WAITING" {
+		t.Fatalf("disabled: %v", item)
+	}
+	e.want("POST", v1+"/tasks/"+id+"/run", "ci", "", 403)
+	if b := e.want("POST", v1+"/tasks/"+id+"/run", "admin", "", 405); !strings.Contains(string(b), "disabled") {
+		t.Fatalf("run of a disabled task: %s", b)
+	}
+	e.want("POST", v1+"/tasks/missing/run", "admin", "", 404)
+	e.want("PUT", v1+"/tasks/"+id, "admin", `{"enabled":true}`, 204)
 	e.want("POST", v1+"/tasks/"+id+"/run", "admin", "", 204)
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		e.get(v1+"/tasks/"+id, "admin", &item)

@@ -64,8 +64,17 @@ func New(t testing.TB) *Server {
 
 // Config is the blob-store configuration that reaches s.
 func (s *Server) Config() blob.S3Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return blob.S3Config{Bucket: s.Bucket, Region: "us-east-1", Endpoint: s.URL, PathStyle: true,
 		AccessKey: s.AccessKey, SecretKey: s.SecretKey}
+}
+
+// SetKeys rotates the credentials: from now on s takes only these.
+func (s *Server) SetKeys(access, secret string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.AccessKey, s.SecretKey = access, secret
 }
 
 // Put stores an object as if uploaded at mod.
@@ -300,10 +309,13 @@ func (s *Server) list(w http.ResponseWriter, q url.Values) {
 // verify checks the request's SigV4 signature against s's credentials, by
 // signing it again, and that x-amz-content-sha256 is the body's hash.
 func (s *Server) verify(r *http.Request, body []byte) error {
+	s.mu.Lock()
+	access, secret := s.AccessKey, s.SecretKey
+	s.mu.Unlock()
 	auth := r.Header.Get("Authorization")
-	cred := "Credential=" + s.AccessKey + "/"
+	cred := "Credential=" + access + "/"
 	if !strings.Contains(auth, cred) {
-		return fmt.Errorf("authorization %q is not for %s", auth, s.AccessKey)
+		return fmt.Errorf("authorization %q is not for %s", auth, access)
 	}
 	at, err := time.Parse("20060102T150405Z", r.Header.Get("x-amz-date"))
 	if err != nil {
@@ -326,7 +338,7 @@ func (s *Server) verify(r *http.Request, body []byte) error {
 	}
 	_, scope, _ := strings.Cut(auth, cred)
 	region := strings.Split(scope, "/")[1]
-	blob.SignV4(clone, s.AccessKey, s.SecretKey, "", region, r.Header.Get("x-amz-content-sha256"), at)
+	blob.SignV4(clone, access, secret, "", region, r.Header.Get("x-amz-content-sha256"), at)
 	if want := clone.Header.Get("Authorization"); want != auth {
 		return fmt.Errorf("signature mismatch:\n got %s\nwant %s", auth, want)
 	}

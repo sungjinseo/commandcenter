@@ -487,3 +487,28 @@ func TestConfigurationTokens(t *testing.T) {
 		t.Fatalf("token export of secrets: %d", resp.StatusCode)
 	}
 }
+
+// A file store the Nexus API made at a relative path exports as one and comes
+// back on another instance; the same document changes nothing where it came
+// from (core-29).
+func TestConfigurationKeepsARelativeBlobStore(t *testing.T) {
+	h, _ := bcrypt.GenerateFromPassword([]byte("admin-password"), bcrypt.MinCost)
+	src := ccStart(t, ccConfig(t, string(h)))
+	if st, b := src.call(t, "POST", "/service/rest/v1/blobstores/file", `{"name":"rel","path":"disks/one"}`); st != 204 {
+		t.Fatalf("create: %d %s", st, b)
+	}
+	doc := src.export(t, "include=blobStores")
+	if !strings.Contains(doc, "relativePath: disks/one") {
+		t.Fatalf("export:\n%s", doc)
+	}
+	if st, res, b := src.apply(t, "dryRun=true", doc); st != 200 || !res.OK || strings.Contains(b, `"action":"update"`) || strings.Contains(b, `"action":"create"`) {
+		t.Fatalf("same document: %d %s", st, b)
+	}
+	dst := ccStart(t, ccConfig(t, string(h)))
+	if st, res, b := dst.apply(t, "", doc); st != 200 || !res.OK {
+		t.Fatalf("apply: %d %s", st, b)
+	}
+	if st, b := dst.call(t, "GET", "/service/rest/v1/blobstores/file/rel", ""); st != 200 || !strings.Contains(b, `"path":"disks/one"`) {
+		t.Fatalf("read back: %d %s", st, b)
+	}
+}

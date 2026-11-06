@@ -389,6 +389,36 @@ func (d *DB) scanBlobStore(row scanner) (BlobStore, error) {
 	return bs, nil
 }
 
+// UpdateBlobStoreS3 replaces an S3 store's configuration (the caller keeps
+// its bucket and prefix), keeping its soft quota, or returns ErrNotFound when
+// there is no S3 store of that name.
+func (d *DB) UpdateBlobStoreS3(ctx context.Context, name string, cfg blob.S3Config) error {
+	var err error
+	if cfg.SecretKey, err = d.box.seal(cfg.SecretKey); err != nil {
+		return fmt.Errorf("blob store %q: secretKey: %w", name, err)
+	}
+	return d.Tx(ctx, func(tx *Tx) error {
+		var config string
+		err := tx.q.QueryRowContext(ctx, `SELECT config FROM blob_stores WHERE name = ? AND type = ?`, name, BlobStoreS3).Scan(&config)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var q struct { // the soft quota next to the S3 fields stays
+			Quota *Quota `json:"quota"`
+		}
+		json.Unmarshal([]byte(config), &q)
+		b, err := json.Marshal(storedConfig{S3Config: &cfg, Quota: q.Quota})
+		if err != nil {
+			return err
+		}
+		_, err = tx.q.ExecContext(ctx, `UPDATE blob_stores SET config = ? WHERE name = ?`, string(b), name)
+		return err
+	})
+}
+
 // schemaAzure is the first schema that opens azure and google blob stores.
 // An older build would open one as an empty directory: its repositories
 // would read nothing and their uploads would stay on the node's disk.

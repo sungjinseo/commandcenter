@@ -331,7 +331,8 @@ func (s *Store) RemoveStore(name string) {
 // SyncStores brings the live blob stores in line with the stored rows, which
 // another node may have changed: a new store is opened at its StoreRoot under
 // dataDir, a group takes its stored members and fill policy, a store
-// converted to a group is replaced by the group, and a deleted one goes.
+// converted to a group is replaced by the group, an azure or S3 store takes
+// new credentials and connection settings in place, and a deleted one goes.
 // Callers hold the registry lock, as every blob store change does, so this
 // node changes none meanwhile. A store that does not open is left as it is
 // and named in the error.
@@ -356,7 +357,13 @@ func (s *Store) SyncStores(ctx context.Context, dataDir string) error {
 				}
 				continue
 			}
-			if _, isGroup := cur.Group(); !isGroup { // a file, S3 or azure store's location never changes
+			if c, ok := cur.S3(); ok && row.S3 != nil && !c.SameConnection(*row.S3) {
+				if err := cur.SetS3(*row.S3); err != nil {
+					errs = append(errs, fmt.Errorf("blob store %q: %w", row.Name, err))
+				}
+				continue
+			}
+			if _, isGroup := cur.Group(); !isGroup { // a file store's location never changes, an S3 or azure store's bucket neither
 				continue
 			}
 		}

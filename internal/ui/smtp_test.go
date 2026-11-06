@@ -182,11 +182,11 @@ func TestSMTPTestEndpoint(t *testing.T) {
 	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
 	e.ui.now = func() time.Time { return now }
 
-	// Disabled: 400, nothing sent, and the rate-limit window is not consumed.
+	// No server yet: 400, nothing sent, and the rate-limit window is not consumed.
 	r := e.admin(t, "POST", "/-/api/settings/smtp/test", `{"to":"a@example.com"}`)
 	wantStatus(t, r, http.StatusBadRequest)
-	if !strings.Contains(r.body, "disabled") || fm.count() != 0 {
-		t.Fatalf("disabled: %s", r.body)
+	if !strings.Contains(r.body, "no SMTP server") || fm.count() != 0 {
+		t.Fatalf("no server: %s", r.body)
 	}
 	wantStatus(t, e.admin(t, "PUT", "/-/api/settings/smtp", smtpBody), http.StatusOK)
 	wantStatus(t, e.admin(t, "POST", "/-/api/settings/smtp/test", `{"to":"not an address"}`), http.StatusBadRequest)

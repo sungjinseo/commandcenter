@@ -907,6 +907,22 @@ var nxRealms = []struct{ id, name, cc string }{
 // back while it still matches the realms.
 const nexusRealmsKey = "nexusapi.realms"
 
+// Command Center's one token realm has no single twin in Nexus: its four
+// token realms are about format clients, its default list names none of
+// them, and here every API token needs this one. So a list that names none
+// says nothing about tokens: the token realm stays as it is, and only a list
+// that names one of them is about it (and turns it on). To turn it off is a
+// decision about Command Center's API tokens: the native PUT /-/api/realms.
+
+// withoutTokenRealm is enabled as a list of order compares with it: without
+// the token realm, unless order names it.
+func withoutTokenRealm(enabled, order []string) []string {
+	if slices.Contains(order, meta.RealmToken) {
+		return enabled
+	}
+	return slices.DeleteFunc(slices.Clone(enabled), func(id string) bool { return id == meta.RealmToken })
+}
+
 // ccRealms is the Command Center realm order of Nexus realm ids, or the
 // unknown ids.
 func ccRealms(ids []string) (order, unknown []string) {
@@ -953,7 +969,7 @@ func (h *Handler) nxRealmsActive(w http.ResponseWriter, r *http.Request) {
 	}
 	var stored []string
 	if v, err := h.DB.GetSetting(r.Context(), nexusRealmsKey); err == nil && json.Unmarshal([]byte(v), &stored) == nil {
-		if order, unknown := ccRealms(stored); len(unknown) == 0 && slices.Equal(order, enabled) {
+		if order, unknown := ccRealms(stored); len(unknown) == 0 && slices.Equal(order, withoutTokenRealm(enabled, order)) {
 			writeJSON(w, http.StatusOK, stored)
 			return
 		}
@@ -970,8 +986,9 @@ func (h *Handler) nxRealmsActive(w http.ResponseWriter, r *http.Request) {
 }
 
 // nxSetRealms is PUT /security/realms/active: the listed realms on, in
-// order, every other one off. An unknown id is 400; a list that would
-// leave no admin able to sign in is the UI's 409.
+// order, every other one off but the token realm, which a list that names
+// no token realm leaves as it is (see withoutTokenRealm). An unknown id is
+// 400; a list that would leave no admin able to sign in is the UI's 409.
 func (h *Handler) nxSetRealms(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.admin(w, r); !ok {
 		return
@@ -996,7 +1013,7 @@ func (h *Handler) nxSetRealms(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, x := range set.Realms {
 		if !slices.Contains(order, x.ID) {
-			realms = append(realms, meta.Realm{ID: x.ID})
+			realms = append(realms, meta.Realm{ID: x.ID, Enabled: x.Enabled && x.ID == meta.RealmToken})
 		}
 	}
 	status, res := h.call(r, http.MethodPut, "/-/api/realms", map[string]any{"realms": realms})

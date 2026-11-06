@@ -303,3 +303,44 @@ func TestUpdateKeepsStaleValues(t *testing.T) {
 		t.Fatalf("rebuild of a deleted repo: %+v", out)
 	}
 }
+
+// core-48: while the scheduler is paused neither a due task nor a queued run
+// starts, whichever node leads; a run now does; on resuming each runs once.
+func TestSchedulerPause(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	tk := h.create(t, Def{Name: "due", Type: TypeCompact, Schedule: "daily:03:00"})
+	queued := h.create(t, Def{Name: "queued", Type: TypeCompact, Schedule: "manual"})
+	if paused, err := h.s.Paused(ctx); err != nil || paused {
+		t.Fatalf("a new scheduler: %v %v", paused, err)
+	}
+	if err := h.s.SetPaused(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.db.QueueTaskRun(ctx, queued.ID, "alice", t0); err != nil {
+		t.Fatal(err)
+	}
+	h.clock.Set(tk.NextRun.Add(25 * time.Hour)) // two runs missed
+	h.s.RunDue(ctx)
+	h.s.Wait()
+	if n := h.gcs.Load(); n != 0 {
+		t.Fatalf("ran %d times while paused", n)
+	}
+	if _, err := h.s.RunNow(tk.ID, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if n := h.gcs.Load(); n != 1 {
+		t.Fatalf("a run now ran %d times while paused", n)
+	}
+	if err := h.s.SetPaused(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	h.s.RunDue(ctx)
+	h.s.Wait()
+	if n := h.gcs.Load(); n != 3 {
+		t.Fatalf("%d runs after resuming, want the queued and the due one on top", n)
+	}
+	if got := h.get(t, tk.ID); !got.NextRun.After(h.clock.Now()) {
+		t.Fatalf("next run: %s", got.NextRun)
+	}
+}

@@ -450,3 +450,102 @@ func TestS3ConfigLocation(t *testing.T) {
 		t.Fatalf("Location = %q", l)
 	}
 }
+
+// core-26: new keys, in place: the store, a group that holds it and its
+// failover buckets use them at once; the bucket and prefix cannot change.
+func TestS3SetConnection(t *testing.T) {
+	srv, replica := s3test.New(t), s3test.New(t)
+	root := t.TempDir()
+	cfg := srv.Config()
+	cfg.Prefix = "cc"
+	s, err := blob.OpenS3(root, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := blob.OpenGroup(t.TempDir(), blob.GroupConfig{Members: []blob.GroupMember{{Name: "s3"}}, FillPolicy: blob.FillRoundRobin},
+		func(string) *blob.Store { return s })
+	if err != nil {
+		t.Fatal(err)
+	}
+	sums, err := g.Write(strings.NewReader("before"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetKeys("ROTATED", "rotated-secret")
+	replica.SetKeys("ROTATED", "rotated-secret")
+	if err := s.Check(); err == nil {
+		t.Fatal("old keys: the bucket answers")
+	}
+	next := cfg
+	next.AccessKey, next.SecretKey = "ROTATED", "wrong"
+	if err := blob.CheckS3(next); err == nil {
+		t.Fatal("a wrong secret passes the check")
+	}
+	next.SecretKey = "rotated-secret"
+	if err := blob.CheckS3(next); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SameConnection(next) || !next.SameConnection(next) {
+		t.Fatal("SameConnection")
+	}
+	next.Failover = []blob.S3Failover{{Bucket: replica.Bucket, Endpoint: replica.URL}}
+	next.MaxConnections = 9
+	if err := s.SetS3(next); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Check(); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := s.S3(); !ok || got.AccessKey != "ROTATED" || !got.SameConnection(next) {
+		t.Fatalf("S3() = %+v, %v", got, ok)
+	}
+	for _, p := range s.Health() {
+		if !p.OK {
+			t.Fatalf("health: %+v", p)
+		}
+	}
+	if perHost, idle := blob.S3MaxConns(s); perHost != 9 || idle != 9 {
+		t.Fatalf("pool: %d %d", perHost, idle)
+	}
+	if _, err := g.Write(strings.NewReader("after")); err != nil {
+		t.Fatalf("the group's member: %v", err)
+	}
+	f, err := g.Open(sums.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(f)
+	f.Close()
+	if string(b) != "before" {
+		t.Fatalf("read back %q", b)
+	}
+	for name, mutate := range map[string]func(*blob.S3Config){
+		"bucket": func(c *blob.S3Config) { c.Bucket = "other-bucket" },
+		"prefix": func(c *blob.S3Config) { c.Prefix = "other" },
+	} {
+		c := next
+		mutate(&c)
+		if err := s.SetS3(c); err == nil {
+			t.Errorf("%s changed", name)
+		}
+	}
+	bad := next
+	bad.MaxConnections = -1
+	if err := s.SetS3(bad); err == nil {
+		t.Error("a negative bound")
+	}
+	d, err := blob.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := d.S3(); ok {
+		t.Error("a directory store has no S3 settings")
+	}
+	if err := d.SetS3(next); err == nil {
+		t.Error("SetS3 on a directory store")
+	}
+	empty, us := blob.S3Config{Region: ""}, blob.S3Config{Region: "us-east-1"}
+	if !empty.SameConnection(us) {
+		t.Error("an empty region is us-east-1")
+	}
+}

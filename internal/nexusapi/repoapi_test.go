@@ -298,7 +298,9 @@ func TestS3BlobStoreLifecycle(t *testing.T) {
 	}
 	e.want("PUT", v1+"/blobstores/s3/s3a", "admin", body("s3a", "cc", "bucketSecurity", c.SecretKey), 204)
 	e.wantField("PUT", v1+"/blobstores/s3/s3a", body("s3a", "other", "bucketSecurity", c.SecretKey), "bucketConfiguration")
-	e.wantField("PUT", v1+"/blobstores/s3/s3a", body("s3a", "cc", "bucketSecurity", "wrong-secret"), "bucketConfiguration")
+	if b := e.want("PUT", v1+"/blobstores/s3/s3a", "admin", body("s3a", "cc", "bucketSecurity", "wrong-secret"), 400); !strings.Contains(string(b), "not usable") {
+		t.Fatalf("wrong secret: %s", b)
+	}
 	e.wantField("PUT", v1+"/blobstores/s3/s3a", body("s3x", "cc", "bucketSecurity", c.SecretKey), "name")
 	e.wantField("POST", v1+"/blobstores/s3", strings.Replace(body("s3c", "cc3", "bucketSecurity", c.SecretKey), `"accessKeyId"`, `"role":"arn:aws:iam::1:role/x","accessKeyId"`, 1),
 		"bucketConfiguration.bucketSecurity.role")
@@ -350,7 +352,6 @@ func TestEmailCompat(t *testing.T) {
 	for _, c := range []struct{ from, to, id string }{
 		{`"startTlsEnabled":false`, `"startTlsEnabled":true`, "startTlsRequired"}, // opportunistic STARTTLS
 		{`"sslOnConnectEnabled":false`, `"sslOnConnectEnabled":true`, "sslServerIdentityCheckEnabled"},
-		{`"subjectPrefix":null`, `"subjectPrefix":"[cc]"`, "subjectPrefix"},
 		{fmt.Sprintf(`"port":%d,`, port), ``, "port"},
 	} {
 		e.wantField("PUT", v1+"/email", strings.Replace(plain, c.from, c.to, 1), c.id)
@@ -359,7 +360,7 @@ func TestEmailCompat(t *testing.T) {
 		`"sslServerIdentityCheckEnabled":false`, `"sslServerIdentityCheckEnabled":true`, `"nexusTrustStoreEnabled":false`, `"nexusTrustStoreEnabled":true`).Replace(plain)
 	e.want("PUT", v1+"/email", "admin", starttls, 204)
 	got = decodeMap(t, e.want("GET", v1+"/email", "admin", "", 200))
-	if d := subset(map[string]any{"startTlsEnabled": true, "startTlsRequired": true, "sslOnConnectEnabled": false, "sslServerIdentityCheckEnabled": true}, got, "email"); d != "" {
+	if d := subset(map[string]any{"startTlsEnabled": true, "startTlsRequired": true, "sslOnConnectEnabled": false, "sslServerIdentityCheckEnabled": true, "nexusTrustStoreEnabled": true}, got, "email"); d != "" {
 		t.Fatal(d)
 	}
 	if a, b := e.want("GET", "/service/rest/beta/email", "admin", "", 200), e.want("GET", v1+"/email", "admin", "", 200); string(a) != string(b) {
@@ -375,7 +376,8 @@ func TestEmailCompat(t *testing.T) {
 }
 
 // Nexus's metrics paths: the old ones redirect, ping/prometheus/data follow
-// the prometheus endpoint's rule, threads is admin only.
+// the prometheus endpoint's rule, threads takes an admin or the metrics
+// privilege (TestMetricsPrivilegeOpensTheMetricsPaths).
 func TestMetricsCompat(t *testing.T) {
 	e := start(t, false)
 	for from, to := range map[string]string{

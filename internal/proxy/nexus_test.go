@@ -275,3 +275,46 @@ func TestConnectionOverrides(t *testing.T) {
 		t.Fatalf("global timeout: %v", err)
 	}
 }
+
+// core-04: a cached asset the remote lost is served stale, with no miss
+// recorded, and asked about again; one not cached stays a miss. The document
+// that decides a group's owner is not served stale: the package left.
+func TestFetchCachedRemoteLost(t *testing.T) {
+	for _, status := range []int32{404, 410} {
+		rm := &remote{}
+		f, rp, c := setup(t, rm)
+		first, err := f.Fetch(ctx, rp, "g/maven-metadata.xml", Metadata)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.t = c.t.Add(2 * time.Hour)
+		rm.status.Store(status)
+		for i := int32(0); i < 2; i++ {
+			hits := rm.hits.Load()
+			res, err := f.Fetch(ctx, rp, "g/maven-metadata.xml", Metadata)
+			if err != nil || !res.Stale || res.Asset.BlobSHA256 != first.Asset.BlobSHA256 {
+				t.Fatalf("%d: res=%+v err=%v", status, res, err)
+			}
+			if rm.hits.Load() != hits+1 {
+				t.Fatalf("%d: not asked again", status)
+			}
+		}
+		if hit, err := f.Store.DB.NegativeHit(ctx, rp.Name, "g/maven-metadata.xml", f.Now()); err != nil || hit {
+			t.Fatalf("%d: a miss was recorded: %v %v", status, hit, err)
+		}
+		if _, err := f.Fetch(ctx, rp, "g/other.xml", Metadata); !errors.Is(err, repo.ErrNotFound) {
+			t.Fatalf("%d: not cached: %v", status, err)
+		}
+
+		rm.status.Store(0)
+		tg := Target{Key: "pkg", Remote: "pkg", DeniedIsFailure: true}
+		if _, err := f.FetchTarget(ctx, rp, tg, Metadata); err != nil {
+			t.Fatal(err)
+		}
+		c.t = c.t.Add(2 * time.Hour)
+		rm.status.Store(status)
+		if _, err := f.FetchTarget(ctx, rp, tg, Metadata); !errors.Is(err, repo.ErrNotFound) {
+			t.Fatalf("%d: owner document: %v", status, err)
+		}
+	}
+}

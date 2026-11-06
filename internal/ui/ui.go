@@ -105,6 +105,10 @@ type UI struct {
 	// over their soft quota, so the blobstore.quota event fires once per flip.
 	quotaMu       sync.Mutex
 	quotaViolated map[string]bool
+
+	// probeMu guards probes: each blob store's last probe (storeProblems).
+	probeMu sync.Mutex
+	probes  map[string]*storeProbe
 }
 
 // accessLock is the cluster lock of access changes (meta.DB.Lock): users,

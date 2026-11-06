@@ -542,7 +542,7 @@ func (m *migration) blobStores() {
 			}
 			it.create = &request{http.MethodPost, nx + "/blobstores/s3", obj{"name": name, "softQuota": s["softQuota"], "bucketConfiguration": obj{
 				"bucket": pick(b, "region", "name", "prefix"), "encryption": bc["encryption"], "failoverBuckets": bc["failoverBuckets"],
-				"advancedBucketConnection": pick(sub(bc, "advancedBucketConnection"), "endpoint", "forcePathStyle")}}}
+				"advancedBucketConnection": pick(sub(bc, "advancedBucketConnection"), "endpoint", "forcePathStyle", "maxConnectionPoolSize")}}}
 		default:
 			it.skip = "the credentials of a " + typ + " blob store are not readable from Nexus"
 			m.todo("blobstore %s: make this %s blob store on Command Center, then run this again: the repositories that use it are not made before", name, typ)
@@ -1200,7 +1200,7 @@ func (m *migration) email() {
 	if src["enabled"] != true {
 		return // Nexus sends no mail: nothing to carry over
 	}
-	it := item{kind: kind, name: "settings", cur: cur, unset: str(cur, "host") == "", want: pick(src, "enabled", "host", "port", "username", "fromAddress")}
+	it := item{kind: kind, name: "settings", cur: cur, unset: str(cur, "host") == "", want: pick(src, "enabled", "host", "port", "username", "fromAddress", "subjectPrefix", "nexusTrustStoreEnabled")}
 	tls := src["sslOnConnectEnabled"] == true
 	startTLS := !tls && (src["startTlsEnabled"] == true || src["startTlsRequired"] == true)
 	it.want["sslOnConnectEnabled"], it.want["startTlsEnabled"], it.want["startTlsRequired"] = tls, startTLS, startTLS
@@ -1210,9 +1210,6 @@ func (m *migration) email() {
 	}
 	if (tls || startTLS) && src["sslServerIdentityCheckEnabled"] != true {
 		it.note("the server's identity is always checked over TLS: its certificate must be valid for its name")
-	}
-	if str(src, "subjectPrefix") != "" {
-		it.note("without the subject prefix, which has no equivalent")
 	}
 	if u := str(src, "username"); u != "" && smtp["passwordSet"] != true {
 		it.todo("email: enter the password of the SMTP user %q (it is not readable from Nexus); until then mail is not accepted by a server that asks for it", u)

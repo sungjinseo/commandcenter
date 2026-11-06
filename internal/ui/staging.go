@@ -146,10 +146,11 @@ type tagRequest struct {
 	Attributes json.RawMessage `json:"attributes"`
 }
 
-// POST /-/api/tags {"name", "attributes"} (admin): 201 with the tag, 409
+// POST /-/api/tags {"name", "attributes"} (an admin or the add action of the
+// tags domain, a token too: CI makes a tag per build): 201 with the tag, 409
 // when the name is taken.
 func (u *UI) createTag(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok || !requireUIHeader(w, r) {
+	if _, ok := u.requireApp(w, r, "tags", meta.ActionAdd); !ok || !requireUIHeader(w, r) {
 		return
 	}
 	var body tagRequest
@@ -178,10 +179,10 @@ func (u *UI) createTag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, tagJSON(t))
 }
 
-// PUT /-/api/tags/{name} {"attributes"} (admin): replaces the attributes;
-// a name in the body must be the tag's.
+// PUT /-/api/tags/{name} {"attributes"} (an admin or the tags domain's edit):
+// replaces the attributes; a name in the body must be the tag's.
 func (u *UI) updateTag(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok || !requireUIHeader(w, r) {
+	if _, ok := u.requireApp(w, r, "tags", meta.ActionEdit); !ok || !requireUIHeader(w, r) {
 		return
 	}
 	name := r.PathValue("name")
@@ -211,9 +212,10 @@ func (u *UI) updateTag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tagJSON(t))
 }
 
-// DELETE /-/api/tags/{name} (admin): the tag and its associations; 204.
+// DELETE /-/api/tags/{name} (an admin or the tags domain's delete): the tag
+// and its associations; 204.
 func (u *UI) deleteTag(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok || !requireUIHeader(w, r) {
+	if _, ok := u.requireApp(w, r, "tags", meta.ActionDelete); !ok || !requireUIHeader(w, r) {
 		return
 	}
 	name := r.PathValue("name")

@@ -269,6 +269,8 @@ func readBlobStores(c *confRun) ([]any, error) {
 		// The default place is the data directory's, whichever it is.
 		if bs.Name == repo.DefaultStore || bs.Path == filepath.Join("blobstores", bs.Name) {
 			b.Path = ""
+		} else if rel, ok := strings.CutPrefix(bs.Path, "blobstores"+string(filepath.Separator)); ok {
+			b.Path, b.RelativePath = "", rel
 		}
 		if bs.S3 != nil {
 			s3 := *bs.S3
@@ -334,7 +336,7 @@ func checkBlobStores(c *confRun, objs []confObj) {
 		if !exists {
 			continue
 		}
-		for _, f := range []string{"type", "path", "s3", "google"} {
+		for _, f := range []string{"type", "path", "relativePath", "s3", "google"} {
 			if !confSame(normJSON(cur[f]), normJSON(o[f])) {
 				c.bad("%s: %s cannot be changed (create a new store and move the repositories to it)", at, f)
 			}
