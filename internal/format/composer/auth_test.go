@@ -73,6 +73,9 @@ func TestPrivileges(t *testing.T) {
 	do := func(method, path string, body []byte, user, pw string) (int, http.Header) {
 		t.Helper()
 		r, _ := http.NewRequest(method, ts.URL+"/repository/"+path, bytes.NewReader(body))
+		if method == http.MethodPost {
+			r.Header.Set("Content-Type", formType)
+		}
 		if user != "" {
 			r.SetBasicAuth(user, pw)
 		}
@@ -102,6 +105,9 @@ func TestPrivileges(t *testing.T) {
 		{"anonymous dist", "GET", "composer-hosted/dist/acme/demo/1.1.0.0.zip", nil, "", "", 200},
 		{"anonymous read, private", "GET", "composer-private/packages.json", nil, "", "", 401},
 		{"signed-in read, private", "GET", "composer-private/packages.json", nil, "reader", "pw", 200},
+		{"anonymous advisories", "POST", "composer-hosted/" + advisoriesPath, []byte("packages[]=a/b"), "", "", 200},
+		{"anonymous advisories, private", "POST", "composer-private/" + advisoriesPath, []byte("packages[]=a/b"), "", "", 401},
+		{"signed-in advisories, private: a POST that only reads", "POST", "composer-private/" + advisoriesPath, []byte("packages[]=a/b"), "reader", "pw", 200},
 	}
 	for _, c := range cases {
 		status, hdr := do(c.method, c.path, c.body, c.user, c.pw)

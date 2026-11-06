@@ -27,6 +27,7 @@ type upstream struct {
 	root        map[string]any
 	metadataURL string // "%package%" to replace
 	searchURL   string // "%query%" and "%type%" to replace; "" when the remote has no search
+	advisoryURL string // its security advisories API; "" when it has none
 }
 
 // rootURL is where rp's remote packages.json is: remote itself when it
@@ -80,6 +81,10 @@ func (h *Handler) upstreamFor(ctx context.Context, rp *repo.Repository) (upstrea
 	}
 	s, _ := up.root["search"].(string)
 	up.metadataURL, up.searchURL = absolute(rp, m), absolute(rp, s)
+	if sa, ok := up.root["security-advisories"].(map[string]any); ok {
+		api, _ := sa["api-url"].(string)
+		up.advisoryURL = absolute(rp, api)
+	}
 	return up, res, nil
 }
 
@@ -120,7 +125,11 @@ var keptRootKeys = []string{"packages", "minified", "available-packages", "avail
 
 // proxyRoot is the upstream packages.json with metadata-url and search
 // pointing at the proxy. Inline packages (a Satis repository without
-// providers) are passed through as they are.
+// providers) are passed through as they are. It has no Last-Modified: it is
+// also made of what the upstream's file does not say (the routing rule, this
+// build), and Composer revalidates with If-Modified-Since, so a client that
+// got it from a build without the advisories would keep that copy for as long
+// as the upstream's file does not change.
 func (h *Handler) proxyRoot(ctx context.Context, rp *repo.Repository) (doc, error) {
 	up, res, err := h.upstreamFor(ctx, rp)
 	if err != nil {
@@ -146,8 +155,11 @@ func (h *Handler) proxyRoot(ctx context.Context, rp *repo.Repository) (doc, erro
 		}
 		out[k] = v
 	}
+	if up.advisoryURL != "" && h.routeAllowed(rp, advisoriesPath) {
+		out["security-advisories"] = advisoryConfig(base)
+	}
 	body, err := json.Marshal(out)
-	return doc{body: body, res: res}, err
+	return doc{body: body, res: proxy.Result{Stale: res.Stale}}, err
 }
 
 // metadataFile fetches (or finds in the cache) the upstream metadata file of

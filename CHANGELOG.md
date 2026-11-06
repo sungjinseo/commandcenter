@@ -140,6 +140,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fails it: the previous merge with a `Warning`, or a 502, never a partial index.
 - Yum: package groups. `repodata/comps.xml` or `comps.xml.gz` is taken by PUT and listed in `repomd.xml`
   for `dnf group list` and `dnf group install`; `DELETE` of that path or the asset API removes it.
+- Composer proxies and groups pass security advisories on: `packages.json` offers the repository's own
+  `api/security-advisories/`, which asks the upstream's API. `composer audit` reports advisories and
+  `audit.block-insecure` refuses those versions as against Packagist, from a client with no route out.
+  A name any hosted repository holds is never sent to an upstream. Nothing is cached, and an upstream
+  failure is an error for the client (502, 429), never an empty list.
+- NuGet proxies and groups serve `VulnerabilityInfo/6.7.0` (`vulnerabilities/index.json` and its pages,
+  cached for `metadataMaxAge`): `dotnet restore` warns NU1901 to NU1904 as against nuget.org, from a
+  client with no route out, and NU1900 when the upstream fails with nothing cached. A group serves
+  the first member that has the resource.
+- `test/smoke/composer-smoke.sh` and `test/smoke/nuget-smoke.sh` test advisories with the real clients
+  on real packages. The Composer script also checks, against an upstream that logs what it hears, that a
+  hosted name never reaches it and that a failing API is a failure.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -227,6 +239,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Yum: a PUT or component upload under a name other than the package's, as Nexus documents with
   `.../yum-hosted/test.rpm`, is accepted (was 400). The package is stored in that directory under its
   own name, which the 201's `Location` gives; a GET of the name uploaded to is a 404.
+- After an upgrade Composer and `dotnet restore` refuse or warn about versions they used to take
+  through a proxy or a group, as they do against Packagist and nuget.org. With `TreatWarningsAsErrors` a
+  build can fail. An allow-list routing rule must let `/api/security-advisories/` (Composer) and
+  `/vulnerabilities/` (NuGet) through, or the proxy goes on without warnings.
+- A Composer proxy's `packages.json` has no `Last-Modified`: clients would have kept a copy without the
+  advisories offer for as long as the upstream's file did not change.
+- npm audit: a request that is not JSON is a 400 here instead of going to the remote.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -321,6 +340,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Turning two realms off at the same time could undo one of them (`PUT /-/api/realms` `off`, under the lock).
 - A zip without entries failed strict content type validation.
 - `import-nexus -update` keeps a proxy's credentials on the target.
+- npm audit sent every name in the client's lock file to the remote, through a proxy and through a group,
+  including packages from hosted repositories. Names a hosted repository holds, and names the routing
+  rule refuses, are now removed first, as are the project's name and `install` and `remove` lists.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -393,6 +415,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A proxy member now downloads filelists and other too, which dnf alone rarely asks for (Rocky 9: 30 MiB more per metadata
   change). Old hash-named repodata files stay in a proxy's cache as before; nothing in cleanup removes them (not changed here).
 - The proxied metadata age now decides how fresh the merge is: `metadataMaxAge` of the proxy, 24 h by default.
+> **After this upgrade clients refuse or warn about versions they used to take.** This is what they do against Packagist and nuget.org.
+
+- **Composer.** Through a proxy or a group with a proxy, `composer update` and `composer require` no longer pick a version with a security advisory; a project pinned to one fails to resolve ("... were not loaded, because they are affected by security advisories"). `composer audit` exits 1 when it finds any. `composer install` from a lock file is not affected. Ways out, all Composer's: update the package, `policy.advisories.ignore` or `ignore-id`, `policy.advisories.block: false`, `--no-blocking`.
+- **Composer, the server's network.** The server must reach the API the upstream names, for Packagist `packagist.org`, not only `repo.packagist.org`. If it cannot: `composer audit` exits 100, `composer update` warns and goes on.
+- **NuGet.** `dotnet restore` through a proxy or a group warns NU1901 to NU1904. With `TreatWarningsAsErrors` that fails a build that used to pass, and an unreachable upstream with nothing cached does the same through NU1900. Ways out: update the package, `NuGetAuditSuppress`, `NuGetAuditLevel`, `NuGetAuditMode`, `WarningsNotAsErrors`, `NuGetAudit=false`. A client sees the new resource once its cached copy of the service index expires.
+- **Routing rules.** An allow-list rule on a proxy must let `/api/security-advisories/` (Composer) and `/vulnerabilities/` (NuGet) through, or that proxy goes on without warnings, as before. A rule refusing `p2/<name>.json` now also keeps the name out of the POST.
+- **Content selectors.** A user with only a selector needs it to match those paths too: otherwise a 403, which `composer audit` reports as a failure, `composer update` warns about, and NuGet turns into NU1900.
+- **npm.** A malformed audit body is a 400 from here. Results for private names are gone from the report, as they should be. A group is still answered by its first proxy alone.
+- No stored data changes meaning, nothing to migrate.
 
 ## [0.4.0] - 2026-11-05
 

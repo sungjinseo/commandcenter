@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,12 +78,21 @@ type env struct {
 	zips  map[string][]byte
 	now   time.Time
 	docs  map[string]string // more upstream documents, by path
+
+	mu     sync.Mutex
+	seen   []string                                 // every upstream request: method, path, body
+	advise func(http.ResponseWriter, *http.Request) // answers the upstream's advisories API
 }
 
 // upstream is a fake Packagist: a v2 root with the v1 keys Packagist still
 // lists, minified package metadata whose dist URLs point at this host,
 // a ~dev file with a wrong shasum, the archives and search.
 func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	e.mu.Lock()
+	e.seen = append(e.seen, r.Method+" "+r.URL.Path+" "+string(body))
+	e.mu.Unlock()
 	up := e.up
 	j := func(v string) {
 		w.Header().Set("Content-Type", "application/json")
@@ -92,6 +102,8 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 		return `{"type":"zip","url":"` + up + `/zips/` + name + `.zip","reference":"ref-` + name + `","shasum":"` + sha1hex(e.zips[name]) + `"}`
 	}
 	switch p := r.URL.Path; {
+	case p == "/api/security-advisories/" && e.advise != nil:
+		e.advise(w, r)
 	case p == "/packages.json":
 		j(`{"packages":{},"metadata-url":"/p2/%package%.json","providers-url":"/p/%package%$%hash%.json","notify-batch":"` + up + `/downloads/",
 "search":"` + up + `/search.json?q=%query%&type=%type%","list":"` + up + `/packages/list.json","security-advisories":{"api-url":"` + up + `/api/security-advisories/"},"minified":"composer/2.0",
@@ -159,6 +171,9 @@ func newEnv(t *testing.T) *env {
 		{Name: "composer-all", Format: "composer", Type: "group", Members: []string{"composer-hosted", "composer-proxy"}, WriteMember: "composer-hosted"},
 		{Name: "composer-proxy-first", Format: "composer", Type: "group", Members: []string{"composer-proxy", "composer-hosted"}},
 	}}
+	if _, err := db.ImportRepositories(context.Background(), cfg.Repositories); err != nil {
+		t.Fatal(err)
+	}
 	f := proxy.New(store, ts.Client(), 4)
 	f.Now = func() time.Time { return e.now }
 	e.h = New(store, f, auth.New(cfg, db), func() string { return ccBase + "/" })
@@ -430,7 +445,7 @@ func TestProxy(t *testing.T) {
 	if rt["metadata-url"] != base+"/p2/%package%.json" || rt["search"] != base+"/search.json?q=%query%&type=%type%" {
 		t.Fatalf("root: %v", rt)
 	}
-	for _, k := range []string{"providers-url", "notify-batch", "list", "security-advisories", "minified", "metadata-changes-url", "providers-api", "providers", "filter", "some-later-api"} {
+	for _, k := range []string{"providers-url", "notify-batch", "list", "minified", "metadata-changes-url", "providers-api", "providers", "filter", "some-later-api"} {
 		if _, ok := rt[k]; ok {
 			t.Errorf("root keeps %s: %v", k, rt[k])
 		}

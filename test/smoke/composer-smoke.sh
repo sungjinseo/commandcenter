@@ -17,6 +17,13 @@
 #   7. use composer-proxy alone: require and composer audit, which must not
 #      reach for Packagist; 16 clients at once on the largest metadata file
 #      (aws/aws-sdk-php, 1.6 MiB)
+#   8. security advisories of a package that has them (symfony/http-foundation
+#      4.4.0, on Packagist) through the group and the proxy: composer require
+#      refuses it at Composer's default audit.block-insecure, composer audit
+#      reports it
+#   9. the private-name rule, against a repository that logs what it hears: a
+#      hosted package's name never reaches it, however Composer asks, and an API
+#      that fails is a failure for composer audit, not "no advisories"
 # The server's request log then shows what Composer asked for.
 # The repositories are plain HTTP, which Composer takes only with
 # secure-http false. The client has no route to the internet, and the server
@@ -32,7 +39,7 @@ name=commandcenter-composer-smoke-$$
 . test/postgres.sh
 
 cleanup() {
-  docker rm -f -v "$name" "$name-pg" "$name-client" >/dev/null 2>&1 || true
+  docker rm -f -v "$name" "$name-pg" "$name-client" "$name-spy" >/dev/null 2>&1 || true
   docker network rm "$net" "$net-clients" >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
 }
@@ -45,7 +52,7 @@ docker build -q -t commandcenter:smoke-composer . >/dev/null
 hash="$(printf 'smoke-pass\n' | docker run --rm -i commandcenter:smoke-composer hash-password)"
 
 mkdir -p "$work"
-cp -r test/smoke/composer/hello test/smoke/composer/app "$work/"
+cp -r test/smoke/composer/hello test/smoke/composer/app test/smoke/composer/spy.php "$work/"
 
 cat > "$work/config.yaml" <<EOF
 anonymousRead: true
@@ -59,6 +66,11 @@ repositories:
   - { name: composer-hosted,  format: composer, type: hosted }
   - { name: composer-all,     format: composer, type: group,  members: [composer-hosted, composer-proxy], writeMember: composer-hosted }
   - { name: composer-private, format: composer, type: hosted, writePolicy: allow, anonymousRead: false }
+  - { name: composer-spy,       format: composer, type: proxy, remote: "http://spy:8000/" }
+  - { name: composer-spy-all,   format: composer, type: group, members: [composer-hosted, composer-spy] }
+  - { name: composer-spy-first, format: composer, type: group, members: [composer-spy, composer-hosted] }
+  - { name: composer-down,      format: composer, type: proxy, remote: "http://spy:8000/down/" }
+  - { name: composer-down-all,  format: composer, type: group, members: [composer-hosted, composer-down] }
 EOF
 
 cat > "$work/run.sh" <<'EOF'
@@ -156,12 +168,46 @@ composer config repositories.proxy composer "$REPO/composer-proxy/"
 says "Installing psr/log" composer require psr/log
 says "No security vulnerability advisories found" composer audit
 seq 16 | xargs -P 16 -I{} curl -fsS -o /dev/null "$REPO/composer-proxy/p2/aws/aws-sdk-php.json"
+
+echo "== a package with security advisories, through the group and the proxy: require refuses it, audit reports it"
+for r in composer-all composer-proxy; do
+  mkdir "/tmp/w/$r"
+  cd "/tmp/w/$r"
+  echo '{}' > composer.json
+  composer config repositories.cc composer "$REPO/$r/"
+  refused "because they are affected by security advisories" composer require symfony/http-foundation:4.4.0 --no-install --ignore-platform-reqs
+  composer require symfony/http-foundation:4.4.0 --no-install --no-blocking --ignore-platform-reqs >/dev/null 2>&1
+  if composer audit --locked --format=json > /tmp/audit.json 2>/dev/null; then echo "FAIL: composer audit through $r found nothing"; cat /tmp/audit.json; exit 1; fi
+  found=$(php -r 'echo count(json_decode(file_get_contents("/tmp/audit.json"), true)["advisories"]["symfony/http-foundation"] ?? []);')
+  echo "$r: $found advisories"
+  test "$found" -ge 1
+done
+
+echo "== the private-name rule: smoke/hello, hosted here, is not asked about upstream (the script reads the upstream's log); a failing API is a failure"
+mkdir /tmp/w/spy
+cd /tmp/w/spy
+# a lock file as a project has: its own hosted package and a public one
+php -r 'echo json_encode(["content-hash" => "x", "aliases" => [], "minimum-stability" => "stable", "stability-flags" => [], "prefer-stable" => false, "prefer-lowest" => false,
+  "platform" => new stdClass(), "platform-dev" => new stdClass(), "packages-dev" => [],
+  "packages" => array_map(fn ($n) => ["name" => $n, "version" => "1.0.0", "version_normalized" => "1.0.0.0", "type" => "library", "dist" => ["type" => "zip", "url" => "http://nowhere.example/x.zip"]], ["smoke/hello", "spy/vuln"])]);' > composer.lock
+for r in composer-spy-all composer-spy-first composer-spy; do
+  printf '{"repositories": [{"type": "composer", "url": "%s/"}]}\n' "$REPO/$r" > composer.json
+  refused "Found 1 security vulnerability advisory" composer audit --locked --format=plain
+done
+printf '{"repositories": [{"type": "composer", "url": "%s/"}]}\n' "$REPO/composer-down-all" > composer.json
+refused "could not be downloaded (HTTP/1.1 502 Bad Gateway)" composer audit --locked
+if grep -q "No security vulnerability advisories" /tmp/out.log; then echo "FAIL: a failing API read as no advisories"; cat /tmp/out.log; exit 1; fi
+# 16 clients at once with as many names as Composer sends at a time
+php -r 'for ($i = 0; $i < 500; $i++) { echo "packages[]=spy/name-$i&"; } echo "packages[]=spy/vuln";' > /tmp/names.form
+seq 16 | xargs -P 16 -I{} curl -fsS -o /dev/null -H 'Content-Type: application/x-www-form-urlencoded' --data-binary @/tmp/names.form "$REPO/composer-spy-all/api/security-advisories/"
 echo "COMPOSER CLIENT OK"
 EOF
 
 docker network create "$net" >/dev/null
 docker network create --internal "$net-clients" >/dev/null
 start_postgres
+docker run -d --name "$name-spy" --network "$net" --network-alias spy --memory 128m -v "$root/$work/spy.php:/spy.php:ro" \
+  --entrypoint php composer:2 -S 0.0.0.0:8000 /spy.php >/dev/null
 docker run -d --name "$name" --network "$net" -e COMMANDCENTER_DATABASE_URL="$pg_url" --network-alias commandcenter --memory 128m \
   -v "$root/$work/config.yaml:/etc/commandcenter/config.yaml:ro" commandcenter:smoke-composer >/dev/null
 
@@ -200,6 +246,14 @@ asked GET composer-all/search.json 200
 asked GET composer-private/packages.json 401
 asked GET composer-private/p2/smoke/hello.json 200
 asked GET composer-private/dist/smoke/hello/2.0.0.0.zip 200
+asked POST composer-all/api/security-advisories/ 200
+asked POST composer-proxy/api/security-advisories/ 200
+asked POST composer-down-all/api/security-advisories/ 502
+
+echo "== what the upstream heard: the public name, never the hosted one"
+docker logs "$name-spy" > "$work/spy.log" 2>&1
+grep -q 'ASKED POST /api/security-advisories/ packages\[\]=spy/vuln' "$work/spy.log" || { echo "FAIL: the upstream was not asked about spy/vuln"; cat "$work/spy.log"; exit 1; }
+if grep -q 'smoke/hello' "$work/spy.log"; then echo "FAIL: the upstream heard a hosted package's name"; grep 'smoke/hello' "$work/spy.log"; exit 1; fi
 
 echo "== memory"
 docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$name"

@@ -1,7 +1,8 @@
 // Package composer implements Composer v2 repositories (what Composer 2.x
 // reads) under /repository/<repo>/: the root packages.json, the per-package
-// metadata p2/<vendor>/<package>.json (and ~dev.json), dist archives, and
-// search.json. A hosted repository takes zips by PUT, reads composer.json
+// metadata p2/<vendor>/<package>.json (and ~dev.json), dist archives,
+// search.json and the security advisories API (api/security-advisories/, a
+// proxy's upstream's). A hosted repository takes zips by PUT, reads composer.json
 // out of them and derives every document from its rows; a proxy caches an
 // upstream Composer repository (Packagist, Satis, Private Packagist) with
 // the documents' URLs rewritten to itself and the dist archives fetched on
@@ -20,11 +21,12 @@ import (
 type Kind int
 
 const (
-	KindRoot     Kind = iota // packages.json
-	KindMetadata             // p2/<vendor>/<package>.json or ~dev.json
-	KindDist                 // dist/<vendor>/<package>/<version>.zip (hosted) or .../<version>/<sha1>.zip (proxy)
-	KindSearch               // search.json?q=&type=
-	KindUpload               // packages/upload/<vendor>/<package>/<version>: PUT a zip, DELETE the version
+	KindRoot       Kind = iota // packages.json
+	KindMetadata               // p2/<vendor>/<package>.json or ~dev.json
+	KindDist                   // dist/<vendor>/<package>/<version>.zip (hosted) or .../<version>/<sha1>.zip (proxy)
+	KindSearch                 // search.json?q=&type=
+	KindUpload                 // packages/upload/<vendor>/<package>/<version>: PUT a zip, DELETE the version
+	KindAdvisories             // api/security-advisories/: POST the names to ask about
 )
 
 // Route is a parsed request. Name is vendor/package, lower-cased. Version is
@@ -39,12 +41,13 @@ type Route struct {
 }
 
 const (
-	p2Prefix    = "p2/"
-	distPrefix  = "dist/"
-	uploadPath  = "packages/upload/"
-	upstreamKey = "upstream/packages.json" // a proxy's cached copy of the remote root
-	ctJSON      = "application/json"
-	ctZip       = "application/zip"
+	p2Prefix       = "p2/"
+	distPrefix     = "dist/"
+	uploadPath     = "packages/upload/"
+	advisoriesPath = "api/security-advisories/"
+	upstreamKey    = "upstream/packages.json" // a proxy's cached copy of the remote root
+	ctJSON         = "application/json"
+	ctZip          = "application/zip"
 )
 
 var (
@@ -62,6 +65,8 @@ func ParseRoute(path string) (Route, error) {
 		return Route{Kind: KindRoot}, nil
 	case "search.json":
 		return Route{Kind: KindSearch}, nil
+	case advisoriesPath, strings.TrimSuffix(advisoriesPath, "/"):
+		return Route{Kind: KindAdvisories}, nil
 	}
 	name := func(vendor, pkg string) (string, bool) {
 		if !segRE.MatchString(vendor) || !segRE.MatchString(pkg) {

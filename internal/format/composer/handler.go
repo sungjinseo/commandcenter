@@ -48,6 +48,21 @@ type doc struct {
 // composer.json fields plus version_normalized, dist and time.
 type entry = map[string]any
 
+// Access implements repo.AccessDecider: a POST of names to the advisories API
+// is a read; the rest follows the server's default rule.
+func (h *Handler) Access(r *http.Request, rp *repo.Repository, path string) auth.Access {
+	if rt, err := ParseRoute(path); err == nil && rt.Kind == KindAdvisories {
+		return auth.Read
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		return auth.Read
+	case http.MethodDelete:
+		return auth.Delete
+	}
+	return auth.Add
+}
+
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) {
 	rt, err := ParseRoute(path)
 	if err == nil {
@@ -59,6 +74,9 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 }
 
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
+	if rt.Kind == KindAdvisories {
+		return h.advisories(w, r, rp)
+	}
 	if rt.Kind == KindUpload {
 		allow := "PUT, DELETE"
 		if !repo.AcceptsWrites(rp) {
@@ -133,7 +151,9 @@ func rootDoc(base string) map[string]any {
 
 // root is packages.json. A hosted repository lists its packages as
 // available-packages, so Composer asks it only for those; a group cannot
-// enumerate its proxies and lists none.
+// enumerate its proxies and lists none. A group with a proxy offers the
+// advisories API without asking the proxy's upstream, so its packages.json goes
+// on working when that is down: the API then fails, where a client should see it.
 func (h *Handler) root(ctx context.Context, rp *repo.Repository) (doc, error) {
 	switch rp.Type {
 	case "hosted":
@@ -151,7 +171,12 @@ func (h *Handler) root(ctx context.Context, rp *repo.Repository) (doc, error) {
 	case "proxy":
 		return h.proxyRoot(ctx, rp)
 	case "group":
-		body, err := json.Marshal(rootDoc(h.repoURL(rp)))
+		base := h.repoURL(rp)
+		out := rootDoc(base)
+		if online, offline := proxyMembers(rp); online+offline > 0 {
+			out["security-advisories"] = advisoryConfig(base)
+		}
+		body, err := json.Marshal(out)
 		return doc{body: body}, err
 	}
 	return doc{}, fmt.Errorf("unknown repository type %q", rp.Type)

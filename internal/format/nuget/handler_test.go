@@ -114,7 +114,8 @@ type env struct {
 	queries atomic.Pointer[string]
 	down    atomic.Bool
 	now     time.Time
-	search  string // when set, the upstream's answer to every search
+	search  string            // when set, the upstream's answer to every search
+	vuln    map[string]string // the upstream's VulnerabilityInfo: documents under /vuln/, by file name
 }
 
 // upstream is a fake V3 feed as api.nuget.org lays one out: a service
@@ -132,6 +133,18 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, v)
 	}
 	switch p := r.URL.Path; {
+	case p == "/v3/index.json" && e.vuln != nil:
+		j(`{"version":"3.0.0","resources":[
+{"@id":"` + up + `/flat/","@type":"PackageBaseAddress/3.0.0"},
+{"@id":"` + up + `/vuln/index.json","@type":"VulnerabilityInfo/6.7.0","comment":"pages"}]}`)
+	case strings.HasPrefix(p, "/vuln/"):
+		doc, ok := e.vuln[strings.TrimPrefix(p, "/vuln/")]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		e.hits.Add(1)
+		j(doc)
 	case p == "/v3/index.json":
 		j(`{"version":"3.0.0","resources":[
 {"@id":"` + up + `/flat/","@type":"PackageBaseAddress/3.0.0"},

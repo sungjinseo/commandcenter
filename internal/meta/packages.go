@@ -379,6 +379,43 @@ WHERE repo = ? AND replace(lower(name), '_', '-') = ? ORDER BY name`, repo, cano
 	return out, rows.Err()
 }
 
+// HostedPackages returns which of names a hosted repository of format holds,
+// and in which repositories. It is what keeps private names away from an
+// upstream, so it looks at every hosted repository, online or not.
+func (d *DB) HostedPackages(ctx context.Context, format string, names []string) (map[string][]string, error) {
+	const batch = 256
+	out := map[string][]string{}
+	for len(names) > 0 {
+		n := min(batch, len(names))
+		args := make([]any, 0, n+1)
+		args = append(args, format)
+		for _, name := range names[:n] {
+			args = append(args, name)
+		}
+		marks := strings.TrimSuffix(strings.Repeat("?,", n), ",")
+		rows, err := d.sql.QueryContext(ctx, `SELECT DISTINCT p.repo, p.name FROM repositories r JOIN packages p ON p.repo = r.name
+WHERE r.format = ? AND r.type = 'hosted' AND p.name IN (`+marks+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var repo, name string
+			if err := rows.Scan(&repo, &name); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[name] = append(out[name], repo)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+		names = names[n:]
+	}
+	return out, nil
+}
+
 // PublishedName returns the "name" in the attrs of one of a package's rows,
 // or "" when it has none. Cargo stores a crate's name lowercased for lookups;
 // its index lines in attrs keep the spelling it was published with.

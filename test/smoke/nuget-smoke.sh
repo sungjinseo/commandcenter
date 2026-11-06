@@ -16,6 +16,10 @@
 #   6. push 1.0.1 with a symbols package through the group (the .snupkg is
 #      left out: the service index has no SymbolPackagePublish resource, and
 #      the endpoint refuses one) and delete it with dotnet nuget delete
+#   7. restore a package with a known vulnerability (Newtonsoft.Json 12.0.3, on
+#      nuget.org) through the group and the proxy: dotnet warns NU1903, from
+#      VulnerabilityInfo served by commandcenter; 16 clients at once on its
+#      largest page
 # The server's request log then shows which V3 resources the client used.
 # The sources are plain HTTP, which NuGet takes only with
 # allowInsecureConnections (--allow-insecure-connections). The client has no
@@ -114,7 +118,7 @@ says '"id": "Smoke.Hello"' dotnet package search smoke.hello --source cc --take 
 says '"version": "1.0.0"' dotnet package search Smoke.Hello --source cc --exact-match --format json
 says '"version": "13.0.3"' dotnet package search Newtonsoft.Json --source cc --exact-match --format json
 curl -fsS "$REPO/nuget-all/index.json" > /tmp/index.json
-for t in PackageBaseAddress/3.0.0 RegistrationsBaseUrl/3.6.0 SearchQueryService/3.5.0 PackagePublish/2.0.0; do
+for t in PackageBaseAddress/3.0.0 RegistrationsBaseUrl/3.6.0 SearchQueryService/3.5.0 PackagePublish/2.0.0 VulnerabilityInfo/6.7.0; do
   grep -q "\"$t\"" /tmp/index.json || { echo "FAIL: no $t in the service index"; exit 1; }
 done
 seq 16 | xargs -P 16 -I{} curl -fsS -o /dev/null "$REPO/nuget-all/query?q=microsoft&take=1000&prerelease=true"
@@ -144,6 +148,20 @@ echo "== delete 1.0.1 through the group"
 says "was deleted successfully" dotnet nuget delete Smoke.Hello 1.0.1 -s cc -k "$TOKEN" --non-interactive
 test "$(curl -fsS "$REPO/nuget-hosted/v3-flatcontainer/smoke.hello/index.json")" = '{"versions":["1.0.0"]}'
 test "$(curl -s -o /dev/null -w '%{http_code}' "$REPO/nuget-all/v3-flatcontainer/smoke.hello/1.0.1/smoke.hello.1.0.1.nupkg")" = 404
+
+echo "== a package with a known vulnerability warns, through the group and the proxy"
+for r in nuget-all nuget-proxy; do
+  mkdir "/tmp/$r"
+  cd "/tmp/$r"
+  printf '<configuration><packageSources><clear /></packageSources></configuration>\n' > NuGet.Config
+  dotnet nuget add source "$REPO/$r/index.json" -n cc --allow-insecure-connections --configfile NuGet.Config >/dev/null
+  printf '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup><PackageReference Include="Newtonsoft.Json" Version="12.0.3" /></ItemGroup></Project>\n' > vulnerable.csproj
+  says "warning NU1903: Package 'Newtonsoft.Json' 12.0.3 has a known high severity vulnerability" dotnet restore --packages /tmp/packages
+done
+curl -fsS "$REPO/nuget-all/vulnerabilities/index.json" > /tmp/vulnerabilities.json
+if grep -q "api.nuget.org" /tmp/vulnerabilities.json; then echo "FAIL: the index points past commandcenter"; cat /tmp/vulnerabilities.json; exit 1; fi
+page=$(grep -o '"@id":"[^"]*"' /tmp/vulnerabilities.json | head -1 | cut -d'"' -f4)
+seq 16 | xargs -P 16 -I{} curl -fsS -o /dev/null "$page"
 echo "NUGET CLIENT OK"
 EOF
 
@@ -186,6 +204,10 @@ asked GET nuget-all/registration/newtonsoft.json/index.json 200
 asked PUT nuget-hosted/api/v2/package/ 201                                                # push
 asked PUT nuget-hosted/api/v2/package/ 409
 asked DELETE nuget-all/api/v2/package/Smoke.Hello/1.0.1 204
+asked GET nuget-all/vulnerabilities/index.json 200                                        # vulnerability data
+asked GET 'nuget-all/vulnerabilities/[0-9a-f]*\.json' 200
+asked GET nuget-proxy/vulnerabilities/index.json 200
+asked GET 'nuget-proxy/vulnerabilities/[0-9a-f]*\.json' 200
 
 echo "== memory"
 docker stats --no-stream --format '{{.Name}} {{.MemUsage}}' "$name"

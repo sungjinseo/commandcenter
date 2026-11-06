@@ -507,14 +507,15 @@ const emptyAudit = `{"actions":[],"advisories":{},"muted":[],"metadata":{"vulner
 
 // audit forwards an npm audit request (POST /-/npm/v1/security/audits,
 // /audits/quick, /advisories/bulk) to the remote of a proxy, or of a group's
-// first proxy member, without caching; a hosted repository (or a group
-// without a proxy) answers an empty report.
+// first proxy member, without caching and without the names it may not hear
+// of (forwardAudit); a hosted repository (or a group without a proxy) answers
+// an empty report.
 func (h *Handler) audit(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) error {
 	if r.Method != http.MethodPost {
 		return repo.MethodNotAllowed(http.MethodPost, "method %s not allowed", r.Method)
 	}
 	if target := auditTarget(rp); target != nil {
-		return h.Resolver.Fetcher.Forward(r.Context(), target, w, r, path, auditBodyMax)
+		return h.forwardAudit(w, r, rp, target, path)
 	}
 	body := emptyAudit
 	if strings.HasSuffix(path, "/advisories/bulk") {

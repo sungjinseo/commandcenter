@@ -111,6 +111,17 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		d, err = h.registration(ctx, rp, rp, rt)
 	case KindSearch:
 		d, err = h.search(ctx, rp, rp, parseQuery(r))
+	case KindVulnIndex:
+		d, err = h.vulnIndexDoc(ctx, rp)
+	case KindVulnPage:
+		res, err := h.vulnPage(ctx, rp, rt.Rest)
+		if err != nil {
+			return err
+		}
+		proxy.SetStaleHeader(w, res)
+		res.Asset.ContentType = ctJSON
+		repo.ServeAsset(w, r, h.Store, res.Asset)
+		return nil
 	}
 	if err != nil {
 		return err
@@ -175,6 +186,9 @@ func (h *Handler) serviceIndex(ctx context.Context, rp *repo.Repository) (doc, e
 	}
 	if repo.AcceptsWrites(rp) {
 		add(base+"/api/v2/package", "PackagePublish/2.0.0")
+	}
+	if h.offersVuln(ctx, rp) {
+		add(base+"/"+vulnIndex, "VulnerabilityInfo/6.7.0")
 	}
 	body, err := json.Marshal(map[string]any{"version": "3.0.0", "resources": resources})
 	return doc{body: body, res: res}, err
