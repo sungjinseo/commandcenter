@@ -119,6 +119,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - p2: the REST search parameter `p2.pluginName` (a bundle's Bundle-Name or a feature's label).
 - Real-client smoke tests for CocoaPods (`test/smoke/cocoapods-smoke.sh`, CocoaPods 1.17 on Linux) and p2
   (`test/smoke/p2-smoke.sh`, the Eclipse p2 director and Tycho on a closed network).
+- `test/compat/terraform.sh` runs the Terraform provider for Nexus (`datadrivers/nexus` 3.0.1) against
+  Command Center from the official OpenTofu image (or Terraform, `TF_IMAGE`): apply, an empty plan,
+  update, import and destroy of one resource of every kind, with S3 (SeaweedFS), Azure (Azurite) and
+  a real directory (OpenLDAP). 62 of the provider's 70 resources work; `nexus_script`,
+  `nexus_privilege_script`, `nexus_capability`, `nexus_iqserver`, `nexus_security_oidc` and the
+  `nexus_repository_bower_*` fail with the reason.
+- Nexus API: `GET/PUT/DELETE /v1/security/saml`, `GET /v1/security/ssl/truststore` and the LDAP server
+  list (`/v1/security/ldap`, `change-order`) over Command Center's one directory.
+- LDAP: `userOneLevel` (Nexus `userSubtree: false`) and `groupsAsRoles` (Nexus `ldapGroupsAsRoles`; a
+  group's name grants that role, never `admin`). Both off by default.
+- `strictContentTypeValidation` on a proxy: a remote file whose first bytes contradict its name is not
+  cached and answers 404.
+- Built-in privilege `nx-usertoken-current`.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -195,6 +208,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - p2: a group's children are relative to the URL the client used (no `baseURL` needed), and its
   documents carry the time the group or a member last changed as `Last-Modified`.
 - p2: the Nexus API reports `group: null` for components; `group=` searches keep working.
+- Nexus API, repositories: a PUT replaces as Nexus's does. A body without `cleanup` clears the policies,
+  and an `httpClient` without `authentication` clears the remote's credentials.
+- Nexus API: `docker.forceBasicAuth` is the repository's anonymous-read override, set and answered (it
+  was always answered `true` and did nothing).
+- Nexus API: an S3 `bucket.expiration` reads back as written; it changes nothing, as there is no bucket
+  lifecycle rule (it was dropped and answered -1).
+- `import-nexus -config` carries `strictContentTypeValidation` of proxies, a blob store group's soft
+  quota and `userSubtree: false`.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -279,6 +300,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Go: `DELETE /v1/assets/{id}` deletes a version's `.info`, `.mod` and `.zip` together (hosted: 400 before).
 - Go: REST search finds components by the case-escaped spelling in `name=` and `version=`.
 - p2: bundles below a composite child's directory were not components (search, cleanup, metadata tab).
+- Nexus API answers that kept the Terraform provider's plan from ever being empty: `cleanup` is `null`
+  without policies, `proxy.remoteUrl` as written, and read back as written `strictContentTypeValidation`
+  on proxies and groups, a group's `blobStoreName`, `proprietaryComponents`, `pathEnabled`, `indexType`,
+  `queryCacheItemMaxAge`, `deployPolicy` at depth 0, `preemptive`, `signerType`, and the e-mail identity
+  switch without TLS.
+- A blob store group's `softQuota` was silently dropped by the Nexus API.
+- `nexus_security_ssl_truststore` left an orphan certificate behind: its create failed after the POST.
+- Turning two realms off at the same time could undo one of them (`PUT /-/api/realms` `off`, under the lock).
+- A zip without entries failed strict content type validation.
+- `import-nexus -update` keeps a proxy's credentials on the target.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -333,6 +364,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Changing a remote deletes the cache. Bundles below child directories become components, so `format: p2`
   cleanup policies now apply to them (fetched again on demand).
 - **Go**: no data change. Paths that are not GOPROXY routes answer 400 or 404 instead of the rule's 403.
+- An older node ignores the new keys in a repository's definition and the new settings rows.
+- Saving in the web UI of an older node a proxy that has strict on is 400 (its rule), and it drops the `nexus` values, which only read back: the next plan shows and restores them.
+- Saving the LDAP form on an older node drops `userOneLevel` and `groupsAsRoles`, and an older node does not honour them. Set them when every node is upgraded.
+
+- **A PUT now replaces.** A script that PUTs a repository without `cleanup` loses the cleanup policies, and one that sends `httpClient` without `authentication` loses the remote's credentials. Read, change, PUT back; the secrets are never in the answer, so send the password again or leave `httpClient` out.
+- `GET` of a repository has `cleanup: null` in place of `{"policyNames": []}`; `proxy.remoteUrl` no longer gains a `/`.
+- **`docker.forceBasicAuth: true` now acts**, and it is Nexus's default and the usual value. A script or configuration sending it turns anonymous pull off for that repository, as in Nexus. Stored repositories do not change until one sends it. Answers change: a repository without an override reads `false`.
+- **`strictContentTypeValidation: true` on a proxy now acts** on the next PUT that sends it, and scripts and provider configurations usually send `true`. A remote that serves another type under a known extension (a `.jar` that is not a zip) then answers 404 and is not cached. Stored proxies have it off.
+- A PUT on `/blobstores/group/{name}` without `softQuota` removes a quota set in the web UI.
+- `import-nexus -config` run again against a Nexus with `userSubtree: false` says `differs: userOneLevel`; `-update` sets it. Until then the target searches the whole subtree, as it always did.
 
 ## [0.4.0] - 2026-11-05
 

@@ -29,6 +29,12 @@ type LDAP struct {
 	GroupAttr          string         `json:"groupAttr"`
 	GroupMappings      []GroupMapping `json:"groupMappings"`
 	DefaultRoles       []string       `json:"defaultRoles"`
+	// UserOneLevel looks a user up among the direct children of UserBaseDN,
+	// not in its whole subtree (Nexus userSubtree false).
+	UserOneLevel bool `json:"userOneLevel"`
+	// GroupsAsRoles also grants the role named as each of a user's groups,
+	// but for the admin role, which takes a mapping (Nexus ldapGroupsAsRoles).
+	GroupsAsRoles bool `json:"groupsAsRoles"`
 }
 
 // GroupMapping grants Roles to members of Group, matched against the

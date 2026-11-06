@@ -1,6 +1,7 @@
 package ldap
 
 import (
+	"cmp"
 	"context"
 	"crypto/x509"
 	"errors"
@@ -119,6 +120,7 @@ func hostOf(raw string) string {
 func find(c *Conn, cfg meta.LDAP, name string, tr *trace) (User, error) {
 	entries, err := c.Search(SearchRequest{
 		BaseDN:     cfg.UserBaseDN,
+		OneLevel:   cfg.UserOneLevel,
 		Filter:     UserFilter(cfg.UserFilter, name),
 		Attributes: []string{cfg.UserIDAttr, cfg.NameAttr, cfg.EmailAttr, cfg.GroupAttr},
 		SizeLimit:  maxEntries,
@@ -277,8 +279,9 @@ func GroupMatches(value, group string) bool {
 }
 
 // MapRoles returns the roles granted by groups under cfg (the union of the
-// matching mappings' roles and the default roles, in first-seen order) and
-// the group values that matched a mapping.
+// matching mappings' roles, the default roles and, with GroupsAsRoles, the
+// roles named as the groups, in first-seen order) and the group values that
+// matched a mapping.
 func MapRoles(cfg meta.LDAP, groups []string) (roles, matched []string) {
 	seen := map[string]bool{}
 	add := func(r string) {
@@ -303,6 +306,14 @@ func MapRoles(cfg meta.LDAP, groups []string) (roles, matched []string) {
 	}
 	for _, r := range cfg.DefaultRoles {
 		add(r)
+	}
+	if cfg.GroupsAsRoles {
+		for _, g := range groups {
+			r := cmp.Or(firstRDNValue(g), strings.TrimSpace(g))
+			if r != "" && r != meta.AdminRole { // a role that does not exist grants nothing
+				add(r)
+			}
+		}
 	}
 	if roles == nil {
 		roles = []string{}

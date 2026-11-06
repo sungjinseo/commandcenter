@@ -522,11 +522,14 @@ type samlRequest struct {
 }
 
 // merged is the configuration body describes, with defaults for absent
-// fields and cur's key pair.
+// fields and cur's key pair. The metadata document loses what precedes it
+// (blank lines, a byte order mark: the parser refuses them) and keeps its
+// end as written: a client that manages it (the Terraform provider, from a
+// file) compares what it reads with what it wrote, final newline included.
 func (body samlRequest) merged(cur meta.SAML) meta.SAML {
 	def := meta.DefaultSAML()
 	next := meta.SAML{DisplayName: orDefault(body.DisplayName, def.DisplayName),
-		IdPMetadataXML: strings.TrimSpace(body.IdPMetadataXML), IdPMetadataURL: strings.TrimSpace(body.IdPMetadataURL),
+		IdPMetadataXML: strings.TrimLeft(body.IdPMetadataXML, " \t\r\n\ufeff"), IdPMetadataURL: strings.TrimSpace(body.IdPMetadataURL),
 		EntityID: strings.TrimSpace(body.EntityID), UsernameAttribute: orDefault(body.UsernameAttribute, def.UsernameAttribute),
 		FirstNameAttribute: strings.TrimSpace(body.FirstNameAttribute), LastNameAttribute: strings.TrimSpace(body.LastNameAttribute),
 		EmailAttribute: strings.TrimSpace(body.EmailAttribute), GroupsAttribute: strings.TrimSpace(body.GroupsAttribute),

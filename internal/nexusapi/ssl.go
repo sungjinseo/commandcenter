@@ -31,8 +31,9 @@ func nexusCert(c uiCert) map[string]any {
 	}
 }
 
-// GET /security/ssl: the trust store; with ?host=&port= the certificate
-// the host presents (its leaf), as Nexus's "retrieve" does.
+// GET /security/ssl: with ?host=&port= the certificate the host presents
+// (its leaf), as Nexus's "retrieve" does; without, the trust store (earlier
+// builds listed it here only).
 func (h *Handler) sslList(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.admin(w, r); !ok {
 		return
@@ -59,7 +60,16 @@ func (h *Handler) sslList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, nexusCert(res.Certificates[0]))
 		return
 	}
-	status, body = h.call(r, http.MethodGet, "/-/api/ssl/certificates", nil)
+	h.sslTrustStore(w, r)
+}
+
+// GET /security/ssl/truststore: the certificates of the trust store
+// (Nexus's list; the Terraform provider looks up the one it added there).
+func (h *Handler) sslTrustStore(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.admin(w, r); !ok {
+		return
+	}
+	status, body := h.call(r, http.MethodGet, "/-/api/ssl/certificates", nil)
 	if status != http.StatusOK {
 		writeUIError(w, status, body)
 		return

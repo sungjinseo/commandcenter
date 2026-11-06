@@ -285,10 +285,9 @@ func TestRepositoryContentAndRemoteFields(t *testing.T) {
 		t.Fatalf("reader: %s", r.body)
 	}
 	for body, want := range map[string]string{
-		`{"name":"x1","format":"raw","type":"hosted","contentDisposition":"download"}`:                                 "contentDisposition must be",
-		`{"name":"x2","format":"npm","type":"hosted","contentDisposition":"attachment"}`:                               "only valid for raw, gitlfs and maven",
-		`{"name":"x3","format":"raw","type":"proxy","remote":"https://r.example/","strictContentTypeValidation":true}`: "only valid for hosted",
-		`{"name":"x4","format":"raw","type":"hosted","blocked":true}`:                                                  "only valid for proxy",
+		`{"name":"x1","format":"raw","type":"hosted","contentDisposition":"download"}`:   "contentDisposition must be",
+		`{"name":"x2","format":"npm","type":"hosted","contentDisposition":"attachment"}`: "only valid for raw, gitlfs and maven",
+		`{"name":"x4","format":"raw","type":"hosted","blocked":true}`:                    "only valid for proxy",
 	} {
 		if r := e.admin(t, "POST", "/-/api/repositories", body); r.status != http.StatusBadRequest || !strings.Contains(r.body, want) {
 			t.Fatalf("%s: %d %s", body, r.status, r.body)
@@ -300,6 +299,11 @@ func TestRepositoryContentAndRemoteFields(t *testing.T) {
 	}
 	if r := e.admin(t, "GET", "/-/api/repositories/raw-s", ""); !strings.Contains(r.body, `"strictContentTypeValidation":true,"contentDisposition":"attachment"`) {
 		t.Fatalf("describe: %s", r.body)
+	}
+	// A proxy takes strictContentTypeValidation too (it checks what it fetches).
+	r = e.admin(t, "POST", "/-/api/repositories", `{"name":"x3","format":"raw","type":"proxy","remote":"https://r.example/","strictContentTypeValidation":true}`)
+	if wantStatus(t, r, http.StatusCreated); !strings.Contains(r.body, `"strictContentTypeValidation":true`) {
+		t.Fatalf("strict proxy: %s", r.body)
 	}
 	r = e.admin(t, "POST", "/-/api/repositories", `{"name":"raw-p","format":"raw","type":"proxy","remote":"https://r.example/","autoBlock":false,"blocked":true}`)
 	if wantStatus(t, r, http.StatusCreated); !strings.Contains(r.body, `"blocked":true,"autoBlock":false`) {

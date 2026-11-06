@@ -372,6 +372,29 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		slog.Warn("remote answered with a web page, taken as not found", "repo", rp.Name, "path", t.Key)
 		status = http.StatusNotFound
 	}
+	var body io.Reader
+	if status == http.StatusOK {
+		idle := bodyIdle
+		if c := rp.Connection; c != nil && c.Timeout > 0 {
+			idle = time.Duration(c.Timeout) * time.Second
+		}
+		body = newStallReader(resp.Body, idle, cancel)
+		if rp.StrictContentTypeValidation {
+			// Strict content type validation of a proxy (Nexus): a file whose
+			// first bytes are not what its name promises (a sign-in page for
+			// a .jar) is not the asset, as a web page for a NotHTML target.
+			checked, cerr := repo.CheckContent(t.Key, "", body)
+			switch {
+			case cerr == nil:
+				body = checked
+			case cached || repo.StatusOf(cerr) != http.StatusBadRequest: // or the read failed
+				return f.stale(rp, t.Key, a, cached, cerr)
+			default:
+				slog.Warn("remote content does not match its type, taken as not found", "repo", rp.Name, "path", t.Key)
+				status = http.StatusNotFound
+			}
+		}
+	}
 
 	switch {
 	case status == http.StatusNotModified && cached:
@@ -385,11 +408,6 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{Asset: a}, nil
 
 	case status == http.StatusOK:
-		idle := bodyIdle
-		if c := rp.Connection; c != nil && c.Timeout > 0 {
-			idle = time.Duration(c.Timeout) * time.Second
-		}
-		body := newStallReader(resp.Body, idle, cancel)
 		var na meta.Asset
 		var verr error
 		sums, err := f.Store.WriteBlob(rp.Name, body, func(s blob.Sums) error {

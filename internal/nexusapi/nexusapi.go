@@ -105,7 +105,11 @@ func (h *Handler) init() {
 	m.HandleFunc("GET /service/rest/swagger.json", h.swagger) // outside the prefix; the server routes it here
 	m.HandleFunc("GET "+p+"/tasks", h.tasks)
 	h.securityRoutes(m, p)
+	h.samlRoutes(m, p)
+	h.ldapRoutes(m, p)
+	h.leftOutRoutes(m, p)
 	m.HandleFunc("GET "+p+"/security/ssl", h.sslList)
+	m.HandleFunc("GET "+p+"/security/ssl/truststore", h.sslTrustStore)
 	m.HandleFunc("POST "+p+"/security/ssl/truststore", h.sslAdd)
 	m.HandleFunc("DELETE "+p+"/security/ssl/truststore/{id}", h.sslRemove)
 	h.userTokenRoutes(m, p)
@@ -314,13 +318,18 @@ func ccFormat(f string) string {
 
 func (h *Handler) repoURL(name string) string { return h.BaseURL() + "/repository/" + name }
 
-// publicRemote is the remote without userinfo, query and fragment, which may
-// hold credentials (the UI shows the same).
+// publicRemote is the remote as it was written (a client that reads another
+// spelling, a trailing slash added, sees a change it did not make), without
+// the userinfo, query and fragment, which may hold credentials (the UI shows
+// the same).
 func publicRemote(rp *repo.Repository) string {
-	if rp.RemoteURL == nil {
+	ru, err := url.Parse(rp.Remote)
+	if err != nil {
 		return ""
 	}
-	ru := *rp.RemoteURL
+	if ru.User == nil && ru.RawQuery == "" && !ru.ForceQuery && ru.Fragment == "" {
+		return rp.Remote
+	}
 	ru.User = nil
 	ru.RawQuery, ru.ForceQuery, ru.Fragment, ru.RawFragment = "", false, "", ""
 	return ru.String()
@@ -358,7 +367,7 @@ func minutes(d config.Duration) int {
 
 func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 	d := rp.Repository
-	storage := map[string]any{"blobStoreName": repo.StoreOf(d), "strictContentTypeValidation": d.StrictContentTypeValidation}
+	storage := map[string]any{"blobStoreName": cmp.Or(d.Nexus.BlobStore, repo.StoreOf(d)), "strictContentTypeValidation": d.StrictContentTypeValidation}
 	if d.Type == "hosted" {
 		storage["writePolicy"] = strings.ToUpper(d.WritePolicy)
 	}
@@ -366,10 +375,15 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 	out := map[string]any{"name": d.Name, "format": nexusFormat(d.Format), "type": d.Type, "url": h.repoURL(d.Name),
 		"online": d.IsOnline(), "storage": storage}
 	if d.Type != "group" { // a Nexus group carries storage and group only
-		out["cleanup"] = map[string]any{"policyNames": policies}
+		// null without policies, as Nexus answers: the Terraform provider
+		// takes an empty list for a cleanup block its configuration lacks.
+		out["cleanup"] = nil
+		if len(policies) > 0 {
+			out["cleanup"] = map[string]any{"policyNames": policies}
+		}
 	}
 	if d.Type == "hosted" {
-		out["component"] = map[string]any{"proprietaryComponents": false}
+		out["component"] = map[string]any{"proprietaryComponents": d.Nexus.ProprietaryComponents}
 	}
 	formatBlocks(out, rp)
 	switch d.Type {
@@ -380,7 +394,7 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 		if a := d.RemoteAuth; a != nil && a.BearerToken != "" { // the proxy sends the token when there is one
 			hc["authentication"] = map[string]any{"type": "bearerToken"}
 		} else if a != nil && a.Username != "" {
-			hc["authentication"] = map[string]any{"type": "username", "username": a.Username}
+			hc["authentication"] = map[string]any{"type": "username", "username": a.Username, "preemptive": d.Nexus.Preemptive}
 		}
 		out["httpClient"] = hc
 		out["routingRule"], out["routingRuleName"] = d.RoutingRule, d.RoutingRule
@@ -503,6 +517,9 @@ type repoBody struct {
 	Cleanup *struct {
 		PolicyNames []string `json:"policyNames"`
 	} `json:"cleanup"`
+	Component *struct {
+		ProprietaryComponents bool `json:"proprietaryComponents"`
+	} `json:"component"`
 	Proxy struct {
 		RemoteURL      string `json:"remoteUrl"`
 		ContentMaxAge  *int   `json:"contentMaxAge"`
@@ -516,14 +533,18 @@ type repoBody struct {
 		MemberNames    []string `json:"memberNames"`
 		WritableMember string   `json:"writableMember"`
 	} `json:"group"`
-	HTTPClient struct {
-		Blocked        bool  `json:"blocked"`
-		AutoBlock      *bool `json:"autoBlock"`
+	// HTTPClient is a proxy's; a body without one changes nothing of it.
+	HTTPClient *struct {
+		Blocked   bool  `json:"blocked"`
+		AutoBlock *bool `json:"autoBlock"`
+		// Authentication absent removes the stored credentials, as a Nexus
+		// PUT does. Preemptive is kept for the client (config.NexusKept).
 		Authentication *struct {
 			Type        string `json:"type"` // username (or empty), bearerToken; ntlm is refused
 			Username    string `json:"username"`
 			Password    string `json:"password"`
 			BearerToken string `json:"bearerToken"`
+			Preemptive  bool   `json:"preemptive"`
 		} `json:"authentication"`
 		// Connection is the proxy's own connection settings; absent keeps them.
 		Connection *config.Connection `json:"connection"`
@@ -587,15 +608,20 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 		"writePolicy":      strings.ToLower(b.Storage.WritePolicy),
 		"online":           b.Online,
 		"blobStore":        b.Storage.BlobStoreName,
+
+		"strictContentTypeValidation": b.Storage.StrictContentTypeValidation,
 	}
-	if typ == "hosted" {
-		out["strictContentTypeValidation"] = b.Storage.StrictContentTypeValidation
+	var kept config.NexusKept // what only reads back (hosted: proprietaryComponents)
+	if c := b.Component; c != nil && typ == "hosted" {
+		kept.ProprietaryComponents = c.ProprietaryComponents
 	}
 	if typ == "proxy" {
-		out["blocked"], out["autoBlock"] = b.HTTPClient.Blocked, b.HTTPClient.AutoBlock
 		out["negativeCacheEnabled"] = b.NegativeCache.Enabled
-		if c := b.HTTPClient.Connection; c != nil {
-			out["connection"] = c
+	}
+	if hc := b.HTTPClient; hc != nil && typ == "proxy" {
+		out["blocked"], out["autoBlock"] = hc.Blocked, hc.AutoBlock
+		if hc.Connection != nil {
+			out["connection"] = hc.Connection
 		}
 	}
 	if cur != nil {
@@ -624,31 +650,49 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 	}
 	if typ == "group" { // Nexus group bodies name a blob store and a maven object; Command Center groups have neither
 		out["blobStore"], out["versionPolicy"] = "", ""
+		kept.BlobStore = b.Storage.BlobStoreName
 	}
 	if b.RoutingRule != nil {
 		out["routingRule"] = *b.RoutingRule
 	} else if b.RoutingRuleName != nil {
 		out["routingRule"] = *b.RoutingRuleName
 	}
-	if b.Cleanup != nil {
+	// A Nexus PUT replaces the repository: a body without cleanup has no
+	// policies, and an httpClient without authentication no credentials
+	// (the Terraform provider removes both by leaving them out).
+	switch {
+	case b.Cleanup != nil:
 		out["cleanupPolicies"] = append([]string{}, b.Cleanup.PolicyNames...)
+	case typ != "group":
+		out["cleanupPolicies"] = []string{}
 	}
-	if a := b.HTTPClient.Authentication; a != nil {
-		if strings.EqualFold(a.Type, "bearerToken") { // an empty token on update keeps the stored one
+	if hc := b.HTTPClient; hc != nil {
+		switch a := hc.Authentication; {
+		case a == nil:
+			if cur != nil && cur.RemoteAuth != nil {
+				out["remoteAuth"] = map[string]any{"clearPassword": true, "clearBearerToken": true}
+			}
+		case strings.EqualFold(a.Type, "bearerToken"): // an empty token on update keeps the stored one
 			out["remoteAuth"] = map[string]any{"bearerToken": a.BearerToken, "clearPassword": true}
-		} else {
+		default:
 			out["remoteAuth"] = map[string]any{"username": a.Username, "password": a.Password, "clearBearerToken": a.Type != ""}
+			kept.Preemptive = a.Preemptive
 		}
 	}
 	if b.Replication != nil {
 		out["replication"] = b.Replication
 	}
-	return out, formatRequest(ccFormat(format), typ, b, out, cur)
+	errs := formatRequest(ccFormat(format), typ, b, out, cur, &kept)
+	out["nexus"] = kept
+	return out, errs
 }
 
 // supportedAuth refuses a remote authentication type Command Center does
 // not speak with 400, rather than sending the credentials as Basic.
 func supportedAuth(w http.ResponseWriter, b repoBody) bool {
+	if b.HTTPClient == nil {
+		return true
+	}
 	a := b.HTTPClient.Authentication
 	if a == nil || a.Type == "" || a.Type == "username" || a.Type == "bearerToken" {
 		return true

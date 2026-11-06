@@ -76,6 +76,9 @@ func (u *UI) putRealms(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Realms []meta.Realm `json:"realms"`
+		// Off, in place of realms, turns one realm off and keeps the others
+		// as stored: read under the lock, so such changes do not undo each other.
+		Off string `json:"off"`
 	}
 	if !decodeBody(w, r, &body) {
 		return
@@ -85,6 +88,17 @@ func (u *UI) putRealms(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer unlock()
+	if body.Off != "" {
+		set, err := u.DB.LoadSettings(r.Context())
+		if err != nil {
+			u.fail(w, r, err)
+			return
+		}
+		for _, x := range set.Realms {
+			x.Enabled = x.Enabled && x.ID != body.Off
+			body.Realms = append(body.Realms, x)
+		}
+	}
 	if body.Realms == nil {
 		body.Realms = []meta.Realm{}
 	}
@@ -164,6 +178,8 @@ type ldapDTO struct {
 	GroupAttr          string              `json:"groupAttr"`
 	GroupMappings      []meta.GroupMapping `json:"groupMappings"`
 	DefaultRoles       []string            `json:"defaultRoles"`
+	UserOneLevel       bool                `json:"userOneLevel"`
+	GroupsAsRoles      bool                `json:"groupsAsRoles"`
 }
 
 func ldapJSON(c meta.LDAP) ldapDTO {
@@ -176,7 +192,8 @@ func ldapJSON(c meta.LDAP) ldapDTO {
 	return ldapDTO{URL: c.URL, StartTLS: c.StartTLS, InsecureSkipVerify: c.InsecureSkipVerify, BindDN: c.BindDN,
 		BindPasswordSet: c.BindPassword != "", TimeoutSeconds: c.TimeoutSeconds, UserBaseDN: c.UserBaseDN,
 		UserFilter: c.UserFilter, UserIDAttr: c.UserIDAttr, NameAttr: c.NameAttr, EmailAttr: c.EmailAttr,
-		GroupAttr: c.GroupAttr, GroupMappings: c.GroupMappings, DefaultRoles: c.DefaultRoles}
+		GroupAttr: c.GroupAttr, GroupMappings: c.GroupMappings, DefaultRoles: c.DefaultRoles,
+		UserOneLevel: c.UserOneLevel, GroupsAsRoles: c.GroupsAsRoles}
 }
 
 type ldapRequest struct {
@@ -195,6 +212,9 @@ type ldapRequest struct {
 	GroupAttr          string              `json:"groupAttr"`
 	GroupMappings      []meta.GroupMapping `json:"groupMappings"`
 	DefaultRoles       []string            `json:"defaultRoles"`
+	// The form has no fields for these two: absent keeps the stored value.
+	UserOneLevel  *bool `json:"userOneLevel"`
+	GroupsAsRoles *bool `json:"groupsAsRoles"`
 }
 
 func (u *UI) getLDAP(w http.ResponseWriter, r *http.Request) {
@@ -241,6 +261,13 @@ func (u *UI) putLDAP(w http.ResponseWriter, r *http.Request) {
 		UserIDAttr: orDefault(body.UserIDAttr, def.UserIDAttr), NameAttr: orDefault(body.NameAttr, def.NameAttr),
 		EmailAttr: orDefault(body.EmailAttr, def.EmailAttr), GroupAttr: orDefault(body.GroupAttr, def.GroupAttr),
 		DefaultRoles: append([]string{}, body.DefaultRoles...),
+		UserOneLevel: cur.UserOneLevel, GroupsAsRoles: cur.GroupsAsRoles,
+	}
+	if body.UserOneLevel != nil {
+		next.UserOneLevel = *body.UserOneLevel
+	}
+	if body.GroupsAsRoles != nil {
+		next.GroupsAsRoles = *body.GroupsAsRoles
 	}
 	for _, m := range body.GroupMappings {
 		next.GroupMappings = append(next.GroupMappings, meta.GroupMapping{Group: strings.TrimSpace(m.Group), Roles: append([]string{}, m.Roles...)})
@@ -327,6 +354,8 @@ func ldapChanged(a, b meta.LDAP) string {
 	add(a.UserIDAttr != b.UserIDAttr || a.NameAttr != b.NameAttr || a.EmailAttr != b.EmailAttr || a.GroupAttr != b.GroupAttr, "attributes")
 	add(ldapJSONString(a.GroupMappings) != ldapJSONString(b.GroupMappings), "groupMappings")
 	add(strings.Join(a.DefaultRoles, ",") != strings.Join(b.DefaultRoles, ","), "defaultRoles")
+	add(a.UserOneLevel != b.UserOneLevel, "userOneLevel")
+	add(a.GroupsAsRoles != b.GroupsAsRoles, "groupsAsRoles")
 	return strings.Join(keys, ", ")
 }
 

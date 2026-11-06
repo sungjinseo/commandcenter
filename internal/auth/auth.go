@@ -854,6 +854,7 @@ var AppDomains = map[string][]string{
 	"selectors":  {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
 	"settings":   {meta.ActionRead},
 	"tasks":      {meta.ActionRead, meta.ActionRun},
+	"usertoken":  {meta.ActionRead, meta.ActionAdd, meta.ActionDelete}, // open to every signed-in user, as the last five
 	"blobstores": {meta.ActionRead},
 	"tags":       {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
 

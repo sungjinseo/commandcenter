@@ -221,6 +221,42 @@ func TestFetchTargetNotHTML(t *testing.T) {
 	}
 }
 
+// Strict content type validation of a proxy: a remote file that is not what
+// its name promises is a 404, negative-cached and not stored; a name that
+// promises nothing is stored; a cached file revalidated with such content is
+// served stale. Without the setting everything is stored as before.
+func TestFetchStrictContentType(t *testing.T) {
+	rm := &remote{} // every body is "body of <path>": no zip, no XML
+	f, rp, c := setup(t, rm)
+	if res, err := f.Fetch(ctx, rp, "g/loose.jar", Content); err != nil || read(t, f, res.Asset) != "body of /maven2/g/loose.jar" {
+		t.Fatalf("without the setting: %+v %v", res, err)
+	}
+	rp.StrictContentTypeValidation = true
+	hits := rm.hits.Load()
+	for i := 0; i < 2; i++ {
+		if _, err := f.Fetch(ctx, rp, "g/a.jar", Content); repo.StatusOf(err) != 404 {
+			t.Fatalf("fetch %d of a jar that is no zip: %v", i, err)
+		}
+	}
+	if rm.hits.Load() != hits+1 {
+		t.Fatalf("hits = %d, want %d (negative-cached)", rm.hits.Load(), hits+1)
+	}
+	if _, err := f.Store.Get(ctx, "p", "g/a.jar"); !errors.Is(err, repo.ErrNotFound) {
+		t.Fatalf("mismatching content cached: %v", err)
+	}
+	if res, err := f.Fetch(ctx, rp, "g/a.jar.sha1", Content); err != nil || read(t, f, res.Asset) != "body of /maven2/g/a.jar.sha1" {
+		t.Fatalf("a name without a signature: %+v %v", res, err)
+	}
+	if _, err := f.Store.Put(ctx, "p", "g/maven-metadata.xml", "application/xml", strings.NewReader("<cached/>")); err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(2 * time.Hour)
+	res, err := f.Fetch(ctx, rp, "g/maven-metadata.xml", Metadata)
+	if err != nil || !res.Stale || read(t, f, res.Asset) != "<cached/>" {
+		t.Fatalf("cached, revalidated with other content: %+v %v", res, err)
+	}
+}
+
 func TestFetchSingleflight(t *testing.T) {
 	// The remote is slow enough, and the callers start together, that all
 	// ten overlap even on a loaded machine.

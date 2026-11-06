@@ -47,6 +47,7 @@ const (
 	ResultUnwillingToPerform  = 53
 	maxEntries                = 2 // the search size limit: two is enough to detect ambiguity
 	defaultTimeout            = 5 * time.Second
+	scopeSingleLevel          = 1
 	scopeWholeSubtree         = 2
 	derefNever                = 0
 	searchTimeLimitSeconds    = 10
@@ -321,6 +322,7 @@ func (c *Conn) Bind(dn, password string) error {
 // SearchRequest is a whole-subtree search.
 type SearchRequest struct {
 	BaseDN     string
+	OneLevel   bool   // the direct children of BaseDN, not its whole subtree
 	Filter     string // RFC 4515; compiled with CompileFilter
 	Attributes []string
 	SizeLimit  int
@@ -341,9 +343,13 @@ func (c *Conn) Search(req SearchRequest) ([]Entry, error) {
 			attrs = append(attrs, ber.String(ber.TagOctetString, a))
 		}
 	}
+	scope := int64(scopeWholeSubtree)
+	if req.OneLevel {
+		scope = scopeSingleLevel
+	}
 	id, err := c.send(ber.TLV(opSearchRequest,
 		ber.String(ber.TagOctetString, req.BaseDN),
-		ber.Int(ber.TagEnumerated, scopeWholeSubtree),
+		ber.Int(ber.TagEnumerated, scope),
 		ber.Int(ber.TagEnumerated, derefNever),
 		ber.Int(ber.TagInteger, int64(req.SizeLimit)),
 		ber.Int(ber.TagInteger, searchTimeLimitSeconds),

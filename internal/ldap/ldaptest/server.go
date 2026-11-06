@@ -252,13 +252,16 @@ func (s *Server) search(content []byte) ([][]byte, int64) {
 	if err != nil {
 		return nil, 2
 	}
-	var sizeLimit int64
+	var scope, sizeLimit int64
 	for i, want := range []byte{ber.TagEnumerated, ber.TagEnumerated, ber.TagInteger, ber.TagInteger, ber.TagBoolean} {
 		var c []byte
 		if c, rest, err = ber.Expect(rest, want); err != nil {
 			return nil, 2
 		}
-		if i == 2 {
+		switch i {
+		case 0:
+			scope, _ = ber.ParseInt(c)
+		case 2:
 			sizeLimit, _ = ber.ParseInt(c)
 		}
 	}
@@ -285,6 +288,9 @@ func (s *Server) search(content []byte) ([][]byte, int64) {
 	for _, e := range entries {
 		if !underBase(e.DN, string(base)) {
 			continue
+		}
+		if scope == 1 && strings.Count(strings.TrimSuffix(strings.ToLower(e.DN), ","+strings.ToLower(string(base))), ",") > 0 {
+			continue // below a direct child
 		}
 		ok, valid := match(filter, e)
 		if !valid {

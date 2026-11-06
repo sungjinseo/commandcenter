@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -582,5 +583,40 @@ func TestDialErrorPhases(t *testing.T) {
 	s.SetNoticeOnSearch(true)
 	if _, err := cl.Authenticate(ctx, cfg, "alice", "alice-pw"); err == nil || errors.As(err, &de) {
 		t.Fatalf("notice after the bind: %v", err)
+	}
+}
+
+// UserOneLevel finds the direct children of the base only; the whole subtree
+// is the default.
+func TestUserOneLevel(t *testing.T) {
+	s := ldaptest.New(t, nil)
+	s.Add(ldaptest.Entry{DN: "uid=a,ou=people,dc=x", Password: "pw", Attrs: map[string][]string{"uid": {"a"}}})
+	s.Add(ldaptest.Entry{DN: "uid=b,ou=sub,ou=people,dc=x", Password: "pw", Attrs: map[string][]string{"uid": {"b"}}})
+	cfg := meta.DefaultLDAP()
+	cfg.URL, cfg.UserBaseDN = s.URL("ldap"), "ou=people,dc=x"
+	cl := &ldap.Client{}
+	for _, c := range []struct {
+		oneLevel bool
+		user     string
+		err      error
+	}{{false, "a", nil}, {false, "b", nil}, {true, "a", nil}, {true, "b", ldap.ErrNoSuchUser}} {
+		cfg.UserOneLevel = c.oneLevel
+		if _, err := cl.Authenticate(context.Background(), cfg, c.user, "pw"); !errors.Is(err, c.err) {
+			t.Errorf("one level %v, user %s: %v, want %v", c.oneLevel, c.user, err, c.err)
+		}
+	}
+}
+
+// GroupsAsRoles grants the role named as a group, by a DN's first value or a
+// plain name, beside the mappings; never the admin role.
+func TestMapRolesGroupsAsRoles(t *testing.T) {
+	cfg := meta.LDAP{GroupMappings: []meta.GroupMapping{{Group: "mapped", Roles: []string{"from-mapping"}}}, DefaultRoles: []string{"everyone"}}
+	groups := []string{"cn=devs,ou=groups,dc=x", "ops", "cn=mapped,ou=groups,dc=x", "cn=admin,ou=groups,dc=x", "admin", " "}
+	if roles, _ := ldap.MapRoles(cfg, groups); !slices.Equal(roles, []string{"from-mapping", "everyone"}) {
+		t.Errorf("without GroupsAsRoles: %v", roles)
+	}
+	cfg.GroupsAsRoles = true
+	if roles, _ := ldap.MapRoles(cfg, groups); !slices.Equal(roles, []string{"from-mapping", "everyone", "devs", "ops", "mapped"}) {
+		t.Errorf("with GroupsAsRoles: %v", roles)
 	}
 }

@@ -481,6 +481,9 @@ func repoRequestOf(d config.Repository) repoRequest {
 		v := *r
 		b.Replication = &v
 	}
+	if k := d.Nexus; k != (config.NexusKept{}) {
+		b.Nexus = &k
+	}
 	ev := d.Evaluation // always given, so an apply also resets an override to inherit
 	if ev == "" {
 		ev = "inherit"
@@ -857,6 +860,12 @@ func ldapMerged(body ldapRequest) meta.LDAP {
 		GroupAttr: orDefault(body.GroupAttr, def.GroupAttr), GroupMappings: body.GroupMappings, DefaultRoles: body.DefaultRoles}
 	if next.TimeoutSeconds == 0 {
 		next.TimeoutSeconds = def.TimeoutSeconds
+	}
+	if body.UserOneLevel != nil {
+		next.UserOneLevel = *body.UserOneLevel
+	}
+	if body.GroupsAsRoles != nil {
+		next.GroupsAsRoles = *body.GroupsAsRoles
 	}
 	return next
 }

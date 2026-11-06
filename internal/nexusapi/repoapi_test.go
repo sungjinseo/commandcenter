@@ -67,33 +67,32 @@ func TestFormatSectionsRoundTrip(t *testing.T) {
 	const remote = `"proxy":{"remoteUrl":"%s","contentMaxAge":1440,"metadataMaxAge":1440},"negativeCache":{"enabled":true,"timeToLive":1440},"httpClient":{"blocked":false,"autoBlock":true}`
 	hosted := func(name, extra string) string {
 		return `{"name":"` + name + `","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true,"writePolicy":"ALLOW"},` +
-			`"cleanup":{"policyNames":[]},"component":{"proprietaryComponents":false}` + extra + `}`
+			`"component":{"proprietaryComponents":false}` + extra + `}`
 	}
-	// Proxies and groups: strictContentTypeValidation is a hosted setting
-	// here, so true is accepted and answered false (a known difference).
+	// Proxies and groups keep strictContentTypeValidation too (the
+	// provider's default is true), and the remote reads back as written.
 	proxy := func(name, url, extra string) string {
-		return `{"name":"` + name + `","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":false},` +
-			`"cleanup":{"policyNames":[]},` + fmt.Sprintf(remote, url) + extra + `}`
+		return `{"name":"` + name + `","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true},` +
+			fmt.Sprintf(remote, url) + extra + `}`
 	}
 	cases := []struct{ path, name, body string }{
 		{"docker/hosted", "docker-h", strings.Replace(hosted("docker-h", ","+docker), `"writePolicy":"ALLOW"`, `"writePolicy":"ALLOW","latestPolicy":false`, 1)},
 		{"docker/proxy", "docker-p", proxy("docker-p", "https://registry-1.docker.io", ","+docker+
 			`,"dockerProxy":{"indexType":"HUB","indexUrl":null,"cacheForeignLayers":false,"foreignLayerUrlWhitelist":[]}`)},
-		{"docker/group", "docker-g", `{"name":"docker-g","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":false},` +
+		{"docker/group", "docker-g", `{"name":"docker-g","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true},` +
 			`"group":{"memberNames":["docker-h","docker-p"],"writableMember":"docker-h"},` + docker + `}`},
 		{"yum/hosted", "yum-h", hosted("yum-h", `,"yum":{"repodataDepth":1,"deployPolicy":"STRICT"}`)},
 		{"nuget/proxy", "nuget-p", proxy("nuget-p", "https://api.nuget.org/v3/index.json", `,"nugetProxy":{"queryCacheItemMaxAge":3600,"nugetVersion":"V3"}`)},
 		{"npm/proxy", "npm-p", proxy("npm-p", "https://registry.npmjs.org", `,"npm":{"removeNonCataloged":false,"removeQuarantined":false}`)},
 		{"pypi/proxy", "pypi-p", proxy("pypi-p", "https://pypi.org", `,"pypi":{"removeQuarantined":false}`)},
 		{"cargo/hosted", "cargo-h", hosted("cargo-h", `,"cargo":{"requireAuthentication":true}`)},
-		{"maven/group", "mvn-g", `{"name":"mvn-g","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":false},` +
+		{"maven/group", "mvn-g", `{"name":"mvn-g","online":true,"storage":{"blobStoreName":"default","strictContentTypeValidation":true},` +
 			`"group":{"memberNames":["maven-releases"],"writableMember":null}}`},
 	}
 	for _, c := range cases {
 		e.want("POST", v1+"/repositories/"+c.path, "admin", c.body, 201)
 		got := decodeMap(t, e.want("GET", v1+"/repositories/"+c.path+"/"+c.name, "admin", "", 200))
 		want := decodeMap(t, []byte(c.body))
-		delete(want, "proxy") // remoteUrl comes back with a trailing slash
 		if d := subset(want, got, c.name); d != "" {
 			t.Errorf("read back: %s", d)
 		}
@@ -210,7 +209,7 @@ func TestProxyBearerToken(t *testing.T) {
 		t.Fatalf("after a PUT without the token: %q", got)
 	}
 	e.want("PUT", v1+"/repositories/raw/proxy/raw-tok", "admin", body(`{"type":"username","username":"bob","password":"pw2"}`), 204)
-	if a := authOf(); !reflect.DeepEqual(a, map[string]any{"type": "username", "username": "bob"}) {
+	if a := authOf(); !reflect.DeepEqual(a, map[string]any{"type": "username", "username": "bob", "preemptive": false}) {
 		t.Fatalf("authentication = %v", a)
 	}
 	if got := sent("c.txt"); got != "Basic "+base64.StdEncoding.EncodeToString([]byte("bob:pw2")) {
@@ -280,7 +279,7 @@ func TestS3BlobStoreLifecycle(t *testing.T) {
 	}
 	want := map[string]any{"name": "s3a", "type": "S3", "softQuota": map[string]any{"type": "spaceUsedQuota", "limit": float64(5000)},
 		"bucketConfiguration": map[string]any{
-			"bucket":                   map[string]any{"region": c.Region, "name": c.Bucket, "prefix": "cc"},
+			"bucket":                   map[string]any{"region": c.Region, "name": c.Bucket, "prefix": "cc", "expiration": float64(-1)},
 			"bucketSecurity":           map[string]any{"accessKeyId": c.AccessKey, "secretAccessKey": "#~NXRM~PLACEHOLDER~PASSWORD~#"},
 			"encryption":               map[string]any{"encryptionType": "s3ManagedEncryption"},
 			"advancedBucketConnection": map[string]any{"endpoint": c.Endpoint, "forcePathStyle": true},
@@ -304,6 +303,22 @@ func TestS3BlobStoreLifecycle(t *testing.T) {
 	e.wantField("PUT", v1+"/blobstores/s3/s3a", body("s3x", "cc", "bucketSecurity", c.SecretKey), "name")
 	e.wantField("POST", v1+"/blobstores/s3", strings.Replace(body("s3c", "cc3", "bucketSecurity", c.SecretKey), `"accessKeyId"`, `"role":"arn:aws:iam::1:role/x","accessKeyId"`, 1),
 		"bucketConfiguration.bucketSecurity.role")
+	// There is no bucket lifecycle rule: an expiration only reads back (Nexus's default is 3).
+	e.want("POST", v1+"/blobstores/s3", "admin", strings.Replace(body("s3d", "cc4", "bucketSecurity", c.SecretKey), `"prefix":"cc4"`, `"prefix":"cc4","expiration":3`, 1), 201)
+	if got := decodeMap(t, e.want("GET", v1+"/blobstores/s3/s3d", "admin", "", 200)); got["bucketConfiguration"].(map[string]any)["bucket"].(map[string]any)["expiration"] != float64(3) {
+		t.Fatalf("expiration: %v", got)
+	}
+	e.wantField("POST", v1+"/blobstores/s3", strings.Replace(body("s3e", "cc5", "bucketSecurity", c.SecretKey), `"prefix":"cc5"`, `"prefix":"cc5","expiration":-2`, 1),
+		"bucketConfiguration.bucket.expiration")
+	// The signer type reads back as written, and only one that means Signature Version 4 is taken.
+	signed := strings.Replace(body("s3a", "cc", "bucketSecurity", c.SecretKey), `"forcePathStyle":true`, `"forcePathStyle":true,"signerType":"DEFAULT"`, 1)
+	e.want("PUT", v1+"/blobstores/s3/s3a", "admin", signed, 204)
+	got := decodeMap(t, e.want("GET", v1+"/blobstores/s3/s3a", "admin", "", 200))
+	if a := got["bucketConfiguration"].(map[string]any)["advancedBucketConnection"].(map[string]any); a["signerType"] != "DEFAULT" {
+		t.Fatalf("the signer type: %v", a)
+	}
+	e.wantField("PUT", v1+"/blobstores/s3/s3a", strings.Replace(signed, `"signerType":"DEFAULT"`, `"signerType":"S3SignerType"`, 1), "bucketConfiguration.advancedBucketConnection.signerType")
+	e.want("PUT", v1+"/blobstores/s3/s3a", "admin", body("s3a", "cc", "bucketSecurity", c.SecretKey), 204)
 	e.want("GET", v1+"/blobstores/s3/default", "admin", "", 400)
 	e.want("GET", v1+"/blobstores/file/s3a", "admin", "", 400)
 	e.want("GET", v1+"/blobstores/s3/nope", "admin", "", 404)
@@ -358,6 +373,31 @@ func TestEmailCompat(t *testing.T) {
 	}
 	starttls := strings.NewReplacer(`"startTlsEnabled":false`, `"startTlsEnabled":true`, `"startTlsRequired":false`, `"startTlsRequired":true`,
 		`"sslServerIdentityCheckEnabled":false`, `"sslServerIdentityCheckEnabled":true`, `"nexusTrustStoreEnabled":false`, `"nexusTrustStoreEnabled":true`).Replace(plain)
+	// The switches read back as written (false is the Terraform provider's
+	// default for the trust store), the identity check in the mode it was
+	// written for.
+	for _, c := range []struct {
+		what, body      string
+		identity, trust bool
+	}{
+		{"true without TLS", strings.NewReplacer(`"sslServerIdentityCheckEnabled":false`, `"sslServerIdentityCheckEnabled":true`, `"nexusTrustStoreEnabled":false`, `"nexusTrustStoreEnabled":true`).Replace(plain), true, true},
+		{"false over STARTTLS", strings.Replace(starttls, `"nexusTrustStoreEnabled":true`, `"nexusTrustStoreEnabled":false`, 1), true, false},
+		{"false without TLS", plain, false, false},
+	} {
+		e.want("PUT", v1+"/email", "admin", c.body, 204)
+		got = decodeMap(t, e.want("GET", v1+"/email", "admin", "", 200))
+		if got["sslServerIdentityCheckEnabled"] != c.identity || got["nexusTrustStoreEnabled"] != c.trust {
+			t.Errorf("%s: read back %v %v", c.what, got["sslServerIdentityCheckEnabled"], got["nexusTrustStoreEnabled"])
+		}
+	}
+	// A mode changed in the web UI answers what happens there.
+	if st, b := e.ui("PUT", "/-/api/settings/smtp", fmt.Sprintf(`{"enabled":true,"host":"127.0.0.1","port":%d,"security":"tls","from":"cc@example.com"}`, port)); st != 200 {
+		t.Fatalf("ui update: %d %s", st, b)
+	}
+	got = decodeMap(t, e.want("GET", v1+"/email", "admin", "", 200))
+	if got["sslOnConnectEnabled"] != true || got["sslServerIdentityCheckEnabled"] != true {
+		t.Errorf("after the web UI: %v", got)
+	}
 	e.want("PUT", v1+"/email", "admin", starttls, 204)
 	got = decodeMap(t, e.want("GET", v1+"/email", "admin", "", 200))
 	if d := subset(map[string]any{"startTlsEnabled": true, "startTlsRequired": true, "sslOnConnectEnabled": false, "sslServerIdentityCheckEnabled": true, "nexusTrustStoreEnabled": true}, got, "email"); d != "" {

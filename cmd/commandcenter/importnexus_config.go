@@ -524,7 +524,7 @@ func (m *migration) blobStores() {
 					it.skip = "its member " + member + " is missing on the target"
 				}
 			}
-			it.want = obj{"name": name, "members": g["members"], "fillPolicy": g["fillPolicy"]} // a group has no quota in Command Center's API
+			it.want = obj{"name": name, "members": g["members"], "fillPolicy": g["fillPolicy"], "softQuota": g["softQuota"]}
 			it.create, it.update = &request{http.MethodPost, nx + "/blobstores/group", it.want}, &request{http.MethodPut, one, it.want}
 		case typ == "S3":
 			var c obj
@@ -651,9 +651,9 @@ func (m *migration) repository(r, cur obj) item {
 			it.skip = "its blob store " + store + " is missing on the target"
 			return it
 		}
-		storage := obj{"blobStoreName": store}
+		storage := obj{"blobStoreName": store, "strictContentTypeValidation": st["strictContentTypeValidation"]}
 		if typ == "hosted" {
-			storage["strictContentTypeValidation"], storage["writePolicy"] = st["strictContentTypeValidation"], st["writePolicy"]
+			storage["writePolicy"] = st["writePolicy"]
 		}
 		policies := []string{}
 		for _, p := range list(sub(r, "cleanup"), "policyNames") {
@@ -669,8 +669,7 @@ func (m *migration) repository(r, cur obj) item {
 	switch typ {
 	case "proxy":
 		remote := pick(sub(r, "proxy"), "remoteUrl", "contentMaxAge", "metadataMaxAge")
-		// Command Center keeps the remote as it is given and answers it
-		// with the "/" its path ends with there.
+		// The same remote, but for the "/" its path ends with there.
 		if cp := sub(cur, "proxy"); str(cp, "remoteUrl") == str(remote, "remoteUrl")+"/" {
 			cp["remoteUrl"] = remote["remoteUrl"]
 		}
@@ -680,6 +679,11 @@ func (m *migration) repository(r, cur obj) item {
 		client := pick(hc, "blocked", "autoBlock")
 		if c := sub(hc, "connection"); c != nil {
 			client["connection"] = pick(c, "retries", "userAgentSuffix", "timeout", "enableCircularRedirects", "enableCookies", "useTrustStore")
+		}
+		// A PUT without credentials takes the proxy's away, so what the
+		// target holds is sent back: its secret stays, being left out.
+		if ca := sub(sub(cur, "httpClient"), "authentication"); ca != nil {
+			client["authentication"] = ca
 		}
 		want["httpClient"] = client
 		// The remote's credentials are not readable. The proxy is made
@@ -1089,7 +1093,9 @@ func (m *migration) ldap() {
 		"userBaseDN": base, "userFilter": userFilter, "userIdAttr": idAttr,
 		"nameAttr":  cmp.Or(str(s, "userRealNameAttribute"), "cn"),
 		"emailAttr": cmp.Or(str(s, "userEmailAddressAttribute"), "mail"),
-		"groupAttr": cmp.Or(str(s, "userMemberOfAttribute"), "memberOf")}
+		"groupAttr": cmp.Or(str(s, "userMemberOfAttribute"), "memberOf"),
+
+		"userOneLevel": s["userSubtree"] == false}
 	if timeout > 0 {
 		want["timeoutSeconds"] = min(max(timeout, meta.MinLDAPTimeoutSeconds), meta.MaxLDAPTimeoutSeconds)
 	}
