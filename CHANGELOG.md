@@ -174,6 +174,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Web UI: a repository administrator gets "Invalidate cache" on the proxies and groups they can open.
 - Web UI: a note beside a p2 proxy's remote says that changing it deletes the cache.
 - `test/smoke/purge-smoke.sh`: the purge with real npm, pip and go against the public registries.
+- Web UI: the LDAP form has the group type, the static group settings with a quick fill for `groupOfNames`,
+  `groupOfUniqueNames` and `posixGroup`, and the `userOneLevel` and `groupsAsRoles` check boxes.
+- Web UI: a proxy's form has the `strictContentTypeValidation` switch ("Do not cache remote files whose first
+  bytes contradict their name").
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such

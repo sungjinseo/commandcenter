@@ -332,7 +332,8 @@ func TestOpsWired(t *testing.T) {
 		"admin.js":    {`viewPolicies(view, p0)`, `logsCard(isLive, criteria)`, `trendCard(isLive, "24h"`},
 		"dash.js":     {`trendCard(isLive, "7d"`, `api("events?limit=6")`},
 		"ops.js":      {`"cleanup/policies"`, `"/preview"`, `"/run"`, `"/-/api/logs/download"`, `api("stats/requests?range="`},
-		"repoform.js": {`if (polPick) b.cleanupPolicies = polPick.get();`},
+		"repoform.js": {`if (polPick) b.cleanupPolicies = polPick.get();`, `isProxy ? t("rf.strictProxy") : t("rf.strict")`},
+		"access.js":   {`groupType: groupType.value`, `groupMemberFormat: memberFormat.value`, `userOneLevel: oneLevel.checked`, `groupsAsRoles: asRoles.checked`},
 		"browse.js":   {`t("comp.downloads")`, `t("comp.lastDownloaded")`},
 	} {
 		js := readStatic(t, file)

@@ -669,6 +669,9 @@ export async function viewRealmConfig(view, id) {
     h("div", { class: "stack" }, nodes));
 }
 
+// objectClass, name attribute, member attribute and member format of the common group entries.
+const LDAP_GROUP_SHAPES = [["groupOfNames", "cn", "member", "${dn}"], ["groupOfUniqueNames", "cn", "uniqueMember", "${dn}"], ["posixGroup", "cn", "memberUid", "${username}"]];
+
 function ldapSettings(ld, rl, isLive) {
   // ---- LDAP form
   const roleOpts = roleItems(rl.roles || []);
@@ -691,6 +694,42 @@ function ldapSettings(ld, rl, isLive) {
   const nameAttr = textIn(ld.nameAttr, { placeholder: "cn" });
   const emailAttr = textIn(ld.emailAttr, { placeholder: "mail" });
   const groupAttr = textIn(ld.groupAttr, { placeholder: "memberOf" });
+  const oneLevel = h("input", { type: "checkbox", checked: !!ld.userOneLevel });
+  const asRoles = h("input", { type: "checkbox", checked: !!ld.groupsAsRoles });
+  // Where the groups come from: an attribute of the user, or the group entries that list their members.
+  const groupType = sel([["dynamic", t("ldap.groupDynamic")], ["static", t("ldap.groupStatic")]], ld.groupType === "static" ? "static" : "dynamic");
+  const groupBase = textIn(ld.groupBaseDN, { maxlength: 300, placeholder: "ou=groups,dc=example,dc=com" });
+  const groupSubtree = h("input", { type: "checkbox", checked: !!ld.groupSubtree });
+  const groupClass = textIn(ld.groupObjectClass, { placeholder: "groupOfNames" });
+  const groupId = textIn(ld.groupIdAttr, { placeholder: "cn" });
+  const memberAttr = textIn(ld.groupMemberAttr, { placeholder: "member" });
+  const memberFormat = textIn(ld.groupMemberFormat, { class: "mono", maxlength: 300, placeholder: "${dn}" });
+  // Quick fill: the three common kinds of group entry.
+  const fills = LDAP_GROUP_SHAPES.map(([cls, id, member, format]) => {
+    const b = button(cls, "small");
+    b.addEventListener("click", () => {
+      groupClass.value = cls;
+      groupId.value = id;
+      memberAttr.value = member;
+      memberFormat.value = format;
+      form.dispatchEvent(new Event("input"));
+    });
+    return b;
+  });
+  const groupAttrField = field(t("ldap.groupAttr"), groupAttr);
+  const staticFields = [groupField(t("ldap.groupFill"), h("div", { class: "actions" }, fills)), field(t("ldap.groupBase"), groupBase),
+    h("div", { class: "field" }, h("label", { class: "check" }, groupSubtree, t("ldap.groupSubtree"))),
+    field(t("ldap.groupClass"), groupClass), field(t("ldap.groupId"), groupId), field(t("ldap.memberAttr"), memberAttr),
+    field(t("ldap.memberFormat"), memberFormat, t("ldap.memberFormatHelp"), { full: true })];
+  const mapsHelp = h("p", { class: "hint" });
+  const syncGroups = () => {
+    const st = groupType.value === "static";
+    groupAttrField.hidden = st;
+    for (const el of staticFields) el.hidden = !st;
+    mapsHelp.textContent = st ? t("ldap.mapsHelpStatic") : t("ldap.mapsHelp");
+  };
+  groupType.addEventListener("change", syncGroups);
+  syncGroups();
   const defaults = checkGroup(roleOpts, ld.defaultRoles || []);
   const adminCnWarn = notice(t("ldap.adminCnWarn"), "amber");
   const adminDefWarn = notice(t("ldap.adminDefaultWarn"), "amber");
@@ -735,11 +774,14 @@ function ldapSettings(ld, rl, isLive) {
       field(t("ldap.timeout"), timeout, t("ldap.timeoutHelp")),
       field(t("ldap.baseDN"), baseDN),
       field(t("ldap.filter"), filter, t("ldap.filterHelp")),
+      h("div", { class: "field full" }, h("label", { class: "check" }, oneLevel, t("ldap.userOneLevel"))),
       field(t("ldap.idAttr"), idAttr), field(t("ldap.nameAttr"), nameAttr),
-      field(t("ldap.emailAttr"), emailAttr), field(t("ldap.groupAttr"), groupAttr),
+      field(t("ldap.emailAttr"), emailAttr), field(t("ldap.groupType"), groupType),
+      groupAttrField, ...staticFields,
+      h("div", { class: "field full" }, h("label", { class: "check" }, asRoles, t("ldap.asRoles"))),
       groupField(t("ldap.defaults"), defaults.el, t("ldap.defaultsHelp"))),
     insecureWarn,
-    h("h3", { class: "card-title" }, t("ldap.maps")), h("p", { class: "hint" }, t("ldap.mapsHelp")), mapBox,
+    h("h3", { class: "card-title" }, t("ldap.maps")), mapsHelp, mapBox,
     h("div", { class: "actions" }, addMapBtn), adminCnWarn, adminDefWarn, saveHint, h("div", { class: "savebar" }, save));
   syncWarn();
   form.addEventListener("submit", async (ev) => {
@@ -762,6 +804,9 @@ function ldapSettings(ld, rl, isLive) {
         userFilter: filter.value.trim(), userIdAttr: idAttr.value.trim(), nameAttr: nameAttr.value.trim(), emailAttr: emailAttr.value.trim(),
         groupAttr: groupAttr.value.trim(), defaultRoles: defaults.values(),
         groupMappings: maps.map((m) => ({ group: m.group.value.trim(), roles: m.roles.values() })),
+        userOneLevel: oneLevel.checked, groupsAsRoles: asRoles.checked, groupType: groupType.value, groupBaseDN: groupBase.value,
+        groupSubtree: groupSubtree.checked, groupObjectClass: groupClass.value, groupIdAttr: groupId.value,
+        groupMemberAttr: memberAttr.value, groupMemberFormat: memberFormat.value,
       } });
       if (!isLive()) return;
       // update this card in place: the realm lists keep their own unsaved edits

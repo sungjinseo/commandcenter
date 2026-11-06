@@ -487,8 +487,8 @@ export async function viewRepoForm(view, o) {
   // Hosted and proxy of a format with OSV data: whether repository.evaluate monitors it.
   const evalSel = !isGroup && OSV_FORMATS.includes(cfg.format)
     ? select([["inherit", t("rf.evInherit")], ["enabled", t("rf.evOn")], ["disabled", t("rf.evOff")]], cfg.evaluation || "inherit") : null;
-  // Content: strict content type validation (hosted) and Content-Disposition (raw, gitlfs).
-  const strict = isHosted ? checkbox(t("rf.strict"), cfg.strictContentTypeValidation) : null;
+  // Content: strict content type validation (hosted, proxy; a group keeps its stored value) and Content-Disposition (raw, gitlfs).
+  const strict = isGroup ? null : checkbox(isProxy ? t("rf.strictProxy") : t("rf.strict"), cfg.strictContentTypeValidation);
   const disposition = DISPOSITION.includes(cfg.format) || isMaven ? select([["inline", t("rf.dispInline")], ["attachment", t("rf.dispAttachment")]], cfg.contentDisposition || "inline") : null;
   const storedRule = cfg.routingRule || "";
   let rule = null, ruleHint = null;
@@ -618,6 +618,7 @@ export async function viewRepoForm(view, o) {
           h("div", { class: "field full" }, negOn.el, h("small", null, t("rf.negOnHelp"))),
           field(t("rf.negTTL"), negTTL, t("rf.negHelp")),
           rule ? field(t("rf.rule"), rule, t("rf.ruleHelp"), { full: true }) : ruleHint,
+          h("div", { class: "field full" }, strict.el, h("small", null, t("rf.strictProxyHelp"))),
           h("div", { class: "field full" }, autoBlock.el, h("small", null, t("rf.autoBlockHelp"))),
           h("div", { class: "field full" }, blocked.el, h("small", null, t("rf.blockedHelp"))))) : null,
         isProxy ? card(t("rf.cn"), t("rf.cnSub"), fields(
