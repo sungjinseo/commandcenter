@@ -321,7 +321,7 @@ func unitPrefix(format, p string) string {
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]
 		}
-	case "cocoapods": // the version directory: the podspec and the archives fetched for it
+	case "cocoapods": // the version directory: the archives fetched for it
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]
 		}

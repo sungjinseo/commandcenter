@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -438,6 +439,9 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 			if err := r.db.InvalidateCache(ctx, []string{name}); err != nil {
 				return config.Repository{}, err
 			}
+		}
+		if def.Format == "p2" {
+			slog.Info("p2 proxy: the remote changed, its cached site was deleted", "repo", name)
 		}
 	}
 	r.snap.Store(newSnapshot(list, gens))

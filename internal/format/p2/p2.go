@@ -3,18 +3,23 @@
 // caches it (p2.index, the content and artifacts documents, features,
 // plugins and binaries), rewriting the children of a composite repository
 // so that every child resolves through the proxy: a child elsewhere than
-// under the remote is mirrored under .remote/<sha1 of its URL>/. A group is
-// a composite repository whose children are its members.
+// under the remote is mirrored under .remote/<sha1 of its URL>/, and removing
+// p2.mirrorsURL from artifacts documents, which would send clients elsewhere
+// for the bundles. A group is a composite repository whose children are its
+// members.
 package p2
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
 )
@@ -23,11 +28,12 @@ import (
 type Handler struct {
 	Store   *repo.Store
 	Fetcher *proxy.Fetcher
-	BaseURL func() string // the prefix of a group's child locations
+
+	noMirrors sync.Map // blob sha256: artifacts documents read and found without p2.mirrorsURL (withoutMirrors)
 }
 
-func New(store *repo.Store, fetcher *proxy.Fetcher, baseURL func() string) *Handler {
-	return &Handler{Store: store, Fetcher: fetcher, BaseURL: baseURL}
+func New(store *repo.Store, fetcher *proxy.Fetcher) *Handler {
+	return &Handler{Store: store, Fetcher: fetcher}
 }
 
 // isMetadata reports whether file (a base name) is a repository document a
@@ -84,7 +90,7 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 			repo.WriteError(w, r, repo.ErrNotFound)
 			return
 		}
-		repo.ServeText(w, r, body, ct, time.Time{}) // generated: no Last-Modified
+		repo.ServeText(w, r, body, ct, h.groupChanged(r.Context(), rp))
 		return
 	}
 	res, owner, err := h.lookup(r.Context(), rp, p)
@@ -93,6 +99,9 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		return
 	}
 	proxy.SetStaleHeader(w, res)
+	if isArtifacts(path.Base(p)) {
+		res.Asset = h.withoutMirrors(r.Context(), owner, res.Asset)
+	}
 	if isComposite(path.Base(p)) {
 		// The composite the client gets is rewritten on the way out; the
 		// cached asset stays the remote's, so its validators keep working.
@@ -179,17 +188,36 @@ func (h *Handler) target(ctx context.Context, rp *repo.Repository, p string) (pr
 	if !ok {
 		return proxy.Target{}, repo.ErrNotFound
 	}
-	return proxy.Target{Key: p, URL: child + sub, NotHTML: true}, nil
+	return proxy.Target{Key: p, URL: child + sub, Route: p, NotHTML: true}, nil
 }
 
 func isSHA1Hex(s string) bool {
 	return len(s) == 40 && strings.Trim(s, "0123456789abcdef") == ""
 }
 
+// groupChanged is when a group's generated documents last changed: when the
+// group or one of its members was last updated, the same on every node (zero,
+// so no Last-Modified, when that cannot be read). A client decides by it
+// whether to read a composite again.
+func (h *Handler) groupChanged(ctx context.Context, rp *repo.Repository) time.Time {
+	names := []string{rp.Name}
+	for _, m := range rp.MemberRepos {
+		if m != nil {
+			names = append(names, m.Name)
+		}
+	}
+	t, err := h.Store.DB.RepositoriesUpdatedAt(ctx, names)
+	if err != nil {
+		slog.Warn("p2 group: reading when its repositories changed", "repo", rp.Name, "err", logsafe.Err(err))
+	}
+	return t
+}
+
 // groupDoc is a group's own p2.index and composite documents: a composite
 // repository (metadata and artifacts alike) whose children are the online
-// members, under the base URL. Everything under a directory comes from
-// the members.
+// members, each a sibling of the group under /repository/, so that they
+// resolve against the host name the client used. Everything under a directory
+// comes from the members.
 func (h *Handler) groupDoc(rp *repo.Repository, p string) (body, contentType string, ok bool) {
 	switch p {
 	case "p2.index":
@@ -206,12 +234,8 @@ func (h *Handler) groupDoc(rp *repo.Repository, p string) (body, contentType str
 		sb.WriteString("  <properties size='1'>\n    <property name='p2.atomic.composite.loading' value='false'/>\n  </properties>\n")
 		members := rp.OnlineMembers()
 		sb.WriteString("  <children size='" + strconv.Itoa(len(members)) + "'>\n")
-		base := ""
-		if h.BaseURL != nil {
-			base = strings.TrimRight(h.BaseURL(), "/")
-		}
 		for _, m := range members {
-			sb.WriteString("    <child location='" + xmlEscape(base+"/repository/"+m.Name+"/") + "'/>\n")
+			sb.WriteString("    <child location='" + xmlEscape("../"+m.Name+"/") + "'/>\n")
 		}
 		sb.WriteString("  </children>\n</repository>\n")
 		return sb.String(), "application/xml", true

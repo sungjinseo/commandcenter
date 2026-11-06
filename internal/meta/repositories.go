@@ -217,10 +217,64 @@ func (d *DB) UpdateRepositoryGen(ctx context.Context, def config.Repository) (ui
 			if _, err := tx.q.ExecContext(ctx, `UPDATE repositories SET gen = ? WHERE name = ?`, gen, def.Name); err != nil {
 				return err
 			}
+			// A p2 proxy's cache is one site: its documents name that site's
+			// files and children, and a bundle of the same name may be another
+			// build on the next site. It goes with the remote, as in Nexus.
+			if def.Format == "p2" && def.Type == "proxy" {
+				if err := tx.dropAssets(ctx, def.Name); err != nil {
+					return err
+				}
+			}
 		}
 		return nil
 	})
 	return uint64(gen), err
+}
+
+// dropAssets deletes every asset of a repository and the tag associations of
+// its components, in one statement each: the transaction holds the database's
+// one write lock.
+func (t *Tx) dropAssets(ctx context.Context, repo string) error {
+	rows, err := t.q.QueryContext(ctx, `DELETE FROM assets WHERE repo = ? RETURNING path`, repo)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return err
+		}
+		t.changes = append(t.changes, Change{Op: ChangeDelete, Kind: ChangeAsset, Repo: repo, Path: p})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	_, err = t.q.ExecContext(ctx, `DELETE FROM component_tags WHERE repo = ?`, repo)
+	return err
+}
+
+// RepositoriesUpdatedAt returns when the named repositories' definitions last
+// changed, the latest of them; zero when none is stored.
+func (d *DB) RepositoriesUpdatedAt(ctx context.Context, names []string) (time.Time, error) {
+	var latest time.Time
+	for _, name := range names {
+		var ms int64
+		err := d.sql.QueryRowContext(ctx, `SELECT updated_at FROM repositories WHERE name = ?`, name).Scan(&ms)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+		if t := fromMs(ms); t.After(latest) {
+			latest = t
+		}
+	}
+	return latest, nil
 }
 
 // migrateNegativeTTL rewrites a stored proxy negativeCacheTTL of "-1",

@@ -848,8 +848,12 @@ func (u *UI) p2Metadata(ctx context.Context, rp *repo.Repository, group, name, v
 		return false, nil
 	}
 	a, err := u.DB.GetAsset(ctx, rp.Name, p)
-	if errors.Is(err, meta.ErrNotFound) {
-		return false, nil
+	if errors.Is(err, meta.ErrNotFound) { // under a composite child's directory: the first one
+		hits, _, serr := u.DB.SearchAssetInfos(ctx, []string{rp.Name}, strings.ToLower("/"+p), 1)
+		if serr != nil || len(hits) == 0 {
+			return false, serr
+		}
+		a, err = u.DB.GetAsset(ctx, rp.Name, hits[0].Path)
 	}
 	if err != nil {
 		return false, err

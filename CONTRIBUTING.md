@@ -29,12 +29,13 @@ docker run --rm -v "$PWD":/src -w /src golang:1.27 gofmt -l .      # must print 
 ```
 
 The unit tests must pass without network access. The end-to-end checks build the image and drive it
-with the real clients (mvn, npm, pip, go, cargo) in containers. They need Docker and internet access,
-because the proxy repositories fetch from Maven Central, npmjs, PyPI, proxy.golang.org and crates.io.
+with the real clients of every format in containers. They need Docker and internet access, because the
+proxy repositories fetch from the public registries (Maven Central, npmjs, PyPI, proxy.golang.org,
+crates.io, nuget.org, rubygems.org, Packagist and the others).
 
 ```bash
-bash test/e2e.sh                  # every smoke test plus the 128 MiB load test, about 20 minutes
-bash test/smoke/maven-smoke.sh    # one smoke test (also npm, pypi, go, cargo, ui, ldap, mail)
+bash test/e2e.sh                  # every smoke test plus the 128 MiB load tests, about an hour
+bash test/smoke/maven-smoke.sh    # one smoke test: test/smoke/<format>-smoke.sh, and ui, ldap, mail
 bash test/load/load.sh            # the memory load test on its own
 ```
 

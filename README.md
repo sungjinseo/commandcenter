@@ -50,20 +50,20 @@
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
 | Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata 자동 생성) |
 | NuGet | ✅ | ✅ | ✅ | dotnet CLI (V3) |
-| APT | ✅ | ✅ | ✅ | apt (signed Release 지원) ※ |
+| APT | ✅ | ✅ | ✅ | apt (signed Release 지원) |
 | RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
 | Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
-| Conda | ✅ | ✅ | ✅ | conda, mamba ※ |
-| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) ※ |
-| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL ※ |
-| Git LFS | ✅ | ❌ | ❌ | git lfs ※ |
-| p2 | ❌ | ✅ | ✅ | Eclipse, Tycho ※ |
-| Swift | ✅ | ✅ | ✅ | swift package-registry ※ |
-| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN) ※ |
-| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers ※ |
-| Terraform | ✅ | ✅ | ✅ | terraform, tofu ※ |
+| Conda | ✅ | ✅ | ✅ | conda, micromamba |
+| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 |
+| R | ✅ | ✅ | ✅ | install.packages, remotes, renv, pak |
+| Git LFS | ✅ | ❌ | ❌ | git lfs |
+| p2 | ❌ | ✅ | ✅ | Eclipse p2 director, Tycho |
+| Swift | ✅ | ✅ | ✅ | swift package-registry |
+| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN, Linux, Xcode 연결 제외) |
+| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers |
+| Terraform | ✅ | ✅ | ✅ | terraform, tofu |
 
-※ 표시한 포맷은 클라이언트 요청을 재현한 프로토콜 테스트로만 확인했고, 실제 클라이언트로는 아직 검증하지 않았습니다. 나머지는 실제 클라이언트로 E2E 시험을 거쳤습니다.
+모든 포맷을 표에 적은 실제 클라이언트로 E2E 시험합니다(`test/e2e.sh`). Windows와 macOS의 클라이언트, Visual Studio, Xcode 연결은 시험하지 않았습니다.
 
 포맷별 알려진 제한은 [제한 사항](docs/guide.md#제한-사항)에 있습니다.
 

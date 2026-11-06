@@ -19,6 +19,7 @@ import (
 	"commandcenter/internal/auth"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
+	"commandcenter/internal/format/golang"
 	"commandcenter/internal/format/maven"
 	"commandcenter/internal/format/npm"
 	"commandcenter/internal/format/pypi"
@@ -303,7 +304,7 @@ func parseCriteria(q url.Values) (criteria, error) {
 	}
 	compTerm(groupKeys, groupForms)
 	compTerm(nameKeys, nameForms)
-	compTerm(versionKeys, func(c *comp) []string { return []string{c.version} })
+	compTerm(versionKeys, versionForms)
 	compTerm(baseKeys, func(c *comp) []string { return []string{baseVersion(c)} })
 	assetTerm(extensionKeys, func(c *comp, p string) string { _, ext := fileParts(c, p); return ext })
 	assetTerm(classifierKeys, func(c *comp, p string) string { cl, _ := fileParts(c, p); return cl })
@@ -382,7 +383,7 @@ func (cr *criteria) gav(m []string) {
 	parts := []struct {
 		v   string
 		get func(*comp) []string
-	}{{m[1], groupForms}, {m[2], nameForms}, {m[3], func(c *comp) []string { return []string{c.version} }}}
+	}{{m[1], groupForms}, {m[2], nameForms}, {m[3], versionForms}}
 	for _, part := range parts {
 		if part.v != "" {
 			t, get := literal(part.v), part.get
@@ -417,7 +418,7 @@ func parseBool(s string) (bool, error) {
 // npm.*, docker.*) implies when format is absent, as Nexus adds it.
 func impliedFormat(q url.Values) string {
 	for _, f := range []struct{ format, prefix string }{{"maven", "maven."}, {"maven", "attributes.maven2."},
-		{"maven", "assets.attributes.maven2."}, {"npm", "npm."}, {"npm", "assets.attributes.npm."}, {"docker", "docker."}, {"pypi", "pypi."}} {
+		{"maven", "assets.attributes.maven2."}, {"npm", "npm."}, {"npm", "assets.attributes.npm."}, {"docker", "docker."}, {"pypi", "pypi."}, {"p2", "p2."}, {"p2", "attributes.p2."}} {
 		for k := range q {
 			if strings.HasPrefix(k, f.prefix) {
 				return f.format
@@ -437,31 +438,46 @@ func groupForms(c *comp) []string {
 		return []string{g, "@" + g}
 	case "raw":
 		return []string{g, strings.TrimPrefix(g, "/")}
+	case "p2":
+		return []string{c.group}
 	}
 	return []string{g}
 }
 
 // nameForms: a raw file's name with and without the leading "/", a PyPI
 // project's normalized name with each of the separators PEP 503 folds, as
-// Nexus indexes it.
+// Nexus indexes it, a Go module's path as it is and case-escaped, as Nexus
+// names it.
 func nameForms(c *comp) []string {
 	switch c.format {
 	case "raw":
 		return []string{"/" + c.name, c.name}
 	case "pypi":
 		return []string{c.name, strings.ReplaceAll(c.name, "-", "_"), strings.ReplaceAll(c.name, "-", ".")}
+	case "go":
+		return []string{c.name, golang.Escape(c.name)}
 	}
 	return []string{c.name}
 }
 
+// versionForms: a Go version as it is and case-escaped.
+func versionForms(c *comp) []string {
+	if c.format == "go" {
+		return []string{c.version, golang.Escape(c.version)}
+	}
+	return []string{c.version}
+}
+
 // compGroup is the group Nexus reports: an npm scope without "@", a raw
-// file's directory ("/" at the top level).
+// file's directory ("/" at the top level), none for p2.
 func compGroup(c *comp) string {
 	switch c.format {
 	case "raw":
 		return "/" + strings.TrimSuffix(path.Dir(c.name), ".")
 	case "npm":
 		return strings.TrimPrefix(c.group, "@")
+	case "p2":
+		return ""
 	}
 	return c.group
 }
@@ -556,6 +572,7 @@ func (h *Handler) searched(w http.ResponseWriter, r *http.Request, win window) (
 		writeValidation(w, []string{err.Error()})
 		return nil, cr, false
 	}
+	tooMany := h.filterP2Plugins(r.Context(), q, &cr)
 	v := h.viewOf(r)
 	names := strings.Join(q["repository"], " ")
 	repos, via, ok := v.searchRepos(names)
@@ -570,6 +587,10 @@ func (h *Handler) searched(w http.ResponseWriter, r *http.Request, win window) (
 	comps, err := h.find(r.Context(), repos, cr, q.Get("tag"), win, v.sees)
 	if err != nil {
 		h.fail(w, err)
+		return nil, cr, false
+	}
+	if *tooMany {
+		writeMessage(w, http.StatusBadRequest, fmt.Sprintf("p2.pluginName reads the bundles it searches, and more than %d qualify: narrow the search with repository or name", maxP2Plugins))
 		return nil, cr, false
 	}
 	for _, c := range comps {

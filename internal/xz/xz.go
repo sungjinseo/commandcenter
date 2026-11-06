@@ -1,5 +1,6 @@
 // Package xz decompresses the .xz format (The .xz File Format 1.0.4) and
-// the legacy .lzma ("LZMA alone") format with the standard library only.
+// the legacy .lzma ("LZMA alone") format with the standard library only, and
+// writes .xz files of stored data (StoredWriter).
 //
 // An .xz file is one or more streams, each a header, blocks, an index and a
 // footer, with stream padding between them. A block is decoded through its

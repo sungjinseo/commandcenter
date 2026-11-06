@@ -399,12 +399,12 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return SplitR(p)
 	case "conan": // v2/conans/<name>/<version>/<user>/<channel>/revisions/<rrev>/...: user/channel is the group
 		return SplitConan(p)
-	case "p2": // [.remote/<sha1>/]{features,plugins}/<id>_<version>.jar, binary/<id>_<version>: the directory is the group
+	case "p2": // [<child>/]{features,plugins}/<id>_<version>.jar, [<child>/]binary/<id>_<version>: the directory is the group
 		return SplitP2(p)
 	case "swift": // <scope>/<name>/<version>/<file>: every file of the version directory (archive, manifests, a proxy's release.json)
 		name, version, ok = SplitSwift(p)
 		return "", name, version, ok
-	case "cocoapods": // Specs/<a>/<b>/<c>/<Pod>/<version>/<file>: the podspec and the archives cached beside it
+	case "cocoapods": // pods/<Pod>/<version>/<file>, the archives; a podspec alone is no component
 		name, version, ok = SplitPod(p)
 		return "", name, version, ok
 	case "huggingface": // [datasets/|spaces/]<repo id>/resolve/<commit sha>/<file>: the kind is the group
@@ -417,21 +417,18 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 }
 
 // SplitP2 maps a p2 artifact path to its component: features/<id>_<version>.jar,
-// plugins/<id>_<version>.jar or binary/<id>_<version>, each possibly under
-// a proxy's .remote/<sha1>/ mirror of a composite child. The version
-// starts at the first "_" followed by a digit, as an id may hold "_"
-// (a.b_c_1.0.0.v20240901). The directory is the group.
+// plugins/<id>_<version>.jar or binary/<id>_<version>, at the root of the site
+// or of a composite child: the child's directory, a proxy's .remote/<sha1>/
+// mirror of one elsewhere. The version starts at the first "_" followed by a
+// digit, as an id may hold "_" (a.b_c_1.0.0.v20240901). The directory holding
+// the file is the group.
 func SplitP2(p string) (group, name, version string, ok bool) {
-	if rest, cut := strings.CutPrefix(p, ".remote/"); cut {
-		if _, rest, cut = strings.Cut(rest, "/"); !cut {
-			return "", "", "", false
-		}
-		p = rest
-	}
-	dir, file, cut := strings.Cut(p, "/")
-	if !cut || strings.Contains(file, "/") {
+	i := strings.LastIndexByte(p, '/')
+	if i < 0 {
 		return "", "", "", false
 	}
+	dir, file := p[strings.LastIndexByte(p[:i], '/')+1:i], p[i+1:]
+	var cut bool
 	switch dir {
 	case "features", "plugins":
 		if file, cut = strings.CutSuffix(file, ".jar"); !cut {
@@ -469,23 +466,32 @@ func SplitSwift(p string) (name, version string, ok bool) {
 	return segs[0] + "." + segs[1], segs[2], true
 }
 
-// SplitPod maps a path of a CocoaPods proxy's cache,
-// Specs/<a>/<b>/<c>/<Pod>/<version>/<file> (the trunk CDN's layout, the
-// shard letters being the first three of the md5 of the pod name), to its
-// component. The file is <Pod>.podspec.json or an archive fetched for the
-// podspec's source.http (<sha1 of its URL>.<ext>). The index files at the
-// root are not components.
+// SplitPod maps an archive in a CocoaPods proxy's cache to its component:
+// pods/<Pod>/<version>/<file>, or Specs/<a>/<b>/<c>/<Pod>/<version>/<file> for
+// one cached beside its podspec by an earlier version (the shard letters
+// being the first three of the md5 of the pod name). As in Nexus, only a
+// downloaded archive makes a component: the client reads the podspecs of
+// every version it considers, and they are cached metadata like the index
+// files at the root.
 func SplitPod(p string) (name, version string, ok bool) {
 	segs := strings.Split(p, "/")
-	if len(segs) != 7 || segs[0] != "Specs" || segs[4] == "" || segs[5] == "" || segs[6] == "" {
+	switch {
+	case len(segs) == 4 && segs[0] == "pods":
+		segs = segs[1:]
+	case len(segs) == 7 && segs[0] == "Specs":
+		for _, s := range segs[1:4] {
+			if len(s) != 1 || strings.Trim(s, "0123456789abcdef") != "" {
+				return "", "", false
+			}
+		}
+		segs = segs[4:]
+	default:
 		return "", "", false
 	}
-	for _, s := range segs[1:4] {
-		if len(s) != 1 || strings.Trim(s, "0123456789abcdef") != "" {
-			return "", "", false
-		}
+	if segs[0] == "" || segs[1] == "" || segs[2] == "" || segs[2] == segs[0]+".podspec.json" {
+		return "", "", false
 	}
-	return segs[4], segs[5], true
+	return segs[0], segs[1], true
 }
 
 // SplitHF maps a path of a Hugging Face proxy's cache,

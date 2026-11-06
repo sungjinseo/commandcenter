@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,7 +29,10 @@ import (
 	"commandcenter/internal/server"
 )
 
-const archive = "PK\x03\x04fake-zip-bytes"
+const (
+	archive = "PK\x03\x04fake-zip-bytes"
+	tarball = "\x1f\x8bfake-tarball-bytes"
+)
 
 type env struct {
 	t        *testing.T
@@ -42,24 +46,38 @@ type env struct {
 	cdn      atomic.Int32 // CDN requests
 	zips     atomic.Int32 // archive host requests
 	archives string       // the archive host's URL
+
+	specMu       sync.Mutex
+	specOverride map[string]string // what trunk now says for a podspec path
 }
 
 // newEnv serves the proxy pods of a fake trunk CDN (index files, the
 // podspecs of Alamofire 5.0.0 with an http source, GitPod 1.0.0 with a
-// git source and Bad 1.0.0 whose sha256 does not match its archive) and a
-// separate archive host, through the real server. Anonymous callers may
-// read.
+// GitHub source, SvnPod 1.0.0 with a source that passes through and Bad
+// 1.0.0 whose sha256 does not match its archive) and a separate archive host,
+// which also stands in for the git hosts, through the real server. Anonymous
+// callers may read.
 func newEnv(t *testing.T) *env {
+	t.Helper()
+	return newEnvRule(t, "")
+}
+
+// newEnvRule is newEnv with the routing rule the proxy names.
+func newEnvRule(t *testing.T, rule string) *env {
 	t.Helper()
 	e := &env{t: t}
 	zips := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.zips.Add(1)
-		if r.URL.Path != "/Alamofire-5.0.0.zip" {
+		switch r.URL.Path {
+		case "/Alamofire-5.0.0.zip":
+			w.Header().Set("Content-Type", "application/zip")
+			io.WriteString(w, archive)
+		case "/x/GitPod/archive/1.0.0.tar.gz":
+			w.Header().Set("Content-Type", "application/x-gzip")
+			io.WriteString(w, tarball)
+		default:
 			http.NotFound(w, r)
-			return
 		}
-		w.Header().Set("Content-Type", "application/zip")
-		io.WriteString(w, archive)
 	}))
 	t.Cleanup(zips.Close)
 	e.archives = zips.URL
@@ -67,6 +85,7 @@ func newEnv(t *testing.T) *env {
 	specs := map[string]string{
 		SpecPath("Alamofire", "5.0.0"):       `{"name":"Alamofire","version":"5.0.0","summary":"Elegant HTTP","license":"MIT","homepage":"https://alamofire.org","source":{"http":"` + zips.URL + `/Alamofire-5.0.0.zip","sha256":"` + hex.EncodeToString(sum[:]) + `","flatten":true},"dependencies":{"Foo":["~> 1.0"],"Bar":[]}}`,
 		SpecPath("GitPod", "1.0.0"):          `{"name":"GitPod","version":"1.0.0","source":{"git":"https://github.com/x/GitPod.git","tag":"1.0.0"},"license":{"type":"Apache-2.0"}}`,
+		SpecPath("SvnPod", "1.0.0"):          `{"name":"SvnPod","version":"1.0.0","source":{"svn":"https://svn.example/x","tag":"1.0.0"}}`,
 		SpecPath("!ProtoCompiler", "3.21.5"): `{"name":"!ProtoCompiler","version":"3.21.5","source":{"http":"` + zips.URL + `/protoc.zip"}}`,
 		SpecPath("Bad", "1.0.0"):             `{"name":"Bad","version":"1.0.0","source":{"http":"` + zips.URL + `/Alamofire-5.0.0.zip","sha256":"` + strings.Repeat("0", 64) + `"}}`,
 	}
@@ -81,6 +100,12 @@ func newEnv(t *testing.T) *env {
 			io.WriteString(w, "Alamofire/5.0.0\n")
 		case specs[p] != "":
 			w.Header().Set("Content-Type", "application/json")
+			e.specMu.Lock()
+			defer e.specMu.Unlock()
+			if b, ok := e.specOverride[p]; ok {
+				io.WriteString(w, b)
+				return
+			}
 			io.WriteString(w, specs[p])
 		default:
 			http.NotFound(w, r)
@@ -101,7 +126,7 @@ func newEnv(t *testing.T) *env {
 		BaseURL:       "http://cc.example",
 		AnonymousRead: true,
 		Repositories: []config.Repository{
-			{Name: "pods", Format: "cocoapods", Type: "proxy", Remote: cdn.URL + "/",
+			{Name: "pods", Format: "cocoapods", Type: "proxy", Remote: cdn.URL + "/", RoutingRule: rule,
 				MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Hour)},
 		},
 	}
@@ -116,7 +141,15 @@ func newEnv(t *testing.T) *env {
 	f := proxy.New(e.store, proxy.NewClient(), 4)
 	f.Now = now
 	e.h = New(e.store, f, func() string { return cfg.BaseURL })
+	e.h.gitHosts = map[string]string{"github.com": zips.URL, "bitbucket.org": zips.URL, "gitlab.com": zips.URL}
 	e.registry = repo.NewRegistry(nil, cfg.Repositories)
+	f.RouteAllowed = e.registry.RouteAllowed
+	if err := e.registry.SetRoutingRules([]meta.RoutingRule{
+		{Name: "repo-paths", Mode: meta.RoutingAllow, Matchers: []string{`^/[^/]+\.txt$`, `^/[^/]+\.yml$`, `^/Specs/.*`, `^/pods/.*`}},
+		{Name: "no-alamofire", Mode: meta.RoutingBlock, Matchers: []string{`^/pods/Alamofire/.*`}},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	srv := &server.Server{Registry: e.registry, Handlers: map[string]repo.Handler{"cocoapods": e.h}, Auth: auth.New(cfg, db),
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	e.ts = httptest.NewServer(srv.Handler())
@@ -187,13 +220,6 @@ func TestPodspecRewriteAndArchive(t *testing.T) {
 	if src["http"] != want || src["flatten"] != true || src["sha256"] == nil || spec["summary"] != "Elegant HTTP" {
 		t.Fatalf("rewritten source: %v", src)
 	}
-	// The podspec is content: not fetched again after metadataMaxAge.
-	n := e.cdn.Load()
-	e.now.Add(7200)
-	e.get("GET", SpecPath("Alamofire", "5.0.0"))
-	if e.cdn.Load() != n {
-		t.Fatal("cached podspec fetched again")
-	}
 	// A wrong shard, pod or version is not found (and not asked upstream twice).
 	if resp, _ := e.get("GET", "Specs/0/0/0/Alamofire/5.0.0/Alamofire.podspec.json"); resp.StatusCode != 404 {
 		t.Fatalf("wrong shard: %d", resp.StatusCode)
@@ -208,17 +234,17 @@ func TestPodspecRewriteAndArchive(t *testing.T) {
 		t.Fatalf("!ProtoCompiler: %s", b)
 	}
 
-	// A git source passes through untouched.
-	_, b = e.get("GET", SpecPath("GitPod", "1.0.0"))
+	// A source that is not served as an archive passes through untouched.
+	_, b = e.get("GET", SpecPath("SvnPod", "1.0.0"))
 	if err := json.Unmarshal([]byte(b), &spec); err != nil {
 		t.Fatal(err)
 	}
-	if git := spec["source"].(map[string]any); git["git"] != "https://github.com/x/GitPod.git" || git["http"] != nil {
-		t.Fatalf("git source: %v", git)
+	if svn := spec["source"].(map[string]any); svn["svn"] != "https://svn.example/x" || svn["tag"] != "1.0.0" || svn["http"] != nil {
+		t.Fatalf("svn source: %v", svn)
 	}
 
-	// The archive is fetched from the podspec's URL once, cached beside
-	// the podspec, and served with its type.
+	// The archive is fetched from the podspec's URL once, cached under the
+	// path the client asks for, and served with its type.
 	resp, b = e.get("GET", strings.TrimPrefix(want, "http://cc.example/repository/pods/"))
 	if resp.StatusCode != 200 || b != archive || resp.Header.Get("Content-Type") != "application/zip" {
 		t.Fatalf("archive: %d %q %q", resp.StatusCode, b, resp.Header.Get("Content-Type"))
@@ -227,15 +253,15 @@ func TestPodspecRewriteAndArchive(t *testing.T) {
 	if e.zips.Load() != 1 {
 		t.Fatalf("archive host hits: %d", e.zips.Load())
 	}
-	if _, err := e.store.Get(context.Background(), "pods", "Specs/"+Shard("Alamofire")+"/Alamofire/5.0.0/"+ref(orig)+".zip"); err != nil {
-		t.Fatalf("archive not cached beside the podspec: %v", err)
+	if _, err := e.store.Get(context.Background(), "pods", "pods/Alamofire/5.0.0/"+ref(orig)+".zip"); err != nil {
+		t.Fatalf("archive not cached at its request path: %v", err)
 	}
 	if resp, _ := e.get("HEAD", strings.TrimPrefix(want, "http://cc.example/repository/pods/")); resp.StatusCode != 200 || resp.ContentLength != int64(len(archive)) {
 		t.Fatalf("HEAD archive: %d %d", resp.StatusCode, resp.ContentLength)
 	}
 	// Another sha1, another extension or a pod without an http source: 404.
 	for _, p := range []string{"pods/Alamofire/5.0.0/" + strings.Repeat("a", 40) + ".zip", "pods/Alamofire/5.0.0/" + ref(orig) + ".tgz",
-		"pods/GitPod/1.0.0/" + ref("x") + ".zip", "pods/Alamofire/5.0.0/" + ref(orig), "pods/Alamofire/5.0.0"} {
+		"pods/SvnPod/1.0.0/" + ref("x") + ".zip", "pods/Alamofire/5.0.0/" + ref(orig), "pods/Alamofire/5.0.0"} {
 		if resp, _ := e.get("GET", p); resp.StatusCode != 404 {
 			t.Fatalf("%s: %d", p, resp.StatusCode)
 		}
@@ -244,6 +270,154 @@ func TestPodspecRewriteAndArchive(t *testing.T) {
 	bad := "pods/Bad/1.0.0/" + ref(orig) + ".zip"
 	if resp, _ := e.get("GET", bad); resp.StatusCode != 502 {
 		t.Fatalf("bad sha256: %d", resp.StatusCode)
+	}
+}
+
+// TestGitSourceIsATarball pins cocoapods-01: a git source on a known host is
+// answered as a tarball through the repository, without the git keys the
+// client's http downloader refuses, and the tarball is fetched from the host
+// once.
+func TestGitSourceIsATarball(t *testing.T) {
+	e := newEnv(t)
+	resp, b := e.get("GET", SpecPath("GitPod", "1.0.0"))
+	if resp.StatusCode != 200 {
+		t.Fatalf("podspec: %d %s", resp.StatusCode, b)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal([]byte(b), &spec); err != nil {
+		t.Fatal(err)
+	}
+	up := e.archives + "/x/GitPod/archive/1.0.0.tar.gz"
+	file := "pods/GitPod/1.0.0/" + ref(up) + ".tar.gz"
+	src := spec["source"].(map[string]any)
+	if len(src) != 1 || src["http"] != "http://cc.example/repository/pods/"+file {
+		t.Fatalf("source: %v", src)
+	}
+	for range 2 {
+		if resp, b := e.get("GET", file); resp.StatusCode != 200 || b != tarball {
+			t.Fatalf("tarball: %d %q", resp.StatusCode, b)
+		}
+	}
+	if e.zips.Load() != 1 {
+		t.Fatalf("git host hits: %d", e.zips.Load())
+	}
+	if _, err := e.store.Get(context.Background(), "pods", file); err != nil {
+		t.Fatalf("tarball not cached at its request path: %v", err)
+	}
+}
+
+func TestGitTarball(t *testing.T) {
+	h := &Handler{}
+	for _, c := range []struct {
+		src  map[string]any
+		want string
+	}{
+		{map[string]any{"git": "https://github.com/Alamofire/Alamofire.git", "tag": "5.9.1"}, "https://github.com/Alamofire/Alamofire/archive/5.9.1.tar.gz"},
+		{map[string]any{"git": "https://github.com/o/r", "commit": "abc", "tag": "1", "branch": "b"}, "https://github.com/o/r/archive/abc.tar.gz"},
+		{map[string]any{"git": "https://github.com/o/r.git", "tag": "1", "branch": "b"}, "https://github.com/o/r/archive/1.tar.gz"},
+		{map[string]any{"git": "https://github.com/o/r.git", "branch": "dev/next"}, "https://github.com/o/r/archive/dev/next.tar.gz"},
+		{map[string]any{"git": "https://github.com/o/r.git"}, "https://github.com/o/r/archive/HEAD.tar.gz"},
+		{map[string]any{"git": "https://GitHub.com/o/r.git/", "tag": "v1#2"}, "https://github.com/o/r/archive/v1%232.tar.gz"},
+		{map[string]any{"git": "git://github.com/o/r.git", "tag": "1"}, "https://github.com/o/r/archive/1.tar.gz"},
+		{map[string]any{"git": "ssh://git@github.com/o/r.git", "tag": "1"}, "https://github.com/o/r/archive/1.tar.gz"},
+		{map[string]any{"git": "git@github.com:o/r.git", "tag": "1"}, "https://github.com/o/r/archive/1.tar.gz"},
+		{map[string]any{"git": "https://www.github.com/o/r.git", "tag": "1", "submodules": false}, "https://github.com/o/r/archive/1.tar.gz"},
+		{map[string]any{"git": "https://bitbucket.org/o/r.git", "tag": "1.0"}, "https://bitbucket.org/o/r/get/1.0.tar.gz"},
+		{map[string]any{"git": "https://bitbucket.org/o/r.git"}, "https://bitbucket.org/o/r/get/HEAD.tar.gz"},
+		{map[string]any{"git": "https://gitlab.com/g/p.git", "tag": "1.0"}, "https://gitlab.com/g/p/-/archive/1.0/p-1.0.tar.gz"},
+		{map[string]any{"git": "https://gitlab.com/g/sub/p.git", "branch": "a/b"}, "https://gitlab.com/g/sub/p/-/archive/a/b/p-a-b.tar.gz"},
+		// These stay clones: another host, no repository path, a ref that
+		// is no string, submodules a tarball does not hold, other sources.
+		{map[string]any{"git": "https://git.example/o/r.git", "tag": "1"}, ""},
+		{map[string]any{"git": "https://github.com/o", "tag": "1"}, ""},
+		{map[string]any{"git": "https://github.com/o/r/x", "tag": "1"}, ""},
+		{map[string]any{"git": "https://bitbucket.org/o/r/x", "tag": "1"}, ""},
+		{map[string]any{"git": "https://github.com/o/r", "tag": 1.5}, ""},
+		{map[string]any{"git": "https://github.com/o/r", "tag": ""}, ""},
+		{map[string]any{"git": "https://github.com/o/r", "tag": "1", "submodules": true}, ""},
+		{map[string]any{"git": "/local/path", "tag": "1"}, ""},
+		{map[string]any{"svn": "https://github.com/o/r", "tag": "1"}, ""},
+		{map[string]any{"hg": "https://bitbucket.org/o/r", "revision": "1"}, ""},
+	} {
+		if got := h.gitTarball(c.src); got != c.want {
+			t.Errorf("%v: %q, want %q", c.src, got, c.want)
+		}
+	}
+	// What the client decides by: the tarball's extension survives the rewrite.
+	for _, u := range []string{"https://github.com/o/r/archive/v1.2.3.tar.gz", "https://gitlab.com/g/p/-/archive/1.0/p-1.0.tar.gz", "https://bitbucket.org/o/r/get/HEAD.tar.gz"} {
+		if got := archiveExt(u); got != ".tar.gz" {
+			t.Errorf("%s: %q", u, got)
+		}
+	}
+}
+
+// TestArchiveCachedByAnEarlierVersion: an archive stored beside its podspec
+// before archives moved to their request path is still what the client gets,
+// and what a REST downloadUrl (cocoapods-02) leads to, without asking anyone.
+func TestArchiveCachedByAnEarlierVersion(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	u := e.archives + "/Alamofire-5.0.0.zip"
+	legacy := "Specs/" + Shard("Alamofire") + "/Alamofire/5.0.0/" + ref(u) + ".zip"
+	if _, err := e.store.Put(ctx, "pods", legacy, "application/zip", strings.NewReader("cached earlier")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"pods/Alamofire/5.0.0/" + ref(u) + ".zip", legacy} {
+		if resp, b := e.get("GET", p); resp.StatusCode != 200 || b != "cached earlier" || resp.Header.Get("Content-Type") != "application/zip" {
+			t.Fatalf("%s: %d %q %q", p, resp.StatusCode, b, resp.Header.Get("Content-Type"))
+		}
+	}
+	if e.zips.Load() != 0 || e.cdn.Load() != 0 {
+		t.Fatalf("asked upstream: %d %d", e.zips.Load(), e.cdn.Load())
+	}
+	// Only what is cached: this path never goes upstream.
+	other := "Specs/" + Shard("Alamofire") + "/Alamofire/5.0.0/" + strings.Repeat("a", 40) + ".zip"
+	if resp, _ := e.get("GET", other); resp.StatusCode != 404 || e.zips.Load() != 0 || e.cdn.Load() != 0 {
+		t.Fatalf("not cached: %d, upstream %d %d", resp.StatusCode, e.zips.Load(), e.cdn.Load())
+	}
+}
+
+// TestRoutingRuleSeesRequestPaths pins cocoapods-03: a rule written for
+// repository paths decides for archives too, whose upstream URL it cannot know.
+func TestRoutingRuleSeesRequestPaths(t *testing.T) {
+	e := newEnvRule(t, "repo-paths")
+	file := "pods/Alamofire/5.0.0/" + ref(e.archives+"/Alamofire-5.0.0.zip") + ".zip"
+	for _, p := range []string{"CocoaPods-version.yml", SpecPath("Alamofire", "5.0.0"), file} {
+		if resp, b := e.get("GET", p); resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %s", p, resp.StatusCode, b)
+		}
+	}
+	if resp, _ := e.get("GET", "other/thing"); resp.StatusCode != 403 {
+		t.Fatalf("outside the rule: %d", resp.StatusCode)
+	}
+	e = newEnvRule(t, "no-alamofire")
+	file = "pods/Alamofire/5.0.0/" + ref(e.archives+"/Alamofire-5.0.0.zip") + ".zip"
+	if resp, _ := e.get("GET", file); resp.StatusCode != 403 {
+		t.Fatalf("blocked archive: %d", resp.StatusCode)
+	}
+	if resp, _ := e.get("GET", SpecPath("Alamofire", "5.0.0")); resp.StatusCode != 200 {
+		t.Fatalf("podspec of a blocked archive: %d", resp.StatusCode)
+	}
+}
+
+// TestPodspecIsMetadata pins cocoapods-04: within metadataMaxAge no request
+// goes upstream; after it what trunk says now is served.
+func TestPodspecIsMetadata(t *testing.T) {
+	e := newEnv(t)
+	p := SpecPath("Alamofire", "5.0.0")
+	e.get("GET", p)
+	n := e.cdn.Load()
+	e.get("GET", p)
+	if e.cdn.Load() != n {
+		t.Fatal("fresh podspec fetched again")
+	}
+	e.specMu.Lock()
+	e.specOverride = map[string]string{p: `{"name":"Alamofire","version":"5.0.0","deprecated":true,"source":{"git":"https://github.com/x/GitPod.git","tag":"1.0.0"}}`}
+	e.specMu.Unlock()
+	e.now.Add(7200)
+	resp, b := e.get("GET", p)
+	if e.cdn.Load() != n+1 || resp.StatusCode != 200 || !strings.Contains(b, `"deprecated":true`) {
+		t.Fatalf("expired podspec: %d upstream, %d %s", e.cdn.Load()-n, resp.StatusCode, b)
 	}
 }
 
@@ -287,13 +461,14 @@ func TestComponentsCleanupAndPrivileges(t *testing.T) {
 	orig := e.archives + "/Alamofire-5.0.0.zip"
 	e.get("GET", SpecPath("Alamofire", "5.0.0"))
 	e.get("GET", "pods/Alamofire/5.0.0/"+ref(orig)+".zip")
-	e.get("GET", SpecPath("GitPod", "1.0.0"))
+	e.get("GET", SpecPath("GitPod", "1.0.0")) // read, not installed: no component
 	e.get("GET", "all_pods.txt")
 	for p, want := range map[string]string{
-		SpecPath("Alamofire", "5.0.0"):                                           "Alamofire@5.0.0",
-		"Specs/" + Shard("Alamofire") + "/Alamofire/5.0.0/" + ref(orig) + ".zip": "Alamofire@5.0.0",
-		SpecPath("GitPod", "1.0.0"):                                              "GitPod@1.0.0",
-		"all_pods.txt":                                                           "", "CocoaPods-version.yml": "", "Specs/x/y/z/A/1/A.podspec.json": "", "Specs/a/b/c/A/1": "",
+		"pods/Alamofire/5.0.0/" + ref(orig) + ".zip":                             "Alamofire@5.0.0",
+		"Specs/" + Shard("Alamofire") + "/Alamofire/5.0.0/" + ref(orig) + ".zip": "Alamofire@5.0.0", // cached by an earlier version
+		SpecPath("Alamofire", "5.0.0"):                                           "",
+		SpecPath("GitPod", "1.0.0"):                                              "",
+		"all_pods.txt":                                                           "", "CocoaPods-version.yml": "", "Specs/x/y/z/A/1/a.zip": "", "Specs/a/b/c/A/1": "", "pods/A/1": "", "pods/A/1/x/y": "",
 	} {
 		g, n, v, ok := component.DeriveAsset("cocoapods", p)
 		got := ""
@@ -315,26 +490,29 @@ func TestComponentsCleanupAndPrivileges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Candidates) != 2 || res.Candidates[0].Label() != "Alamofire@5.0.0" || len(res.Candidates[0].Assets) != 2 || res.Candidates[1].Label() != "GitPod@1.0.0" {
+	if len(res.Candidates) != 1 || res.Candidates[0].Label() != "Alamofire@5.0.0" || len(res.Candidates[0].Assets) != 1 {
 		t.Fatalf("candidates: %+v", res.Candidates)
 	}
 	deleters := cleanup.NewRegistry(e.store)
 	r, err := deleters.Delete(ctx, rp, res.Candidates[0].Component, "system")
-	if err != nil || r.Assets != 2 {
+	if err != nil || r.Assets != 1 {
 		t.Fatalf("delete: %+v %v", r, err)
 	}
-	if _, err := e.store.Get(ctx, "pods", SpecPath("Alamofire", "5.0.0")); err == nil {
-		t.Fatal("podspec still cached")
+	if _, err := e.store.Get(ctx, "pods", "pods/Alamofire/5.0.0/"+ref(orig)+".zip"); err == nil {
+		t.Fatal("archive still cached")
 	}
 	if s := e.sink.String(); !strings.Contains(s, "delete|system|pods|Alamofire@5.0.0") {
 		t.Fatalf("events: %s", s)
 	}
-	if _, err := e.store.Get(ctx, "pods", "all_pods.txt"); err != nil {
-		t.Fatal("index file deleted")
+	// The metadata stays: the podspec and the index files are no component's.
+	for _, p := range []string{"all_pods.txt", SpecPath("Alamofire", "5.0.0")} {
+		if _, err := e.store.Get(ctx, "pods", p); err != nil {
+			t.Fatalf("%s deleted", p)
+		}
 	}
 	// Fetched again on demand.
-	if resp, _ := e.get("GET", SpecPath("Alamofire", "5.0.0")); resp.StatusCode != 200 {
-		t.Fatalf("refetch: %d", resp.StatusCode)
+	if resp, _ := e.get("GET", "pods/Alamofire/5.0.0/"+ref(orig)+".zip"); resp.StatusCode != 200 || e.zips.Load() != 2 {
+		t.Fatalf("refetch: %d, %d archive host hits", resp.StatusCode, e.zips.Load())
 	}
 
 	// format:cocoapods grants on cocoapods repositories only.

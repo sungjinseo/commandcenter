@@ -1229,16 +1229,17 @@ func (h *Handler) getAsset(w http.ResponseWriter, r *http.Request) {
 
 // deleteAsset deletes one file, any format, by the format's rules:
 //   - a proxy's (any format) cached copy is dropped; the next request
-//     fetches it again;
+//     fetches it again; a Go version's .info, .mod and .zip go together;
 //   - a hosted Maven file goes through the Maven handler's delete, which
 //     rebuilds maven-metadata.xml; a hosted Helm chart or provenance file
 //     and a hosted PyPI file, each a file a client can address, go through
 //     their handler's delete too;
 //   - a hosted file that is a component of its own (a raw file, an npm
-//     tarball, a .deb or .rpm, a .nupkg, ...) goes through the component
-//     delete, which updates the format's index files;
+//     tarball, a .deb or .rpm, a .nupkg, ...) or a file of a Go version, whose
+//     files are one, goes through the component delete, which updates the
+//     format's index files;
 //   - anything else is part of a larger component (one layer of a docker
-//     image, one file of a Go module) or generated metadata: 400, delete
+//     image) or generated metadata: 400, delete
 //     the component instead.
 func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
@@ -1270,29 +1271,47 @@ func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// dropCached deletes a proxy's cached file, after the delete check on its
-// path.
+// dropCached deletes a proxy's cached file, with the rest of a Go version,
+// after the delete check on each path.
 func (h *Handler) dropCached(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
 	pr := principal(r)
-	switch {
-	case !h.Auth.CanPath(pr, rp.Name, auth.Delete, selectorPath(rp, p)):
-		deny(w, pr)
-		return
-	case h.Store == nil:
+	paths := []string{p}
+	if _, _, ok := component.DeriveGo(p); ok && rp.Format == "go" {
+		stem := strings.TrimSuffix(p, path.Ext(p))
+		paths = []string{stem + ".info", stem + ".mod", stem + ".zip"}
+	}
+	for _, q := range paths {
+		if !h.Auth.CanPath(pr, rp.Name, auth.Delete, selectorPath(rp, q)) {
+			deny(w, pr)
+			return
+		}
+	}
+	if h.Store == nil {
 		writeMessage(w, http.StatusNotImplemented, "file deletion is not available")
 		return
 	}
+	var dropped []string
 	err := h.Store.Tx(r.Context(), rp, func(tx *meta.Tx) error {
-		_, err := tx.DeleteAsset(r.Context(), rp.Name, p)
-		return err
+		dropped = nil
+		for _, q := range paths {
+			switch _, err := tx.DeleteAsset(r.Context(), rp.Name, q); {
+			case err == nil:
+				dropped = append(dropped, q)
+			case !errors.Is(err, meta.ErrNotFound):
+				return err
+			}
+		}
+		return nil
 	})
 	switch {
-	case errors.Is(err, meta.ErrNotFound):
-		writeMessage(w, http.StatusNotFound, "asset not found")
 	case err != nil:
 		h.fail(w, err)
+	case len(dropped) == 0:
+		writeMessage(w, http.StatusNotFound, "asset not found")
 	default:
-		h.Store.Emit(r, "delete", rp.Name, p, "")
+		for _, q := range dropped {
+			h.Store.Emit(r, "delete", rp.Name, q, "")
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -1336,6 +1355,9 @@ func (h *Handler) ownComponent(ctx context.Context, rp *repo.Repository, p strin
 	group, name, version, ok := component.DeriveAsset(rp.Format, p)
 	if !ok {
 		return nil, nil
+	}
+	if rp.Format == "go" { // a version's files are one: any of them deletes it, as the go handler's DELETE does
+		return &comp{repo: rp.Name, format: rp.Format, name: name, version: version, paths: []string{p}}, nil
 	}
 	n := 0
 	if err := h.DB.WalkAssetPaths(ctx, rp.Name, "", func(q string) {

@@ -114,6 +114,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `assets.attributes.npm.author`, `.description`, `.keywords` and `.license` (hosted repositories).
 - `test/smoke/npm-smoke.sh` runs yarn classic, yarn berry and pnpm through the group as well as npm, against the public registry
   and a fake remote.
+- CocoaPods: a git source on github.com, bitbucket.org or gitlab.com is answered as a tarball through
+  the repository, so `pod install` works where clients cannot reach the git host.
+- p2: the REST search parameter `p2.pluginName` (a bundle's Bundle-Name or a feature's label).
+- Real-client smoke tests for CocoaPods (`test/smoke/cocoapods-smoke.sh`, CocoaPods 1.17 on Linux) and p2
+  (`test/smoke/p2-smoke.sh`, the Eclipse p2 director and Tycho on a closed network).
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -182,6 +187,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the like of `latest` at its top.
 - Nexus API: an npm package document is listed as path `/<package>` with that download URL (it was `/<package>/package.json`).
 - Cleanup: an npm version that is no SemVer and contains `-` is a prerelease, as Nexus reads it.
+- CocoaPods: podspecs are metadata, re-checked every `metadataMaxAge`; archives are cached at their
+  request path `pods/<Pod>/<version>/<file>`, and only a downloaded archive makes a component.
+- p2: `p2.mirrorsURL` is removed from `artifacts.xml`, `.jar` and `.xml.xz`, so clients fetch bundles
+  through the proxy; the rewritten document replaces the cached one.
+- p2: changing a proxy's `remote` deletes its cached files.
+- p2: a group's children are relative to the URL the client used (no `baseURL` needed), and its
+  documents carry the time the group or a member last changed as `Last-Modified`.
+- p2: the Nexus API reports `group: null` for components; `group=` searches keep working.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -259,6 +272,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an admin deleted it. Nothing that is not a package document or a gzip file matching the document's checksums is cached now; the
   client gets 502 or the copy cached before.
 - npm: the download URL of a package document in `/v1/assets` and the HTML browse answered 404.
+- CocoaPods: the REST `downloadUrl` of a cached archive answered 404.
+- CocoaPods, p2: a routing rule was applied to the upstream URL's path of an archive or of a mirrored
+  child's file as well as to the request path.
+- Go: a proxy's routing rule answered 403 for `sumdb/...`, which made the go command fail verification.
+- Go: `DELETE /v1/assets/{id}` deletes a version's `.info`, `.mod` and `.zip` together (hosted: 400 before).
+- Go: REST search finds components by the case-escaped spelling in `name=` and `version=`.
+- p2: bundles below a composite child's directory were not components (search, cleanup, metadata tab).
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -305,6 +325,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Hosted documents get the hoisted fields at their next write, or at once with `repository.rebuild-metadata` (`format: npm`).
 - Scripts that read `/v1/assets` and match `/<name>/package.json` see `/<name>`. The old URL keeps answering.
 - Nothing to migrate; `schemaVersion` is unchanged. An older node in a rolling upgrade serves as before; a `login-` token works on it.
+- **CocoaPods**: the server now needs `github.com`, `codeload.github.com`, `bitbucket.org` and `gitlab.com`
+  for pods with git sources; a site where only the clients reach them breaks. `SPEC CHECKSUMS` in
+  `Podfile.lock` change, so pods reinstall once: commit the lock file. Component lists shrink, and cleanup
+  policies now remove archives only; cached podspecs stay. More conditional requests go upstream.
+- **p2**: the first read rewrites each cached artifacts document (the old blob is reclaimed by compact).
+  Changing a remote deletes the cache. Bundles below child directories become components, so `format: p2`
+  cleanup policies now apply to them (fetched again on demand).
+- **Go**: no data change. Paths that are not GOPROXY routes answer 400 or 404 instead of the rule's 403.
 
 ## [0.4.0] - 2026-11-05
 

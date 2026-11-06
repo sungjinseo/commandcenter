@@ -3,12 +3,13 @@
 // source: the index files at the root (CocoaPods-version.yml, all_pods.txt,
 // the all_pods_versions_<a>_<b>_<c>.txt shards, deprecated_podspecs.txt)
 // and the podspecs under Specs/<a>/<b>/<c>/<Pod>/<version>/. A podspec whose
-// source is an http archive is served with that URL rewritten to the proxy
-// (pods/<Pod>/<version>/<sha1 of the URL>.<ext>), which fetches and caches
-// the archive on demand; git sources pass through untouched (git is not
-// proxied). Nexus has CocoaPods proxies only, and so does this: the legacy
-// Specs git repository is not a remote (CDN only), and there is no hosted
-// or group repository.
+// source is an http archive, or a git repository on GitHub, Bitbucket or
+// GitLab (whose tarball of the ref stands in for the clone), is served with
+// its source pointing at the proxy (pods/<Pod>/<version>/<sha1 of the
+// URL>.<ext>), which fetches and caches the archive on demand; other sources
+// pass through untouched. Nexus has CocoaPods proxies only, and so does this:
+// the legacy Specs git repository is not a remote (CDN only), and there is
+// no hosted or group repository.
 package cocoapods
 
 import (
@@ -24,6 +25,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"commandcenter/internal/proxy"
@@ -35,6 +37,8 @@ type Handler struct {
 	Store   *repo.Store
 	Fetcher *proxy.Fetcher
 	BaseURL func() string // live: the absolute URL the rewritten archive URLs start with
+
+	gitHosts map[string]string // host -> the base URL of its tarballs; nil: the public hosts (tests)
 }
 
 func New(store *repo.Store, fetcher *proxy.Fetcher, baseURL func() string) *Handler {
@@ -86,7 +90,14 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	case strings.HasPrefix(p, specsPrefix):
 		pod, version, ok := splitSpec(p)
 		if !ok {
-			return repo.ErrNotFound
+			// An archive an earlier version cached beside its podspec, where
+			// the REST API's downloadUrl leads; from the cache only.
+			a, err := h.Store.Get(ctx, rp.Name, p)
+			if err != nil {
+				return err
+			}
+			serveArchive(w, r, h.Store, proxy.Result{Asset: a}, p)
+			return nil
 		}
 		res, spec, err := h.podspec(ctx, rp, pod, version)
 		if err != nil {
@@ -103,15 +114,19 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		if err != nil {
 			return err
 		}
-		proxy.SetStaleHeader(w, res)
-		if res.Asset.ContentType == "" {
-			res.Asset.ContentType = contentType(p)
-		}
-		repo.ServeAsset(w, r, h.Store, res.Asset)
+		serveArchive(w, r, h.Store, res, p)
 	default:
 		return repo.ErrNotFound
 	}
 	return nil
+}
+
+func serveArchive(w http.ResponseWriter, r *http.Request, store *repo.Store, res proxy.Result, p string) {
+	proxy.SetStaleHeader(w, res)
+	if res.Asset.ContentType == "" {
+		res.Asset.ContentType = contentType(p)
+	}
+	repo.ServeAsset(w, r, store, res.Asset)
 }
 
 // Shard returns the CDN's shard directory of a pod, a/b/c: the first three
@@ -142,10 +157,11 @@ func splitSpec(p string) (pod, version string, ok bool) {
 }
 
 // podspec fetches (or reads from the cache) the podspec of pod version,
-// parsed.
+// parsed. It is metadata, re-checked every metadataMaxAge: trunk can change a
+// published podspec, a deprecation for one.
 func (h *Handler) podspec(ctx context.Context, rp *repo.Repository, pod, version string) (proxy.Result, map[string]any, error) {
 	key := SpecPath(pod, version)
-	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, Remote: key, NotHTML: true}, proxy.Content)
+	res, err := h.Fetcher.FetchTarget(ctx, rp, proxy.Target{Key: key, Remote: key, NotHTML: true}, proxy.Metadata)
 	if err != nil {
 		return res, nil, err
 	}
@@ -165,17 +181,95 @@ func (h *Handler) podspec(ctx context.Context, rp *repo.Repository, pod, version
 	return res, spec, nil
 }
 
-// httpSource returns a podspec's source.http URL and its sha1 (the
-// proxy's file name for the archive), or ok false for a git (or other)
-// source.
-func httpSource(spec map[string]any) (u, ref string, ok bool) {
+// archiveSource returns the URL of the archive the proxy serves for a
+// podspec's source, source.http or the tarball of a git source (gitTarball),
+// and its sha1 (the proxy's file name for the archive); ok false for a source
+// that passes through.
+func (h *Handler) archiveSource(spec map[string]any) (u, ref string, ok bool) {
 	src, _ := spec["source"].(map[string]any)
 	u, _ = src["http"].(string)
+	if u == "" {
+		u = h.gitTarball(src)
+	}
 	if u == "" {
 		return "", "", false
 	}
 	sum := sha1.Sum([]byte(u))
 	return u, hex.EncodeToString(sum[:]), true
+}
+
+// publicGitHosts are the hosts whose tarballs stand in for a clone, and the
+// base URLs of the tarballs: GitHub's web URL, not its API (which allows an
+// unauthenticated address 60 requests an hour).
+var publicGitHosts = map[string]string{"github.com": "https://github.com", "bitbucket.org": "https://bitbucket.org", "gitlab.com": "https://gitlab.com"}
+
+// gitTarball is the URL of the tarball of a git source's ref (the first of
+// commit, tag and branch, the default branch without one), "" when the source
+// has to stay a clone: another host, a path that is no repository on its host,
+// a ref that is not a string, or submodules, which a tarball does not hold.
+func (h *Handler) gitTarball(src map[string]any) string {
+	raw, _ := src["git"].(string)
+	if raw == "" || src["submodules"] == true {
+		return ""
+	}
+	host, repoPath, ok := parseGitURL(raw)
+	bases := h.gitHosts
+	if bases == nil {
+		bases = publicGitHosts
+	}
+	base, known := bases[host]
+	if !ok || !known {
+		return ""
+	}
+	segs := strings.Split(repoPath, "/")
+	if len(segs) < 2 || slices.Contains(segs, "") || slices.Contains(segs, "..") || (len(segs) != 2 && host != "gitlab.com") {
+		return "" // GitLab alone nests projects in groups
+	}
+	ref := "HEAD"
+	for _, k := range []string{"commit", "tag", "branch"} {
+		if v, set := src[k]; set {
+			if ref, _ = v.(string); ref == "" {
+				return ""
+			}
+			break
+		}
+	}
+	var file string
+	switch host {
+	case "github.com":
+		file = repoPath + "/archive/" + ref + ".tar.gz"
+	case "bitbucket.org":
+		file = repoPath + "/get/" + ref + ".tar.gz"
+	case "gitlab.com":
+		file = repoPath + "/-/archive/" + ref + "/" + path.Base(repoPath) + "-" + strings.ReplaceAll(ref, "/", "-") + ".tar.gz"
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return ""
+	}
+	return u.JoinPath(file).String()
+}
+
+// parseGitURL splits a git remote, a URL or the scp form git@host:owner/repo,
+// into its lower-case host and its path without slashes around it or ".git".
+func parseGitURL(raw string) (host, repoPath string, ok bool) {
+	if !strings.Contains(raw, "://") {
+		user, rest, found := strings.Cut(raw, "@")
+		if !found || strings.Contains(user, "/") {
+			rest = raw
+		}
+		if host, repoPath, ok = strings.Cut(rest, ":"); !ok {
+			return "", "", false
+		}
+	} else {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", "", false
+		}
+		host, repoPath = u.Hostname(), u.Path
+	}
+	host = strings.TrimPrefix(strings.ToLower(host), "www.")
+	return host, strings.TrimSuffix(strings.Trim(repoPath, "/"), ".git"), host != ""
 }
 
 // archiveExt is the extension the proxy's archive path keeps from the
@@ -198,13 +292,18 @@ func archiveExt(u string) string {
 }
 
 // rewrite returns the podspec with source.http pointing at the proxy:
-// <base>/repository/<repo>/pods/<Pod>/<version>/<sha1 of the URL>.<ext>.
-// Other sources (git, svn, hg) are left as they are.
+// <base>/repository/<repo>/pods/<Pod>/<version>/<sha1 of the URL>.<ext>,
+// without the keys of a git source, which the client's http downloader
+// refuses. Sources that are not served as archives are left as they are.
 func (h *Handler) rewrite(rp *repo.Repository, spec map[string]any, pod, version string) ([]byte, error) {
-	if u, ref, ok := httpSource(spec); ok {
+	if u, ref, ok := h.archiveSource(spec); ok {
 		src := map[string]any{}
 		for k, v := range spec["source"].(map[string]any) {
-			src[k] = v
+			switch k {
+			case "git", "commit", "tag", "branch", "submodules":
+			default:
+				src[k] = v
+			}
 		}
 		src["http"] = h.repoURL(rp) + "/" + podsPrefix + pod + "/" + version + "/" + ref + archiveExt(u)
 		spec["source"] = src
@@ -222,10 +321,10 @@ func (h *Handler) repoURL(rp *repo.Repository) string {
 	return base + "/repository/" + rp.Name
 }
 
-// archive serves pods/<Pod>/<version>/<sha1>.<ext>: the archive the cached
-// podspec's source.http names, fetched from there the first time and cached
-// beside the podspec (Specs/.../<Pod>/<version>/<sha1>.<ext>), verified
-// against the podspec's sha256 when it has one.
+// archive serves pods/<Pod>/<version>/<sha1>.<ext>: the archive the podspec's
+// source names, fetched from there the first time and cached under that path,
+// verified against the podspec's sha256 when it has one. An archive an
+// earlier version cached beside the podspec is served from there.
 func (h *Handler) archive(ctx context.Context, rp *repo.Repository, p string) (proxy.Result, error) {
 	segs := strings.Split(strings.TrimPrefix(p, podsPrefix), "/")
 	if len(segs) != 3 || !segRE.MatchString(segs[0]) || !segRE.MatchString(segs[1]) {
@@ -236,23 +335,24 @@ func (h *Handler) archive(ctx context.Context, rp *repo.Repository, p string) (p
 	if !sha1RE.MatchString(ref) || file == ref {
 		return proxy.Result{}, repo.ErrNotFound
 	}
-	key := path.Dir(SpecPath(pod, version)) + "/" + file
-	a, err := h.Store.Get(ctx, rp.Name, key)
-	if err == nil {
-		return proxy.Result{Asset: a}, nil
-	}
-	if !errors.Is(err, repo.ErrNotFound) {
-		return proxy.Result{}, err
+	for _, key := range []string{p, path.Dir(SpecPath(pod, version)) + "/" + file} {
+		a, err := h.Store.Get(ctx, rp.Name, key)
+		if err == nil {
+			return proxy.Result{Asset: a}, nil
+		}
+		if !errors.Is(err, repo.ErrNotFound) {
+			return proxy.Result{}, err
+		}
 	}
 	_, spec, err := h.podspec(ctx, rp, pod, version)
 	if err != nil {
 		return proxy.Result{}, err
 	}
-	u, want, ok := httpSource(spec)
+	u, want, ok := h.archiveSource(spec)
 	if !ok || want != ref || file != ref+archiveExt(u) {
 		return proxy.Result{}, repo.ErrNotFound
 	}
-	t := proxy.Target{Key: key, URL: u, NotHTML: true}
+	t := proxy.Target{Key: p, URL: u, Route: p, NotHTML: true}
 	if sum, _ := spec["source"].(map[string]any)["sha256"].(string); proxy.IsSHA256Hex(sum) {
 		t.SHA256 = sum
 	}

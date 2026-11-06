@@ -50,20 +50,20 @@ Everything an in-house package repository needs, in one binary, with no editions
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
 | Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) |
 | NuGet | ✅ | ✅ | ✅ | dotnet CLI (V3) |
-| APT | ✅ | ✅ | ✅ | apt (signed Release) ※ |
+| APT | ✅ | ✅ | ✅ | apt (signed Release) |
 | RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
 | Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
-| Conda | ✅ | ✅ | ✅ | conda, mamba ※ |
-| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) ※ |
-| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL ※ |
-| Git LFS | ✅ | ❌ | ❌ | git lfs ※ |
-| p2 | ❌ | ✅ | ✅ | Eclipse, Tycho ※ |
-| Swift | ✅ | ✅ | ✅ | swift package-registry ※ |
-| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN) ※ |
-| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers ※ |
-| Terraform | ✅ | ✅ | ✅ | terraform, tofu ※ |
+| Conda | ✅ | ✅ | ✅ | conda, micromamba |
+| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 |
+| R | ✅ | ✅ | ✅ | install.packages, remotes, renv, pak |
+| Git LFS | ✅ | ❌ | ❌ | git lfs |
+| p2 | ❌ | ✅ | ✅ | Eclipse p2 director, Tycho |
+| Swift | ✅ | ✅ | ✅ | swift package-registry |
+| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN, Linux without Xcode integration) |
+| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers |
+| Terraform | ✅ | ✅ | ✅ | terraform, tofu |
 
-※ marks formats checked only by protocol tests that replay client requests; they have not been run against the real client yet. The others passed end-to-end tests with the real clients.
+Every format is tested end to end with the real clients in this table (`test/e2e.sh`). Windows and macOS clients, Visual Studio and Xcode integration were not run.
 
 Known limits per format are listed under [limitations](docs/guide.md#제한-사항).
 

@@ -46,6 +46,14 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 	}
 }
 
+// Routed reports whether path is a GOPROXY request (repo.RouteFilter); the
+// rest, the checksum database's sumdb/ paths above all, is answered without
+// asking the remote.
+func (h *Handler) Routed(path string) bool {
+	_, err := ParseRoute(path)
+	return err == nil
+}
+
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
