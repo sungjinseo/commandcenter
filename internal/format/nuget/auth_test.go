@@ -20,10 +20,11 @@ import (
 )
 
 // TestPushAuthAndPrivileges runs the handler behind the real server: a
-// push authenticates with X-NuGet-ApiKey (an API token), with the token as
-// the Basic password, or with the password; it needs add, an unpublish
-// needs delete, reads are anonymous when anonymousRead is on and a 401
-// Basic challenge otherwise.
+// push (to the URL dotnet nuget push uses, the PackagePublish resource with
+// a "/" appended) authenticates with X-NuGet-ApiKey (an API token), with
+// the token as the Basic password, or with the password; it needs add, an
+// unpublish needs delete, reads are anonymous when anonymousRead is on and
+// a 401 Basic challenge otherwise.
 func TestPushAuthAndPrivileges(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -103,14 +104,14 @@ func TestPushAuthAndPrivileges(t *testing.T) {
 		cred               func(*http.Request)
 		want               int
 	}{
-		{"api key", "PUT", "nuget-hosted/api/v2/package", nupkg(t, "Demo", "1.0.0", ""), apiKey(token), 201},
-		{"token as Basic password", "PUT", "nuget-hosted/api/v2/package", nupkg(t, "Demo", "1.1.0", ""), basic("pusher", token), 201},
-		{"password", "PUT", "nuget-hosted/api/v2/package", nupkg(t, "Demo", "1.2.0", ""), basic("pusher", "pw"), 201},
-		{"wrong api key", "PUT", "nuget-hosted/api/v2/package", nupkg(t, "Demo", "1.3.0", ""), apiKey("cc_nope"), 401},
-		{"anonymous push", "PUT", "nuget-hosted/api/v2/package", nupkg(t, "Demo", "1.3.0", ""), nil, 401},
-		{"reader push", "PUT", "nuget-hosted/api/v2/package", nupkg(t, "Demo", "1.3.0", ""), basic("reader", "pw"), 403},
-		{"pusher delete", "DELETE", "nuget-hosted/api/v2/package/demo/1.0.0", nil, apiKey(token), 403},
-		{"deleter delete", "DELETE", "nuget-hosted/api/v2/package/demo/1.0.0", nil, basic("deleter", "pw"), 204},
+		{"api key", "PUT", "nuget-hosted/api/v2/package/", nupkg(t, "Demo", "1.0.0", ""), apiKey(token), 201},
+		{"token as Basic password", "PUT", "nuget-hosted/api/v2/package/", nupkg(t, "Demo", "1.1.0", ""), basic("pusher", token), 201},
+		{"password", "PUT", "nuget-hosted/api/v2/package/", nupkg(t, "Demo", "1.2.0", ""), basic("pusher", "pw"), 201},
+		{"wrong api key", "PUT", "nuget-hosted/api/v2/package/", nupkg(t, "Demo", "1.3.0", ""), apiKey("cc_nope"), 401},
+		{"anonymous push", "PUT", "nuget-hosted/api/v2/package/", nupkg(t, "Demo", "1.3.0", ""), nil, 401},
+		{"reader push", "PUT", "nuget-hosted/api/v2/package/", nupkg(t, "Demo", "1.3.0", ""), basic("reader", "pw"), 403},
+		{"pusher delete", "DELETE", "nuget-hosted/api/v2/package/Demo/1.0.0", nil, apiKey(token), 403}, // the id as dotnet nuget delete was given it
+		{"deleter delete", "DELETE", "nuget-hosted/api/v2/package/Demo/1.0.0", nil, basic("deleter", "pw"), 204},
 		{"anonymous read", "GET", "nuget-hosted/v3-flatcontainer/demo/index.json", nil, nil, 200},
 		{"anonymous read, private", "GET", "nuget-private/index.json", nil, nil, 401},
 		{"signed-in read, private (authenticatedRead)", "GET", "nuget-private/index.json", nil, basic("reader", "pw"), 200},

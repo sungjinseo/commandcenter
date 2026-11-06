@@ -4,14 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
-	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"commandcenter/internal/meta"
 )
 
 // stdFields are the columns tools::write_PACKAGES writes, in its order;
@@ -38,61 +40,93 @@ func stanzaOf(r row) stanza {
 			s = append(s, [2]string{f, v})
 		}
 	}
-	if v := r.field("Built"); v != "" && strings.HasPrefix(r.Dir, "bin/") {
+	if v := r.field("Built"); v != "" && binaryDir(r.Dir) {
 		s = append(s, [2]string{"Built", v})
 	}
 	return s
 }
 
-// render writes the stanzas as DCF, a blank line between them,
-// continuation lines indented as write.dcf does.
+// binaryDir reports whether dir holds binary packages: it is below a bin
+// directory (bin/windows/contrib/4.4, prod/bin/linux/jammy).
+func binaryDir(dir string) bool { return strings.Contains("/"+dir+"/", "/bin/") }
+
+// sourceDir is the src/contrib of the tree binary directory dir is in, ""
+// for a directory that is not binary.
+func sourceDir(dir string) string {
+	if !binaryDir(dir) {
+		return ""
+	}
+	return strings.TrimPrefix(("/" + dir)[:strings.LastIndex("/"+dir+"/", "/bin/")]+"/src/contrib", "/")
+}
+
+// write renders the stanza as DCF, continuation lines indented as write.dcf
+// does.
+func (s stanza) write(w io.StringWriter) error {
+	for _, f := range s {
+		if _, err := w.WriteString(f[0] + ": " + strings.ReplaceAll(f[1], "\n", "\n        ") + "\n"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// render writes the stanzas as DCF, a blank line between them.
 func render(ss []stanza) string {
 	var b strings.Builder
 	for i, s := range ss {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		for _, f := range s {
-			b.WriteString(f[0] + ": " + strings.ReplaceAll(f[1], "\n", "\n        ") + "\n")
-		}
+		s.write(&b)
 	}
 	return b.String()
 }
 
-// parsePackages reads a PACKAGES file (at most maxDoc): DCF records
-// separated by blank lines.
-func parsePackages(r io.Reader) ([]stanza, error) {
+// eachStanza calls fn with every record of a PACKAGES file (at most maxDoc):
+// DCF records separated by blank lines.
+func eachStanza(r io.Reader, fn func(stanza) error) error {
 	sc := bufio.NewScanner(io.LimitReader(r, maxDoc))
 	sc.Buffer(nil, 1<<20)
-	var out []stanza
 	var cur stanza
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
 		switch {
 		case strings.TrimSpace(line) == "":
 			if cur != nil {
-				out, cur = append(out, cur), nil
+				if err := fn(cur); err != nil {
+					return err
+				}
+				cur = nil
 			}
 		case line[0] == ' ' || line[0] == '\t':
 			if cur == nil {
-				return nil, fmt.Errorf("PACKAGES: continuation line %q without a field", line)
+				return fmt.Errorf("PACKAGES: continuation line %q without a field", line)
 			}
 			cur[len(cur)-1][1] += "\n" + strings.TrimSpace(line)
 		default:
 			key, value, ok := strings.Cut(line, ":")
 			if !ok || !dcfKeyRE.MatchString(key) {
-				return nil, fmt.Errorf("PACKAGES: line %q is not \"Field: value\"", line)
+				return fmt.Errorf("PACKAGES: line %q is not \"Field: value\"", line)
 			}
 			cur = append(cur, [2]string{key, strings.TrimSpace(value)})
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("PACKAGES: %w", err)
+		return fmt.Errorf("PACKAGES: %w", err)
 	}
 	if cur != nil {
-		out = append(out, cur)
+		return fn(cur)
 	}
-	return out, nil
+	return nil
+}
+
+func parsePackages(r io.Reader) ([]stanza, error) {
+	var out []stanza
+	err := eachStanza(r, func(s stanza) error {
+		out = append(out, s)
+		return nil
+	})
+	return out, err
 }
 
 // gzipBytes compresses b without a name or mtime, so the same input gives
@@ -110,7 +144,7 @@ func gzipBytes(b []byte) []byte {
 // (a member's File or Path), in order of appearance.
 func columns(dir string, ss []stanza) []string {
 	cols := append([]string(nil), stdFields...)
-	if strings.HasPrefix(dir, "bin/") {
+	if binaryDir(dir) {
 		cols = append(cols, "Built")
 	}
 	seen := map[string]bool{}
@@ -252,27 +286,76 @@ func sortStanzas(ss []stanza) {
 	})
 }
 
-// mergePackages is the resolve.MergeFunc of a group's <dir>/PACKAGES: the
-// members' stanzas in member order, a Package and Version listed by
-// several members being the first member's (the one that answers for
-// the file, as Lookup does).
-func mergePackages(ctx context.Context, members []io.ReadSeeker, w io.Writer) error {
-	seen := map[string]bool{}
-	var out []stanza
+// member is what a group's merge reads of one member: its index of the
+// directory and, for a binary directory, its source index; nil where it has
+// none.
+type member struct{ index, source *meta.Asset }
+
+// mergePrefix starts the fingerprint of a merged PACKAGES, so that a copy
+// stored by a build with another merge rule is merged again once.
+const mergePrefix = "r-merge:"
+
+// mergePackages writes a group's <dir>/PACKAGES: a package name is listed
+// from the first member that has it, with all the versions that member
+// lists there, whatever a later member has. So a newer public version never
+// beats an internal package of the same name, which R would otherwise
+// install (dependency confusion). A member's source index counts as well:
+// Windows and macOS clients read a binary directory too, and pick a newer
+// binary over a source package. With everyVersion (mergeMembers) a member
+// keeps what it adds, only a version listed earlier being the first's.
+func (h *Handler) mergePackages(w io.Writer, members []member, everyVersion bool) error {
+	owned := map[string]bool{}
+	first := true
+	bw := bufio.NewWriterSize(w, 64<<10)
 	for _, m := range members {
-		ss, err := parsePackages(m)
+		mine := map[string]bool{}
+		err := h.eachOf(m.index, func(s stanza) error {
+			key := s.get("Package")
+			if everyVersion {
+				key += "\x00" + s.get("Version")
+			}
+			if owned[key] {
+				return nil
+			}
+			mine[key] = true
+			if !first {
+				bw.WriteByte('\n')
+			}
+			first = false
+			return s.write(bw)
+		})
 		if err != nil {
 			return err
 		}
-		for _, s := range ss {
-			key := s.get("Package") + "\x00" + s.get("Version")
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, s)
+		err = h.eachOf(m.source, func(s stanza) error {
+			mine[s.get("Package")] = true
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		maps.Copy(owned, mine)
+	}
+	return bw.Flush()
+}
+
+// eachOf calls fn with every record of a stored index, plain or gzipped
+// (nil: none).
+func (h *Handler) eachOf(a *meta.Asset, fn func(stanza) error) error {
+	if a == nil {
+		return nil
+	}
+	f, err := h.Store.Open(*a)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	br := bufio.NewReader(f)
+	var r io.Reader = br
+	if magic, _ := br.Peek(2); len(magic) == 2 && magic[0] == 0x1f && magic[1] == 0x8b {
+		if r, err = gzip.NewReader(br); err != nil {
+			return fmt.Errorf("%s of %q: %w", a.Path, a.Repo, err)
 		}
 	}
-	_, err := io.WriteString(w, render(out))
-	return err
+	return eachStanza(r, fn)
 }

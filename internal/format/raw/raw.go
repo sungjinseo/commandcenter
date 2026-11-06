@@ -6,6 +6,7 @@
 package raw
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"html"
@@ -150,7 +151,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 		h.list(w, r, rp, p)
 		return
 	}
-	res, err := h.Resolver.LookupTarget(r.Context(), rp, proxy.Target{Key: p, Remote: p}, proxy.Content)
+	res, err := h.Resolver.LookupTarget(proxy.ForHead(r), rp, proxy.Target{Key: p, Remote: p}, proxy.Content)
 	if err != nil {
 		repo.WriteError(w, r, err)
 		return
@@ -159,6 +160,12 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repositor
 }
 
 func (h *Handler) serveFile(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string, res proxy.Result) {
+	if head := res.Head; head != nil {
+		head.ContentType = cmp.Or(head.ContentType, ContentType(p))
+		repo.SetContentDisposition(w, rp.ContentDisposition, p)
+		proxy.ServeHead(w, r, h.Store, head)
+		return
+	}
 	proxy.SetStaleHeader(w, res)
 	a := res.Asset
 	if a.ContentType == "" {

@@ -12,6 +12,7 @@ import (
 
 	"commandcenter/internal/auth"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo/repotest"
 )
 
@@ -599,7 +600,7 @@ func TestOldMergedPackumentIsNotServed(t *testing.T) {
 		_, err := io.WriteString(w, `{"name":"left-pad","dist-tags":{"latest":"1.1.0"},"versions":{"1.1.0":{"version":"1.1.0"}}}`)
 		return err
 	}
-	old, err := e.h.Resolver.MergedTarget(context.Background(), e.repos["npm-all"], packumentTarget("left-pad"), "application/json", oldMerge)
+	old, err := e.h.Resolver.MergedTarget(context.Background(), e.repos["npm-all"], proxy.Target{Key: PackumentKey("left-pad")}, "application/json", oldMerge)
 	if err != nil || old.Repo != "npm-all" {
 		t.Fatalf("setup: merged copy not stored in the group: %+v %v", old, err)
 	}

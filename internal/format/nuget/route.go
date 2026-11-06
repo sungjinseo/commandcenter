@@ -1,12 +1,12 @@
 // Package nuget implements NuGet V3 feeds (what dotnet restore, nuget.exe
 // and Visual Studio use) under /repository/<repo>/: the service index
 // (index.json), the flat container (v3-flatcontainer/), registration pages
-// (registration/), search (query) and the push API (api/v2/package). A
-// hosted repository takes packages by PUT, reads the .nuspec out of the
-// .nupkg and derives every document from its rows; a proxy caches an
-// upstream V3 feed (api.nuget.org or another) with the documents' URLs
-// rewritten to itself; a group answers from the first member that has the
-// package id and pushes to its writeMember.
+// (registration/), search (query), vulnerability data (vulnerabilities/, a
+// proxy's upstream's) and the push API (api/v2/package). A hosted repository
+// takes packages by PUT, reads the .nuspec out of the .nupkg and derives every
+// document from its rows; a proxy caches an upstream V3 feed (api.nuget.org or
+// another) with the documents' URLs rewritten to itself; a group answers from
+// the first member that has the package id and pushes to its writeMember.
 package nuget
 
 import (
@@ -28,11 +28,13 @@ const (
 	KindSearch                   // query?q=&skip=&take=&prerelease=
 	KindPublish                  // api/v2/package (PUT) and api/v2/package/<id>/<version> (DELETE)
 	KindSymbols                  // api/v2/symbolpackage: refused
+	KindVulnIndex                // vulnerabilities/index.json
+	KindVulnPage                 // vulnerabilities/<sha1 of the upstream URL>.json
 )
 
 // Route is a parsed request. ID and Version are lower-cased (the version
 // normalized when it parses); File is the flat container file name and
-// Rest the path under registration/<id>/.
+// Rest the path under registration/<id>/, or a vulnerability page's sha1.
 type Route struct {
 	Kind              Kind
 	ID, Version, File string
@@ -42,7 +44,9 @@ type Route struct {
 const (
 	flatPrefix  = "v3-flatcontainer/"
 	regPrefix   = "registration/"
-	upstreamKey = "upstream/index.json" // a proxy's cached copy of the remote service index
+	vulnPrefix  = "vulnerabilities/"
+	vulnIndex   = vulnPrefix + "index.json" // the request path and a proxy's cache key
+	upstreamKey = "upstream/index.json"     // a proxy's cached copy of the remote service index
 	ctJSON      = "application/json"
 	ctNupkg     = "application/octet-stream"
 	ctNuspec    = "application/xml"
@@ -51,6 +55,9 @@ const (
 // idRE is a package id as NuGet accepts it: letters, digits, "_", "." and
 // "-", at most 100 characters.
 var idRE = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$`)
+
+// vulnPageRE is the file name of a vulnerability page.
+var vulnPageRE = regexp.MustCompile(`^[0-9a-f]{40}\.json$`)
 
 // restRE is what may follow registration/<id>/: index.json, <version>.json,
 // or a page path an upstream splits its registration into.
@@ -63,9 +70,11 @@ func ParseRoute(path string) (Route, error) {
 		return Route{Kind: KindIndex}, nil
 	case path == "query":
 		return Route{Kind: KindSearch}, nil
-	case path == "api/v2/package":
+	// dotnet nuget push and nuget.exe PUT to the resource's URL with a "/"
+	// appended; curl -T sends it as written.
+	case path == "api/v2/package", path == "api/v2/package/":
 		return Route{Kind: KindPublish}, nil
-	case path == "api/v2/symbolpackage":
+	case path == "api/v2/symbolpackage", path == "api/v2/symbolpackage/":
 		return Route{Kind: KindSymbols}, nil
 	}
 	if rest, ok := strings.CutPrefix(path, "api/v2/package/"); ok {
@@ -100,6 +109,15 @@ func ParseRoute(path string) (Route, error) {
 			return Route{Kind: KindFlatFile, ID: id, Version: v.key(), File: file}, nil
 		}
 		return Route{}, notFound
+	}
+	if path == vulnIndex {
+		return Route{Kind: KindVulnIndex}, nil
+	}
+	if rest, ok := strings.CutPrefix(path, vulnPrefix); ok {
+		if !vulnPageRE.MatchString(rest) {
+			return Route{}, notFound
+		}
+		return Route{Kind: KindVulnPage, Rest: strings.TrimSuffix(rest, ".json")}, nil
 	}
 	if rest, ok := strings.CutPrefix(path, regPrefix); ok {
 		id, sub, found := strings.Cut(rest, "/")

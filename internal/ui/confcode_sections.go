@@ -15,7 +15,6 @@ import (
 	"commandcenter/internal/blob"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/config"
-	"commandcenter/internal/ldap"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/saml"
@@ -269,6 +268,8 @@ func readBlobStores(c *confRun) ([]any, error) {
 		// The default place is the data directory's, whichever it is.
 		if bs.Name == repo.DefaultStore || bs.Path == filepath.Join("blobstores", bs.Name) {
 			b.Path = ""
+		} else if rel, ok := strings.CutPrefix(bs.Path, "blobstores"+string(filepath.Separator)); ok {
+			b.Path, b.RelativePath = "", rel
 		}
 		if bs.S3 != nil {
 			s3 := *bs.S3
@@ -334,7 +335,7 @@ func checkBlobStores(c *confRun, objs []confObj) {
 		if !exists {
 			continue
 		}
-		for _, f := range []string{"type", "path", "s3", "google"} {
+		for _, f := range []string{"type", "path", "relativePath", "s3", "google"} {
 			if !confSame(normJSON(cur[f]), normJSON(o[f])) {
 				c.bad("%s: %s cannot be changed (create a new store and move the repositories to it)", at, f)
 			}
@@ -478,6 +479,9 @@ func repoRequestOf(d config.Repository) repoRequest {
 	if r := d.Replication; r != nil {
 		v := *r
 		b.Replication = &v
+	}
+	if k := d.Nexus; k != (config.NexusKept{}) {
+		b.Nexus = &k
 	}
 	ev := d.Evaluation // always given, so an apply also resets an override to inherit
 	if ev == "" {
@@ -856,6 +860,13 @@ func ldapMerged(body ldapRequest) meta.LDAP {
 	if next.TimeoutSeconds == 0 {
 		next.TimeoutSeconds = def.TimeoutSeconds
 	}
+	if body.UserOneLevel != nil {
+		next.UserOneLevel = *body.UserOneLevel
+	}
+	if body.GroupsAsRoles != nil {
+		next.GroupsAsRoles = *body.GroupsAsRoles
+	}
+	body.groupSettings(&next)
 	return next
 }
 
@@ -865,8 +876,8 @@ func checkLDAP(c *confRun, objs []confObj) {
 	if err := meta.ValidateLDAP(next); err != nil {
 		c.bad("ldap: %v", err)
 	}
-	if _, err := ldap.CompileFilter(ldap.UserFilter(next.UserFilter, "x")); err != nil {
-		c.bad("ldap userFilter: %s", strings.TrimPrefix(err.Error(), "ldap filter: "))
+	for _, msg := range ldapFilterProblems(next) {
+		c.bad("%s", msg)
 	}
 }
 

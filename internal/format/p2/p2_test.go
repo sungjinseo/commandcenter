@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ import (
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/repo/repotest"
+	"commandcenter/internal/xz"
 )
 
 // jar zips files (name -> content) as a p2 jar is zipped.
@@ -86,24 +88,30 @@ type env struct {
 	mu    sync.Mutex
 	hits  map[string]int
 	files map[string][]byte // the upstream's files by URL path
+	mod   string            // the upstream's Last-Modified
 }
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
-	e := &env{now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), hits: map[string]int{}}
+	e := &env{now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC), hits: map[string]int{}, mod: "Wed, 01 Oct 2026 00:00:00 GMT"}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		e.mu.Lock()
 		e.hits[r.URL.Path]++
 		body, ok := e.files[r.URL.Path]
+		mod := e.mod
 		e.mu.Unlock()
 		if !ok {
 			http.NotFound(w, r)
 			return
 		}
+		if r.Header.Get("If-Modified-Since") == mod {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, ".xml") {
 			w.Header().Set("Content-Type", "application/xml")
 		}
-		w.Header().Set("Last-Modified", "Wed, 01 Oct 2026 00:00:00 GMT")
+		w.Header().Set("Last-Modified", mod)
 		w.Write(body)
 	}))
 	t.Cleanup(ts.Close)
@@ -154,7 +162,7 @@ func newEnv(t *testing.T) *env {
 	}
 	f := proxy.New(store, ts.Client(), 4)
 	f.Now = func() time.Time { return e.now }
-	e.h = New(store, f, func() string { return "http://cc.example/" })
+	e.h = New(store, f)
 	e.repos = repo.Build(cfg)
 	return e
 }
@@ -325,7 +333,7 @@ func TestGroup(t *testing.T) {
 		t.Fatalf("p2.index: %q", got)
 	}
 	content := e.get(t, "p2-all", "compositeContent.xml").Body.String()
-	want := "  <children size='2'>\n    <child location='http://cc.example/repository/p2-site/'/>\n    <child location='http://cc.example/repository/p2-proxy/'/>\n  </children>\n"
+	want := "  <children size='2'>\n    <child location='../p2-site/'/>\n    <child location='../p2-proxy/'/>\n  </children>\n"
 	if !strings.Contains(content, want) || !strings.Contains(content, "<?compositeMetadataRepository version='1.0.0'?>") || !strings.Contains(content, "CompositeMetadataRepository' version='1.0.0'>") || !strings.Contains(content, "name='p2-all'") {
 		t.Fatalf("compositeContent.xml:\n%s", content) // the offline member is left out
 	}
@@ -333,7 +341,7 @@ func TestGroup(t *testing.T) {
 	if !strings.Contains(artifacts, want) || !strings.Contains(artifacts, "<?compositeArtifactRepository version='1.0.0'?>") || !strings.Contains(artifacts, "CompositeArtifactRepository' version='1.0.0'>") {
 		t.Fatalf("compositeArtifacts.xml:\n%s", artifacts)
 	}
-	if !strings.Contains(e.get(t, "p2-nested", "compositeContent.xml").Body.String(), "<child location='http://cc.example/repository/p2-all/'/>") {
+	if !strings.Contains(e.get(t, "p2-nested", "compositeContent.xml").Body.String(), "<child location='../p2-all/'/>") {
 		t.Fatal("nested group")
 	}
 	// a group is a composite: its members' own documents are not its
@@ -357,6 +365,266 @@ func TestGroup(t *testing.T) {
 	}
 	if w := e.do("PUT", "p2-all", "plugins/x_1.0.0.jar"); w.Code != 405 {
 		t.Fatalf("PUT on a group: %d", w.Code)
+	}
+}
+
+// TestGroupLastModified pins p2-04: a group's documents carry when the group
+// or a member last changed, read from the database, the same on every node;
+// without it a client reads them again on every load.
+func TestGroupLastModified(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if w := e.get(t, "p2-all", "compositeContent.xml"); w.Header().Get("Last-Modified") != "" {
+		t.Fatalf("not stored, but dated: %q", w.Header().Get("Last-Modified"))
+	}
+	for _, name := range []string{"p2-all", "p2-site"} {
+		if err := e.db.CreateRepository(ctx, e.repos[name].Repository); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lastModified := func(p string) string {
+		t.Helper()
+		lm := e.do("HEAD", "p2-all", p).Header().Get("Last-Modified")
+		if _, err := http.ParseTime(lm); err != nil {
+			t.Fatalf("%s: Last-Modified %q", p, lm)
+		}
+		return lm
+	}
+	first := lastModified("compositeContent.xml")
+	if lastModified("compositeArtifacts.xml") != first || lastModified("p2.index") != first {
+		t.Fatal("the documents of one group differ")
+	}
+	time.Sleep(1100 * time.Millisecond) // Last-Modified has seconds
+	if lastModified("compositeContent.xml") != first {
+		t.Fatal("Last-Modified moved with nothing changed")
+	}
+	def := e.repos["p2-site"].Repository
+	def.MetadataMaxAge = config.Duration(2 * time.Hour)
+	if err := e.db.UpdateRepository(ctx, def); err != nil {
+		t.Fatal(err)
+	}
+	if lastModified("compositeContent.xml") == first {
+		t.Fatal("Last-Modified did not move with a member")
+	}
+	r := httptest.NewRequest("GET", "/repository/p2-all/p2.index", nil)
+	r.Header.Set("If-Modified-Since", lastModified("p2.index"))
+	w := httptest.NewRecorder()
+	e.h.Serve(w, r, e.repos["p2-all"], "p2.index")
+	if w.Code != 304 {
+		t.Fatalf("conditional GET: %d", w.Code)
+	}
+}
+
+func mirrored(t *testing.T) string {
+	t.Helper()
+	return "<?xml version='1.0' encoding='UTF-8'?>\n<?artifactRepository version='1.1.0'?>\n<repository name='r' type='org.eclipse.equinox.p2.artifact.repository.simpleRepository' version='1'>\n" +
+		"  <properties size='3'>\n    <property name='p2.timestamp' value='1'/>\n    <property name='p2.mirrorsURL' value='http://mirrors.example/list?a=1&amp;b=2'/>\n    <property name='p2.compressed' value='true'/>\n  </properties>\n" +
+		"  <mappings size='1'>\n    <rule filter='(&amp; (classifier=osgi.bundle))' output='${repoUrl}/plugins/${id}_${version}.jar'/>\n  </mappings>\n" +
+		"  <artifacts size='1'>\n    <artifact classifier='osgi.bundle' id='a' version='1.0.0'>\n      <properties size='1'>\n        <property name='artifact.size' value='9'/>\n      </properties>\n    </artifact>\n  </artifacts>\n</repository>\n"
+}
+
+func stripped(t *testing.T) string {
+	t.Helper()
+	return strings.NewReplacer("<properties size='3'>", "<properties size='2'>", "    <property name='p2.mirrorsURL' value='http://mirrors.example/list?a=1&amp;b=2'/>\n", "").Replace(mirrored(t))
+}
+
+func xzStored(t *testing.T, s string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	w := xz.NewStoredWriter(&buf)
+	io.WriteString(w, s)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func unxz(t *testing.T, b []byte) string {
+	t.Helper()
+	r, err := xz.NewReader(bytes.NewReader(b), xz.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// TestMirrorsRemoved pins p2-01: the three forms of an artifacts document, at
+// the root, below it and in a mirrored child, come without p2.mirrorsURL and
+// with the size corrected, however a client asks; the cached file is the
+// rewritten one, and the remote's validators keep working on it.
+func TestMirrorsRemoved(t *testing.T) {
+	e := newEnv(t)
+	e.mu.Lock()
+	e.files["/site/artifacts.xml"] = []byte(mirrored(t))
+	e.files["/site/artifacts.jar"] = jar(t, map[string]string{"artifacts.xml": mirrored(t)})
+	e.files["/site/artifacts.xml.xz"] = xzStored(t, mirrored(t))
+	e.files["/site/sub/artifacts.jar"] = e.files["/site/artifacts.jar"]
+	e.files["/composite/compositeArtifacts.xml"] = []byte(strings.ReplaceAll(composite(e.up+"/elsewhere/"), "Metadata", "Artifact"))
+	e.files["/elsewhere/artifacts.xml.xz"] = xzStored(t, mirrored(t))
+	e.mu.Unlock()
+	read := map[string]func(*testing.T, []byte) string{
+		"artifacts.xml":     func(_ *testing.T, b []byte) string { return string(b) },
+		"artifacts.jar":     func(t *testing.T, b []byte) string { return unjar(t, b)["artifacts.xml"] },
+		"artifacts.xml.xz":  unxz,
+		"sub/artifacts.jar": func(t *testing.T, b []byte) string { return unjar(t, b)["artifacts.xml"] },
+	}
+	for p, get := range read {
+		w := e.get(t, "p2-site", p)
+		if got := get(t, w.Body.Bytes()); got != stripped(t) {
+			t.Fatalf("%s:\n%s", p, got)
+		}
+		// after the remote's, so a client holding the remote's bytes reads this
+		if lm := w.Header().Get("Last-Modified"); lm != "Thu, 01 Oct 2026 00:00:01 GMT" {
+			t.Fatalf("%s: Last-Modified %q", p, lm)
+		}
+		// what the REST API lists is what is served
+		a, err := e.h.Store.Get(context.Background(), "p2-site", p)
+		if err != nil || a.Size != int64(w.Body.Len()) || a.RemoteLastModified != "Wed, 01 Oct 2026 00:00:00 GMT" {
+			t.Fatalf("%s cached: %+v %v", p, a, err)
+		}
+		if w := e.do("HEAD", "p2-site", p); w.Code != 200 {
+			t.Fatalf("HEAD %s: %d", p, w.Code)
+		}
+	}
+	// a mirrored child's document too, and through a group
+	e.get(t, "p2-proxy", "compositeArtifacts.xml")
+	child := ".remote/" + sha1hex(e.up+"/elsewhere/") + "/artifacts.xml.xz"
+	if got := unxz(t, e.get(t, "p2-proxy", child).Body.Bytes()); got != stripped(t) {
+		t.Fatalf("%s:\n%s", child, got)
+	}
+	if got := unxz(t, e.get(t, "p2-all", child).Body.Bytes()); got != stripped(t) {
+		t.Fatalf("%s through the group:\n%s", child, got)
+	}
+	// Once: a second read neither asks the remote nor writes.
+	before, _ := e.h.Store.Get(context.Background(), "p2-site", "artifacts.jar")
+	hits := e.hit("/site/artifacts.jar")
+	e.get(t, "p2-site", "artifacts.jar")
+	after, _ := e.h.Store.Get(context.Background(), "p2-site", "artifacts.jar")
+	if e.hit("/site/artifacts.jar") != hits || after.BlobSHA256 != before.BlobSHA256 {
+		t.Fatalf("read again: %d remote requests, blob %s -> %s", e.hit("/site/artifacts.jar")-hits, before.BlobSHA256, after.BlobSHA256)
+	}
+	// Past metadataMaxAge the remote's 304 keeps the rewritten document.
+	e.now = e.now.Add(2 * time.Hour)
+	if got := unjar(t, e.get(t, "p2-site", "artifacts.jar").Body.Bytes())["artifacts.xml"]; got != stripped(t) || e.hit("/site/artifacts.jar") != hits+1 {
+		t.Fatalf("after a 304: %d remote requests:\n%s", e.hit("/site/artifacts.jar")-hits, got)
+	}
+	// A new document from the remote is rewritten in its turn.
+	e.mu.Lock()
+	e.mod = "Fri, 02 Oct 2026 00:00:00 GMT"
+	e.files["/site/artifacts.jar"] = jar(t, map[string]string{"artifacts.xml": strings.ReplaceAll(mirrored(t), "value='1'", "value='2'")})
+	e.mu.Unlock()
+	e.now = e.now.Add(2 * time.Hour)
+	w := e.get(t, "p2-site", "artifacts.jar")
+	if got := unjar(t, w.Body.Bytes())["artifacts.xml"]; got != strings.ReplaceAll(stripped(t), "value='1'", "value='2'") || w.Header().Get("Last-Modified") != "Fri, 02 Oct 2026 00:00:01 GMT" {
+		t.Fatalf("new document %q:\n%s", w.Header().Get("Last-Modified"), got)
+	}
+}
+
+// Clients that come at once all get the rewritten document, whichever of them
+// fetched and rewrote it, and it is what stays cached.
+func TestMirrorsRemovedForAll(t *testing.T) {
+	e := newEnv(t)
+	e.mu.Lock()
+	e.files["/site/artifacts.jar"] = jar(t, map[string]string{"artifacts.xml": mirrored(t)})
+	e.mu.Unlock()
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := e.do("GET", "p2-site", "artifacts.jar")
+			if got := unjar(t, w.Body.Bytes())["artifacts.xml"]; w.Code != 200 || got != stripped(t) {
+				t.Errorf("%d:\n%s", w.Code, got)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := unjar(t, e.get(t, "p2-site", "artifacts.jar").Body.Bytes())["artifacts.xml"]; got != stripped(t) {
+		t.Fatalf("after them:\n%s", got)
+	}
+}
+
+// A document without the property is the remote's, byte for byte, in every
+// form; one that cannot be read is served as it came.
+func TestMirrorsLeftAlone(t *testing.T) {
+	e := newEnv(t)
+	plain := strings.ReplaceAll(mirrored(t), "    <property name='p2.mirrorsURL' value='http://mirrors.example/list?a=1&amp;b=2'/>\n", "")
+	e.mu.Lock()
+	e.files["/site/artifacts.xml"] = []byte(plain)
+	e.files["/site/artifacts.jar"] = jar(t, map[string]string{"artifacts.xml": plain, "other.txt": "kept"})
+	e.files["/site/artifacts.xml.xz"] = xzStored(t, plain)
+	e.files["/site/a/artifacts.jar"] = []byte("not a jar")
+	e.files["/site/b/artifacts.xml.xz"] = []byte("not xz")
+	e.files["/site/c/artifacts.xml"] = []byte("<repository><properties size='1'><property name='p2.mirrorsURL' value='x'/>")
+	e.files["/site/d/artifacts.jar"] = jar(t, map[string]string{"content.xml": "<repository/>"})
+	e.mu.Unlock()
+	for _, p := range []string{"artifacts.xml", "artifacts.jar", "artifacts.xml.xz", "a/artifacts.jar", "b/artifacts.xml.xz", "c/artifacts.xml", "d/artifacts.jar"} {
+		w := e.get(t, "p2-site", p)
+		if !bytes.Equal(w.Body.Bytes(), e.files["/site/"+p]) {
+			t.Fatalf("%s altered: %q", p, w.Body)
+		}
+		if lm := w.Header().Get("Last-Modified"); lm != "Thu, 01 Oct 2026 00:00:00 GMT" {
+			t.Fatalf("%s: Last-Modified %q", p, lm)
+		}
+	}
+}
+
+func TestStripMirrors(t *testing.T) {
+	big := strings.Repeat("k", 200<<10) // longer than the read buffer, as PGP keys are
+	for _, c := range []struct{ in, want string }{
+		{"<properties size='1'><property name='p2.mirrorsURL' value='x'/></properties>", "<properties size='0'></properties>"},
+		{`<properties size="2"><property value="x" name="p2.mirrorsURL"/><property name="a" value="b"/></properties>`, `<properties size="1"><property name="a" value="b"/></properties>`},
+		{"<properties size='2'>\n <property name = 'p2.mirrorsURL' value='x'></property>\n <property name='a' value='b'/>\n</properties>", "<properties size='1'>\n <property name='a' value='b'/>\n</properties>"},
+		{"<a><properties size='2'><property name='k' value='" + big + "'/><property name='p2.mirrorsURL' value='x'/></properties></a>", "<a><properties size='1'><property name='k' value='" + big + "'/></properties></a>"},
+		{"<artifact><properties size='1'><property name='p2.mirrorsURL' value='x'/></properties></artifact><properties size='1'><property name='k' value='v'/></properties>", "<artifact><properties size='0'></properties></artifact><properties size='1'><property name='k' value='v'/></properties>"},
+		// a size attribute that is not there stays that way
+		{"<properties><property name='p2.mirrorsURL' value='x'/></properties>", "<properties></properties>"},
+	} {
+		var out bytes.Buffer
+		removed, err := stripMirrors(&out, strings.NewReader(c.in))
+		if err != nil || !removed || out.String() != c.want {
+			t.Errorf("%.80q: %v %v\n%.200q", c.in, removed, err, out.String())
+		}
+	}
+	for _, in := range []string{"", "<repository/>", "<properties size='0'/>", "<properties size='1'><property name='p2.timestamp' value='p2.mirrorsURL'/></properties>", "<property name='p2.mirrorsURL' value='outside properties'/>", "text only"} {
+		var out bytes.Buffer
+		if removed, err := stripMirrors(&out, strings.NewReader(in)); err != nil || removed || out.String() != in {
+			t.Errorf("%q: %v %v\n%q", in, removed, err, out.String())
+		}
+	}
+	for _, in := range []string{"<properties size='1'>", "<properties size='1'><property name='p2.mirrorsURL' value='a>b'/></properties>"} {
+		if _, err := stripMirrors(io.Discard, strings.NewReader(in)); err == nil {
+			t.Errorf("%q: no error", in)
+		}
+	}
+	if _, err := stripMirrors(io.Discard, strings.NewReader(strings.Repeat("k", maxTag+1<<17))); !errors.Is(err, errTagTooLarge) {
+		t.Errorf("a tag without end: %v", err)
+	}
+}
+
+// TestRoutingRuleSeesRequestPaths pins p2-03: a rule written for repository
+// paths decides for a mirrored child's files, whose own URL it cannot know.
+func TestRoutingRuleSeesRequestPaths(t *testing.T) {
+	e := newEnv(t)
+	rule, err := repo.CompileRoute(meta.RoutingRule{Name: "repo-paths", Mode: meta.RoutingAllow, Matchers: []string{`^/\.remote/.*`, `^/composite[^/]*$`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.h.Fetcher.RouteAllowed = func(_ *repo.Repository, p string) bool {
+		ok, _ := rule.Allowed(p)
+		return ok
+	}
+	e.get(t, "p2-proxy", "compositeContent.xml")
+	child := ".remote/" + sha1hex(e.up+"/elsewhere/") + "/plugins/e_2.0.0.jar"
+	if got := e.get(t, "p2-proxy", child).Body.String(); got != "e" {
+		t.Fatalf("child plugin: %q", got)
+	}
+	if w := e.do("GET", "p2-proxy", "rel/content.xml"); w.Code != 404 {
+		t.Fatalf("outside the rule: %d", w.Code) // the handler's view: the server answers 403 first
 	}
 }
 

@@ -401,8 +401,10 @@ func applyDeprecation(newManifest json.RawMessage, oldAttrs string) (string, err
 }
 
 // withServerDist returns the manifest with dist.tarball, dist.shasum and
-// dist.integrity set from the stored tarball. Other client dist fields are kept.
-func withServerDist(raw json.RawMessage, file string, sums blob.Sums) (string, error) {
+// dist.integrity set from the stored tarball, other client dist fields kept,
+// and _npmUser.name set to who published it (user; "" for no one: unit tests
+// without a principal), whatever the client claimed.
+func withServerDist(raw json.RawMessage, file string, sums blob.Sums, user string) (string, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return "", badJSON(err)
@@ -431,6 +433,17 @@ func withServerDist(raw json.RawMessage, file string, sums blob.Sums) (string, e
 		return "", err
 	}
 	m["dist"] = db
+	if user != "" {
+		var publisher map[string]any
+		json.Unmarshal(m["_npmUser"], &publisher) // anything but an object is no claim
+		if publisher == nil {
+			publisher = map[string]any{}
+		}
+		publisher["name"] = user
+		if m["_npmUser"], err = json.Marshal(publisher); err != nil {
+			return "", err
+		}
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return "", err

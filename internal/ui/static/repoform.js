@@ -7,7 +7,7 @@
 // never sees a create or edit control.
 import {
   state, h, put, api, apiRepo, adminRepoLink, browseLink, typeBadge, fmtBytes, fmtNum, fmtDate, FORMAT_NAMES,
-  copyLine, pageHead, needAdmin, loadRepos, handleError, card, kv, alive, icon, markBusy, bar, OSV_FORMATS, SEVERITIES, sevBadge, sevText, repoFlags, NO_REPLICATION,
+  copyLine, pageHead, needAdmin, loadRepos, handleError, card, kv, alive, icon, markBusy, bar, OSV_FORMATS, SEVERITIES, sevBadge, sevText, repoFlags, NO_REPLICATION, MERGE_FORMATS,
 } from "./util.js";
 import { modal, rerender } from "./shell.js";
 import { t } from "./i18n.js";
@@ -487,8 +487,8 @@ export async function viewRepoForm(view, o) {
   // Hosted and proxy of a format with OSV data: whether repository.evaluate monitors it.
   const evalSel = !isGroup && OSV_FORMATS.includes(cfg.format)
     ? select([["inherit", t("rf.evInherit")], ["enabled", t("rf.evOn")], ["disabled", t("rf.evOff")]], cfg.evaluation || "inherit") : null;
-  // Content: strict content type validation (hosted) and Content-Disposition (raw, gitlfs).
-  const strict = isHosted ? checkbox(t("rf.strict"), cfg.strictContentTypeValidation) : null;
+  // Content: strict content type validation (hosted, proxy; a group keeps its stored value) and Content-Disposition (raw, gitlfs).
+  const strict = isGroup ? null : checkbox(isProxy ? t("rf.strictProxy") : t("rf.strict"), cfg.strictContentTypeValidation);
   const disposition = DISPOSITION.includes(cfg.format) || isMaven ? select([["inline", t("rf.dispInline")], ["attachment", t("rf.dispAttachment")]], cfg.contentDisposition || "inline") : null;
   const storedRule = cfg.routingRule || "";
   let rule = null, ruleHint = null;
@@ -500,7 +500,7 @@ export async function viewRepoForm(view, o) {
   }
 
   // Group
-  let picker = null, writable = null;
+  let picker = null, writable = null, merge = null;
   if (isGroup) {
     const candidates = all.filter((r) => r.format === cfg.format && r.name !== cfg.name)
       .map((r) => ({ name: r.name, type: r.type })).sort((a, b) => a.name.localeCompare(b.name));
@@ -512,6 +512,7 @@ export async function viewRepoForm(view, o) {
     };
     picker = memberPicker(candidates, cfg.members || [], (m) => fillWritable(m, writable.value));
     fillWritable(cfg.members || [], cfg.writeMember);
+    if (MERGE_FORMATS.includes(cfg.format)) merge = checkbox(t("rf.merge"), cfg.mergeMembers);
   }
 
   // Cleanup policy (plan 11 Decision 5): hosted and proxy repositories, never
@@ -607,7 +608,7 @@ export async function viewRepoForm(view, o) {
           h("div", { class: "field full" }, strict.el, h("small", null, t("rf.strictHelp"))),
           gpgKey ? field(t("rf.gpgKey"), gpgKey, t("rf.gpgKeyHelp"), { full: true }) : null)) : null,
         isProxy ? card(t("rf.proxy"), t("rf.proxySub"), fields(
-          field(t("rf.remote"), remote, cfg.format === "swift" ? t("rf.remoteSwift") : t("rf.remoteHelp"), { req: true, full: true }),
+          field(t("rf.remote"), remote, cfg.format === "swift" ? t("rf.remoteSwift") : cfg.format === "p2" ? [t("rf.remoteHelp"), h("br"), t("rf.remoteP2")] : t("rf.remoteHelp"), { req: true, full: true }),
           hidden ? h("div", { class: "field full" }, hidden.el, h("small", null, t("rf.hiddenHelp"))) : null,
           pDist ? field(t("rf.distribution"), pDist, t("rf.pDistHelp")) : null,
           pFlat ? h("div", { class: "field" }, pFlat.el, h("small", null, t("rf.flatHelp"))) : null,
@@ -617,6 +618,7 @@ export async function viewRepoForm(view, o) {
           h("div", { class: "field full" }, negOn.el, h("small", null, t("rf.negOnHelp"))),
           field(t("rf.negTTL"), negTTL, t("rf.negHelp")),
           rule ? field(t("rf.rule"), rule, t("rf.ruleHelp"), { full: true }) : ruleHint,
+          h("div", { class: "field full" }, strict.el, h("small", null, t("rf.strictProxyHelp"))),
           h("div", { class: "field full" }, autoBlock.el, h("small", null, t("rf.autoBlockHelp"))),
           h("div", { class: "field full" }, blocked.el, h("small", null, t("rf.blockedHelp"))))) : null,
         isProxy ? card(t("rf.cn"), t("rf.cnSub"), fields(
@@ -640,7 +642,8 @@ export async function viewRepoForm(view, o) {
         authCard,
         isGroup ? card(t("rf.group"), t("rf.groupSub"), fields(
           field(t("rf.memberRepos"), picker.el, t("rf.membersHelp"), { group: true, full: true }),
-          isDocker ? null : field(t("rf.writable"), writable, t("rf.writableHelp"), { full: true }))) : null,
+          isDocker ? null : field(t("rf.writable"), writable, t("rf.writableHelp"), { full: true }),
+          merge ? h("div", { class: "field full" }, merge.el, h("small", null, t("rf.mergeHelp"), cfg.format === "yum" ? [" ", t("rf.mergeYum")] : null)) : null)) : null,
         cleanupCard,
         card(t("rf.access"), t("rf.accessSub"), fields(field(t("rf.anon"), anon, t("rf.anonHelp"), { full: true }))),
         info ? card(t("rf.storage"), t("rf.storageSub"), [
@@ -724,6 +727,7 @@ export async function viewRepoForm(view, o) {
     if (isGroup) {
       b.members = picker.get();
       b.writeMember = writable.value;
+      b.mergeMembers = merge ? merge.box.checked : !!cfg.mergeMembers;
     }
     if (distribution) {
       b.distribution = distribution.value.trim();
@@ -808,10 +812,10 @@ export async function viewRepoForm(view, o) {
   if (editing) {
     const del = h("button", { type: "button", class: "btn danger" }, t("rf.delete"));
     del.addEventListener("click", () => deleteDialog(cfg.name, isLive));
-    // Invalidate cache (admins): a proxy's cached content goes stale and its misses are
-    // forgotten; a group does it for every proxy it reaches.
+    // Invalidate cache (edit on this repository; the server checks, as for Save and Delete):
+    // a proxy's cached content goes stale and its misses are forgotten; a group does it for every proxy it reaches.
     let inv = null;
-    if ((isProxy || isGroup) && state.me.admin) {
+    if (isProxy || isGroup) {
       inv = h("button", { type: "button", class: "btn" }, icon("refresh"), t("rf.invalidate"));
       inv.addEventListener("click", async () => {
         inv.disabled = true;

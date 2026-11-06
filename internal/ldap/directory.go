@@ -1,6 +1,7 @@
 package ldap
 
 import (
+	"cmp"
 	"context"
 	"crypto/x509"
 	"errors"
@@ -27,7 +28,10 @@ type User struct {
 	ID     string // the userIdAttr value
 	Name   string
 	Email  string
-	Groups []string // the groupAttr values
+	Groups []string // the groupAttr values; with static groups, each group's names (its id attribute) and DN
+	// GroupsErr says why the search for static groups failed. Groups is then
+	// empty: the password was right, and the user has no roles from groups.
+	GroupsErr error
 }
 
 // Step is one stage of a diagnostic run (Diagnose).
@@ -115,12 +119,22 @@ func hostOf(raw string) string {
 	return "?"
 }
 
+// maxGroups is the search size limit of static groups, as many as a group
+// attribute may hold. There is no paging here: a user beyond it, or beyond the
+// server's own limit, is a failed search.
+const maxGroups = maxValuesPerAttr
+
 // find searches for the one entry of user name.
 func find(c *Conn, cfg meta.LDAP, name string, tr *trace) (User, error) {
+	groupAttr := cfg.GroupAttr
+	if cfg.StaticGroups() {
+		groupAttr = "" // not asked for, and not read: only a group entry says who is in it
+	}
 	entries, err := c.Search(SearchRequest{
 		BaseDN:     cfg.UserBaseDN,
+		OneLevel:   cfg.UserOneLevel,
 		Filter:     UserFilter(cfg.UserFilter, name),
-		Attributes: []string{cfg.UserIDAttr, cfg.NameAttr, cfg.EmailAttr, cfg.GroupAttr},
+		Attributes: []string{cfg.UserIDAttr, cfg.NameAttr, cfg.EmailAttr, groupAttr},
 		SizeLimit:  maxEntries,
 	})
 	var re *ResultError
@@ -138,7 +152,7 @@ func find(c *Conn, cfg meta.LDAP, name string, tr *trace) (User, error) {
 	}
 	e := entries[0]
 	u := User{DN: e.DN, ID: e.First(cfg.UserIDAttr), Name: e.First(cfg.NameAttr), Email: e.First(cfg.EmailAttr),
-		Groups: append([]string{}, e.Attrs[strings.ToLower(cfg.GroupAttr)]...)}
+		Groups: append([]string{}, e.Attrs[strings.ToLower(groupAttr)]...)}
 	if u.DN == "" {
 		err = fmt.Errorf("%w: empty DN", ErrBadEntry)
 	} else if u.ID == "" {
@@ -148,9 +162,49 @@ func find(c *Conn, cfg meta.LDAP, name string, tr *trace) (User, error) {
 	return u, err
 }
 
+// readGroups fills in the static groups of u, if cfg has them, on c as the
+// service account or anonymously (userBound: c is u's, and binds back first).
+// One size-limited, time-limited search that asks for the group's id attribute
+// only, so a huge group's members do not travel. Nested groups are not followed.
+//
+// A failed search fails nothing: as for a user whose group attribute cannot be
+// read, u has no groups, and with them no roles from groups; u.GroupsErr says
+// why. Only a caller that went away is an error, so that no entry is left with
+// a search that never ended.
+func readGroups(ctx context.Context, c *Conn, cfg meta.LDAP, u *User, userBound bool) error {
+	if !cfg.StaticGroups() {
+		return nil
+	}
+	var err error
+	if userBound && cfg.BindDN != "" {
+		err = c.Bind(cfg.BindDN, cfg.BindPassword)
+	} else if userBound {
+		err = c.bind("", "") // an anonymous bind (RFC 4513 5.1.1), which Bind refuses for a mistake
+	}
+	var entries []Entry
+	if err == nil {
+		entries, err = c.Search(SearchRequest{
+			BaseDN:     cfg.GroupBaseDN,
+			OneLevel:   !cfg.GroupSubtree,
+			Filter:     GroupFilter(cfg, u.ID, u.DN),
+			Attributes: []string{cfg.GroupIDAttr},
+			SizeLimit:  maxGroups,
+		})
+	}
+	if err != nil {
+		u.GroupsErr = fmt.Errorf("group search under %s: %w", cfg.GroupBaseDN, err)
+		return ctx.Err()
+	}
+	for _, e := range entries {
+		u.Groups = append(append(u.Groups, e.Attrs[strings.ToLower(cfg.GroupIDAttr)]...), e.DN)
+	}
+	return nil
+}
+
 // Authenticate verifies name and password: service bind, search for the one
-// entry matching userFilter (name escaped), then a bind as that entry. An
-// empty name or password is refused without contacting the server.
+// entry matching userFilter (name escaped), then a bind as that entry, and
+// after it the search for static groups. An empty name or password is refused
+// without contacting the server.
 func (cl *Client) Authenticate(ctx context.Context, cfg meta.LDAP, name, password string) (User, error) {
 	return cl.authenticate(ctx, cfg, name, password, nil)
 }
@@ -173,12 +227,15 @@ func (cl *Client) authenticate(ctx context.Context, cfg meta.LDAP, name, passwor
 	if err != nil {
 		return User{}, err
 	}
+	if err := readGroups(ctx, c, cfg, &u, true); err != nil {
+		return User{}, err
+	}
 	return u, nil
 }
 
-// Find looks up the user with the given id through the service bind (no
-// user bind): the periodic re-check of a signed-in LDAP user. The found
-// entry's id must equal id.
+// Find looks up the user with the given id and its static groups through the
+// service bind (no user bind): the periodic re-check of a signed-in LDAP user.
+// The found entry's id must equal id.
 func (cl *Client) Find(ctx context.Context, cfg meta.LDAP, id string) (User, error) {
 	if id == "" {
 		return User{}, ErrNoSuchUser
@@ -194,6 +251,9 @@ func (cl *Client) Find(ctx context.Context, cfg meta.LDAP, id string) (User, err
 	}
 	if u.ID != id {
 		return User{}, ErrNoSuchUser
+	}
+	if err := readGroups(ctx, c, cfg, &u, false); err != nil {
+		return User{}, err
 	}
 	return u, nil
 }
@@ -213,15 +273,24 @@ func (cl *Client) Diagnose(ctx context.Context, cfg meta.LDAP, name, password st
 		c, err = cl.open(ctx, cfg, tr)
 		if err == nil {
 			if name != "" {
-				u, err = find(c, cfg, name, tr)
+				if u, err = find(c, cfg, name, tr); err == nil {
+					err = readGroups(ctx, c, cfg, &u, false)
+				}
 			}
 			c.Close()
 		}
 	}
 	if err == nil && name != "" {
 		roles, matched := MapRoles(cfg, u.Groups)
-		tr.add("groups", nil, fmt.Sprintf("user %q; groups matched: [%s]; roles: [%s]",
-			u.ID, strings.Join(matched, ", "), strings.Join(roles, ", ")))
+		detail := fmt.Sprintf("user %q; groups matched: [%s]; roles: [%s]", u.ID, strings.Join(matched, ", "), strings.Join(roles, ", "))
+		if cfg.StaticGroups() {
+			detail = fmt.Sprintf("found under %s: [%s]; %s", cfg.GroupBaseDN, strings.Join(u.Groups, ", "), detail)
+		}
+		var failed error
+		if u.GroupsErr != nil {
+			failed = fmt.Errorf("%w; a sign-in works, without roles from groups", u.GroupsErr)
+		}
+		tr.add("groups", failed, detail)
 	}
 	if len(tr.steps) == 0 && err != nil {
 		tr.add("connect", err, "")
@@ -277,8 +346,10 @@ func GroupMatches(value, group string) bool {
 }
 
 // MapRoles returns the roles granted by groups under cfg (the union of the
-// matching mappings' roles and the default roles, in first-seen order) and
-// the group values that matched a mapping.
+// matching mappings' roles, the default roles and, with GroupsAsRoles, the
+// roles named as the groups, in first-seen order) and the group values that
+// matched a mapping. Of a static group, the id attribute names the role; its
+// DN is there for the mappings.
 func MapRoles(cfg meta.LDAP, groups []string) (roles, matched []string) {
 	seen := map[string]bool{}
 	add := func(r string) {
@@ -303,6 +374,18 @@ func MapRoles(cfg meta.LDAP, groups []string) (roles, matched []string) {
 	}
 	for _, r := range cfg.DefaultRoles {
 		add(r)
+	}
+	if cfg.GroupsAsRoles {
+		for _, g := range groups {
+			rdn := firstRDNValue(g)
+			if rdn != "" && cfg.StaticGroups() {
+				continue
+			}
+			r := cmp.Or(rdn, strings.TrimSpace(g))
+			if r != "" && r != meta.AdminRole { // a role that does not exist grants nothing
+				add(r)
+			}
+		}
 	}
 	if roles == nil {
 		roles = []string{}

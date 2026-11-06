@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -262,11 +263,24 @@ type env struct {
 	now   time.Time
 	hits  atomic.Int32 // upstream requests
 	up    *httptest.Server
+	files sync.Map // more of the upstream's files, by URL path
 }
 
-// upstream is a mirror: el9/repodata/repomd.xml and one package.
+// upstream is a mirror: el9/repodata/repomd.xml and one package, and files.
 func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 	e.hits.Add(1)
+	if b, ok := e.files.Load(r.URL.Path); ok {
+		w.Write(b.([]byte))
+		return
+	}
+	switch {
+	case strings.HasPrefix(r.URL.Path, "/fail/"):
+		w.WriteHeader(http.StatusBadGateway)
+		return
+	case strings.HasPrefix(r.URL.Path, "/denied/"):
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
 	switch r.URL.Path {
 	case "/el9/repodata/repomd.xml":
 		w.Header().Set("Content-Type", "text/xml")
@@ -305,6 +319,10 @@ func newEnv(t *testing.T) *env {
 		{Name: "yum-proxy", Format: "yum", Type: "proxy", Remote: e.up.URL + "/",
 			MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Minute)},
 		{Name: "yum-all", Format: "yum", Type: "group", Members: []string{"yum-hosted", "yum-proxy"}, WriteMember: "yum-hosted"},
+		{Name: "yum-merged", Format: "yum", Type: "group", Members: []string{"yum-hosted", "yum-proxy"}, WriteMember: "yum-hosted", MergeMembers: true},
+		{Name: "yum-merged-deep", Format: "yum", Type: "group", Members: []string{"yum-deep", "yum-proxy"}, MergeMembers: true},
+		{Name: "yum-inner", Format: "yum", Type: "group", Members: []string{"yum-hosted"}},
+		{Name: "yum-outer", Format: "yum", Type: "group", Members: []string{"yum-inner", "yum-proxy", "yum-hosted"}, MergeMembers: true},
 	}}
 	if err := config.ValidateRepositories(cfg.Repositories); err != nil {
 		t.Fatal(err)
@@ -475,14 +493,12 @@ func TestHostedUploadAndRepodata(t *testing.T) {
 	if w := e.do("PUT", "yum-hosted", "Packages/d/demo-1.0-1.el9.x86_64.rpm", demo); w.Code != 409 {
 		t.Fatalf("republish: %d %s", w.Code, w.Body)
 	}
-	// the file name must be the package's NVRA; only .rpm outside repodata/
+	// only .rpm outside repodata/, and it must be an RPM
 	for _, c := range []struct {
 		path string
 		body []byte
 		want int
 	}{
-		{"demo-1.0-1.el9.x86_64.rpm", nvra("other", "1.0", "1.el9", "x86_64"), 400},
-		{"demo.rpm", demo, 400},
 		{"repodata/x-1.0-1.noarch.rpm", nvra("x", "1.0", "1", "noarch"), 400},
 		{"notes.txt", []byte("x"), 400},
 		{"empty-1.0-1.noarch.rpm", nil, 400},

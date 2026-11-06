@@ -105,8 +105,8 @@ var nexusTimestamp = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}\
 // npm proxy caching; a commandcenter webhook beside them unchanged.
 func TestNexusWebhooks(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, ".tgz") {
-			io.WriteString(w, "content of "+r.URL.Path)
+		if strings.HasSuffix(r.URL.Path, ".tgz") { // gzip's first bytes: an npm proxy caches nothing else
+			io.WriteString(w, "\x1f\x8bcontent of "+r.URL.Path)
 			return
 		}
 		http.NotFound(w, r)

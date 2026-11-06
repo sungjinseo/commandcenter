@@ -845,16 +845,18 @@ func (a *Authenticator) CanApp(p Principal, domain, action string) bool {
 }
 
 // AppDomains are the application privilege domains ("app:<domain>",
-// Nexus nx-<domain>-*) and the actions each delegates. The last five are
-// open to every signed-in user here; they are accepted, so Nexus roles
-// that hold them migrate, and grant nothing more.
+// Nexus nx-<domain>-*) and the actions each delegates. The last five, and
+// reading tags, are open to every signed-in user here; they are accepted, so
+// Nexus roles that hold them migrate, and grant nothing more.
 var AppDomains = map[string][]string{
 	"users":      {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
 	"roles":      {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
 	"selectors":  {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
 	"settings":   {meta.ActionRead},
 	"tasks":      {meta.ActionRead, meta.ActionRun},
+	"usertoken":  {meta.ActionRead, meta.ActionAdd, meta.ActionDelete}, // open to every signed-in user, as the last five
 	"blobstores": {meta.ActionRead},
+	"tags":       {meta.ActionRead, meta.ActionAdd, meta.ActionEdit, meta.ActionDelete},
 
 	"search":        {meta.ActionRead},
 	"healthcheck":   {meta.ActionRead},
@@ -986,8 +988,40 @@ func (a *Authenticator) RevokeToken(ctx context.Context, token string, p Princip
 // ErrLDAPUser reports a token requested for an LDAP or OIDC override row.
 var ErrLDAPUser = errors.New("tokens of LDAP, OIDC, Crowd and SAML users are created by the user")
 
+// MaxLoginTokens is how many tokens from logins a user keeps (CreateLoginToken).
+const MaxLoginTokens = 100
+
+// loginTokenID starts the id of a token from a login, which tells it from
+// the tokens a user creates and names by hand.
+const loginTokenID = "login-"
+
+type loginTokenKey struct{}
+
+// CreateLoginToken is CreateTokenFor for a client's login (npm login), which
+// CI may run for every build: the owner's tokens from logins that were used
+// last stay, up to MaxLoginTokens, and the others are revoked. Tokens a user
+// creates by hand, and those of builds before this one, do not count.
+func (a *Authenticator) CreateLoginToken(ctx context.Context, p Principal) (string, error) {
+	_, token, err := a.CreateTokenFor(context.WithValue(ctx, loginTokenKey{}, true), p)
+	if err != nil {
+		return "", err
+	}
+	if pr, ok := a.tokens.(interface {
+		PruneTokens(ctx context.Context, owner, idPrefix string, keep int) error
+	}); ok {
+		if err := pr.PruneTokens(ctx, p.Owner(), loginTokenID, MaxLoginTokens); err != nil {
+			// The login worked; the next one prunes again.
+			slog.Warn("could not revoke old login tokens", "user", p.User, "err", logsafe.Err(err))
+		}
+	}
+	return token, nil
+}
+
 func (a *Authenticator) storeToken(ctx context.Context, owner string) (id, token string, err error) {
 	id, token = randomHex(8), tokenPrefix+randomHex(32)
+	if ctx.Value(loginTokenKey{}) != nil {
+		id = loginTokenID + id
+	}
 	if err := a.tokens.CreateToken(ctx, id, owner, hashToken(token), time.Now()); err != nil {
 		return "", "", err
 	}

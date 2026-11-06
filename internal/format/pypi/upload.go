@@ -13,15 +13,18 @@ import (
 
 	"golang.org/x/crypto/blake2b"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/blob"
+	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 )
 
 const (
-	maxField   = 4 << 10  // cap for each form field the handler uses
-	maxIgnored = 16 << 20 // cap for all other form fields together (twine sends the README as description)
-	maxParts   = 256
+	maxField     = 4 << 10  // cap for each form field the handler uses
+	maxIgnored   = 16 << 20 // cap for all other form fields together (twine sends the README as description)
+	maxSignature = 64 << 10 // cap for a gpg_signature part: an armored signature is a few KiB at most
+	sigHead      = "-----BEGIN PGP SIGNATURE-----"
 )
 
 // usedFields are the only form fields buffered; everything else is drained.
@@ -31,7 +34,11 @@ var usedFields = map[string]bool{
 }
 
 // upload handles twine's legacy upload API. The file part is streamed to the
-// blob store; other form fields are small and read into memory.
+// blob store; other form fields are small and read into memory, and their
+// number is not bounded: twine sends one per Requires-Dist, Provides-Extra and
+// classifier, and the byte caps bound the memory. A gpg_signature part (twine
+// upload --sign) is stored beside the file. Under writePolicy allow an upload
+// replaces the file it is the same file as (replaced).
 func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Repository) error {
 	if rp.WritePolicy == "deny" {
 		return repo.Errorf(http.StatusBadRequest, "repository %q is read-only", rp.Name)
@@ -43,11 +50,11 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	fields := map[string]string{}
 	b2, _ := blake2b.New256(nil) // errors only for a key over 64 bytes
 	var (
-		sums     blob.Sums
-		filename string
-		haveFile bool
-		drained  int64
-		parts    int
+		sums      blob.Sums
+		filename  string
+		haveFile  bool
+		drained   int64
+		signature []byte
 	)
 	for {
 		part, err := mr.NextPart()
@@ -80,7 +87,7 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 				if err != nil {
 					return err
 				}
-				if err := duplicate(project, pkgs, filename); err != nil {
+				if _, err := h.replaced(r.Context(), rp, project, pkgs, filename); err != nil {
 					return err
 				}
 			}
@@ -93,9 +100,17 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 			haveFile = true
 			continue
 		}
-		parts++
-		if parts > maxParts {
-			return repo.Errorf(http.StatusRequestEntityTooLarge, "upload has too many form fields")
+		if name == "gpg_signature" {
+			if signature, err = io.ReadAll(io.LimitReader(part, maxSignature+1)); err != nil {
+				return multipartErr(err)
+			}
+			if len(signature) > maxSignature {
+				return repo.Errorf(http.StatusRequestEntityTooLarge, "gpg_signature is over %d KiB", maxSignature>>10)
+			}
+			if !bytes.HasPrefix(bytes.TrimSpace(signature), []byte(sigHead)) {
+				return repo.Errorf(http.StatusBadRequest, "gpg_signature is not an ASCII-armored signature")
+			}
+			continue
 		}
 		if !usedFields[name] {
 			n, err := io.Copy(io.Discard, io.LimitReader(part, maxIgnored-drained+1))
@@ -155,10 +170,18 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	if err != nil {
 		return err
 	}
+	var sigSums *blob.Sums
+	if signature != nil {
+		s, err := h.Store.WriteBlob(rp.Name, bytes.NewReader(signature), nil)
+		if err != nil {
+			return err
+		}
+		sigSums = &s
+	}
 	if err := h.record(r.Context(), rp, project, fileAttrs{
 		Filename: filename, Version: version, SHA256: sums.SHA256, RequiresPython: requiresPython,
-		Blake2b256: hex.EncodeToString(b2.Sum(nil)), MetadataSHA256: mdSums.SHA256,
-	}, sums, mdSums); err != nil {
+		Blake2b256: hex.EncodeToString(b2.Sum(nil)), MetadataSHA256: mdSums.SHA256, HasSig: signature != nil,
+	}, sums, mdSums, sigSums); err != nil {
 		return err
 	}
 	h.Store.Emit(r, "upload", rp.Name, filename, "")
@@ -166,9 +189,10 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, rp *repo.Reposi
 	return nil
 }
 
-// record stores the file row, the file and its core metadata sidecar (PEP
-// 658, blob mdSums) in one transaction.
-func (h *Handler) record(ctx context.Context, rp *repo.Repository, project string, attrs fileAttrs, sums, mdSums blob.Sums) error {
+// record stores the file row, the file, its core metadata sidecar (PEP 658,
+// blob mdSums) and its signature (sigSums, when it has one) in one
+// transaction, in place of what it replaces (replaced).
+func (h *Handler) record(ctx context.Context, rp *repo.Repository, project string, attrs fileAttrs, sums, mdSums blob.Sums, sigSums *blob.Sums) error {
 	unlock, err := h.Store.Lock(ctx, "pypi\x00"+rp.Name+"\x00"+project)
 	if err != nil {
 		return err
@@ -183,8 +207,17 @@ func (h *Handler) record(ctx context.Context, rp *repo.Repository, project strin
 		if err != nil {
 			return err
 		}
-		if err := duplicate(project, pkgs, attrs.Filename); err != nil {
+		old, err := h.replaced(ctx, rp, project, pkgs, attrs.Filename)
+		if err != nil {
 			return err
+		}
+		for _, p := range old {
+			if err := tx.DeletePackage(ctx, rp.Name, project, p.Version); err != nil {
+				return err
+			}
+			if err := removeFile(ctx, tx, rp.Name, project, p.Version, &component.Result{}); err != nil {
+				return err
+			}
 		}
 		err = tx.InsertPackage(ctx, meta.Package{
 			Repo: rp.Name, Format: "pypi", Name: project, Version: attrs.Filename, Attrs: string(doc), CreatedAt: h.Now(),
@@ -198,8 +231,37 @@ func (h *Handler) record(ctx context.Context, rp *repo.Repository, project strin
 		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, fileKey(project, attrs.Filename), "application/octet-stream", sums)); err != nil {
 			return err
 		}
+		if sigSums != nil {
+			if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, fileKey(project, attrs.Filename)+sigExt, metadataType, *sigSums)); err != nil {
+				return err
+			}
+		}
 		return tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, metadataKey(project, attrs.Filename), metadataType, mdSums))
 	})
+}
+
+// replaced returns the rows an upload of filename to rp replaces, none when
+// it is a new file. A file rp has already, in any spelling of its name, may be
+// uploaded again only under writePolicy allow, by a user with Edit as well as
+// Add; otherwise it is duplicate's 400.
+func (h *Handler) replaced(ctx context.Context, rp *repo.Repository, project string, pkgs []meta.Package, filename string) ([]meta.Package, error) {
+	err := duplicate(project, pkgs, filename)
+	switch {
+	case err == nil:
+		return nil, nil
+	case rp.WritePolicy != "allow":
+		return nil, err
+	case !h.Auth.Permits(ctx, rp.Name, auth.Edit):
+		return nil, repo.Errorf(http.StatusForbidden, "user %q may not overwrite %s", auth.FromContext(ctx).User, filename)
+	}
+	want := canonicalKey(project, filename)
+	var old []meta.Package
+	for _, p := range pkgs {
+		if p.Version == filename || canonicalKey(project, p.Version) == want {
+			old = append(old, p)
+		}
+	}
+	return old, nil
 }
 
 // checkFields validates the form fields against the uploaded file name and

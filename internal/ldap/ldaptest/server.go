@@ -48,7 +48,9 @@ type Server struct {
 	entries  []Entry
 	down     bool
 	notice   bool
+	hook     func(base string) int64
 	filters  []string
+	as       []string
 	binds    atomic.Int64
 	dials    atomic.Int64
 	searches atomic.Int64
@@ -112,6 +114,15 @@ func (s *Server) SetNoticeOnSearch(on bool) {
 	s.mu.Unlock()
 }
 
+// SetSearchHook runs hook before a search is served, with the search's base.
+// A result code it returns (0 or more) answers the search; a negative one lets
+// the search run. It may wait, as a slow server does.
+func (s *Server) SetSearchHook(hook func(base string) int64) {
+	s.mu.Lock()
+	s.hook = hook
+	s.mu.Unlock()
+}
+
 // SetDown makes the server drop every new connection at once (an outage).
 func (s *Server) SetDown(down bool) {
 	s.mu.Lock()
@@ -131,6 +142,13 @@ func (s *Server) Filters() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.filters...)
+}
+
+// SearchedAs returns who each search was bound as, in order: "" is anonymous.
+func (s *Server) SearchedAs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.as...)
 }
 
 func (s *Server) accept() {
@@ -158,6 +176,7 @@ func (s *Server) accept() {
 
 func (s *Server) serve(c net.Conn) {
 	r := bufio.NewReader(c)
+	bound := ""
 	for {
 		c.SetDeadline(time.Now().Add(10 * time.Second))
 		msg, err := ber.ReadElement(r, ber.MaxLen)
@@ -183,16 +202,28 @@ func (s *Server) serve(c net.Conn) {
 			return
 		case opBindRequest:
 			s.binds.Add(1)
-			reply(result(opBindResponse, s.bind(content)))
+			dn, code := s.bind(content)
+			if code == 0 {
+				bound = dn
+			}
+			reply(result(opBindResponse, code))
 		case opSearchRequest:
 			s.searches.Add(1)
 			s.mu.Lock()
-			notice := s.notice
+			notice, hook := s.notice, s.hook
+			s.as = append(s.as, bound)
 			s.mu.Unlock()
 			if notice {
 				c.Write(ber.TLV(ber.TagSequence, ber.Int(ber.TagInteger, 0), ber.TLV(opExtendedResp, ber.Int(ber.TagEnumerated, 52),
 					ber.String(ber.TagOctetString, ""), ber.String(ber.TagOctetString, "going away"), ber.String(ber.ClassContext|10, "1.3.6.1.4.1.1466.20036"))))
 				return
+			}
+			if hook != nil {
+				base, _, _ := ber.Expect(content, ber.TagOctetString)
+				if code := hook(string(base)); code >= 0 {
+					reply(result(opSearchDone, code))
+					continue
+				}
 			}
 			entries, code := s.search(content)
 			for _, e := range entries {
@@ -220,31 +251,31 @@ func result(op byte, code int64) []byte {
 	return ber.TLV(op, ber.Int(ber.TagEnumerated, code), ber.String(ber.TagOctetString, ""), ber.String(ber.TagOctetString, ""))
 }
 
-// bind returns the result code of a simple bind.
-func (s *Server) bind(content []byte) int64 {
+// bind returns who a simple bind is bound as and its result code.
+func (s *Server) bind(content []byte) (string, int64) {
 	_, rest, err := ber.Expect(content, ber.TagInteger)
 	if err != nil {
-		return 2
+		return "", 2
 	}
 	dn, rest, err := ber.Expect(rest, ber.TagOctetString)
 	if err != nil {
-		return 2
+		return "", 2
 	}
 	pw, _, err := ber.Expect(rest, ber.ClassContext|0)
 	if err != nil {
-		return 2
+		return "", 2
 	}
 	if len(pw) == 0 {
-		return 0 // unauthenticated bind: real servers accept it
+		return "", 0 // unauthenticated bind: real servers accept it
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, e := range s.entries {
 		if strings.EqualFold(e.DN, string(dn)) && e.Password != "" && e.Password == string(pw) {
-			return 0
+			return string(dn), 0
 		}
 	}
-	return 49
+	return "", 49
 }
 
 func (s *Server) search(content []byte) ([][]byte, int64) {
@@ -252,13 +283,16 @@ func (s *Server) search(content []byte) ([][]byte, int64) {
 	if err != nil {
 		return nil, 2
 	}
-	var sizeLimit int64
+	var scope, sizeLimit int64
 	for i, want := range []byte{ber.TagEnumerated, ber.TagEnumerated, ber.TagInteger, ber.TagInteger, ber.TagBoolean} {
 		var c []byte
 		if c, rest, err = ber.Expect(rest, want); err != nil {
 			return nil, 2
 		}
-		if i == 2 {
+		switch i {
+		case 0:
+			scope, _ = ber.ParseInt(c)
+		case 2:
 			sizeLimit, _ = ber.ParseInt(c)
 		}
 	}
@@ -285,6 +319,9 @@ func (s *Server) search(content []byte) ([][]byte, int64) {
 	for _, e := range entries {
 		if !underBase(e.DN, string(base)) {
 			continue
+		}
+		if scope == 1 && strings.Count(strings.TrimSuffix(strings.ToLower(e.DN), ","+strings.ToLower(string(base))), ",") > 0 {
+			continue // below a direct child
 		}
 		ok, valid := match(filter, e)
 		if !valid {

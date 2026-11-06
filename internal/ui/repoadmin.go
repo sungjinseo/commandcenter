@@ -32,11 +32,13 @@ func (u *UI) repoAdminRoutes(mux *http.ServeMux) {
 
 // invalidateCache makes a proxy's cached content stale and forgets its
 // misses; a group does so for every proxy it reaches (repo.Registry.InvalidateCache).
+// It takes the edit right on the repository named, as in Nexus: a group's
+// holder needs none on its members, and nothing but a revalidation follows.
 func (u *UI) invalidateCache(w http.ResponseWriter, r *http.Request) {
-	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
+	name := r.PathValue("name")
+	if !u.requireRepoAdmin(w, r, name, u.repoFormat(name), auth.Edit, true) {
 		return
 	}
-	name := r.PathValue("name")
 	proxies, err := u.Repos.InvalidateCache(r.Context(), name)
 	if err != nil {
 		u.writeRepoError(w, r, err)
@@ -74,8 +76,9 @@ type repoRequest struct {
 	NegativeCacheTTL       string   `json:"negativeCacheTTL"`
 	Members                []string `json:"members"`
 	WriteMember            string   `json:"writeMember"`
-	// MergeMembers (npm and pypi groups): answer a package from every
-	// member that has it, merged, instead of the first one alone.
+	// MergeMembers (npm, pypi and yum groups): answer a package (yum: a
+	// path's repodata/) from every member that has it, merged, instead of
+	// the first one alone.
 	MergeMembers bool `json:"mergeMembers"`
 	// RoutingRule names the proxy's routing rule; "" is none.
 	RoutingRule   string `json:"routingRule"`
@@ -141,6 +144,9 @@ type repoRequest struct {
 	// Connection (proxy) overrides the outbound HTTP settings; absent (null)
 	// keeps the stored one on update and means none on create, {} clears it.
 	Connection *config.Connection `json:"connection"`
+	// Nexus is what the Nexus API keeps for its clients (config.NexusKept);
+	// absent (null) keeps the stored values on update and means none on create.
+	Nexus *config.NexusKept `json:"nexus"`
 }
 
 // repoAuthResponse never carries a secret.
@@ -315,7 +321,11 @@ func (b *repoRequest) definition() (config.Repository, repo.ClearSecrets, error)
 		NegativeCacheEnabled: b.NegativeCacheEnabled, Connection: config.CleanConnection(b.Connection),
 	}
 	clear := repo.ClearSecrets{SigningKey: b.ClearSigningKey, KeepFirewall: b.Firewall == nil, KeepReplication: b.Replication == nil,
-		KeepEvaluation: b.Evaluation == nil, KeepConnection: b.Connection == nil, KeepLayoutPolicy: b.LayoutPolicy == nil}
+		KeepEvaluation: b.Evaluation == nil, KeepConnection: b.Connection == nil, KeepLayoutPolicy: b.LayoutPolicy == nil,
+		KeepNexus: b.Nexus == nil}
+	if b.Nexus != nil {
+		d.Nexus = *b.Nexus
+	}
 	if b.LayoutPolicy != nil && *b.LayoutPolicy != "strict" {
 		d.LayoutPolicy = *b.LayoutPolicy
 	}

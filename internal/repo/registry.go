@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -108,6 +109,7 @@ type ClearSecrets struct {
 	KeepEvaluation    bool // keep the stored evaluation, whatever def says (the API's absent field)
 	KeepConnection    bool // keep the stored connection settings, whatever def says (the API's absent field)
 	KeepLayoutPolicy  bool // keep the stored layoutPolicy, whatever def says (the API's absent field)
+	KeepNexus         bool // keep the stored nexus values, whatever def says (the API's absent field)
 }
 
 // NewRegistry publishes the first snapshot from defs, which must already be
@@ -394,6 +396,9 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	if clear.KeepLayoutPolicy {
 		def.LayoutPolicy = cur.LayoutPolicy
 	}
+	if clear.KeepNexus {
+		def.Nexus = cur.Nexus
+	}
 	ra, err := mergeAuth(name, cur.Remote, def.Remote, cur.RemoteAuth, def.RemoteAuth, clear)
 	if err != nil {
 		return config.Repository{}, err
@@ -432,6 +437,16 @@ func (r *Registry) UpdateDef(ctx context.Context, name string, def config.Reposi
 	gens := r.gens()
 	if def.Remote != cur.Remote {
 		gens[name] = gen
+		if def.Format == "npm" {
+			// As Nexus does: the old remote's package documents would be
+			// served until their max age. What the new one lacks stays.
+			if err := r.db.InvalidateCache(ctx, []string{name}); err != nil {
+				return config.Repository{}, err
+			}
+		}
+		if def.Format == "p2" {
+			slog.Info("p2 proxy: the remote changed, its cached site was deleted", "repo", name)
+		}
 	}
 	r.snap.Store(newSnapshot(list, gens))
 	r.written(ctx)
@@ -639,6 +654,10 @@ func cloneDef(def config.Repository) config.Repository {
 		def.NegativeCacheEnabled = &v
 	}
 	def.Connection = config.CleanConnection(def.Connection)
+	if v := def.Nexus.QueryCacheItemMaxAge; v != nil {
+		age := *v
+		def.Nexus.QueryCacheItemMaxAge = &age
+	}
 	return def
 }
 

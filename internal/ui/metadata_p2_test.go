@@ -42,6 +42,8 @@ func TestComponentMetadataP2(t *testing.T) {
 	for p, body := range map[string]string{
 		"plugins/org.example.a_1.0.0.v20260101.jar": jar(map[string]string{"META-INF/MANIFEST.MF": manifest}),
 		"features/org.example.f_1.0.0.jar":          jar(map[string]string{"feature.xml": "<feature/>"}),
+		// below a composite child's directory, as a release site has them
+		"202409111000/plugins/org.example.child_2.0.0.jar": jar(map[string]string{"META-INF/MANIFEST.MF": manifest}),
 	} {
 		if _, err := store.Put(ctx, "p2-proxy", p, "", strings.NewReader(body)); err != nil {
 			t.Fatal(err)
@@ -58,6 +60,10 @@ func TestComponentMetadataP2(t *testing.T) {
 	}
 	if got := strings.Join(parts, " "); got != "require-bundle:org.eclipse.core.runtime:[3.0.0,4.0.0) require-bundle:org.eclipse.ui:" {
 		t.Fatalf("p2 deps: %s", got)
+	}
+	r = e.req(t, "GET", "/-/api/repositories/p2-proxy/components/metadata?group=plugins&name=org.example.child&version=2.0.0", "", "admin", nil, false)
+	if r.status != 200 || json.Unmarshal([]byte(r.body), &m) != nil || !m.Collected || *m.Maintainer != "Example Inc." {
+		t.Fatalf("below a child: %d %s", r.status, r.body)
 	}
 	r = e.req(t, "GET", "/-/api/repositories/p2-proxy/components/metadata?group=features&name=org.example.f&version=1.0.0", "", "admin", nil, false)
 	if r.status != 200 || json.Unmarshal([]byte(r.body), &m) != nil || m.Collected {

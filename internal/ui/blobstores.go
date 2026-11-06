@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 
 	"commandcenter/internal/blob"
 	"commandcenter/internal/events"
@@ -21,8 +23,8 @@ import (
 )
 
 // Blob-store admin API (plan 12 Decision 7). Reads need an admin; mutations
-// need an interactive admin and the UI header. A store's path and bucket
-// are immutable (no PUT). Deleting a store leaves its files on disk and its
+// need an interactive admin and the UI header. A store's path, bucket and
+// prefix are immutable. Deleting a store leaves its files on disk and its
 // objects in the bucket.
 //
 // Create and delete run under the registry's write lock, which repository
@@ -47,12 +49,15 @@ var blobStoreDeleteHook func()
 // "s3", which takes the bucket in S3. An empty path puts the store (for an
 // S3 store: its temp files) under <dataDir>/blobstores/<name> (recorded
 // relative to the data directory); an absolute path is used as given; a
-// relative one is refused (QA N-22).
+// relative one is refused (QA N-22). RelativePath, what the Nexus API's
+// relative paths map to, puts it under <dataDir>/blobstores/ instead.
 type blobStoreRequest struct {
 	Name string         `json:"name"`
 	Path string         `json:"path"`
 	Type string         `json:"type"`
 	S3   *blob.S3Config `json:"s3"`
+
+	RelativePath string `json:"relativePath,omitempty"`
 
 	Quota *meta.Quota `json:"quota"` // soft quota; null or absent is none
 	// An azure store's container and credentials (Type "azure"); on PUT its
@@ -93,8 +98,8 @@ type blobStoreJSON struct {
 	Azure  *azureJSON `json:"azure,omitempty"`
 	Google *gcsJSON   `json:"google,omitempty"`
 
-	// Unavailable says why the store did not open on this node; its
-	// repositories answer 503 meanwhile.
+	// Unavailable says why the store did not open on this node (its
+	// repositories answer 503 meanwhile) or why its last probe failed.
 	Unavailable string `json:"unavailable,omitempty"`
 }
 
@@ -137,6 +142,8 @@ type s3JSON struct {
 	// Encryption is null unless set; Failover is [] without replicas.
 	Encryption *blob.S3Encryption `json:"encryption"`
 	Failover   []blob.S3Failover  `json:"failover"`
+
+	MaxConnections int `json:"maxConnections,omitempty"`
 }
 
 // blobStoreView builds the DTO for one stored row: usage scoped to the store's
@@ -159,7 +166,7 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 	out.Quota = bs.Quota
 	if u.Store != nil {
 		out.MemberOf = u.Store.GroupOf(bs.Name)
-		out.Unavailable = u.Store.Unopened(bs.Name)
+		out.Unavailable = cmp.Or(u.Store.Unopened(bs.Name), u.probeFailure(bs.Name))
 	}
 	if bs.Type == meta.BlobStoreGroup && bs.Group != nil {
 		out.Members, out.FillPolicy = bs.Group.Members, bs.Group.FillPolicy
@@ -170,7 +177,7 @@ func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSO
 		c := bs.S3
 		out.S3 = &s3JSON{Bucket: c.Bucket, Prefix: c.Prefix, Region: c.Region, Endpoint: c.Endpoint,
 			PathStyle: c.PathStyle, AccessKey: c.AccessKey, SecretSet: c.SecretKey != "", SSE: c.SSE,
-			Encryption: c.Encryption, Failover: append([]blob.S3Failover{}, c.Failover...)}
+			Encryption: c.Encryption, Failover: append([]blob.S3Failover{}, c.Failover...), MaxConnections: c.MaxConnections}
 		out.QuotaViolated, _ = quotaState(out)
 		return out, nil
 	}
@@ -210,6 +217,7 @@ func (u *UI) listBlobStores(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
+	u.storeProblems() // the views read the probes
 	out := make([]blobStoreJSON, 0, len(rows))
 	for _, bs := range rows {
 		v, err := u.blobStoreView(r.Context(), bs)
@@ -231,6 +239,7 @@ func (u *UI) getBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.writeBlobStoreError(w, r, err)
 		return
 	}
+	u.storeProblems() // the view reads the probes
 	v, err := u.blobStoreView(r.Context(), bs)
 	if err != nil {
 		u.fail(w, r, err)
@@ -267,6 +276,13 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{
 			"blob store path must be absolute; leave it empty for <dataDir>/blobstores/" + body.Name}})
 		return
+	case body.RelativePath != "":
+		p := filepath.Clean(body.RelativePath)
+		if !filepath.IsLocal(p) || p == "." {
+			u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"path: a relative path must name a directory inside <dataDir>/blobstores"}})
+			return
+		}
+		row.Path = filepath.Join("blobstores", p)
 	}
 	switch row.Type {
 	case "":
@@ -417,8 +433,10 @@ func (u *UI) createBlobStore(w http.ResponseWriter, r *http.Request) {
 }
 
 // updateBlobStore changes the soft quota: {"quota": {type, limitBytes}} sets
-// it, {"quota": null} removes it; a group's members and fill policy; and an
-// azure store's credentials ({"azure": {...}}, setAzureAuth).
+// it, {"quota": null} removes it; a group's members and fill policy; an
+// azure store's credentials ({"azure": {...}}, setAzureAuth); and an S3
+// store's credentials, endpoint, region, path style and connection bound
+// ({"s3": {...}}, setS3Connection).
 func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 	if !requireAdminInteractive(w, r) || !requireUIHeader(w, r) {
 		return
@@ -439,10 +457,11 @@ func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 	_, members := raw["members"]
 	_, fill := raw["fillPolicy"]
 	_, setAzure := raw["azure"]
+	_, setS3 := raw["s3"]
 	setGroup := members || fill
 	name := r.PathValue("name")
-	if !setQuota && !setGroup && !setAzure {
-		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"nothing to change: send quota, a group's members and fillPolicy, or an azure store's credentials"}})
+	if !setQuota && !setGroup && !setAzure && !setS3 {
+		u.writeBlobStoreError(w, r, &repo.ValidationError{Errors: []string{"nothing to change: send quota, a group's members and fillPolicy, an azure store's credentials or an s3 store's connection settings"}})
 		return
 	}
 	if setQuota {
@@ -477,6 +496,22 @@ func (u *UI) updateBlobStore(w http.ResponseWriter, r *http.Request) {
 		}
 		u.notify(r.Context(), "blobstores")
 		u.emit(r, "blobstore.update", "", name, "credentials: "+azureDetail(cfg))
+	}
+	if setS3 {
+		if u.Store == nil {
+			writeError(w, http.StatusNotImplemented, "blob stores are not available")
+			return
+		}
+		cfg, changed, err := u.setS3Connection(r.Context(), name, body.S3)
+		if err != nil {
+			u.writeBlobStoreError(w, r, err)
+			return
+		}
+		if changed {
+			u.notify(r.Context(), "blobstores")
+			u.syncNodes(r.Context(), name) // an old key may be revoked once this answers
+			u.emit(r, "blobstore.update", "", name, "connection: "+cfg.Location())
+		}
 	}
 	if setQuota {
 		if err := u.DB.SetBlobStoreQuota(r.Context(), name, body.Quota); err != nil {
@@ -559,6 +594,151 @@ func (u *UI) quotaChecks(ctx context.Context) []check {
 		}))
 	}
 	return out
+}
+
+// CheckQuotas runs the soft quota checks without a client asking (Nexus
+// checks every minute): a store over its quota is logged each time, and a
+// flip records its event as in quotaChecks. The leader runs it. ponytail: a
+// full count of each store with a quota per minute, what a status check has
+// always cost; keep running totals if it shows on stores of millions of assets.
+func (u *UI) CheckQuotas(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, statsTimeout)
+	defer cancel()
+	for _, c := range u.quotaChecks(ctx) {
+		if !c.Healthy && u.Log != nil && ctx.Err() == nil {
+			u.Log.Warn("a blob store is over its soft quota", "check", c.Name, "detail", c.Message)
+		}
+	}
+}
+
+// quotaAggregate is the "Blob Stores Quota" check: one verdict over the
+// per-store checks.
+func quotaAggregate(checks []check) check {
+	return runCheck("Blob Stores Quota", func() (bool, string) {
+		var over []string
+		for _, c := range checks {
+			if !c.Healthy {
+				over = append(over, strings.TrimPrefix(c.Name, "Blob store quota: ")+": "+c.Message)
+			}
+		}
+		if len(over) > 0 {
+			return false, fmt.Sprintf("%d of %d blob stores with a soft quota are over it: %s", len(over), len(checks), strings.Join(over, "; "))
+		}
+		return true, fmt.Sprintf("none of the %d blob stores with a soft quota is over it", len(checks))
+	})
+}
+
+// ---- blob store probes ----
+
+// storeProbeTTL is how long a probe's answer stands: a status page, a
+// Prometheus scrape and a blob store list all ask, and a probe of a bucket is
+// a request to it. A var for tests.
+var storeProbeTTL = 30 * time.Second
+
+// storeProbe is one store's last probe on this node (a store's bucket or disk
+// can fail on one node alone).
+type storeProbe struct {
+	why     string        // what is wrong; "": nothing
+	at      time.Time     // when it answered; zero until it did
+	done    chan struct{} // while it runs
+	started time.Time     // and since when
+}
+
+func (u *UI) probeExpired(p *storeProbe) bool {
+	return p.at.IsZero() || u.clock().Sub(p.at) >= storeProbeTTL
+}
+
+// storeProblems probes the stores this node has open whose last answer is
+// old, each in a goroutine of its own, gives each blobCheckTimeout, and
+// returns what is wrong per store: why it did not open or what its probe says,
+// a probe that has not answered being a problem. One that hangs keeps its
+// goroutine, no other starts on top of it, and nobody waits for it again.
+func (u *UI) storeProblems() map[string]string {
+	if u.Store == nil {
+		return nil
+	}
+	out := u.Store.UnopenedStores()
+	names := u.Store.StoreNames()
+	var running []chan struct{}
+	var patience time.Duration
+	u.probeMu.Lock()
+	if u.probes == nil {
+		u.probes = map[string]*storeProbe{}
+	}
+	for name := range u.probes {
+		if !slices.Contains(names, name) {
+			delete(u.probes, name)
+		}
+	}
+	for _, name := range names {
+		bs := u.Store.StoreByName(name)
+		p := u.probes[name]
+		if p == nil {
+			p = &storeProbe{}
+			u.probes[name] = p
+		}
+		if p.done == nil && bs != nil && u.probeExpired(p) {
+			p.done, p.started = make(chan struct{}), time.Now()
+			go u.runProbe(bs, p)
+		}
+		if p.done != nil {
+			running = append(running, p.done)
+			patience = max(patience, blobCheckTimeout-time.Since(p.started))
+		}
+	}
+	u.probeMu.Unlock()
+	timeout := time.NewTimer(patience)
+	defer timeout.Stop()
+wait:
+	for _, done := range running {
+		select {
+		case <-done:
+		case <-timeout.C:
+			break wait
+		}
+	}
+	u.probeMu.Lock()
+	defer u.probeMu.Unlock()
+	for _, name := range names {
+		if p := u.probes[name]; p != nil && p.done != nil && u.probeExpired(p) {
+			out[name] = fmt.Sprintf("no answer to a probe within %s", blobCheckTimeout)
+		} else if p != nil && p.why != "" {
+			out[name] = p.why
+		}
+	}
+	return out
+}
+
+func (u *UI) runProbe(bs *blob.Store, p *storeProbe) {
+	var bad []string
+	for _, c := range bs.Health() {
+		if !c.OK {
+			bad = append(bad, c.Target+": "+c.Error)
+		}
+	}
+	u.probeMu.Lock()
+	defer u.probeMu.Unlock()
+	p.why, p.at = strings.Join(bad, "; "), u.clock()
+	close(p.done)
+	p.done = nil
+}
+
+// probeFailure is what the last probe of the named store found, "" when it
+// found nothing; it asks nothing.
+func (u *UI) probeFailure(name string) string {
+	u.probeMu.Lock()
+	defer u.probeMu.Unlock()
+	if p := u.probes[name]; p != nil {
+		return p.why
+	}
+	return ""
+}
+
+// forgetProbe drops the store's last probe: its settings changed.
+func (u *UI) forgetProbe(name string) {
+	u.probeMu.Lock()
+	defer u.probeMu.Unlock()
+	delete(u.probes, name)
 }
 
 // errStoreInUse refuses deleting a store a repository uses.
@@ -787,6 +967,80 @@ func (u *UI) checkAzureIsolation(ctx context.Context, c blob.AzureConfig) error 
 		}
 	}
 	return nil
+}
+
+// setS3Connection replaces the credentials, endpoint, region, path style and
+// connection bound of the S3 store name with those of n under the registry
+// lock, taken as sent, but for a secret left empty beside an access key,
+// which keeps the stored one (no key at all is the AWS_* environment or an AWS
+// role) unless the endpoint changes: as SMTP's and LDAP's, a stored secret does
+// not follow the settings to another server, where a signature made with it
+// could be guessed at. Bucket, prefix, encryption and failover buckets cannot
+// change (send them empty or unchanged). The bucket must list with the new
+// settings before they are stored and used, and the other nodes take them from
+// the row (repo.Store.SyncStores). changed is false when n says nothing new.
+func (u *UI) setS3Connection(ctx context.Context, name string, n *blob.S3Config) (c blob.S3Config, changed bool, err error) {
+	err = u.Repos.WithWriteLock(ctx, func(*repo.Snapshot) error {
+		row, err := u.DB.GetBlobStore(ctx, name)
+		if err != nil {
+			return err
+		}
+		if row.Type != meta.BlobStoreS3 || row.S3 == nil || n == nil {
+			return &repo.ValidationError{Errors: []string{`"s3" is an s3 store's ("type": "s3")`}}
+		}
+		cur := *row.S3
+		c = *n
+		if c.AccessKey != "" && c.SecretKey == "" {
+			if c.Endpoint != cur.Endpoint {
+				return &repo.ValidationError{Errors: []string{"s3: re-enter the secret key when changing the endpoint"}}
+			}
+			c.SecretKey = cur.SecretKey
+		}
+		if c.Bucket != "" && c.Bucket != cur.Bucket || c.Prefix != "" && strings.Trim(c.Prefix, "/") != strings.Trim(cur.Prefix, "/") {
+			return &repo.ValidationError{Errors: []string{"s3: the bucket and prefix cannot change; create another store and move the repositories"}}
+		}
+		c.Bucket, c.Prefix = cur.Bucket, cur.Prefix
+		if c.SSE == "" && c.Encryption == nil {
+			c.SSE, c.Encryption = cur.SSE, cur.Encryption
+		}
+		if c.Failover == nil {
+			c.Failover = cur.Failover
+		}
+		if err := c.Validate(); err != nil {
+			return &repo.ValidationError{Errors: []string{"s3: " + err.Error()}}
+		}
+		if c.SSE != cur.SSE || kmsKeyOf(c) != kmsKeyOf(cur) || !slices.Equal(c.Failover, cur.Failover) {
+			return &repo.ValidationError{Errors: []string{"s3: encryption and failover cannot change; create another store and move the repositories"}}
+		}
+		if c.SameConnection(cur) {
+			return nil
+		}
+		if loc := c.Location(); loc != cur.Location() {
+			if err := u.checkBucketIsolation(ctx, loc); err != nil {
+				return err
+			}
+		}
+		if err := blob.CheckS3(c); err != nil {
+			return &repo.ValidationError{Errors: []string{fmt.Sprintf("blob store %q: bucket %s is not usable with these settings: %v", name, c.Location(), err)}}
+		}
+		if err := u.DB.UpdateBlobStoreS3(ctx, name, c); err != nil {
+			return err
+		}
+		changed = true
+		u.forgetProbe(name)
+		if bs := u.Store.StoreByName(name); bs != nil {
+			return bs.SetS3(c)
+		}
+		return nil // not open on this node: SyncStores opens it
+	})
+	return c, changed, err
+}
+
+func kmsKeyOf(c blob.S3Config) string {
+	if c.Encryption != nil {
+		return c.Encryption.KMSKeyID
+	}
+	return ""
 }
 
 // azureDetail names an azure store's container and method for the activity log.

@@ -326,8 +326,12 @@ func translatePriv(p nxPriv, repos repoKnown) (*grant, error) {
 }
 
 // addApp adds an application privilege of domain: "metrics" is the
-// metrics target, the rest "app:<domain>".
+// metrics target, the rest "app:<domain>". Privileges live in roles here
+// (the "priv:" roles), so the privileges domain is the roles domain.
 func addApp(g *grant, domain string, actions []string) error {
+	if domain == "privileges" {
+		domain = "roles"
+	}
 	if domain == "metrics" {
 		for _, a := range actions {
 			if u := strings.ToUpper(a); u != "READ" && u != "ALL" && u != "*" {
@@ -443,21 +447,22 @@ func nxAction(a string) string {
 // name: domain and Nexus actions.
 var appBuiltins = func() map[string]nxPriv {
 	m := map[string]nxPriv{
-		"nx-metrics-all":      {Domain: "metrics", Actions: []string{"ALL"}},
-		"nx-search-read":      {Domain: "search", Actions: []string{"READ"}},
-		"nx-healthcheck-read": {Domain: "healthcheck", Actions: []string{"READ"}},
-		"nx-userschangepw":    {Domain: "userschangepw", Actions: []string{"ADD", "READ"}},
-		"nx-component-upload": {Domain: "component", Actions: []string{"ADD"}},
-		"nx-apikey-all":       {Domain: "apikey", Actions: []string{"ALL"}},
-		"nx-settings-read":    {Domain: "settings", Actions: []string{"READ"}},
-		"nx-settings-all":     {Domain: "settings", Actions: []string{"ALL"}},
-		"nx-blobstores-read":  {Domain: "blobstores", Actions: []string{"READ"}},
-		"nx-blobstores-all":   {Domain: "blobstores", Actions: []string{"ALL"}},
-		"nx-tasks-read":       {Domain: "tasks", Actions: []string{"READ"}},
-		"nx-tasks-run":        {Domain: "tasks", Actions: []string{"START", "STOP"}},
-		"nx-tasks-all":        {Domain: "tasks", Actions: []string{"ALL"}},
+		"nx-metrics-all":       {Domain: "metrics", Actions: []string{"ALL"}},
+		"nx-search-read":       {Domain: "search", Actions: []string{"READ"}},
+		"nx-healthcheck-read":  {Domain: "healthcheck", Actions: []string{"READ"}},
+		"nx-userschangepw":     {Domain: "userschangepw", Actions: []string{"ADD", "READ"}},
+		"nx-component-upload":  {Domain: "component", Actions: []string{"ADD"}},
+		"nx-apikey-all":        {Domain: "apikey", Actions: []string{"ALL"}},
+		"nx-usertoken-current": {Domain: "usertoken", Actions: []string{"ALL"}},
+		"nx-settings-read":     {Domain: "settings", Actions: []string{"READ"}},
+		"nx-settings-all":      {Domain: "settings", Actions: []string{"ALL"}},
+		"nx-blobstores-read":   {Domain: "blobstores", Actions: []string{"READ"}},
+		"nx-blobstores-all":    {Domain: "blobstores", Actions: []string{"ALL"}},
+		"nx-tasks-read":        {Domain: "tasks", Actions: []string{"READ"}},
+		"nx-tasks-run":         {Domain: "tasks", Actions: []string{"START", "STOP"}},
+		"nx-tasks-all":         {Domain: "tasks", Actions: []string{"ALL"}},
 	}
-	for _, d := range []string{"users", "roles", "selectors"} {
+	for _, d := range []string{"users", "roles", "privileges", "selectors", "tags"} {
 		for _, a := range []string{"create", "read", "update", "delete", "all"} {
 			m["nx-"+d+"-"+a] = nxPriv{Domain: d, Actions: []string{strings.ToUpper(a)}}
 		}
@@ -633,6 +638,8 @@ func appNames(domain string, acts []string) []string {
 		return []string{"nx-component-upload"}
 	case "apikey":
 		return []string{"nx-apikey-all"}
+	case "usertoken":
+		return []string{"nx-usertoken-current"}
 	}
 	have := auth.AppDomains[domain]
 	if len(have) > 1 && len(canonActions(acts)) == len(have) {

@@ -446,10 +446,11 @@ func TestExportImportRoundTrip(t *testing.T) {
 		a.must("PUT", "/repository/raw-hosted/docs/new.txt", []byte("new file"))
 		a.must("PUT", "/repository/helm-hosted/demo-0.2.0.tgz", helmChart("demo", "0.2.0"))
 		a.must("PUT", "/repository/npm-hosted/demo", npmPublish("demo", "1.1.0"), "Content-Type", "application/json")
-		delta := a.ok(a.start("export", map[string]any{"repositories": []string{"raw-hosted", "helm-hosted", "npm-hosted"},
+		a.must("PUT", "/repository/yum-hosted/repodata/comps.xml", []byte("<comps/>"))
+		delta := a.ok(a.start("export", map[string]any{"repositories": []string{"raw-hosted", "helm-hosted", "npm-hosted", "yum-hosted"},
 			"destination": "delta", "since": since.Format(time.RFC3339Nano)}))
 		ddir := filepath.Join(root, "delta", delta.ID)
-		if m := readManifest(t, ddir); m.Since.IsZero() || len(m.Repositories) != 3 {
+		if m := readManifest(t, ddir); m.Since.IsZero() || len(m.Repositories) != 4 {
 			t.Fatalf("delta manifest: %+v", m)
 		}
 		if lines := readLines(t, filepath.Join(ddir, "raw-hosted", "assets.jsonl")); len(lines) != 1 || lines[0].Path != "docs/new.txt" {
@@ -472,6 +473,13 @@ func TestExportImportRoundTrip(t *testing.T) {
 		// overwrite off: the tag already here is kept, and reported.
 		if len(doc.Versions) != 2 || doc.DistTags["latest"] != "1.0.0" || !strings.Contains(st.LastLog, "tag latest of demo") {
 			t.Errorf("packument after the delta: %+v\n%s", doc, st.LastLog)
+		}
+		// yum's comps.xml is imported as the file it is, not regenerated
+		if got := b.must("GET", "/repository/yum-hosted/repodata/comps.xml", nil); string(got) != "<comps/>" {
+			t.Errorf("comps.xml: %q", got)
+		}
+		if repomd := string(b.must("GET", "/repository/yum-hosted/repodata/repomd.xml", nil)); !strings.Contains(repomd, `<data type="group">`) {
+			t.Errorf("repomd.xml after the delta:\n%s", repomd)
 		}
 	})
 

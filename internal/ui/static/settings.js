@@ -365,7 +365,7 @@ async function storeDetail(view, name) {
     s.type === "s3" ? [
       kv(t("blob.bucket"), (s.s3 || {}).bucket), kv(t("blob.prefix"), (s.s3 || {}).prefix),
       kv(t("blob.region"), (s.s3 || {}).region), kv(t("blob.endpoint"), (s.s3 || {}).endpoint),
-      kv(t("blob.pathStyle"), String(!!(s.s3 || {}).pathStyle)), kv(t("blob.sse"), (s.s3 || {}).sse),
+      kv(t("blob.pathStyle"), String(!!(s.s3 || {}).pathStyle)), kv(t("blob.s3.maxConn"), (s.s3 || {}).maxConnections), kv(t("blob.sse"), (s.s3 || {}).sse),
       kv(t("blob.accessKey"), (s.s3 || {}).accessKeyId || (s.s3 || {}).accessKey),
       kv(t("blob.secretKey"), typeof ((s.s3 || {}).secretSet ?? s.secretSet) === "boolean"
         ? (((s.s3 || {}).secretSet ?? s.secretSet) ? t("blob.secretSet") : t("blob.secretUnset")) : dash),
@@ -399,7 +399,7 @@ async function storeDetail(view, name) {
   const using = card(t("blob.usedBy"), t("blob.usedBySub"), users.length ? tbl([t("col.repo"), t("col.type")],
     users.map((r) => h("tr", null, h("td", { class: "name" }, h("a", { href: adminRepoLink(r.name) }, h("strong", null, r.name))), h("td", null, typeBadge(r.type)))))
     : h("div", { class: "empty" }, t("blob.noRepos")));
-  // soft quota: the one setting a file or S3 store can change (a group's members too)
+  // soft quota
   const qForm = h("form", { novalidate: true });
   const qfs = formState(qForm);
   const quota = quotaEditor(s.quota);
@@ -476,6 +476,43 @@ async function storeDetail(view, name) {
     azCard = card(t("blob.az.title"), t("blob.az.sub"), aForm);
   }
 
+  // an S3 store's connection (its bucket, prefix, encryption and failover stay)
+  let s3Card = null;
+  if (s.type === "s3" && s.s3) {
+    const cForm = h("form", { novalidate: true });
+    const cfs = formState(cForm);
+    const key = textIn(s.s3.accessKeyId, { class: "mono" });
+    const secret = h("input", { type: "password", autocomplete: "new-password", placeholder: s.s3.secretSet ? t("rf.unchanged") : "" });
+    const reg = textIn(s.s3.region, { class: "mono", placeholder: "us-east-1" });
+    const ep = textIn(s.s3.endpoint, { type: "url", class: "mono", placeholder: "https://s3.example.com" });
+    const ps = h("input", { type: "checkbox", checked: !!s.s3.pathStyle });
+    const conns = h("input", { type: "number", inputmode: "numeric", min: 1, step: 1, value: s.s3.maxConnections ? String(s.s3.maxConnections) : "" });
+    const cSave = h("button", { type: "submit", class: "btn primary" }, t("blob.s3.save"));
+    put(cForm, cfs.err, fields(
+      field(t("blob.accessKey"), key, t("blob.s3.keyHelp")),
+      field(t("blob.secretKey"), secret, [s.s3.secretSet ? [h("span", { class: "rf-set" }, t("blob.secretSet")), " — ", t("rf.keepEmpty"), ". "] : null, t("blob.s3.secretHelp")]),
+      field(t("blob.endpoint"), ep, t("blob.s3.endpointHelp"), { full: true }),
+      field(t("blob.region"), reg), field(t("blob.s3.maxConn"), conns, t("blob.s3.maxConnHelp")),
+      checkRow(ps, t("blob.pathStyle"), t("blob.s3.pathStyleHelp"))), h("div", { class: "actions end" }, cSave));
+    cForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      cfs.clear();
+      const n = conns.value.trim() === "" ? 0 : Number(conns.value);
+      if (!Number.isInteger(n) || n < 0) { cfs.show([t("blob.e.maxConn")]); return; }
+      const sent = secret.value;
+      secret.value = ""; // the secret never stays in the page
+      cSave.disabled = true;
+      try {
+        await api("blobstores/" + enc(s.name), { method: "PUT", body: { s3: { accessKeyId: key.value.trim(), secretAccessKey: sent, region: reg.value.trim(), endpoint: ep.value.trim(), pathStyle: ps.checked, maxConnections: n } } });
+        if (isLive()) cfs.done(storeLink(s.name), t("blob.s3.saved"));
+      } catch (e) {
+        cSave.disabled = false;
+        if (isLive()) { if (e.status === 401 || e.status === 403) handleError(e); else cfs.show(mask(errList(e), [sent])); }
+      }
+    });
+    s3Card = card(t("blob.s3.title"), t("blob.s3.sub"), cForm);
+  }
+
   // health check of every target (directory, primary and failover buckets, members)
   const hRun = button(t("blob.health"), "small");
   const hOut = h("div", { "aria-live": "polite" }, h("p", { class: "hint" }, t("blob.healthIdle")));
@@ -526,7 +563,7 @@ async function storeDetail(view, name) {
 
   put(view, pageHead(s.name, h("p", null, storeFlags(s), storeFlags(s).length ? " " : null, t("blob.detailSub")), acts(back, convert, del), { eyebrow: t("blob.eyebrow") }),
     fs.ok,
-    h("div", { class: "two" }, h("div", { class: "stack" }, settings, azCard, groupCard, using), h("div", { class: "stack" }, usage, quotaCard, healthCard, notice(t("blob.note")))));
+    h("div", { class: "two" }, h("div", { class: "stack" }, settings, azCard, s3Card, groupCard, using), h("div", { class: "stack" }, usage, quotaCard, healthCard, notice(t("blob.note")))));
 }
 
 // ---- general settings ------------------------------------------------------------
@@ -592,6 +629,13 @@ export async function viewGeneral(view, part) {
   clearRow.hidden = !sm.passwordSet;
   clearBox.addEventListener("change", () => { pw.disabled = clearBox.checked; if (clearBox.checked) pw.value = ""; });
   const sender = textIn(sm.from, { maxlength: 255, placeholder: "Command Center <noreply@example.com>" });
+  const subject = textIn(sm.subjectPrefix, { maxlength: 200, placeholder: "[Command Center]" });
+  // Absent or true: the SSL trust store as well; only TLS asks (without TLS the row is hidden and nothing is sent).
+  const trust = h("input", { type: "checkbox", checked: sm.trustStore !== false });
+  const trustRow = checkRow(trust, t("smtp.trust"), t("smtp.trustHelp"));
+  const syncTrust = () => { trustRow.hidden = secure.value === "none"; };
+  secure.addEventListener("change", syncTrust);
+  syncTrust();
   const pwSet = h("span", null);
   const pwErr = errBox();
   const pwField = field(t("smtp.password"), pw, pwSet);
@@ -601,6 +645,7 @@ export async function viewGeneral(view, part) {
 
   const smtpDirty = () => enabled.checked !== !!sm.enabled || host.value.trim() !== (sm.host || "") || (Number(port.value) || 0) !== (sm.port || 0) ||
     secure.value !== (sm.security || "none") || user.value !== (sm.username || "") || sender.value.trim() !== (sm.from || "") ||
+    subject.value.trim() !== (sm.subjectPrefix || "") || (secure.value !== "none" && trust.checked !== (sm.trustStore !== false)) ||
     pw.value !== "" || clearBox.checked;
 
   // test message: uses the saved configuration
@@ -669,7 +714,9 @@ export async function viewGeneral(view, part) {
     field(t("smtp.host"), host), field(t("smtp.port"), port),
     field(t("smtp.security"), secure), field(t("smtp.username"), user),
     pwField, clearRow,
-    field(t("smtp.sender"), sender, t("smtp.senderHelp"), { full: true })),
+    field(t("smtp.sender"), sender, t("smtp.senderHelp"), { full: true }),
+    field(t("smtp.subject"), subject, t("smtp.subjectHelp"), { full: true }),
+    trustRow),
     saveHint,
     h("div", { class: "row" }, h("div", { class: "field grow" }, h("span", { class: "flabel" }, t("smtp.testTitle")), to), testBtn),
     result);
@@ -716,7 +763,8 @@ export async function viewGeneral(view, part) {
     if (!errs.length && on("usertoken") && utDirty()) body.userTokens = ut;
     const mailChanged = on("email") && smtpDirty();
     const mail = { host: host.value.trim(), port: Number(port.value) || 0, security: secure.value, username: user.value, from: sender.value.trim(),
-      enabled: enabled.checked, password: pw.value, clearPassword: clearBox.checked };
+      enabled: enabled.checked, password: pw.value, clearPassword: clearBox.checked, subjectPrefix: subject.value.trim(),
+      trustStore: secure.value === "none" ? undefined : trust.checked };
     pw.value = ""; // the secret never stays in the page
     if (errs.length) { fs.show(errs, t("gen.errOne")); return; }
     if (!Object.keys(body).length && !mailChanged) { put(fs.ok, t("gen.nothing")); fs.ok.hidden = false; fs.clean(); return; }

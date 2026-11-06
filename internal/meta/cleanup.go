@@ -162,6 +162,7 @@ type ScanAsset struct {
 	Created        time.Time
 	Modified       time.Time // last_modified
 	LastDownloaded time.Time // zero if never downloaded
+	Checked        time.Time // checked_at: last stored or found current at the remote; zero if invalidated
 	BlobSHA256     string
 }
 
@@ -178,7 +179,7 @@ func (d *DB) ScanAssetsFrom(ctx context.Context, repo, from string, limit int) (
 }
 
 func (d *DB) scanAssets(ctx context.Context, cond, repo, bound string, limit int) ([]ScanAsset, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT path, size, created_at, last_modified, last_downloaded, blob_sha256 FROM assets
+	rows, err := d.sql.QueryContext(ctx, `SELECT path, size, created_at, last_modified, last_downloaded, checked_at, blob_sha256 FROM assets
 WHERE repo = ? AND `+cond+` ORDER BY path LIMIT ?`, repo, bound, limit)
 	if err != nil {
 		return nil, err
@@ -187,11 +188,11 @@ WHERE repo = ? AND `+cond+` ORDER BY path LIMIT ?`, repo, bound, limit)
 	out := make([]ScanAsset, 0, limit)
 	for rows.Next() {
 		var a ScanAsset
-		var created, modified, lastDl int64
-		if err := rows.Scan(&a.Path, &a.Size, &created, &modified, &lastDl, &a.BlobSHA256); err != nil {
+		var created, modified, lastDl, checked int64
+		if err := rows.Scan(&a.Path, &a.Size, &created, &modified, &lastDl, &checked, &a.BlobSHA256); err != nil {
 			return nil, err
 		}
-		a.Created, a.Modified, a.LastDownloaded = fromMs(created), fromMs(modified), fromMs(lastDl)
+		a.Created, a.Modified, a.LastDownloaded, a.Checked = fromMs(created), fromMs(modified), fromMs(lastDl), fromMs(checked)
 		out = append(out, a)
 	}
 	return out, rows.Err()

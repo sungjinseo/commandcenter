@@ -152,10 +152,9 @@ func TestParseDescription(t *testing.T) {
 		"continuation":    {"src/contrib/foo_1.0.0.tar.gz", tarGz("foo", "  Package: foo\n", ""), "starts with a continuation"},
 		"empty":           {"src/contrib/foo_1.0.0.tar.gz", tarGz("foo", "\n\n", ""), "DESCRIPTION is empty"},
 		"huge":            {"src/contrib/foo_1.0.0.tar.gz", tarGz("foo", "Package: foo\nX: "+strings.Repeat("x", maxDescription)+"\n", ""), "larger than"},
-		"not a package":   {"src/contrib/foo-1.0.0.tar.gz", src, "upload <contrib dir>"},
-		"bad version":     {"src/contrib/foo_1.tar.gz", src, "upload <contrib dir>"},
-		"no dir":          {"foo_1.0.0.tar.gz", src, "upload <contrib dir>"},
-		"other dir name":  {"contrib/foo_1.0.0.tar.gz", src, "upload <contrib dir>"},
+		"not a package":   {"src/contrib/foo-1.0.0.tar.gz", src, "upload <directory>"},
+		"bad version":     {"src/contrib/foo_1.tar.gz", src, "upload <directory>"},
+		"no dir":          {"foo_1.0.0.tar.gz", src, "upload <directory>"},
 	}
 	for name, c := range bad {
 		if _, err := parseBytes(t, c.path, c.b); repo.StatusOf(err) != 400 || !strings.Contains(err.Error(), c.msg) {
@@ -175,7 +174,14 @@ func TestSplitR(t *testing.T) {
 		{"bin/macosx/contrib/4.3/foo_1.0.0.tgz", "bin/macosx/contrib/4.3", "foo", "1.0.0", true},
 		{"bin/macosx/big-sur-arm64/contrib/4.4/foo_1.0.0.tgz", "bin/macosx/big-sur-arm64/contrib/4.4", "foo", "1.0.0", true},
 		{"src/contrib/Archive/foo/foo_0.9.tar.gz", "src/contrib/Archive/foo", "foo", "0.9", true},
-		{"src/contrib/foo_1.0.0.zip", "", "", "", false}, // wrong extension for the directory
+		{"prod/src/contrib/foo_1.0.tar.gz", "prod/src/contrib", "foo", "1.0", true},                                     // below a prefix
+		{"prod/bin/windows/contrib/4.4/foo_1.0.zip", "prod/bin/windows/contrib/4.4", "foo", "1.0", true},                // ... the prefix keeps the binary's extension
+		{"prod/bin/macosx/contrib/4.4/foo_1.0.tgz", "prod/bin/macosx/contrib/4.4", "foo", "1.0", true},                  //
+		{"bin/linux/jammy/contrib/4.4/foo_1.0.tar.gz", "bin/linux/jammy/contrib/4.4", "foo", "1.0", true},               // a layout of its own
+		{"__linux__/jammy/latest/src/contrib/foo_1.0.tar.gz", "__linux__/jammy/latest/src/contrib", "foo", "1.0", true}, // a proxied Posit layout
+		{"lib/foo_1.0.tar.gz", "lib", "foo", "1.0", true},                                                               // a proxy's directory; an upload needs two levels
+		{"src/contrib/foo_1.0.0.zip", "", "", "", false},                                                                // wrong extension for the directory
+		{"prod/bin/windows/contrib/4.4/foo_1.0.tar.gz", "", "", "", false},
 		{"bin/windows/contrib/4.4/foo_1.0.0.tar.gz", "", "", "", false},
 		{"src/contrib/PACKAGES", "", "", "", false}, // the index
 		{"src/contrib/PACKAGES.rds", "", "", "", false},
@@ -183,8 +189,6 @@ func TestSplitR(t *testing.T) {
 		{"src/contrib/1foo_1.0.tar.gz", "", "", "", false}, // name must start with a letter
 		{"src/contrib/foo._1.0.tar.gz", "", "", "", false}, // and not end with a dot
 		{"src/contrib/foo_bar_1.0.tar.gz", "", "", "", false},
-		{"bin/windows/contrib/foo_1.0.zip", "", "", "", false}, // no R version
-		{"lib/foo_1.0.tar.gz", "", "", "", false},
 		{"foo_1.0.tar.gz", "", "", "", false},
 	} {
 		dir, name, version, ok := component.SplitR(c.p)
@@ -201,8 +205,13 @@ func TestSplitR(t *testing.T) {
 	if g, n, v, p := component.PackageComponent("r", "src/contrib/foo", "1.0.0"); g != "src/contrib" || n != "foo" || v != "1.0.0" || p != "src/contrib/foo_1.0.0.tar.gz" {
 		t.Fatalf("PackageComponent: %q %q %q %q", g, n, v, p)
 	}
-	if !component.RContribDir("src/contrib") || component.RContribDir("src/contrib/Archive/foo") || component.RContribDir("src") {
-		t.Fatal("RContribDir")
+	if g, n, v, p := component.PackageComponent("r", "prod/bin/windows/contrib/4.4/foo", "1.0.0"); g != "prod/bin/windows/contrib/4.4" || n != "foo" || v != "1.0.0" || p != "prod/bin/windows/contrib/4.4/foo_1.0.0.zip" {
+		t.Fatalf("PackageComponent: %q %q %q %q", g, n, v, p)
+	}
+	for dir, want := range map[string]string{"src/contrib": "", "bin/windows/contrib/4.4": "src/contrib", "prod/bin/macosx/big-sur-arm64/contrib/4.4": "prod/src/contrib", "bin/linux/jammy": "src/contrib", "binary/x": ""} {
+		if got := sourceDir(dir); got != want {
+			t.Errorf("sourceDir(%q) = %q, want %q", dir, got, want)
+		}
 	}
 }
 
@@ -436,34 +445,78 @@ func TestIndexFiles(t *testing.T) {
 	readRDS(t, writeRDS([]string{"Title"}, []stanza{{{"Title", "Bär"}}}))
 }
 
-func TestMerge(t *testing.T) {
-	hosted := "Package: dup\nVersion: 1.0\nMD5sum: hosted\n\nPackage: a\nVersion: 2.0\n"
-	upstream := "Package: a\nVersion: 1.0\nDepends: R (>= 3.5)\n\nPackage: dup\nVersion: 1.0\nMD5sum: upstream\n\nPackage: dup\nVersion: 1.1\nMD5sum: upstream\n\n\n"
+// merge runs mergePackages over index and source documents stored in r-hosted.
+func (e *env) merge(t *testing.T, docs ...[2]string) (string, error) {
+	t.Helper()
+	store := func(doc string) *meta.Asset {
+		if doc == "" {
+			return nil
+		}
+		a, err := e.h.Store.Put(context.Background(), "r-hosted", "doc-"+sums([]byte(doc)).SHA256, ctText, strings.NewReader(doc))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &a
+	}
+	members := make([]member, len(docs))
+	for i, d := range docs {
+		members[i] = member{store(d[0]), store(d[1])}
+	}
 	var out bytes.Buffer
-	if err := mergePackages(context.Background(), []io.ReadSeeker{strings.NewReader(hosted), strings.NewReader(upstream)}, &out); err != nil {
+	err := e.h.mergePackages(&out, members, false)
+	return out.String(), err
+}
+
+func TestMerge(t *testing.T) {
+	e := newEnv(t)
+	// a name is the first member's, whatever version a later member has: the
+	// public dup 1.1 and a 1.0 are hidden, b comes through; all the versions
+	// the first member lists stay.
+	hosted := "Package: dup\nVersion: 1.0\nMD5sum: hosted\n\nPackage: a\nVersion: 2.0\n\nPackage: a\nVersion: 2.1\n"
+	upstream := "Package: a\nVersion: 1.0\nDepends: R (>= 3.5)\n\nPackage: dup\nVersion: 1.0\nMD5sum: upstream\n\nPackage: dup\nVersion: 1.1\nMD5sum: upstream\n\nPackage: b\nVersion: 1.0\nDepends: R (>= 3.5),\n    a\n\n\n"
+	got, err := e.merge(t, [2]string{hosted}, [2]string{upstream})
+	want := "Package: dup\nVersion: 1.0\nMD5sum: hosted\n\nPackage: a\nVersion: 2.0\n\nPackage: a\nVersion: 2.1\n\nPackage: b\nVersion: 1.0\nDepends: R (>= 3.5),\n        a\n"
+	if err != nil || got != want {
+		t.Fatalf("merged: %v\n%s\nwant:\n%s", err, got, want)
+	}
+	// a member's source index counts for a binary directory's names, listing nothing itself
+	got, err = e.merge(t, [2]string{"", "Package: dup\nVersion: 0.1\n"}, [2]string{"Package: dup\nVersion: 1.1\n\nPackage: b\nVersion: 1.0\n"})
+	if err != nil || got != "Package: b\nVersion: 1.0\n" {
+		t.Fatalf("with a source index: %v %q", err, got)
+	}
+	// a gzipped member is read as well
+	gz, err := e.h.Store.Put(context.Background(), "r-hosted", "doc.gz", ctGzip, bytes.NewReader(gzipBytes([]byte("Package: z\nVersion: 1.0\n"))))
+	if err != nil {
 		t.Fatal(err)
 	}
-	want := "Package: dup\nVersion: 1.0\nMD5sum: hosted\n\nPackage: a\nVersion: 2.0\n\nPackage: a\nVersion: 1.0\nDepends: R (>= 3.5)\n\nPackage: dup\nVersion: 1.1\nMD5sum: upstream\n"
-	if out.String() != want {
-		t.Fatalf("merged:\n%s\nwant:\n%s", out.String(), want)
+	var out bytes.Buffer
+	if err := e.h.mergePackages(&out, []member{{index: &gz}}, false); err != nil || out.String() != "Package: z\nVersion: 1.0\n" {
+		t.Fatalf("gzipped: %v %q", err, out.String())
 	}
+	// mergeMembers: every member's versions, one listed by both being the first's
+	a, _ := e.h.Store.Put(context.Background(), "r-hosted", "first", ctText, strings.NewReader("Package: dup\nVersion: 1.0\nMD5sum: hosted\n"))
+	b, _ := e.h.Store.Put(context.Background(), "r-hosted", "second", ctText, strings.NewReader("Package: dup\nVersion: 1.0\nMD5sum: up\n\nPackage: dup\nVersion: 1.1\n"))
 	out.Reset()
-	if err := mergePackages(context.Background(), nil, &out); err != nil || out.String() != "" {
-		t.Fatalf("no members: %v %q", err, out.String())
+	if err := e.h.mergePackages(&out, []member{{index: &a}, {index: &b}}, true); err != nil || out.String() != "Package: dup\nVersion: 1.0\nMD5sum: hosted\n\nPackage: dup\nVersion: 1.1\n" {
+		t.Fatalf("every version: %v %q", err, out.String())
 	}
-	if err := mergePackages(context.Background(), []io.ReadSeeker{strings.NewReader("<html>")}, &out); err == nil {
+	if got, err := e.merge(t); err != nil || got != "" {
+		t.Fatalf("no members: %v %q", err, got)
+	}
+	if _, err := e.merge(t, [2]string{"<html>"}); err == nil {
 		t.Fatal("html merged")
 	}
 }
 
 type env struct {
-	h     *Handler
-	repos map[string]*repo.Repository
-	sink  *repotest.Sink
-	db    *meta.DB
-	now   time.Time
-	hits  atomic.Int32 // upstream requests
-	up    *httptest.Server
+	h      *Handler
+	repos  map[string]*repo.Repository
+	sink   *repotest.Sink
+	db     *meta.DB
+	now    time.Time
+	hits   atomic.Int32 // upstream requests
+	up     *httptest.Server
+	webRDS atomic.Value // the upstream's web/packages/packages.rds
 }
 
 const upPackages = "Package: dup\nVersion: 1.0\nLicense: GPL-2\nMD5sum: 00000000000000000000000000000000\nNeedsCompilation: no\n\nPackage: up\nVersion: 1.0\nDepends: R (>= 3.5)\nLicense: MIT\nMD5sum: 11111111111111111111111111111111\nNeedsCompilation: no\n"
@@ -490,7 +543,18 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 	case "/src/contrib/":
 		w.Header().Set("Content-Type", "text/html")
 		io.WriteString(w, "<html>Index of /src/contrib/</html>")
+	case "/web/packages/packages.rds":
+		io.WriteString(w, e.webRDS.Load().(string))
+	case "/bin/windows/contrib/4.5/PACKAGES": // binaries: dup is also a source package of the hosted member
+		io.WriteString(w, "Package: dup\nVersion: 9.9\n\nPackage: winonly\nVersion: 1.0\n")
+	case "/gz/src/contrib/PACKAGES.gz": // a remote that publishes only this, as a Nexus hosted repository does
+		w.Header().Set("Content-Type", "application/x-gzip")
+		w.Write(gzipBytes([]byte("Package: dup\nVersion: 8.8\n\nPackage: gzonly\nVersion: 1.0\n")))
 	default:
+		if strings.HasPrefix(r.URL.Path, "/failing/") {
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }
@@ -498,6 +562,7 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	e := &env{now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)}
+	e.webRDS.Store("web-1")
 	e.up = httptest.NewServer(http.HandlerFunc(e.upstream))
 	t.Cleanup(e.up.Close)
 	dir := t.TempDir()
@@ -516,6 +581,10 @@ func newEnv(t *testing.T) *env {
 		{Name: "r-proxy", Format: "r", Type: "proxy", Remote: e.up.URL + "/",
 			MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Minute)},
 		{Name: "r-all", Format: "r", Type: "group", Members: []string{"r-hosted", "r-proxy"}, WriteMember: "r-hosted"},
+		{Name: "r-failing", Format: "r", Type: "proxy", Remote: e.up.URL + "/failing/",
+			MetadataMaxAge: config.Duration(time.Hour), ContentMaxAge: config.Never, NegativeCacheTTL: config.Duration(time.Minute)},
+		{Name: "r-failing-first", Format: "r", Type: "group", Members: []string{"r-failing", "r-hosted"}},
+		{Name: "r-failing-last", Format: "r", Type: "group", Members: []string{"r-hosted", "r-failing"}},
 	}}
 	if err := config.ValidateRepositories(cfg.Repositories); err != nil {
 		t.Fatal(err)
@@ -563,7 +632,7 @@ func TestHostedUploadAndIndex(t *testing.T) {
 	if cols, rows := readRDS(t, e.get(t, "r-hosted", "bin/windows/contrib/4.4/PACKAGES.rds", 200)); len(cols) != 16 || len(rows) != 0 {
 		t.Fatalf("empty PACKAGES.rds: %v %v", cols, rows)
 	}
-	for _, p := range []string{"PACKAGES", "src/PACKAGES", "src/contrib/Archive/foo/PACKAGES", "contrib/PACKAGES", "src/contrib/PACKAGES.json", "src/contrib/foo_1.0.0.tar.gz", "src/contrib/"} {
+	for _, p := range []string{"PACKAGES", "src/PACKAGES", "contrib/PACKAGES", "src/contrib/PACKAGES.json", "src/contrib/foo_1.0.0.tar.gz", "src/contrib/"} {
 		e.get(t, "r-hosted", p, 404)
 	}
 	src := tarGz("foo", fooDesc, "")
@@ -605,9 +674,9 @@ func TestHostedUploadAndIndex(t *testing.T) {
 		want int
 	}{
 		{"foo_1.0.0.tar.gz", src, 400},                             // no directory
+		{"contrib/foo_1.0.0.tar.gz", src, 400},                     // one level, as Nexus refuses
 		{"src/contrib/foo-1.0.0.tar.gz", src, 400},                 // not <pkg>_<version>
 		{"src/contrib/foo_1.0.0.zip", zipPkg("foo", fooDesc), 400}, // a zip is not a source package
-		{"src/contrib/Archive/foo/foo_1.0.0.tar.gz", src, 400},     // not a contrib directory
 		{"src/contrib/PACKAGES", []byte("Package: x\n"), 400},      // the index
 		{"src/contrib/bar_1.0.0.tar.gz", src, 400},                 // the DESCRIPTION is foo's
 		{"src/contrib/foo_1.0.1.tar.gz", src, 400},                 // and version 1.0.0's
@@ -615,7 +684,6 @@ func TestHostedUploadAndIndex(t *testing.T) {
 		{"src/contrib/junk_1.0.tar.gz", []byte("junk"), 400},       // not gzip
 		{"bin/windows/contrib/4.4/foo_1.0.0.zip", src, 400},        // not a zip
 		{"../src/contrib/foo_1.0.0.tar.gz", src, 400},              // escapes
-		{"bin/linux/contrib/4.4/foo_1.0.0.tar.gz", src, 400},       // not a contrib directory
 		{"bin/windows/contrib/4.4/foo_1.0.0.tgz", src, 400},        // wrong extension
 		{"bin/macosx/contrib/4.4/foo_1.0.0.tar.gz", src, 400},      // wrong extension
 		{"src/contrib/foo_1.0.0.tar.gz/x", src, 400},               // a file inside a package path
@@ -671,6 +739,98 @@ func TestHostedUploadAndIndex(t *testing.T) {
 	}
 	if w := e.do("HEAD", "r-hosted", "src/contrib/PACKAGES.gz", nil); w.Code != 200 {
 		t.Fatalf("HEAD: %d", w.Code)
+	}
+}
+
+// TestUploadAnyDirectory: what Nexus takes besides CRAN's own directories,
+// each directory with its own index files: CRAN's Archive, a contrib
+// directory below a prefix (one repository holding prod and dev), and a
+// binary layout of its own. The file must still be <pkg>_<version> of its
+// DESCRIPTION, and is a component that can be deleted again.
+func TestUploadAnyDirectory(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	src := tarGz("foo", fooDesc, "")
+	win := zipPkg("foo", fooDesc+"Built: R 4.4.1; x86_64-w64-mingw32; 2026-10-01 10:00:00 UTC; windows\n")
+	for p, b := range map[string][]byte{
+		"src/contrib/Archive/foo/foo_1.0.0.tar.gz":     src,
+		"prod/src/contrib/foo_1.0.0.tar.gz":            src,
+		"dev/src/contrib/foo_1.0.0.tar.gz":             src,
+		"prod/bin/windows/contrib/4.4/foo_1.0.0.zip":   win,
+		"bin/linux/jammy/contrib/4.4/foo_1.0.0.tar.gz": src,
+	} {
+		if w := e.do("PUT", "r-hosted", p, b); w.Code != 201 {
+			t.Fatalf("PUT %s: %d %s", p, w.Code, w.Body)
+		}
+		dir, name, version, ok := component.SplitR(p)
+		if !ok || name != "foo" || version != "1.0.0" {
+			t.Fatalf("SplitR %s", p)
+		}
+		if got := string(e.get(t, "r-hosted", dir+"/PACKAGES", 200)); !strings.HasPrefix(got, "Package: foo\nVersion: 1.0.0\n") {
+			t.Errorf("%s/PACKAGES: %q", dir, got)
+		}
+		if _, rows := readRDS(t, e.get(t, "r-hosted", dir+"/PACKAGES.rds", 200)); len(rows) != 1 {
+			t.Errorf("%s/PACKAGES.rds: %q", dir, rows)
+		}
+		if got := gunzip(t, e.get(t, "r-hosted", dir+"/PACKAGES.gz", 200)); !strings.HasPrefix(got, "Package: foo\n") {
+			t.Errorf("%s/PACKAGES.gz: %q", dir, got)
+		}
+		g, cn, cv, file := component.PackageComponent("r", dir+"/foo", "1.0.0")
+		if g != dir || cn != "foo" || cv != "1.0.0" || file != p {
+			t.Errorf("PackageComponent of %s: %q %q %q %q", p, g, cn, cv, file)
+		}
+	}
+	// the binary directory below a prefix lists Built
+	if got := string(e.get(t, "r-hosted", "prod/bin/windows/contrib/4.4/PACKAGES", 200)); !strings.Contains(got, "\nBuilt: R 4.4.1;") {
+		t.Errorf("no Built: %s", got)
+	}
+	// a directory's index holds only that directory's packages
+	if got := string(e.get(t, "r-hosted", "src/contrib/PACKAGES", 200)); got != "" {
+		t.Errorf("src/contrib lists a package of its Archive: %q", got)
+	}
+	// an index nobody uploaded to is empty, not missing
+	if got := e.get(t, "r-hosted", "other/src/contrib/PACKAGES", 200); len(got) != 0 {
+		t.Errorf("empty directory: %q", got)
+	}
+	e.get(t, "r-hosted", "PACKAGES", 404) // the root is no directory
+	// the checks stay: DESCRIPTION against the file name, extension against the directory
+	if w := e.do("PUT", "r-hosted", "prod/src/contrib/bar_1.0.0.tar.gz", tarGz("bar", fooDesc, "")); w.Code != 400 || !strings.Contains(w.Body.String(), "does not match") {
+		t.Errorf("wrong package: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("PUT", "r-hosted", "prod/stuff/foo_1.0.0.zip", win); w.Code != 400 {
+		t.Errorf("zip outside bin/windows: %d %s", w.Code, w.Body)
+	}
+	// deleting one directory's package rebuilds that directory only
+	c := component.Component{Repo: "r-hosted", Format: "r", Group: "prod/src/contrib", Name: "foo", Version: "1.0.0"}
+	if res, err := e.h.DeleteComponent(ctx, e.repos["r-hosted"], c, "system"); err != nil || res.Assets != 1 {
+		t.Fatalf("delete: %+v %v", res, err)
+	}
+	if got := e.get(t, "r-hosted", "prod/src/contrib/PACKAGES", 200); len(got) != 0 {
+		t.Errorf("after delete: %q", got)
+	}
+	if got := e.get(t, "r-hosted", "dev/src/contrib/PACKAGES", 200); len(got) == 0 {
+		t.Error("the other prefix lost its index")
+	}
+	// the rebuild task regenerates every directory's lost index files
+	for _, f := range []string{"PACKAGES", "PACKAGES.gz", "PACKAGES.rds"} {
+		if err := e.db.DeleteAsset(ctx, "r-hosted", "dev/src/contrib/"+f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := e.get(t, "r-hosted", "dev/src/contrib/PACKAGES", 200); len(got) != 0 {
+		t.Fatalf("the lost index answers: %q", got)
+	}
+	if err := e.h.RebuildMetadata(ctx, e.repos["r-hosted"], func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(e.get(t, "r-hosted", "dev/src/contrib/PACKAGES", 200)); !strings.HasPrefix(got, "Package: foo\n") {
+		t.Errorf("after the rebuild: %q", got)
+	}
+	if _, rows := readRDS(t, e.get(t, "r-hosted", "dev/src/contrib/PACKAGES.rds", 200)); len(rows) != 1 {
+		t.Errorf("rds after the rebuild: %q", rows)
+	}
+	if err := e.h.RebuildMetadata(ctx, e.repos["r-proxy"], func(string, ...any) {}); !errors.Is(err, component.ErrNotSupported) {
+		t.Errorf("rebuild of a proxy: %v", err)
 	}
 }
 
@@ -814,6 +974,125 @@ func TestProxyAndGroup(t *testing.T) {
 	e.get(t, "r-all", "src/contrib/Archive/up/up_0.9.tar.gz", 200)
 }
 
+// TestGroupIndex: a group lists a package name once per directory, from the
+// first member that has it, so a newer public version cannot beat an internal
+// package of the same name, in its own directory or in a binary one.
+func TestGroupIndex(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	for _, v := range []string{"0.9", "1.0"} { // the upstream has dup 1.0; every version the first member lists stays
+		if w := e.do("PUT", "r-hosted", "src/contrib/dup_"+v+".tar.gz", tarGz("dup", "Package: dup\nVersion: "+v+"\nNeedsCompilation: no\n", "")); w.Code != 201 {
+			t.Fatalf("PUT: %d %s", w.Code, w.Body)
+		}
+	}
+	names := func(body []byte) []string {
+		t.Helper()
+		ss, err := parsePackages(bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, s := range ss {
+			out = append(out, s.get("Package")+"_"+s.get("Version"))
+		}
+		return out
+	}
+	if got := strings.Join(names(e.get(t, "r-all", "src/contrib/PACKAGES", 200)), " "); got != "dup_0.9 dup_1.0 up_1.0" {
+		t.Errorf("source index: %s", got)
+	}
+	if _, rows := readRDS(t, e.get(t, "r-all", "src/contrib/PACKAGES.rds", 200)); len(rows) != 3 || rows[0][1] != "0.9" || rows[2][0] != "up" {
+		t.Errorf("source rds: %q", rows)
+	}
+	// a Windows or macOS client reads the binary directory too: the
+	// upstream's dup 9.9 binary would beat the internal source package
+	if got := strings.Join(names(e.get(t, "r-all", "bin/windows/contrib/4.5/PACKAGES", 200)), " "); got != "winonly_1.0" {
+		t.Errorf("binary index: %s", got)
+	}
+	// a file is still the first member's that has it
+	if w := e.do("GET", "r-all", "src/contrib/dup_1.0.tar.gz", nil); w.Code != 200 || w.Body.String() == "up" {
+		t.Errorf("internal file: %d", w.Code)
+	}
+	// a member with only PACKAGES.gz is merged too, not left out
+	if got := strings.Join(names(e.get(t, "r-all", "gz/src/contrib/PACKAGES", 200)), " "); got != "dup_8.8 gzonly_1.0" {
+		t.Errorf("gzip-only member: %s", got)
+	}
+	if got := gunzip(t, e.get(t, "r-all", "gz/src/contrib/PACKAGES.gz", 200)); !strings.Contains(got, "Package: gzonly\n") {
+		t.Errorf("gzip-only member, .gz: %s", got)
+	}
+	if _, rows := readRDS(t, e.get(t, "r-all", "gz/src/contrib/PACKAGES.rds", 200)); len(rows) != 2 {
+		t.Errorf("gzip-only member, .rds: %q", rows)
+	}
+	if w := e.do("PUT", "r-hosted", "gz/src/contrib/gzonly_0.1.tar.gz", tarGz("gzonly", "Package: gzonly\nVersion: 0.1\n", "")); w.Code != 201 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body)
+	}
+	if got := strings.Join(names(e.get(t, "r-all", "gz/src/contrib/PACKAGES", 200)), " "); got != "gzonly_0.1 dup_8.8" {
+		t.Errorf("gzip-only member after an upload: %s", got)
+	}
+	// a proxy's routing rule sees the path of the request, whichever index file the member has
+	var routed []string
+	e.h.Resolver.Fetcher.RouteAllowed = func(_ *repo.Repository, p string) bool {
+		routed = append(routed, p)
+		return p != "/gz/src/contrib/PACKAGES.rds"
+	}
+	if got := strings.Join(names(e.get(t, "r-all", "gz/src/contrib/PACKAGES", 200)), " "); got != "gzonly_0.1 dup_8.8" {
+		t.Errorf("rule allows the path: %s", got)
+	}
+	for _, p := range routed {
+		if p != "/gz/src/contrib/PACKAGES" {
+			t.Errorf("the rule saw %s", p)
+		}
+	}
+	if _, rows := readRDS(t, e.get(t, "r-all", "gz/src/contrib/PACKAGES.rds", 200)); len(rows) != 1 || rows[0][0] != "gzonly" {
+		t.Errorf("rule refuses the path, the proxy is left out: %q", rows)
+	}
+	e.h.Resolver.Fetcher.RouteAllowed = nil
+	// a merged copy of an older build (its fingerprint from before the rule) is merged again
+	old := "Package: stale\nVersion: 1.0\n"
+	if _, err := e.h.Store.Put(ctx, "r-all", "src/contrib/PACKAGES", ctText, strings.NewReader(old), func(a *meta.Asset) { a.RemoteETag = "group:abc" }); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(names(e.get(t, "r-all", "src/contrib/PACKAGES", 200)), " "); got != "dup_0.9 dup_1.0 up_1.0" {
+		t.Errorf("after an older build's merge: %s", got)
+	}
+	// a failing member is left out only when nothing after it answers: a
+	// later member never stands in for it
+	if w := e.do("GET", "r-failing-first", "src/contrib/PACKAGES", nil); w.Code != http.StatusBadGateway {
+		t.Errorf("failing first member: %d %s", w.Code, w.Body)
+	}
+	if got := strings.Join(names(e.get(t, "r-failing-last", "src/contrib/PACKAGES", 200)), " "); got != "dup_0.9 dup_1.0" {
+		t.Errorf("failing last member: %s", got)
+	}
+}
+
+// TestProxyCacheClasses: a package archive is content, fetched once; every
+// other file is metadata, as a mirror rewrites it in place.
+func TestProxyCacheClasses(t *testing.T) {
+	e := newEnv(t)
+	if got := string(e.get(t, "r-proxy", "web/packages/packages.rds", 200)); got != "web-1" {
+		t.Fatalf("first: %s", got)
+	}
+	e.webRDS.Store("web-2")
+	if got := string(e.get(t, "r-proxy", "web/packages/packages.rds", 200)); got != "web-1" {
+		t.Fatalf("within metadataMaxAge: %s", got)
+	}
+	e.do("GET", "r-proxy", "src/contrib/up_1.0.tar.gz", nil)
+	hits := e.hits.Load()
+	e.now = e.now.Add(2 * time.Hour)
+	if got := string(e.get(t, "r-proxy", "web/packages/packages.rds", 200)); got != "web-2" {
+		t.Fatalf("after metadataMaxAge: %s", got)
+	}
+	e.do("GET", "r-proxy", "src/contrib/up_1.0.tar.gz", nil)
+	if e.hits.Load() != hits+1 {
+		t.Fatalf("upstream hits: %d", e.hits.Load()-hits)
+	}
+	for p, want := range map[string]bool{"web/packages/packages.rds": true, "src/contrib/Views.rds": true, "src/contrib/PACKAGES.json": true, "src/contrib/Meta/archive.rds": true, "bin/windows/base/release.html": true,
+		"src/contrib/foo_1.0.tar.gz": false, "bin/windows/contrib/4.4/foo_1.0.zip": false, "bin/macosx/contrib/4.4/foo_1.0.tgz": false, "src/contrib/Archive/foo/foo_0.9.tar.gz": false} {
+		if isMetadata(p) != want {
+			t.Errorf("isMetadata(%q) = %v", p, !want)
+		}
+	}
+}
+
 func TestCleanupAndDelete(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -838,7 +1117,7 @@ func TestCleanupAndDelete(t *testing.T) {
 	if _, err := e.h.DeleteComponent(ctx, e.repos["r-proxy"], cands[1].Component, "system"); !errors.Is(err, component.ErrNotSupported) {
 		t.Fatalf("proxy: %v", err)
 	}
-	for _, c := range []component.Component{{Format: "r", Name: "foo", Version: "1.0.0"}, {Format: "r", Group: "src/contrib", Name: "foo"}, {Format: "r", Group: "src", Name: "foo", Version: "1.0.0"}, {Format: "r", Group: "src/contrib/Archive/foo", Name: "foo", Version: "1.0.0"}} {
+	for _, c := range []component.Component{{Format: "r", Name: "foo", Version: "1.0.0"}, {Format: "r", Group: "src/contrib", Name: "foo"}, {Format: "r", Group: "src", Name: "foo", Version: "1.0.0"}} {
 		if _, err := e.h.DeleteComponent(ctx, e.repos["r-hosted"], c, "system"); err == nil {
 			t.Fatalf("incomplete component %+v deleted", c)
 		}

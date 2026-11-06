@@ -32,7 +32,7 @@
 
 - **같은 URL 규칙.** `/repository/<이름>/...`과 Docker의 `/v2/`를 그대로 쓰므로 클라이언트 설정은 호스트 이름만 바꾸면 됩니다.
 - **같은 운영 모델.** hosted · proxy · group, 사용자 · 역할 · 권한, Cleanup 정책, 예약 작업, blob store. Nexus를 써 본 사람에게 설명이 필요 없는 구조입니다.
-- **Nexus REST API 호환과 이전 도구.** `/service/rest/v1`이 스크립트와 도구가 쓰는 경로와 JSON 필드를 같은 이름으로 제공합니다. Jenkins의 `nexusArtifactUploader`와 Nexus Platform 플러그인(`nexusPublisher`, 태그·스테이징 단계), Gradle, Maven, sbt는 실제로 돌려 확인했습니다. Nexus의 Groovy 스크립트 API는 없으므로 그 API에 기대는 도구(nexus3-cli의 저장소·파일 명령 등)는 쓸 수 없습니다. `import-nexus -config`가 설정과 hosted 저장소 내용을 옮겨 줍니다.
+- **Nexus REST API 호환과 이전 도구.** `/service/rest/v1`이 스크립트와 도구가 쓰는 경로와 JSON 필드를 같은 이름으로 제공합니다. Jenkins의 `nexusArtifactUploader`와 Nexus Platform 플러그인(`nexusPublisher`, 태그·스테이징 단계), Gradle, Maven, sbt, Terraform provider `datadrivers/nexus`는 실제로 돌려 확인했습니다. Nexus의 Groovy 스크립트 API는 없으므로 그 API에 기대는 도구(nexus3-cli의 저장소·파일 명령 등)는 쓸 수 없습니다. `import-nexus -config`가 설정과 hosted 저장소 내용을 옮겨 줍니다.
 - **작습니다.** CGO 없는 Go 바이너리 하나. 128 MiB 컨테이너에서 돌고, 부하 테스트 최대 RSS는 43 MiB입니다.
 - **에디션이 없습니다.** LDAP, OIDC(SSO), SAML, Crowd, 사용자 토큰, S3 · Azure · Google Cloud Storage blob store, 스테이징 · 태그, blob store 그룹, retain 정리, 풀 복제, 내보내기 · 가져오기, DB 복구, 구성 코드화, active-active 고가용성까지 전부 들어 있고, 라이선스는 MIT 또는 Apache-2.0 중 고르면 됩니다.
 
@@ -49,21 +49,21 @@
 | raw | ✅ | ✅ | ✅ | curl, 브라우저 (디렉터리 목록) |
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
 | Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata 자동 생성) |
-| NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) ※ |
-| APT | ✅ | ✅ | ✅ | apt (signed Release 지원) ※ |
-| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) ※ |
-| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) ※ |
-| Conda | ✅ | ✅ | ✅ | conda, mamba ※ |
-| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) ※ |
-| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL ※ |
-| Git LFS | ✅ | ❌ | ❌ | git lfs ※ |
-| p2 | ❌ | ✅ | ✅ | Eclipse, Tycho ※ |
-| Swift | ✅ | ✅ | ✅ | swift package-registry ※ |
-| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN) ※ |
-| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers ※ |
-| Terraform | ✅ | ✅ | ✅ | terraform, tofu ※ |
+| NuGet | ✅ | ✅ | ✅ | dotnet CLI (V3) |
+| APT | ✅ | ✅ | ✅ | apt (signed Release 지원) |
+| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
+| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
+| Conda | ✅ | ✅ | ✅ | conda, micromamba |
+| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 |
+| R | ✅ | ✅ | ✅ | install.packages, remotes, renv, pak |
+| Git LFS | ✅ | ❌ | ❌ | git lfs |
+| p2 | ❌ | ✅ | ✅ | Eclipse p2 director, Tycho |
+| Swift | ✅ | ✅ | ✅ | swift package-registry |
+| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN, Linux, Xcode 연결 제외) |
+| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers |
+| Terraform | ✅ | ✅ | ✅ | terraform, tofu |
 
-※ 표시한 포맷은 클라이언트 요청을 재현한 프로토콜 테스트로만 확인했고, 실제 클라이언트로는 아직 검증하지 않았습니다. 나머지는 실제 클라이언트로 E2E 시험을 거쳤습니다.
+모든 포맷을 표에 적은 실제 클라이언트로 E2E 시험합니다(`test/e2e.sh`). Windows와 macOS의 클라이언트, Visual Studio, Xcode 연결은 시험하지 않았습니다.
 
 포맷별 알려진 제한은 [제한 사항](docs/guide.md#제한-사항)에 있습니다.
 

@@ -47,7 +47,7 @@ EOF2
 docker network create "$net" >/dev/null
 start_postgres
 docker run -d --name "$name" --network "$net" -e COMMANDCENTER_DATABASE_URL="$pg_url" --memory 128m \
-  -v "$root/$work/config.yaml:/etc/commandcenter/config.yaml:ro" -p 18086:8081 commandcenter:smoke >/dev/null
+  -v "$root/$work/config.yaml:/etc/commandcenter/config.yaml:ro" -p 127.0.0.1:18086:8081 commandcenter:smoke >/dev/null
 
 ready=0
 for i in $(seq 1 30); do
@@ -384,7 +384,7 @@ expect 409 "$(status -b "$jar" "${ui[@]}" -X DELETE "$bs/smoke-store")" "delete 
 expect 409 "$(status -b "$jar" "${ui[@]}" -X DELETE "$bs/default")" "delete of the default blob store"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$api/smoke-in-store")" "blob store repository delete"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$bs/smoke-store")" "blob store delete"
-# e-mail: disabled means the test is refused
+# e-mail: without a server the test is refused
 smtpoff='{"host":"","port":0,"security":"none","username":"","from":"","enabled":false}'
 expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d "$smtpoff" "$base/-/api/settings/smtp")" "smtp disabled"
 expect 400 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"to":"a@example.com"}' "$base/-/api/settings/smtp/test")" "smtp test while disabled"
@@ -395,6 +395,49 @@ nid="$(echo "$ncreated" | sed -nE 's/^\{"id":"([^"]+)".*/\1/p')"
 [ -n "$nid" ] || fail "task create with notifyEmail: $ncreated"
 curl -s -b "$jar" "$base/-/api/tasks/$nid" | grep -q '"notifyEmail":\["ops@example.com","dev@example.com"\]' || fail "notifyEmail did not round-trip"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$base/-/api/tasks/$nid")" "notify task delete"
+
+echo "== what the screens send: mergeMembers, the mail subject prefix and trust store, the scheduler, support sections"
+expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"name":"smoke-npm","format":"npm","type":"hosted"}' "$api")" "npm hosted create"
+expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"name":"smoke-npm-all","format":"npm","type":"group","members":["smoke-npm"],"mergeMembers":true}' "$api")" "npm group with mergeMembers"
+curl -s -b "$jar" "$api/smoke-npm-all/config" | grep -q '"mergeMembers":true' || fail "mergeMembers did not round-trip"
+expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d '{"name":"smoke-npm-all","format":"npm","type":"group","members":["smoke-npm"],"mergeMembers":false}' "$api/smoke-npm-all")" "mergeMembers off"
+if curl -s -b "$jar" "$api/smoke-npm-all/config" | grep -q '"mergeMembers"'; then fail "mergeMembers still on"; fi
+expect 400 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"name":"smoke-mvn-all","format":"maven","type":"group","members":["maven-releases"],"mergeMembers":true}' "$api")" "mergeMembers on a maven group"
+smtp="$base/-/api/settings/smtp"
+expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d '{"host":"127.0.0.1","port":1,"security":"starttls","username":"","from":"cc@example.com","enabled":false,"subjectPrefix":"[Smoke]","trustStore":false}' "$smtp")" "smtp with a prefix"
+expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d '{"host":"127.0.0.1","port":1,"security":"starttls","username":"","from":"cc@example.com","enabled":false}' "$smtp")" "smtp without them"
+smtpnow="$(curl -s -b "$jar" "$smtp")"
+echo "$smtpnow" | grep -q '"subjectPrefix":"\[Smoke\]"' || fail "a body without subjectPrefix must keep it: $smtpnow"
+echo "$smtpnow" | grep -q '"trustStore":false' || fail "a body without trustStore must keep it: $smtpnow"
+# Switched off but with a server: the test is tried (nothing listens on port 1).
+expect 502 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"to":"a@example.com"}' "$base/-/api/settings/smtp/test")" "smtp test while switched off"
+sched="$base/-/api/tasks/scheduler"
+expect 403 "$(status -b "$ojar" "${ui[@]}" -X PUT -d '{"paused":true}' "$sched")" "scheduler pause as a non-admin"
+expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d '{"paused":true}' "$sched")" "scheduler pause"
+curl -s -b "$jar" "$base/-/api/tasks" | grep -q '"paused":true' || fail "the task list does not say paused"
+expect 200 "$(status -b "$jar" "${ui[@]}" -X PUT -d '{"paused":false}' "$sched")" "scheduler resume"
+curl -s -b "$jar" "$base/-/api/tasks" | grep -q '"paused":false' || fail "the task list still says paused"
+curl -s -b "$jar" -o "$work/two.zip" "$base/-/api/support/zip?sections=threadDump,log"
+grep -aq 'threads.txt' "$work/two.zip" && grep -aq 'logs.txt' "$work/two.zip" || fail "support zip lacks its two sections"
+if grep -aq 'metrics.txt\|events.json' "$work/two.zip"; then fail "support zip holds a section not asked for"; fi
+expect 400 "$(status -b "$jar" "$base/-/api/support/zip?sections=nope")" "support zip with an unknown section"
+
+echo "== delegation the screens rely on: the tags domain, invalidate cache for a repository administrator"
+expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"id":"smoke-tagger","description":"","privileges":[{"target":"app:tags","actions":["add"]}]}' "$roles")" "tags role"
+expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"name":"smoke-pxy","format":"npm","type":"proxy","remote":"http://127.0.0.1:1/"}' "$api")" "proxy create"
+expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"id":"smoke-pxy-edit","description":"","privileges":[{"target":"admin:repo:smoke-pxy","actions":["read","edit"]}]}' "$roles")" "repository admin role"
+expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d '{"id":"smoke-pxy-read","description":"","privileges":[{"target":"admin:repo:smoke-pxy","actions":["read"]}]}' "$roles")" "read-only repository admin role"
+for u in smoke-tagger smoke-pxy-edit smoke-pxy-read; do
+  expect 201 "$(status -b "$jar" "${ui[@]}" -X POST -d "{\"id\":\"$u\",\"password\":\"password-1\",\"roles\":[\"$u\"]}" "$users")" "user $u"
+  expect 200 "$(status -c "$work/$u.jar" "${ui[@]}" -X POST -d "{\"user\":\"$u\",\"password\":\"password-1\"}" "$base/-/api/login")" "login as $u"
+done
+curl -s -b "$work/smoke-tagger.jar" "$base/-/api/me" | grep -q '"tags":\["add"\]' || fail "me does not list the tags action: $(curl -s -b "$work/smoke-tagger.jar" "$base/-/api/me")"
+expect 201 "$(status -b "$work/smoke-tagger.jar" "${ui[@]}" -X POST -d '{"name":"smoke-tag","attributes":{}}' "$base/-/api/tags")" "tag create with the add action"
+expect 403 "$(status -b "$work/smoke-tagger.jar" "${ui[@]}" -X DELETE "$base/-/api/tags/smoke-tag")" "tag delete without the delete action"
+expect 403 "$(status -b "$ojar" "${ui[@]}" -X POST -d '{"name":"smoke-tag2","attributes":{}}' "$base/-/api/tags")" "tag create without the add action"
+expect 204 "$(status -b "$jar" "${ui[@]}" -X DELETE "$base/-/api/tags/smoke-tag")" "tag delete"
+expect 200 "$(status -b "$work/smoke-pxy-edit.jar" "${ui[@]}" -X POST "$api/smoke-pxy/invalidate-cache")" "invalidate cache with edit on the repository"
+expect 403 "$(status -b "$work/smoke-pxy-read.jar" "${ui[@]}" -X POST "$api/smoke-pxy/invalidate-cache")" "invalidate cache with read on the repository"
 
 echo "== logout"
 expect 204 "$(status -b "$jar" "${ui[@]}" -X POST "$base/-/api/logout")" "logout"

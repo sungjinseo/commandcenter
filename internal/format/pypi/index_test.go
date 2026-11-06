@@ -122,17 +122,23 @@ func TestRendererHTMLAndJSON(t *testing.T) {
 }
 
 func TestWriteProjects(t *testing.T) {
+	more := func(emit func(string) error) error { return emit("more") }
 	w := httptest.NewRecorder()
-	if err := writeProjects(w, false, []string{"six", "django"}); err != nil {
+	if err := writeProjects(w, false, []string{"six", "django"}, more); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(w.Body.String(), `<a href="six/">six</a>`) {
+	if !strings.Contains(w.Body.String(), `<a href="six/">six</a>`) || !strings.Contains(w.Body.String(), `<a href="more/">more</a>`) {
 		t.Fatalf("html = %s", w.Body.String())
 	}
 	w = httptest.NewRecorder()
-	writeProjects(w, true, []string{"six"})
-	if !strings.Contains(w.Body.String(), `"projects":[{"name":"six"}]`) {
+	writeProjects(w, true, []string{"six"}, more)
+	if !strings.Contains(w.Body.String(), `"projects":[{"name":"six"},{"name":"more"}]`) {
 		t.Fatalf("json = %s", w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	writeProjects(w, true, nil, func(func(string) error) error { return nil })
+	if !strings.Contains(w.Body.String(), `"projects":[]`) {
+		t.Fatalf("empty json = %s", w.Body.String())
 	}
 	if w.Header().Get("Vary") != "Accept" {
 		t.Fatalf("projects Vary = %q", w.Header().Get("Vary"))

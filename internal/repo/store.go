@@ -1,6 +1,8 @@
 package repo
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 
 	"commandcenter/internal/blob"
 	"commandcenter/internal/config"
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 )
 
@@ -59,6 +62,12 @@ type Store struct {
 	// Downloads, if set, is told about every GET of an asset body that was
 	// served with a 2xx status (metrics.Recorder.Download).
 	Downloads func(repo, path string)
+	// Used, if set, is told about a read of a proxy's cached document, which
+	// a format may rewrite or read for itself rather than serve: its last
+	// use, not a download (metrics.Recorder.Used). A remote that fails or a
+	// metadataMaxAge that never ends leaves no other trace of it, and
+	// repository.purge-unused would take the document for unused.
+	Used func(repo, path string)
 
 	// Events, if set, receives upload and delete events from the format handlers.
 	Events EventSink
@@ -331,7 +340,8 @@ func (s *Store) RemoveStore(name string) {
 // SyncStores brings the live blob stores in line with the stored rows, which
 // another node may have changed: a new store is opened at its StoreRoot under
 // dataDir, a group takes its stored members and fill policy, a store
-// converted to a group is replaced by the group, and a deleted one goes.
+// converted to a group is replaced by the group, an azure or S3 store takes
+// new credentials and connection settings in place, and a deleted one goes.
 // Callers hold the registry lock, as every blob store change does, so this
 // node changes none meanwhile. A store that does not open is left as it is
 // and named in the error.
@@ -356,7 +366,13 @@ func (s *Store) SyncStores(ctx context.Context, dataDir string) error {
 				}
 				continue
 			}
-			if _, isGroup := cur.Group(); !isGroup { // a file, S3 or azure store's location never changes
+			if c, ok := cur.S3(); ok && row.S3 != nil && !c.SameConnection(*row.S3) {
+				if err := cur.SetS3(*row.S3); err != nil {
+					errs = append(errs, fmt.Errorf("blob store %q: %w", row.Name, err))
+				}
+				continue
+			}
+			if _, isGroup := cur.Group(); !isGroup { // a file store's location never changes, an S3 or azure store's bucket neither
 				continue
 			}
 		}
@@ -607,4 +623,67 @@ func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
 func ServeText(w http.ResponseWriter, r *http.Request, body, contentType string, modTime time.Time) {
 	w.Header().Set("Content-Type", contentType)
 	http.ServeContent(w, r, "", modTime, strings.NewReader(body))
+}
+
+// ServeBytes is ServeText for a document that is already bytes, not copied:
+// many clients at once on a document of megabytes add up.
+func ServeBytes(w http.ResponseWriter, r *http.Request, body []byte, contentType string, modTime time.Time) {
+	w.Header().Set("Content-Type", contentType)
+	http.ServeContent(w, r, "", modTime, bytes.NewReader(body))
+}
+
+// ServeStream serves a generated document as write produces it, for one too
+// large to hold per request: a proxy's rewritten upstream metadata, which any
+// number of clients may ask for at once. Last-Modified and If-Modified-Since
+// work as in http.ServeContent (a zero modTime has neither), a HEAD does not
+// call write, and there is no Range. An error before the first output (the
+// first 32 KiB are buffered) is returned for the caller's error page; a later
+// one cuts the connection, so a short document cannot look complete.
+func ServeStream(w http.ResponseWriter, r *http.Request, contentType string, modTime time.Time, write func(io.Writer) error) error {
+	hd := w.Header()
+	if !modTime.IsZero() {
+		hd.Set("Last-Modified", modTime.UTC().Format(http.TimeFormat))
+		if t, err := http.ParseTime(r.Header.Get("If-Modified-Since")); err == nil && modTime.Truncate(time.Second).Compare(t) <= 0 {
+			w.WriteHeader(http.StatusNotModified)
+			return nil
+		}
+	}
+	hd.Set("Content-Type", contentType)
+	if r.Method == http.MethodHead {
+		return nil
+	}
+	out := &streamWriter{w: w}
+	bw := bufio.NewWriterSize(out, 32<<10)
+	err := write(bw)
+	if err == nil {
+		err = bw.Flush()
+	}
+	switch {
+	case err == nil, out.err != nil, r.Context().Err() != nil:
+		return nil // done, or the client is gone
+	case !out.started:
+		hd.Del("Last-Modified")
+		hd.Del("Content-Type")
+		hd.Del("Warning")
+		return err
+	}
+	slog.Error("response failed after output started", "path", logsafe.Path(r.URL.Path), "err", logsafe.Err(err))
+	panic(http.ErrAbortHandler)
+}
+
+// streamWriter records whether output reached the client and whether writing
+// to it failed.
+type streamWriter struct {
+	w       io.Writer
+	started bool
+	err     error
+}
+
+func (s *streamWriter) Write(p []byte) (int, error) {
+	s.started = true
+	n, err := s.w.Write(p)
+	if err != nil {
+		s.err = err
+	}
+	return n, err
 }

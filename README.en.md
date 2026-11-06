@@ -32,7 +32,7 @@ Everything an in-house package repository needs, in one binary, with no editions
 
 - **The same URL layout.** `/repository/<name>/...` and Docker's `/v2/` are unchanged, so clients only need a new host name.
 - **The same operating model.** hosted, proxy and group repositories, users, roles and privileges, cleanup policies, scheduled tasks, blob stores: nothing to relearn.
-- **Nexus REST API compatibility and a migration tool.** `/service/rest/v1` offers the same paths and JSON field names for what scripts and tools use. Jenkins's `nexusArtifactUploader` and Nexus Platform plugin (`nexusPublisher`, the tag and staging steps), Gradle, Maven and sbt are run against it in `test/compat/`. There is no Groovy script API, so tools built on it (nexus3-cli's repository and file commands) do not work. `import-nexus -config` moves the configuration and the content of hosted repositories.
+- **Nexus REST API compatibility and a migration tool.** `/service/rest/v1` offers the same paths and JSON field names for what scripts and tools use. Jenkins's `nexusArtifactUploader` and Nexus Platform plugin (`nexusPublisher`, the tag and staging steps), Gradle, Maven, sbt and the Terraform provider `datadrivers/nexus` are run against it in `test/compat/`. There is no Groovy script API, so tools built on it (nexus3-cli's repository and file commands) do not work. `import-nexus -config` moves the configuration and the content of hosted repositories.
 - **Small.** One Go binary without CGO. It runs in a 128 MiB container; the load test peaks at 43 MiB RSS.
 - **No editions.** LDAP, OIDC (SSO), SAML, Crowd, user tokens, S3, Azure and Google Cloud Storage blob stores, staging and tags, group blob stores, retain-N cleanup, pull replication, export and import, database reconcile, configuration as code and active-active high availability are all included, under MIT or Apache-2.0 at your option.
 
@@ -49,21 +49,21 @@ Everything an in-house package repository needs, in one binary, with no editions
 | raw | ✅ | ✅ | ✅ | curl, browsers (directory listings) |
 | Helm | ✅ | ✅ | ✅ | helm repo add, helm cm-push |
 | Yum / DNF | ✅ | ✅ | ✅ | dnf, yum (repodata generated) |
-| NuGet | ✅ | ✅ | ✅ | dotnet nuget, nuget.exe (V3) ※ |
-| APT | ✅ | ✅ | ✅ | apt (signed Release) ※ |
-| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) ※ |
-| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) ※ |
-| Conda | ✅ | ✅ | ✅ | conda, mamba ※ |
-| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 (v1 API) ※ |
-| R | ✅ | ✅ | ✅ | install.packages, R CMD INSTALL ※ |
-| Git LFS | ✅ | ❌ | ❌ | git lfs ※ |
-| p2 | ❌ | ✅ | ✅ | Eclipse, Tycho ※ |
-| Swift | ✅ | ✅ | ✅ | swift package-registry ※ |
-| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN) ※ |
-| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers ※ |
-| Terraform | ✅ | ✅ | ✅ | terraform, tofu ※ |
+| NuGet | ✅ | ✅ | ✅ | dotnet CLI (V3) |
+| APT | ✅ | ✅ | ✅ | apt (signed Release) |
+| RubyGems | ✅ | ✅ | ✅ | gem, bundler (compact index) |
+| Composer | ✅ | ✅ | ✅ | composer 2 (Packagist proxy) |
+| Conda | ✅ | ✅ | ✅ | conda, micromamba |
+| Conan | ✅ | ✅ | ✅ | conan 2, conan 1 |
+| R | ✅ | ✅ | ✅ | install.packages, remotes, renv, pak |
+| Git LFS | ✅ | ❌ | ❌ | git lfs |
+| p2 | ❌ | ✅ | ✅ | Eclipse p2 director, Tycho |
+| Swift | ✅ | ✅ | ✅ | swift package-registry |
+| CocoaPods | ❌ | ✅ | ❌ | pod install (CDN, Linux without Xcode integration) |
+| HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers |
+| Terraform | ✅ | ✅ | ✅ | terraform, tofu |
 
-※ marks formats checked only by protocol tests that replay client requests; they have not been run against the real client yet. The others passed end-to-end tests with the real clients.
+Every format is tested end to end with the real clients in this table (`test/e2e.sh`). Windows and macOS clients, Visual Studio and Xcode integration were not run.
 
 Known limits per format are listed under [limitations](docs/guide.md#제한-사항).
 

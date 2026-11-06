@@ -1,16 +1,22 @@
 package nuget
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
@@ -24,8 +30,8 @@ const maxDoc = 16 << 20
 // base URLs it fetches from (the newest of each kind) and every base of
 // each kind, which rewrite replaces in the documents.
 type upstream struct {
-	flat, reg, search string
-	flats, regs       []string
+	flat, reg, search, vuln string
+	flats, regs             []string
 }
 
 // serviceIndexURL is where rp's remote service index is: remote itself when
@@ -52,9 +58,15 @@ func (h *Handler) upstreamFor(ctx context.Context, rp *repo.Repository) (upstrea
 	if err != nil {
 		return upstream{}, res, err
 	}
-	raw, err := h.readDoc(res.Asset)
+	up, err := h.readUpstream(res.Asset)
+	return up, res, err
+}
+
+// readUpstream reads a proxy's cached copy of its remote's service index.
+func (h *Handler) readUpstream(a meta.Asset) (upstream, error) {
+	raw, err := h.readDoc(a)
 	if err != nil {
-		return upstream{}, res, err
+		return upstream{}, err
 	}
 	var idx struct {
 		Resources []struct {
@@ -63,7 +75,7 @@ func (h *Handler) upstreamFor(ctx context.Context, rp *repo.Repository) (upstrea
 		} `json:"resources"`
 	}
 	if err := json.Unmarshal(raw, &idx); err != nil {
-		return upstream{}, res, repo.Errorf(http.StatusBadGateway, "remote service index is not JSON: %v", err)
+		return upstream{}, repo.Errorf(http.StatusBadGateway, "remote service index is not JSON: %v", err)
 	}
 	var up upstream
 	pick := func(dst *string, all *[]string, prefer ...string) {
@@ -87,8 +99,9 @@ func (h *Handler) upstreamFor(ctx context.Context, rp *repo.Repository) (upstrea
 	pick(&up.flat, &up.flats, "PackageBaseAddress/3.0.0", "PackageBaseAddress")
 	pick(&up.reg, &up.regs, "RegistrationsBaseUrl/3.6.0", "RegistrationsBaseUrl/3.4.0", "RegistrationsBaseUrl/3.0.0-rc", "RegistrationsBaseUrl/3.0.0-beta", "RegistrationsBaseUrl")
 	pick(&up.search, nil, "SearchQueryService/3.5.0", "SearchQueryService/3.0.0-rc", "SearchQueryService/3.0.0-beta", "SearchQueryService")
+	pick(&up.vuln, nil, "VulnerabilityInfo/6.7.0", "VulnerabilityInfo")
 	up.flat, up.reg = withSlash(up.flat), withSlash(up.reg)
-	return up, res, nil
+	return up, nil
 }
 
 func withSlash(s string) string {
@@ -115,15 +128,27 @@ func (h *Handler) readDoc(a meta.Asset) ([]byte, error) {
 	return raw, nil
 }
 
-// fetchDoc fetches a metadata document of rp's remote into key and reads it.
-func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url string) (doc, error) {
+// fetchFile fetches a metadata document of rp's remote into key, within maxDoc.
+func (h *Handler) fetchFile(ctx context.Context, rp *repo.Repository, key, url string) (proxy.Result, error) {
 	t := proxy.Target{Key: key, URL: url, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
 	res, err := h.Fetcher.FetchTarget(ctx, rp, t, proxy.Metadata)
+	if err != nil {
+		return res, err
+	}
+	if res.Asset.Size > maxDoc {
+		return res, repo.Errorf(http.StatusBadGateway, "upstream document %s is over %d MiB", res.Asset.Path, maxDoc>>20)
+	}
+	return res, nil
+}
+
+// fetchDoc fetches a metadata document of rp's remote into key and reads it.
+func (h *Handler) fetchDoc(ctx context.Context, rp *repo.Repository, key, url string) (doc, error) {
+	res, err := h.fetchFile(ctx, rp, key, url)
 	if err != nil {
 		return doc{}, err
 	}
 	raw, err := h.readDoc(res.Asset)
-	return doc{raw, res}, err
+	return doc{body: raw, res: res}, err
 }
 
 // proxyFlatIndex serves the upstream flat container index of id, as is.
@@ -171,27 +196,23 @@ func (h *Handler) proxyRegistration(ctx context.Context, serving, rp *repo.Repos
 	if up.reg == "" {
 		return doc{}, repo.Errorf(http.StatusBadGateway, "remote repository has no RegistrationsBaseUrl resource")
 	}
-	d, err := h.fetchDoc(ctx, rp, regPrefix+rt.ID+"/"+rt.Rest, up.reg+rt.ID+"/"+rt.Rest)
+	res, err := h.fetchFile(ctx, rp, regPrefix+rt.ID+"/"+rt.Rest, up.reg+rt.ID+"/"+rt.Rest)
 	if err != nil {
 		return doc{}, err
 	}
-	d.body, err = rewrite(d.body, up, h.repoURL(serving))
-	if err != nil {
-		return doc{}, repo.Errorf(http.StatusBadGateway, "upstream registration of %q is not JSON: %v", rt.ID, err)
-	}
-	return d, nil
+	return h.rewritten(res, up, h.repoURL(serving), fmt.Sprintf("registration of %q", rt.ID)), nil
 }
 
-// proxySearch forwards a search to the upstream (cached under a key made
-// of the query, for metadataMaxAge) and rewrites its URLs to serving.
+// searchFile forwards a search to the upstream, the answer cached under a key
+// made of the query, for metadataMaxAge.
 // ponytail: every distinct query leaves a small cached asset under query/.
-func (h *Handler) proxySearch(ctx context.Context, serving, rp *repo.Repository, q query) (doc, error) {
+func (h *Handler) searchFile(ctx context.Context, rp *repo.Repository, q query) (proxy.Result, upstream, error) {
 	up, _, err := h.upstreamFor(ctx, rp)
 	if err != nil {
-		return doc{}, err
+		return proxy.Result{}, up, err
 	}
 	if up.search == "" {
-		return doc{}, repo.Errorf(http.StatusBadGateway, "remote repository has no SearchQueryService resource")
+		return proxy.Result{}, up, repo.Errorf(http.StatusBadGateway, "remote repository has no SearchQueryService resource")
 	}
 	qs := q.encode()
 	sum := sha256.Sum256([]byte(qs))
@@ -199,50 +220,357 @@ func (h *Handler) proxySearch(ctx context.Context, serving, rp *repo.Repository,
 	if strings.Contains(up.search, "?") {
 		sep = "&"
 	}
-	d, err := h.fetchDoc(ctx, rp, "query/"+hex.EncodeToString(sum[:8])+".json", up.search+sep+qs)
+	res, err := h.fetchFile(ctx, rp, "query/"+hex.EncodeToString(sum[:8])+".json", up.search+sep+qs)
+	return res, up, err
+}
+
+// proxySearch serves a proxy's search answer with its URLs rewritten to serving.
+func (h *Handler) proxySearch(ctx context.Context, serving, rp *repo.Repository, q query) (doc, error) {
+	res, up, err := h.searchFile(ctx, rp, q)
 	if err != nil {
 		return doc{}, err
 	}
-	d.body, err = rewrite(d.body, up, h.repoURL(serving))
-	if err != nil {
-		return doc{}, repo.Errorf(http.StatusBadGateway, "upstream search result is not JSON: %v", err)
-	}
-	return d, nil
+	return h.rewritten(res, up, h.repoURL(serving), "search result"), nil
 }
 
-// rewrite replaces, in every string of the JSON document raw, an upstream
-// registration or flat container base with the proxy's (base), so clients
-// follow registration pages, dependency registrations and packageContent
-// through the proxy. Everything else (catalog URLs, say) is kept.
-func rewrite(raw []byte, up upstream, base string) ([]byte, error) {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return nil, err
+// vulnRouted reports whether rp's routing rule lets the vulnerability data
+// through: one that refuses it takes the proxy out, so a client under it is not
+// warned of a failure at every restore.
+func (h *Handler) vulnRouted(rp *repo.Repository) bool {
+	return h.Fetcher.RouteAllowed == nil || h.Fetcher.RouteAllowed(rp, "/"+vulnIndex)
+}
+
+// offersVuln says whether a service index lists the vulnerability data of a
+// member of a group, from what the proxies have cached: a group's service index
+// asks no upstream, so a proxy that hangs does not hold up a restore of hosted
+// packages, or takes the offer away. A proxy that cannot tell, or is offline,
+// counts: if it has nothing, or fails, the client hears when it asks (NU1900).
+// Only a proxy keeps vulnerability data, so a hosted member has none.
+func (h *Handler) offersVuln(ctx context.Context, rp *repo.Repository) bool {
+	switch rp.Type {
+	case "proxy":
+		if !h.vulnRouted(rp) {
+			return false
+		}
+		a, err := h.Store.Get(ctx, rp.Name, upstreamKey)
+		if err != nil || !rp.IsOnline() {
+			return true
+		}
+		up, err := h.readUpstream(a)
+		return err != nil || up.vuln != ""
+	case "group":
+		return slices.ContainsFunc(rp.MemberRepos, func(m *repo.Repository) bool { return h.offersVuln(ctx, m) })
 	}
-	var walk func(any) any
-	walk = func(x any) any {
-		switch t := x.(type) {
-		case map[string]any:
-			for k, e := range t {
-				t[k] = walk(e)
-			}
-		case []any:
-			for i, e := range t {
-				t[i] = walk(e)
-			}
-		case string:
-			for _, b := range up.regs {
-				if rest, ok := strings.CutPrefix(t, b); ok {
-					return base + "/" + regPrefix + rest
+	return false
+}
+
+// vulnSource is the proxy that serves rp's vulnerability data with its upstream:
+// rp itself, or in a group the first member, depth first, whose upstream has
+// the resource; nil when none has, which is an error if a proxy member offline
+// might have.
+func (h *Handler) vulnSource(ctx context.Context, rp *repo.Repository) (*repo.Repository, upstream, error) {
+	switch rp.Type {
+	case "proxy":
+		up, _, err := h.upstreamFor(ctx, rp)
+		if err != nil {
+			return nil, up, err
+		}
+		if up.vuln != "" && h.vulnRouted(rp) {
+			return rp, up, nil
+		}
+	case "group":
+		var offline error
+		for _, m := range rp.MemberRepos {
+			if !m.IsOnline() {
+				if m.Type != "hosted" && offline == nil {
+					offline = repo.Errorf(http.StatusServiceUnavailable, "group member %q is offline", m.Name)
 				}
+				continue
 			}
-			for _, b := range up.flats {
-				if rest, ok := strings.CutPrefix(t, b); ok {
-					return base + "/" + flatPrefix + rest
-				}
+			src, up, err := h.vulnSource(ctx, m)
+			if err != nil {
+				return nil, up, memberFailure(rp, m, err)
+			}
+			if src != nil {
+				return src, up, nil
 			}
 		}
-		return x
+		return nil, upstream{}, offline
 	}
-	return json.Marshal(walk(v))
+	return nil, upstream{}, nil
+}
+
+// vulnEntries reads src's upstream vulnerability index, a JSON array of pages
+// with @name, @id, @updated and comment, cached for metadataMaxAge. The
+// document is two entries on nuget.org.
+func (h *Handler) vulnEntries(ctx context.Context, src *repo.Repository, up upstream) ([]map[string]json.RawMessage, proxy.Result, error) {
+	t := proxy.Target{Key: vulnIndex, URL: up.vuln, Route: vulnIndex, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	res, err := h.Fetcher.FetchTarget(ctx, src, t, proxy.Metadata)
+	if err != nil {
+		return nil, res, err
+	}
+	raw, err := h.readDoc(res.Asset)
+	if err != nil {
+		return nil, res, err
+	}
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, res, repo.Errorf(http.StatusBadGateway, "upstream vulnerability index is not a JSON array: %v", err)
+	}
+	return entries, res, nil
+}
+
+// vulnPageRef is a vulnerability page's file name under vulnPrefix, without
+// .json: the sha1 of its upstream URL, which holds a time on nuget.org.
+func vulnPageRef(entry map[string]json.RawMessage) (ref, url string) {
+	if json.Unmarshal(entry["@id"], &url) != nil || url == "" {
+		return "", ""
+	}
+	sum := sha1.Sum([]byte(url))
+	return hex.EncodeToString(sum[:]), url
+}
+
+// vulnIndexDoc is vulnerabilities/index.json of rp: its source's upstream index
+// with each page's @id pointing at rp, the rest (@name, @updated) as it is. A
+// group offered it before it knew whether a proxy has any (offersVuln): without
+// a source its index is empty, which a client takes as no data, not as a failure.
+func (h *Handler) vulnIndexDoc(ctx context.Context, rp *repo.Repository) (doc, error) {
+	src, up, err := h.vulnSource(ctx, rp)
+	if err != nil {
+		return doc{}, err
+	}
+	if src == nil {
+		if rp.Type == "group" {
+			return doc{body: []byte("[]")}, nil
+		}
+		return doc{}, repo.ErrNotFound
+	}
+	entries, res, err := h.vulnEntries(ctx, src, up)
+	if err != nil {
+		return doc{}, err
+	}
+	base := h.repoURL(rp)
+	for _, e := range entries {
+		ref, _ := vulnPageRef(e)
+		if ref == "" {
+			return doc{}, repo.Errorf(http.StatusBadGateway, "upstream vulnerability index has a page without a URL")
+		}
+		e["@id"], err = json.Marshal(base + "/" + vulnPrefix + ref + ".json")
+		if err != nil {
+			return doc{}, err
+		}
+	}
+	body, err := json.Marshal(entries)
+	return doc{body: body, res: res}, err
+}
+
+// vulnPage finds page ref of rp's source's upstream index, cached for
+// metadataMaxAge and served as a file (nuget.org's first page is 778 KiB). Only
+// pages of the index are fetched, so this is no way to reach anything else. The
+// upstream names its pages by time: when one arrives that is not cached, those
+// the index has dropped are removed, or a proxy would collect them for good.
+func (h *Handler) vulnPage(ctx context.Context, rp *repo.Repository, ref string) (proxy.Result, error) {
+	src, up, err := h.vulnSource(ctx, rp)
+	if err != nil {
+		return proxy.Result{}, err
+	}
+	if src == nil {
+		return proxy.Result{}, repo.ErrNotFound
+	}
+	entries, _, err := h.vulnEntries(ctx, src, up)
+	if err != nil {
+		return proxy.Result{}, err
+	}
+	key, target := vulnPrefix+ref+".json", ""
+	current := map[string]bool{vulnIndex: true}
+	for _, e := range entries {
+		if r, u := vulnPageRef(e); r != "" {
+			current[vulnPrefix+r+".json"] = true
+			if r == ref {
+				target = u
+			}
+		}
+	}
+	if target == "" {
+		return proxy.Result{}, repo.ErrNotFound
+	}
+	_, missing := h.Store.Get(ctx, src.Name, key)
+	t := proxy.Target{Key: key, URL: target, Route: key, Header: http.Header{"Accept": {ctJSON}}, NotHTML: true}
+	res, err := h.Fetcher.FetchTarget(ctx, src, t, proxy.Metadata)
+	if err == nil && errors.Is(missing, repo.ErrNotFound) {
+		h.dropVulnPages(ctx, src, current)
+	}
+	return res, err
+}
+
+// dropVulnPages removes src's cached vulnerability pages outside keep. A failure
+// costs a few cached files until the next page arrives.
+func (h *Handler) dropVulnPages(ctx context.Context, src *repo.Repository, keep map[string]bool) {
+	assets, err := h.Store.DB.ListAssets(ctx, src.Name, vulnPrefix)
+	if err != nil {
+		slog.Warn("listing old vulnerability pages failed", "repo", src.Name, "err", logsafe.Err(err))
+		return
+	}
+	for _, a := range assets {
+		if keep[a.Path] {
+			continue
+		}
+		if err := h.Store.Delete(ctx, src.Name, a.Path); err != nil && !errors.Is(err, repo.ErrNotFound) {
+			slog.Warn("removing an old vulnerability page failed", "repo", src.Name, "path", a.Path, "err", logsafe.Err(err))
+		}
+	}
+}
+
+// rewritten is a cached upstream document written through rewriteJSON.
+func (h *Handler) rewritten(res proxy.Result, up upstream, base, what string) doc {
+	return doc{res: res, write: func(w io.Writer) error {
+		f, err := h.Store.Open(res.Asset)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := rewriteJSON(w, f, up, base); err != nil {
+			return repo.Errorf(http.StatusBadGateway, "upstream %s is not JSON: %v", what, err)
+		}
+		return nil
+	}}
+}
+
+// writeUpstreamHits reads a proxy member's cached search answer as a stream,
+// one hit at a time, and writes those onPage takes with their URLs rewritten.
+func (h *Handler) writeUpstreamHits(w io.Writer, src searchSource, base string, onPage func(id string) bool) error {
+	f, err := h.Store.Open(src.file.Asset)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	if _, err := dec.Token(); err != nil { // the opening brace
+		return err
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if key != "data" {
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := dec.Token(); err != nil { // the opening bracket
+			return err
+		}
+		for dec.More() {
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return err
+			}
+			var hit struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(raw, &hit); err != nil {
+				return err
+			}
+			if !onPage(hit.ID) {
+				continue
+			}
+			if err := rewriteJSON(w, bytes.NewReader(raw), src.up, base); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// maxJSONDepth bounds the nesting rewriteJSON follows (the decoder keeps a
+// stack entry per level, so a document of brackets must not grow it).
+const maxJSONDepth = 64
+
+// rewriteJSON copies the JSON document src to w token by token, holding none
+// of it, and replaces in every string value an upstream registration or flat
+// container base with the proxy's (base), so clients follow registration
+// pages, dependency registrations and packageContent through the proxy.
+// Everything else (catalog URLs, say) is kept. Decoding whole documents here
+// took a 128 MiB server down: at 64 clients on registration pages, and at 2
+// on a search with take=1000.
+func rewriteJSON(w io.Writer, src io.Reader, up upstream, base string) error {
+	type frame struct {
+		object bool
+		n      int // the keys and values (object) or elements (array) so far
+	}
+	dec := json.NewDecoder(src)
+	dec.UseNumber()
+	var stack []frame
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		if d, ok := tok.(json.Delim); ok && (d == '}' || d == ']') {
+			if _, err := io.WriteString(w, d.String()); err != nil {
+				return err
+			}
+			if stack = stack[:len(stack)-1]; len(stack) == 0 {
+				return nil
+			}
+			continue
+		}
+		key := false
+		if len(stack) > 0 {
+			f := &stack[len(stack)-1]
+			key = f.object && f.n%2 == 0
+			if f.n > 0 && (key || !f.object) {
+				io.WriteString(w, ",")
+			}
+			f.n++
+		}
+		switch v := tok.(type) {
+		case json.Delim:
+			if len(stack) == maxJSONDepth {
+				return fmt.Errorf("nesting deeper than %d", maxJSONDepth)
+			}
+			io.WriteString(w, v.String())
+			stack = append(stack, frame{object: v == '{'})
+			continue
+		case string:
+			if !key {
+				tok = up.toProxy(v, base)
+			}
+		}
+		b, err := json.Marshal(tok)
+		if err != nil {
+			return err
+		}
+		if key {
+			b = append(b, ':')
+		}
+		if _, err := w.Write(b); err != nil {
+			return err
+		}
+		if len(stack) == 0 {
+			return nil
+		}
+	}
+}
+
+// toProxy is s with an upstream registration or flat container base replaced
+// by the proxy's.
+func (up upstream) toProxy(s, base string) string {
+	for _, b := range up.regs {
+		if rest, ok := strings.CutPrefix(s, b); ok {
+			return base + "/" + regPrefix + rest
+		}
+	}
+	for _, b := range up.flats {
+		if rest, ok := strings.CutPrefix(s, b); ok {
+			return base + "/" + flatPrefix + rest
+		}
+	}
+	return s
 }

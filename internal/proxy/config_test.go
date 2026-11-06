@@ -4,12 +4,15 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -202,4 +205,56 @@ func TestTrustStore(t *testing.T) {
 		t.Fatal("closed port: no error")
 	}
 	var _ *x509.Certificate = chain[0]
+}
+
+// core-09: a refused connection, a name that does not resolve and a timeout
+// are not sent again; a broken connection is (TestRetries).
+func TestRetriesSkipWhatWouldOnlyWaitAgain(t *testing.T) {
+	resetConfig(t)
+	retryWait = 100 * time.Millisecond
+	defer func() { retryWait = time.Second }()
+	SetConfig(Config{Retries: 3, HeaderTimeout: 20 * time.Millisecond})
+	c := newClient(nil, resolvesTo("127.0.0.1"))
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	start := time.Now()
+	if _, _, err := get(t, c, "http://"+addr+"/x"); err == nil {
+		t.Fatal("a closed port answered")
+	}
+	if d := time.Since(start); d >= retryWait {
+		t.Fatalf("a refused connection took %s: retried", d)
+	}
+
+	var hits atomic.Int32
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-release
+	}))
+	defer slow.Close()
+	defer close(release)
+	if _, _, err := get(t, c, slow.URL+"/y"); err == nil {
+		t.Fatal("a timeout answered")
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("a timed out request was sent %d times", n)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "http://example.invalid/", nil)
+	for err, want := range map[error]bool{
+		&url.Error{Err: &net.OpError{Err: &net.DNSError{Err: "no such host", IsNotFound: true}}}: false,
+		&url.Error{Err: &net.OpError{Err: syscall.ECONNREFUSED}}:                                 false,
+		&url.Error{Err: &net.OpError{Err: syscall.ECONNRESET}}:                                   true,
+		&url.Error{Err: errors.New("unexpected EOF")}:                                            true,
+		&url.Error{Err: errors.New("x509: certificate signed by unknown authority")}:             false,
+	} {
+		if got := retryable(req, err); got != want {
+			t.Errorf("retryable(%v) = %v", err, got)
+		}
+	}
 }

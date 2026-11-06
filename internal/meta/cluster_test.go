@@ -445,6 +445,11 @@ func TestCompatRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for deadline := time.Now().Add(15 * time.Second); db.Ready(ctx) != nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("not ready after Join: %v", db.Ready(ctx))
+		}
+	}
 	raw := rawOpen(t, target)
 	stamp := func(v, c int) {
 		t.Helper()

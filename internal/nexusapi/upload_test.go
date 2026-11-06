@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha1"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -695,6 +696,48 @@ func TestUploadFormats(t *testing.T) {
 	}
 	e.body("/repository/npm-hosted/@acme/demo/-/demo-1.2.0.tgz")
 	e.wantUpload(403, "ci", "npm-hosted", fil("npm.asset", "demo-1.2.0.tgz", tgzOf("package/package.json", pj))) // npm: cannot publish over
+	// npm-15, npm-16: the listing as Nexus's: a tarball's name and version,
+	// the document under the package's URL, and every download URL answers.
+	var assets struct {
+		Items []struct {
+			Path, DownloadURL, ContentType string
+			Npm                            map[string]string
+		}
+	}
+	if err := json.Unmarshal([]byte(e.body(v1+"/assets?repository=npm-hosted")), &assets); err != nil || len(assets.Items) != 2 {
+		t.Fatalf("npm assets: %+v %v", assets, err)
+	}
+	for _, it := range assets.Items {
+		switch it.Path {
+		case "/@acme/demo":
+			if len(it.Npm) != 0 {
+				t.Errorf("the document's npm object: %v", it.Npm)
+			}
+		case "/@acme/demo/-/demo-1.2.0.tgz":
+			if it.Npm["name"] != "@acme/demo" || it.Npm["version"] != "1.2.0" || it.ContentType != "application/x-tgz" {
+				t.Errorf("the tarball's npm object %v, content type %s", it.Npm, it.ContentType)
+			}
+		default:
+			t.Errorf("listed path %s", it.Path)
+		}
+		if !strings.HasSuffix(it.DownloadURL, "/repository/npm-hosted"+it.Path) {
+			t.Errorf("%s: download URL %s", it.Path, it.DownloadURL)
+		}
+		e.body("/repository/npm-hosted" + it.Path)
+	}
+	// npm-17: the search form's attributes, in a hosted repository's manifests.
+	for query, n := range map[string]int{
+		"assets.attributes.npm.description=d":         1,
+		"assets.attributes.npm.description=other":     0,
+		"assets.attributes.npm.license=MIT":           0, // the manifest has none
+		"assets.attributes.npm.nosuchfield=d":         0,
+		"assets.attributes.npm.description=d&name=no": 0,
+	} {
+		var found struct{ Items []map[string]any }
+		if err := json.Unmarshal([]byte(e.body(v1+"/search?"+query)), &found); err != nil || len(found.Items) != n {
+			t.Errorf("search %s: %d items %v, want %d", query, len(found.Items), err, n)
+		}
+	}
 	e.wantInvalid("*", "package.json", "ci", "npm-hosted", fil("npm.asset", "x.tgz", tgzOf("other/readme", "x")))
 
 	// pypi: name and version come from the wheel's own metadata.
@@ -731,8 +774,25 @@ func TestUploadFormats(t *testing.T) {
 	if b := e.body("/repository/yum-hosted/el9/repodata/repomd.xml"); !strings.Contains(b, "primary") {
 		t.Fatalf("repomd: %s", b)
 	}
-	e.wantInvalid("*", "does not match", "ci", "yum-hosted", fld("yum.directory", "el9"),
-		fil("yum.asset", "x.rpm", rpmOf("demo", "1.0", "1", "x86_64")), fld("yum.asset.filename", "wrong-1-1.x86_64.rpm"))
+	// another file name is taken, as in Nexus; the package is stored as its header says
+	e.wantUpload(204, "ci", "yum-hosted", fld("yum.directory", "el9"),
+		fil("yum.asset", "x.rpm", rpmOf("demo", "2.0", "1", "x86_64")), fld("yum.asset.filename", "test.rpm"))
+	e.body("/repository/yum-hosted/el9/demo-2.0-1.x86_64.rpm")
+	// its comps.xml: PUT by name, gone with the asset API, repomd.xml following; generated files stay refused
+	if st, b, _ := e.send("PUT", "/repository/yum-hosted/el9/repodata/comps.xml", "ci", "", []byte("<comps/>")); st != 201 {
+		t.Fatalf("PUT comps.xml: %d %s", st, b)
+	}
+	if b := e.body("/repository/yum-hosted/el9/repodata/repomd.xml"); !strings.Contains(b, `<data type="group">`) {
+		t.Fatalf("repomd: %s", b)
+	}
+	asset := func(p string) string {
+		return v1 + "/assets/" + base64.RawURLEncoding.EncodeToString([]byte("yum-hosted:"+p))
+	}
+	e.want("DELETE", asset("el9/repodata/repomd.xml"), "ci", "", 400)
+	e.want("DELETE", asset("el9/repodata/comps.xml"), "ci", "", 204)
+	if b := e.body("/repository/yum-hosted/el9/repodata/repomd.xml"); strings.Contains(b, `<data type="group">`) {
+		t.Fatalf("repomd after the delete: %s", b)
+	}
 
 	// helm: the chart's Chart.yaml names it.
 	e.wantUpload(204, "ci", "helm-hosted", fil("helm.asset", "chart.tgz", tgzOf("demo/Chart.yaml", "apiVersion: v2\nname: demo\nversion: 0.1.0\n")))
@@ -825,4 +885,19 @@ func TestUploadCurl(t *testing.T) {
 	if st := run("-H", "Content-Type: application/json", "-d", "{}", api+"raw-files"); st != "400" {
 		t.Fatalf("json: %s", st)
 	}
+}
+
+// npm-20: a role made through the Nexus API with read and edit on an npm
+// repository publishes a new package, as in Nexus, where every PUT needs edit
+// (security-10), and changes its dist-tags.
+func TestNexusEditPrivilegePublishesNpm(t *testing.T) {
+	e := startUploads(t)
+	e.want("POST", v1+"/security/privileges/repository-view", "admin", `{"name":"npm-deploy","actions":["READ","EDIT"],"format":"npm","repository":"npm-hosted"}`, 201)
+	e.want("POST", v1+"/security/roles", "admin", `{"id":"deploy","name":"Deployer","privileges":["npm-deploy"]}`, 200)
+	e.want("POST", v1+"/security/users", "admin", `{"userId":"dep","firstName":"D","lastName":"P","emailAddress":"d@example.com","password":"longenough1","status":"active","roles":["deploy"]}`, 200)
+	tgz := base64.StdEncoding.EncodeToString(tgzOf("package/package.json", `{"name":"pkg","version":"1.0.0"}`))
+	doc := `{"name":"pkg","dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"name":"pkg","version":"1.0.0"}},"_attachments":{"pkg-1.0.0.tgz":{"data":"` + tgz + `"}}}`
+	e.asWant("PUT", "/repository/npm-hosted/pkg", "dep", "longenough1", doc, 201)
+	e.asWant("PUT", "/repository/npm-hosted/-/package/pkg/dist-tags/beta", "dep", "longenough1", `"1.0.0"`, 201)
+	e.asWant("DELETE", "/repository/npm-hosted/pkg", "dep", "longenough1", "", 403) // no delete privilege
 }

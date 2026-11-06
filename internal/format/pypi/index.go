@@ -2,6 +2,7 @@ package pypi
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ type File struct {
 	YankedReason   string
 	HasMetadata    bool   // PEP 658: <URL>.metadata holds the core metadata
 	MetadataSHA256 string // its sha256 when advertised
+	HasSig         bool   // PEP 503: <URL>.asc holds a signature
 }
 
 // parseIndex streams the files of an upstream project page: PEP 691 JSON when
@@ -40,6 +42,43 @@ func parseIndex(r io.Reader, contentType string, base *url.URL, fn func(File) er
 		return parseJSONIndex(r, base, fn)
 	}
 	return parseHTMLIndex(r, base, fn)
+}
+
+// checkPage refuses what a remote answered for the page of project when it
+// is none, before it can replace one that is (proxy.Target.Check): a sign-in or
+// error page answered with 200, which has links too, would make the project
+// vanish for metadataMaxAge and hand it to a group's next member. A JSON page has
+// its files array, an HTML page a link to a file of the project. So an empty HTML
+// page counts as none: it cannot be told from a sign-in page without links.
+func checkPage(r io.Reader, base *url.URL, project string) error {
+	br := bufio.NewReader(r)
+	head, _ := br.Peek(512)
+	if t := bytes.TrimLeft(head, " \t\r\n"); len(t) > 0 && t[0] == '{' {
+		dec := json.NewDecoder(br)
+		_, err := dec.Token()
+		for err == nil && dec.More() {
+			var kt json.Token
+			if kt, err = dec.Token(); err == nil {
+				if kt == "files" {
+					return nil
+				}
+				err = skipValue(dec)
+			}
+		}
+		return fmt.Errorf("not the page of project %q: a JSON document without files", project)
+	}
+	found := false
+	parseHTMLIndex(br, base, func(f File) error { // what it cannot read has no file either
+		if !fileMatches(project, f.Filename) {
+			return nil
+		}
+		found = true
+		return errStop
+	})
+	if !found {
+		return fmt.Errorf("not the page of project %q: no file of it", project)
+	}
+	return nil
 }
 
 func parseJSONIndex(r io.Reader, base *url.URL, fn func(File) error) error {
@@ -74,6 +113,7 @@ func parseJSONIndex(r io.Reader, base *url.URL, fn func(File) error) error {
 				Yanked         json.RawMessage   `json:"yanked"`
 				CoreMetadata   json.RawMessage   `json:"core-metadata"`
 				DistInfoMeta   json.RawMessage   `json:"dist-info-metadata"`
+				GPGSig         bool              `json:"gpg-sig"`
 			}
 			if err := dec.Decode(&jf); err != nil {
 				return err
@@ -85,7 +125,7 @@ func parseJSONIndex(r io.Reader, base *url.URL, fn func(File) error) error {
 			if u == "" {
 				continue
 			}
-			f := File{Filename: jf.Filename, URL: u, SHA256: cleanSHA256(jf.Hashes["sha256"])}
+			f := File{Filename: jf.Filename, URL: u, SHA256: cleanSHA256(jf.Hashes["sha256"]), HasSig: jf.GPGSig}
 			if jf.RequiresPython != nil {
 				f.RequiresPython = *jf.RequiresPython
 			}
@@ -231,6 +271,7 @@ func parseHTMLIndex(r io.Reader, base *url.URL, fn func(File) error) error {
 			md, ok = a["data-dist-info-metadata"] // the attribute before PEP 714
 		}
 		f.HasMetadata, f.MetadataSHA256 = parseHTMLMetadata(md, ok)
+		f.HasSig = a["data-gpg-sig"] == "true"
 		if err := fn(f); err != nil {
 			return err
 		}
@@ -470,6 +511,9 @@ func (r *renderer) File(f File, href string) error {
 			}
 			obj["core-metadata"], obj["dist-info-metadata"] = md, md
 		}
+		if f.HasSig {
+			obj["gpg-sig"] = true
+		}
 		b, err := json.Marshal(obj)
 		if err != nil {
 			return err
@@ -494,6 +538,9 @@ func (r *renderer) File(f File, href string) error {
 		if f.Yanked {
 			fmt.Fprintf(r.bw, ` data-yanked="%s"`, html.EscapeString(f.YankedReason))
 		}
+		if f.HasSig {
+			r.bw.WriteString(` data-gpg-sig="true"`)
+		}
 		fmt.Fprintf(r.bw, ">%s</a><br/>\n", html.EscapeString(f.Filename))
 	}
 	r.n++
@@ -514,30 +561,38 @@ func (r *renderer) Close() (sent bool, err error) {
 	return true, r.bw.Flush()
 }
 
-// writeProjects writes the /simple/ project list.
-func writeProjects(w http.ResponseWriter, asJSON bool, names []string) error {
+// writeProjects writes the /simple/ project list: names, then the names more
+// gives its emit, which may be far more than fit in memory.
+func writeProjects(w http.ResponseWriter, asJSON bool, names []string, more func(emit func(string) error) error) error {
 	bw := bufio.NewWriter(w)
 	w.Header().Set("Vary", "Accept")
-	if asJSON {
-		w.Header().Set("Content-Type", jsonType)
-		bw.WriteString(`{"meta":{"api-version":"1.0"},"projects":[`)
-		for i, n := range names {
-			if i > 0 {
-				bw.WriteString(",")
-			}
-			b, _ := json.Marshal(n)
-			fmt.Fprintf(bw, `{"name":%s}`, b)
-		}
-		bw.WriteString("]}")
-		return bw.Flush()
+	head, tail, n := "<!DOCTYPE html>\n<html><head><meta name=\"pypi:repository-version\" content=\"1.0\"><title>Simple index</title></head><body>\n", "</body></html>\n", 0
+	emit := func(name string) error {
+		e := html.EscapeString(name)
+		_, err := fmt.Fprintf(bw, "<a href=\"%s/\">%s</a><br/>\n", e, e)
+		return err
 	}
 	w.Header().Set("Content-Type", htmlType)
-	bw.WriteString("<!DOCTYPE html>\n<html><head><meta name=\"pypi:repository-version\" content=\"1.0\"><title>Simple index</title></head><body>\n")
-	for _, n := range names {
-		e := html.EscapeString(n)
-		fmt.Fprintf(bw, "<a href=\"%s/\">%s</a><br/>\n", e, e)
+	if asJSON {
+		w.Header().Set("Content-Type", jsonType)
+		head, tail = `{"meta":{"api-version":"1.0"},"projects":[`, "]}"
+		emit = func(name string) error {
+			if n++; n > 1 {
+				bw.WriteString(",")
+			}
+			b, _ := json.Marshal(name)
+			_, err := fmt.Fprintf(bw, `{"name":%s}`, b)
+			return err
+		}
 	}
-	bw.WriteString("</body></html>\n")
+	bw.WriteString(head)
+	for _, name := range names {
+		emit(name) // bw keeps the first write error, which Flush returns
+	}
+	if err := more(emit); err != nil {
+		return err
+	}
+	bw.WriteString(tail)
 	return bw.Flush()
 }
 

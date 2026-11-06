@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,10 +51,60 @@ type Stats interface {
 }
 
 // Result is a cached asset; Stale is set when the remote could not be reached
-// and an expired copy is returned instead.
+// or no longer has it and an expired copy is returned instead. For a lookup
+// under ForHead, Head instead answers an asset that is not cached.
 type Result struct {
 	Asset meta.Asset
 	Stale bool
+	Head  *Head
+}
+
+// Head is a remote's answer to a HEAD of an asset that is not cached: nothing
+// was fetched or stored.
+type Head struct {
+	Repo, Key     string // the proxy that asked, and the asset
+	ContentType   string
+	ContentLength int64 // -1: not said
+	LastModified  string
+}
+
+type headKey struct{}
+
+// FillOnHead marks ctx of a HEAD that is there to fill the cache (pull
+// replication's prefetch): ForHead leaves it the GET it has always been.
+func FillOnHead(ctx context.Context) context.Context {
+	return context.WithValue(ctx, headKey{}, false)
+}
+
+// ForHead is r's context for looking up one file: on a client's HEAD, a proxy
+// that does not hold the file asks its remote with a HEAD and stores nothing
+// (Result.Head, ServeHead). Only for a handler that serves the asset as it is,
+// not one that reads it: a checksum, a rewritten document. GET and a HEAD
+// under FillOnHead are not affected.
+func ForHead(r *http.Request) context.Context {
+	ctx := r.Context()
+	if _, marked := ctx.Value(headKey{}).(bool); marked || r.Method != http.MethodHead {
+		return ctx
+	}
+	return context.WithValue(ctx, headKey{}, true)
+}
+
+// ServeHead answers a HEAD from h; the firewall decides as for a download.
+func ServeHead(w http.ResponseWriter, r *http.Request, s *repo.Store, h *Head) {
+	if s.Firewall != nil {
+		if err := s.Firewall(r.Context(), h.Repo, h.Key); err != nil {
+			repo.WriteError(w, r, err)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", cmp.Or(h.ContentType, "application/octet-stream"))
+	if h.ContentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(h.ContentLength, 10))
+	}
+	if h.LastModified != "" {
+		w.Header().Set("Last-Modified", h.LastModified)
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 // Target names an asset to fetch. Key is where it is cached in the repository,
@@ -100,6 +151,18 @@ type Target struct {
 	// format keeps of the answer beside the asset (the Link to a listing's
 	// next page), there for whoever then finds the asset on any node.
 	Keep func(http.Header)
+
+	// Check, if set, looks at a 200's body once it is in the blob store and
+	// before the asset is recorded, for a format that can tell a wrong answer
+	// by its content (a sign-in page of any declared type, a file that is not
+	// what its document promises). An error refuses the answer: nothing is
+	// recorded, a cached copy stays as it was, and the fetch has failed as when
+	// the remote fails: the copy as stale, else a 502, never a miss, which a
+	// group would take as its next member's turn. A 502 error (repo.Error) is
+	// what the client is told; any other is only logged. Check returns the
+	// sums of what to record: those it got, or of a blob it wrote to the
+	// repository's store in their place (a format that rewrites what it fetches).
+	Check func(ctx context.Context, body io.ReadSeeker, sums blob.Sums) (blob.Sums, error)
 }
 
 type Fetcher struct {
@@ -150,6 +213,9 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 	if err != nil && !errors.Is(err, repo.ErrNotFound) {
 		return Result{}, err
 	}
+	if cached && kind == Metadata && f.Store.Used != nil && now.Sub(a.LastDownloaded) >= usedEvery {
+		f.Store.Used(rp.Name, t.Key)
+	}
 	if cached && fresh(rp, kind, a, now) {
 		f.count(rp.Name, true)
 		return Result{Asset: a}, nil
@@ -168,9 +234,14 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 	if err := f.blocked(rp, now); err != nil {
 		return f.stale(rp, t.Key, a, cached, err)
 	}
+	if ask, _ := ctx.Value(headKey{}).(bool); ask && !cached {
+		if h := f.headRemote(ctx, rp, t); h != nil {
+			return Result{Head: h}, nil
+		}
+	}
 	// The flight is detached from the caller so one cancelled client does not abort
 	// a download that other waiters share. This caller may still stop waiting early.
-	ch := f.sf.DoChan(fmt.Sprintf("%s\x00%d\x00%s", rp.Name, rp.Gen, t.Key), func() (any, error) {
+	ch := f.sf.DoChan(fmt.Sprintf("%s\x00%d\x00%s\x00%s", rp.Name, rp.Gen, t.Key, t.URL), func() (any, error) {
 		return f.fetchRemote(context.WithoutCancel(ctx), rp, t, a, cached)
 	})
 	select {
@@ -183,6 +254,11 @@ func (f *Fetcher) FetchTarget(ctx context.Context, rp *repo.Repository, t Target
 		return Result{}, ctx.Err()
 	}
 }
+
+// usedEvery is how often a read of a cached document moves its last use: a
+// proxy's documents are read far more often than repository.purge-unused,
+// which counts in days, needs to know.
+const usedEvery = time.Hour
 
 // routePath is the path a routing rule sees for t: its Route, else the
 // remote path or the path of an absolute URL, with one leading "/".
@@ -272,14 +348,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 	}
 	defer func() { <-f.sem }()
 
-	target := t.URL
-	if target == "" {
-		u := *rp.RemoteURL
-		u.Path = rp.RemoteURL.Path + t.Remote
-		u.RawPath = ""
-		target = u.String()
-	}
-	req, err := f.newRequest(ctx, rp, target, t.Header)
+	req, err := f.newRequest(ctx, rp, targetURL(rp, t), t.Header)
 	if err != nil {
 		return Result{}, err
 	}
@@ -297,23 +366,11 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 	if f.Stats != nil {
 		f.Stats.Upstream(rp.Name, err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests, time.Since(t0))
 	}
-	// Only the remote's own host counts for its auto-block: an absolute
-	// target on a CDN or a mirror says nothing about it.
-	own := sendsCredentials(rp, req.URL)
+	f.note(rp, req, resp, err)
 	if err != nil {
-		if own {
-			f.noteFailure(rp, err)
-		}
 		return f.stale(rp, t.Key, a, cached, err)
 	}
 	defer resp.Body.Close()
-	switch {
-	case !own:
-	case resp.StatusCode >= 500:
-		f.noteFailure(rp, fmt.Errorf("remote status %d", resp.StatusCode))
-	default:
-		f.noteSuccess(rp)
-	}
 	now := f.Now()
 	status := resp.StatusCode
 	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); status == http.StatusOK && t.NotHTML && mt == "text/html" {
@@ -322,6 +379,29 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		}
 		slog.Warn("remote answered with a web page, taken as not found", "repo", rp.Name, "path", t.Key)
 		status = http.StatusNotFound
+	}
+	var body io.Reader
+	if status == http.StatusOK {
+		idle := bodyIdle
+		if c := rp.Connection; c != nil && c.Timeout > 0 {
+			idle = time.Duration(c.Timeout) * time.Second
+		}
+		body = newStallReader(resp.Body, idle, cancel)
+		if rp.StrictContentTypeValidation {
+			// Strict content type validation of a proxy (Nexus): a file whose
+			// first bytes are not what its name promises (a sign-in page for
+			// a .jar) is not the asset, as a web page for a NotHTML target.
+			checked, cerr := repo.CheckContent(t.Key, "", body)
+			switch {
+			case cerr == nil:
+				body = checked
+			case cached || repo.StatusOf(cerr) != http.StatusBadRequest: // or the read failed
+				return f.stale(rp, t.Key, a, cached, cerr)
+			default:
+				slog.Warn("remote content does not match its type, taken as not found", "repo", rp.Name, "path", t.Key)
+				status = http.StatusNotFound
+			}
+		}
 	}
 
 	switch {
@@ -336,11 +416,6 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{Asset: a}, nil
 
 	case status == http.StatusOK:
-		idle := bodyIdle
-		if c := rp.Connection; c != nil && c.Timeout > 0 {
-			idle = time.Duration(c.Timeout) * time.Second
-		}
-		body := newStallReader(resp.Body, idle, cancel)
 		var na meta.Asset
 		var verr error
 		sums, err := f.Store.WriteBlob(rp.Name, body, func(s blob.Sums) error {
@@ -356,6 +431,9 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 			}
 			return nil
 		})
+		if err == nil && t.Check != nil {
+			sums, err = f.check(ctx, rp, t, sums)
+		}
 		if err == nil {
 			na = f.Store.NewAsset(rp.Name, t.Key, resp.Header.Get("Content-Type"), sums)
 			na.RemoteETag = resp.Header.Get("ETag")
@@ -383,7 +461,11 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		}
 		return Result{Asset: na}, nil
 
-	case status == http.StatusNotFound || status == http.StatusGone,
+	// A cached asset the remote no longer has stays served, marked stale and
+	// asked about again next time, as in Nexus. So does the document that
+	// decides a group's owner: an internal registry's 404 must not hand a
+	// package to a later, public member. Deleting the copy moves it on.
+	case (status == http.StatusNotFound || status == http.StatusGone) && !cached,
 		t.DeniedIsNotFound && !cached && status == http.StatusUnauthorized,
 		!cached && remoteMiss(status) && !t.DeniedIsFailure:
 		// A 404 from a remote that was replaced meanwhile must not outlive the change.
@@ -400,6 +482,74 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 		return Result{}, ErrRateLimited
 	}
 	return f.stale(rp, t.Key, a, cached, fmt.Errorf("remote status %d", resp.StatusCode))
+}
+
+// check runs t.Check on the blob of sums in rp's store.
+func (f *Fetcher) check(ctx context.Context, rp *repo.Repository, t Target, sums blob.Sums) (blob.Sums, error) {
+	body, err := f.Store.Open(meta.Asset{Repo: rp.Name, BlobSHA256: sums.SHA256})
+	if err != nil {
+		return sums, err
+	}
+	defer body.Close()
+	return t.Check(ctx, body, sums)
+}
+
+// note counts the outcome of a request for rp's auto-block. Only the remote's
+// own host counts: an absolute target on a CDN or a mirror says nothing about it.
+func (f *Fetcher) note(rp *repo.Repository, req *http.Request, resp *http.Response, err error) {
+	switch {
+	case !sendsCredentials(rp, req.URL):
+	case err != nil:
+		f.noteFailure(rp, err)
+	case resp.StatusCode >= 500:
+		f.noteFailure(rp, fmt.Errorf("remote status %d", resp.StatusCode))
+	default:
+		f.noteSuccess(rp)
+	}
+}
+
+// targetURL is where t is on rp's remote.
+func targetURL(rp *repo.Repository, t Target) string {
+	if t.URL != "" {
+		return t.URL
+	}
+	u := *rp.RemoteURL
+	u.Path = rp.RemoteURL.Path + t.Remote
+	u.RawPath = ""
+	return u.String()
+}
+
+// headRemote asks rp's remote about t with a HEAD. Only a plain 200 answers
+// the client: for anything else (a remote that takes no HEAD or answers it
+// differently than a GET, a 404, an error) it returns nil, and the GET that
+// follows decides with all its rules, records a miss and counts for auto-block.
+func (f *Fetcher) headRemote(ctx context.Context, rp *repo.Repository, t Target) *Head {
+	select {
+	case f.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil
+	}
+	defer func() { <-f.sem }()
+	req, err := f.newRequest(ctx, rp, targetURL(rp, t), t.Header)
+	if err != nil {
+		return nil
+	}
+	req.Method = http.MethodHead
+	t0 := time.Now()
+	resp, err := f.client(rp).Do(req)
+	if err != nil {
+		return nil
+	}
+	resp.Body.Close()
+	mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if resp.StatusCode != http.StatusOK || t.NotHTML && mt == "text/html" {
+		return nil
+	}
+	if f.Stats != nil {
+		f.Stats.Upstream(rp.Name, true, time.Since(t0))
+	}
+	return &Head{Repo: rp.Name, Key: t.Key, ContentType: resp.Header.Get("Content-Type"), ContentLength: resp.ContentLength,
+		LastModified: resp.Header.Get("Last-Modified")}
 }
 
 // bodyIdle is how long a read of a remote body may wait for data before its
@@ -441,6 +591,9 @@ func (f *Fetcher) stale(rp *repo.Repository, path string, a meta.Asset, cached b
 	slog.Warn("remote fetch failed", "repo", rp.Name, "path", path, "cached", cached, "err", logsafe.Err(cause))
 	if cached {
 		return Result{Asset: a, Stale: true}, nil
+	}
+	if repo.StatusOf(cause) == http.StatusBadGateway { // a refusal that says why (Target.Check)
+		return Result{}, cause
 	}
 	// The cause (a *url.Error carries the remote URL) is only logged: client bodies must not expose it.
 	return Result{}, ErrRemote
@@ -491,13 +644,19 @@ func (f *Fetcher) newRequest(ctx context.Context, rp *repo.Repository, target st
 // of rp's remote and with its credentials when url is on the remote's
 // host: for answers that are not content to cache (a Terraform module
 // download endpoint answers 204 with the archive URL in a header). The
-// caller closes the body. A network error is ErrRemote.
+// caller closes the body. A blocked remote is not asked (ErrRemote), a network
+// error is ErrRemote too, and the outcome counts for auto-block as a fetch's does.
 func (f *Fetcher) Request(ctx context.Context, rp *repo.Repository, url string) (*http.Response, error) {
+	if err := f.blocked(rp, f.Now()); err != nil {
+		slog.Warn("remote request skipped", "repo", rp.Name, "url", logsafe.Path(url), "err", logsafe.Err(err))
+		return nil, ErrRemote
+	}
 	req, err := f.newRequest(ctx, rp, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := f.client(rp).Do(req)
+	f.note(rp, req, resp, err)
 	if err != nil {
 		slog.Warn("remote request failed", "repo", rp.Name, "url", logsafe.Path(url), "err", logsafe.Err(err))
 		return nil, ErrRemote

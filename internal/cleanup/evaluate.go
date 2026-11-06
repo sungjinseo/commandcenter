@@ -68,6 +68,9 @@ type Evaluation struct {
 	// the first unread path. "" when the scan reached the end of the
 	// repository: the next one starts over.
 	Next string
+	// Files are the cached files without a component that the scan read and
+	// the policy selects (Policy.Files; files.go), in path order.
+	Files []meta.ScanAsset
 }
 
 // Evaluate reads at most budget assets of rp in path order from the start,
@@ -117,6 +120,7 @@ func (e *Evaluator) EvaluateFrom(ctx context.Context, rp *repo.Repository, p Pol
 	}
 
 	comps := map[compKey]*compAgg{}
+	var files []meta.ScanAsset
 	after, scanned, next, truncated := "", 0, "", false
 scan:
 	for first := true; ; first = false {
@@ -139,7 +143,9 @@ scan:
 				break scan
 			}
 			scanned++
-			addAsset(comps, rp.Format, a)
+			if !addAsset(comps, rp.Format, a) && p.Files {
+				files = append(files, a)
+			}
 		}
 		if len(page) < want { // the end of the repository
 			break
@@ -167,6 +173,11 @@ scan:
 		return truncated && strings.HasPrefix(next, prefix) || from != "" && from != prefix && strings.HasPrefix(from, prefix)
 	}
 	res := Evaluation{Scanned: scanned, Truncated: truncated}
+	for _, a := range files {
+		if olderThan(fileUsed(a), p.LastDownloadedDays, t) && !keptFile(rp.Format, a.Path) {
+			res.Files = append(res.Files, a)
+		}
+	}
 	if truncated {
 		// Resume at the start of the first component cut by the budget, else
 		// of the first unread component; never at or before this scan's
@@ -223,10 +234,11 @@ scan:
 	return res, nil
 }
 
-func addAsset(comps map[compKey]*compAgg, format string, a meta.ScanAsset) {
+// addAsset adds a to its component; false when it belongs to none.
+func addAsset(comps map[compKey]*compAgg, format string, a meta.ScanAsset) bool {
 	group, name, version, ok := component.DeriveAsset(format, a.Path)
 	if !ok {
-		return
+		return false
 	}
 	k := compKey{group, name, version}
 	c := comps[k]
@@ -261,6 +273,7 @@ func addAsset(comps map[compKey]*compAgg, format string, a meta.ScanAsset) {
 	if used.After(c.lastUsed) {
 		c.lastUsed = used
 	}
+	return true
 }
 
 // assetWritten is when a's current content was written, as near as the row
@@ -291,8 +304,10 @@ func unitPrefix(format, p string) string {
 		if i := strings.LastIndex(p, "."); i > strings.LastIndex(p, "/") {
 			return p[:i+1]
 		}
-	case "npm", "cargo", "helm", "yum":
+	case "npm", "cargo", "yum":
 		return p
+	case "helm": // the chart file, which its provenance file (<chart>.prov) starts with
+		return strings.TrimSuffix(p, ".prov")
 	case "nuget": // the version directory, <id>/<version>/ (under v3-flatcontainer/ in a proxy)
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]
@@ -319,7 +334,7 @@ func unitPrefix(format, p string) string {
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]
 		}
-	case "cocoapods": // the version directory: the podspec and the archives fetched for it
+	case "cocoapods": // the version directory: the archives fetched for it
 		if i := strings.LastIndex(p, "/"); i >= 0 {
 			return p[:i+1]
 		}
@@ -411,8 +426,8 @@ func namePrefix(format, p, group, name string) string {
 		return homePrefix(format, p)
 	case "helm", "yum": // <name>-<version>..., the yum name directory-qualified
 		return name + "-"
-	case "conda":
-		return group + "/" + name + "-"
+	case "conda": // <subdir>/<name>-, below the channel when the remote holds several
+		return p[:strings.LastIndexByte(p, '/')+1] + name + "-"
 	case "r":
 		return group + "/" + name + "_"
 	case "apt":

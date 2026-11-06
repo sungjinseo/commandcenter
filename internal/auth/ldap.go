@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -206,6 +207,7 @@ func (a *Authenticator) ldapPassword(ctx context.Context, s *Snapshot, name, pas
 		a.logger().Warn("ldap login refused: the user id is not valid", "attr", s.settings.LDAP.UserIDAttr)
 		return Principal{}, false
 	}
+	a.warnLDAPGroups(u)
 	e := newLDAPEntry(u, now)
 	p, ok := a.ldapPrincipal(s, e.user)
 	if !ok {
@@ -228,7 +230,7 @@ func (a *Authenticator) ldapPassword(ctx context.Context, s *Snapshot, name, pas
 // ldapPrincipal builds the principal of directory user u under s. A
 // disabled override row denies it.
 func (a *Authenticator) ldapPrincipal(s *Snapshot, u ldap.User) (Principal, bool) {
-	roles, _ := ldap.MapRoles(s.settings.LDAP, u.Groups)
+	roles := s.ldapRoles(u.Groups)
 	if row, ok := s.users[u.ID]; ok && row.Source == meta.SourceLDAP {
 		if row.Status != meta.StatusActive {
 			return Principal{}, false
@@ -241,6 +243,28 @@ func (a *Authenticator) ldapPrincipal(s *Snapshot, u ldap.User) (Principal, bool
 	}
 	roles = s.grant(roles)
 	return Principal{User: u.ID, Admin: s.isAdmin(roles), roles: roles, source: sourceLDAP}, true
+}
+
+// ldapRoles maps a directory user's groups under s. A role named as a group
+// makes no administrator, as the admin role itself (ldap.MapRoles) or through
+// a role it contains: that takes a mapping.
+func (s *Snapshot) ldapRoles(groups []string) []string {
+	cfg := s.settings.LDAP
+	roles, _ := ldap.MapRoles(cfg, groups)
+	if !cfg.GroupsAsRoles {
+		return roles
+	}
+	cfg.GroupsAsRoles = false
+	mapped, _ := ldap.MapRoles(cfg, groups)
+	return slices.DeleteFunc(roles, func(r string) bool { return !hasRole(mapped, r) && s.isAdmin([]string{r}) })
+}
+
+// warnLDAPGroups logs a failed search for static groups: the user goes on
+// without roles from groups until the next re-check finds them.
+func (a *Authenticator) warnLDAPGroups(u ldap.User) {
+	if u.GroupsErr != nil {
+		a.logger().Warn("ldap group search failed: no roles from groups until the next check", "user", u.ID, "err", logsafe.Err(u.GroupsErr))
+	}
 }
 
 // ldapLookup returns the principal of LDAP user id, re-checking it against
@@ -291,6 +315,7 @@ func (a *Authenticator) ldapLookup(ctx context.Context, id string) (Principal, b
 			return Principal{}, false
 		}
 		e.user, e.checkedAt, e.failedAt = u, now, time.Time{}
+		a.warnLDAPGroups(u)
 	}
 	return a.ldapPrincipal(s, e.user)
 }

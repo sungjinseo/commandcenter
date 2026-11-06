@@ -40,6 +40,9 @@ func fakeProxy() http.HandlerFunc {
 			io.WriteString(w, "module rsc.io/quote\n")
 		case "/rsc.io/quote/@v/v1.5.2.zip":
 			io.WriteString(w, "zip-bytes")
+		case "/example.com/signin/@v/list", "/example.com/signin/@v/v1.0.0.zip", "/example.com/signin/@latest":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			io.WriteString(w, "<html>Sign in</html>")
 		case "/github.com/!azure/x/@v/list":
 			io.WriteString(w, "")
 		case "/github.com/!azure/x/@latest":
@@ -122,6 +125,20 @@ func TestProxyReads(t *testing.T) {
 	}
 	if w := e.do("GET", "go-proxy", "sumdb/sum.golang.org/supported", nil); w.Code != 404 {
 		t.Fatalf("sumdb: %d", w.Code)
+	}
+}
+
+// A sign-in page answered with 200 is no file of a module: not found (the go
+// command then tries its next GOPROXY) and not cached, where a .zip would stay.
+func TestProxyDoesNotCacheWebPages(t *testing.T) {
+	e := newEnv(t)
+	for _, p := range []string{"example.com/signin/@v/list", "example.com/signin/@v/v1.0.0.zip", "example.com/signin/@latest"} {
+		if w := e.do("GET", "go-proxy", p, nil); w.Code != 404 {
+			t.Errorf("%s: %d %q", p, w.Code, w.Body.String())
+		}
+		if _, err := e.h.Store.Get(context.Background(), "go-proxy", p); repo.StatusOf(err) != 404 {
+			t.Errorf("%s was cached: %v", p, err)
+		}
 	}
 }
 

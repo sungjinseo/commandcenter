@@ -110,6 +110,13 @@ type AccessDecider interface {
 	Access(r *http.Request, rp *Repository, path string) auth.Access
 }
 
+// RouteFilter lets a Handler take the paths it never asks a remote for out of
+// a proxy's routing rule, so that it answers them itself: the go command reads
+// any answer but 404 from a proxy's checksum database path as a failure.
+type RouteFilter interface {
+	Routed(path string) bool
+}
+
 // Error is an error that maps to an HTTP status code.
 type Error struct {
 	Status int

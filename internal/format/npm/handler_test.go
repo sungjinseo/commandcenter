@@ -1,6 +1,8 @@
 package npm
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -30,6 +32,21 @@ type env struct {
 	accepted *string
 }
 
+// gzipped is s compressed: what a proxy takes for a tarball.
+func gzipped(s string) string {
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	io.WriteString(gz, s)
+	gz.Close()
+	return b.String()
+}
+
+var (
+	remoteTgz = gzipped("remote")
+	upTgz     = gzipped("up")
+	hasTgz    = gzipped("has")
+)
+
 // fakeRegistry serves left-pad like registry.npmjs.org does.
 func fakeRegistry(accept *string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +55,7 @@ func fakeRegistry(accept *string) http.HandlerFunc {
 			*accept = r.Header.Get("Accept")
 			io.WriteString(w, leftPad)
 		case "/left-pad/-/left-pad-1.1.0.tgz":
-			io.WriteString(w, "remote-tgz")
+			io.WriteString(w, remoteTgz)
 		case "/-/npm/v1/security/audits/quick", "/-/npm/v1/security/advisories/bulk":
 			// the audit endpoints echo what they were sent (TestAudit)
 			b, _ := io.ReadAll(r.Body)
@@ -128,7 +145,7 @@ func TestProxyPackumentAndTarball(t *testing.T) {
 		t.Fatalf("Accept sent upstream = %q", *e.accepted)
 	}
 	w = e.do("GET", "npm-proxy", "left-pad/-/left-pad-1.1.0.tgz", "", anon)
-	if w.Code != 200 || w.Body.String() != "remote-tgz" {
+	if w.Code != 200 || w.Body.String() != remoteTgz {
 		t.Fatalf("tarball: %d %q", w.Code, w.Body.String())
 	}
 	if w := e.do("GET", "npm-proxy", "nope", "", anon); w.Code != 404 || jsonBody(t, w)["error"] == nil {
@@ -326,11 +343,150 @@ func TestTarballURLUsesLiveBaseURL(t *testing.T) {
 	cur := "https://one.example/"
 	e.h.BaseURL = func() string { return cur }
 	rp := e.repos["npm-hosted"]
-	if got := e.h.tarballURL(rp, "p")("p-1.tgz"); got != "https://one.example/repository/npm-hosted/p/-/p-1.tgz" {
+	if got := e.h.tarballURL(rp, "p")("1", "/-/p-1.tgz"); got != "https://one.example/repository/npm-hosted/p/-/p-1.tgz" {
 		t.Fatalf("first: %s", got)
 	}
 	cur = "https://two.example"
-	if got := e.h.tarballURL(rp, "p")("p-1.tgz"); got != "https://two.example/repository/npm-hosted/p/-/p-1.tgz" {
+	if got := e.h.tarballURL(rp, "p")("1", "/-/p-1.tgz"); got != "https://two.example/repository/npm-hosted/p/-/p-1.tgz" {
 		t.Fatalf("after change: %s", got)
+	}
+}
+
+// npm-18: a document has validators: a client's copy that is still right
+// is answered with 304, for hosted, proxy and group alike, and the ETag
+// follows what the answer depends on.
+func TestDocumentConditionalRequests(t *testing.T) {
+	e := newEnv(t)
+	if w := e.do("PUT", "npm-hosted", "@s/p", publishBody("@s/p", "1.0.0", []byte("x"), false), ci); w.Code != 201 {
+		t.Fatalf("publish: %d %s", w.Code, w.Body.String())
+	}
+	cond := func(repoName, path, header, value string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/repository/"+repoName+"/"+path, nil)
+		if header != "" {
+			r.Header.Set(header, value)
+		}
+		e.h.Serve(w, r.WithContext(auth.WithPrincipal(r.Context(), ci)), e.repos[repoName], path)
+		return w
+	}
+	for _, c := range []struct{ repo, path string }{
+		{"npm-hosted", "@s/p"}, {"npm-all", "@s/p"}, {"npm-proxy", "left-pad"}, {"npm-hosted", "@s/p/1.0.0"}, {"npm-hosted", "-/package/@s/p/dist-tags"},
+	} {
+		w := cond(c.repo, c.path, "", "")
+		etag := w.Header().Get("ETag")
+		if w.Code != 200 || etag == "" {
+			t.Fatalf("%s/%s: %d, ETag %q", c.repo, c.path, w.Code, etag)
+		}
+		for _, match := range []string{etag, `"other", ` + etag, "W/" + etag, "*"} {
+			if w := cond(c.repo, c.path, "If-None-Match", match); w.Code != 304 || w.Body.Len() != 0 || w.Header().Get("ETag") != etag || w.Header().Get("Content-Type") != "" {
+				t.Errorf("%s/%s, If-None-Match %s: %d %v", c.repo, c.path, match, w.Code, w.Header())
+			}
+		}
+		if w := cond(c.repo, c.path, "If-None-Match", `"other"`); w.Code != 200 || w.Body.Len() == 0 {
+			t.Errorf("%s/%s, another ETag: %d", c.repo, c.path, w.Code)
+		}
+		lm := w.Header().Get("Last-Modified")
+		if w := cond(c.repo, c.path, "If-Modified-Since", lm); w.Code != 304 {
+			t.Errorf("%s/%s, If-Modified-Since %s: %d", c.repo, c.path, lm, w.Code)
+		}
+		if w := cond(c.repo, c.path, "If-Modified-Since", "Thu, 01 Jan 2015 00:00:00 GMT"); w.Code != 200 {
+			t.Errorf("%s/%s, an older If-Modified-Since: %d", c.repo, c.path, w.Code)
+		}
+	}
+	etag := cond("npm-hosted", "@s/p", "", "").Header().Get("ETag")
+	// Another repository or base URL rewrites the tarball URLs; another
+	// document is another answer.
+	if got := cond("npm-all", "@s/p", "", "").Header().Get("ETag"); got == etag {
+		t.Error("the group's document has the hosted repository's ETag")
+	}
+	e.h.BaseURL = func() string { return "https://elsewhere.example" }
+	if got := cond("npm-hosted", "@s/p", "", "").Header().Get("ETag"); got == etag {
+		t.Error("the ETag does not follow the base URL")
+	}
+	e.h.BaseURL = func() string { return base }
+	if w := e.do("PUT", "npm-hosted", "-/package/@s/p/dist-tags/beta", `"1.0.0"`, ci); w.Code != 201 {
+		t.Fatalf("dist-tag: %d", w.Code)
+	}
+	if w := cond("npm-hosted", "@s/p", "If-None-Match", etag); w.Code != 200 || get(jsonBody(t, w), "dist-tags", "beta") != "1.0.0" {
+		t.Errorf("after a change: %d %s", w.Code, w.Body.String())
+	}
+	// An error keeps no validators.
+	if w := cond("npm-hosted", "@s/p/9.9.9", "", ""); w.Code != 404 || w.Header().Get("ETag") != "" {
+		t.Errorf("missing version: %d %v", w.Code, w.Header())
+	}
+}
+
+// npm-16: the document's stored path, which the asset listing and the UI
+// link to, answers too; it takes no writes.
+func TestDocumentAtItsStoredPath(t *testing.T) {
+	e := newEnv(t)
+	if w := e.do("PUT", "npm-hosted", "@s/p", publishBody("@s/p", "1.0.0", []byte("x"), false), ci); w.Code != 201 {
+		t.Fatalf("publish: %d %s", w.Code, w.Body.String())
+	}
+	for _, repoName := range []string{"npm-hosted", "npm-all"} {
+		w := e.do("GET", repoName, PackumentKey("@s/p"), "", anon)
+		if w.Code != 200 || get(jsonBody(t, w), "versions", "1.0.0") == nil {
+			t.Fatalf("%s: %d %s", repoName, w.Code, w.Body.String())
+		}
+	}
+	if w := e.do("GET", "npm-proxy", PackumentKey("left-pad"), "", anon); w.Code != 200 || get(jsonBody(t, w), "versions", "1.1.0") == nil {
+		t.Fatalf("proxy: %d %s", w.Code, w.Body.String())
+	}
+	for _, method := range []string{"PUT", "DELETE"} {
+		if w := e.do(method, "npm-hosted", PackumentKey("@s/p"), "{}", ci); w.Code != 405 {
+			t.Fatalf("%s: %d %s", method, w.Code, w.Body.String())
+		}
+	}
+}
+
+// npm-19: a user's tokens from logins stay at auth.MaxLoginTokens, the ones
+// used last; tokens created by hand do not count and are not touched.
+func TestLoginTokensAreCapped(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	_, byHand, err := e.h.Auth.CreateToken(ctx, "ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	login := func() string {
+		t.Helper()
+		w := e.do("PUT", "npm-all", "-/user/org.couchdb.user:ci", `{"name":"ci","password":"pw"}`, anon)
+		tok, _ := jsonBody(t, w)["token"].(string)
+		if w.Code != 201 || tok == "" {
+			t.Fatalf("login: %d %s", w.Code, w.Body.String())
+		}
+		return tok
+	}
+	works := func(tok string) bool {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("Authorization", "Bearer "+tok)
+		p, err := e.h.Auth.Authenticate(r)
+		return err == nil && p.User == "ci"
+	}
+	used, unused := login(), login()
+	time.Sleep(2 * time.Millisecond) // created_at has milliseconds
+	for i := 2; i < auth.MaxLoginTokens; i++ {
+		login()
+	}
+	// At the cap now. A token in use outlives the ones that are not: the
+	// next login takes the one used, or created, longest ago.
+	time.Sleep(2 * time.Millisecond)
+	if !works(used) {
+		t.Fatal("a login token below the cap")
+	}
+	time.Sleep(2 * time.Millisecond)
+	newest := login()
+	toks, _, err := e.h.Store.DB.ListTokens(ctx, "ci", 2*auth.MaxLoginTokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toks) != auth.MaxLoginTokens+1 { // and the one created by hand
+		t.Fatalf("%d tokens after %d logins", len(toks), auth.MaxLoginTokens+1)
+	}
+	if !works(newest) || !works(byHand) || !works(used) {
+		t.Fatalf("newest %v, by hand %v, in use %v", works(newest), works(byHand), works(used))
+	}
+	if works(unused) {
+		t.Fatal("the token used, or created, longest ago is still valid")
 	}
 }

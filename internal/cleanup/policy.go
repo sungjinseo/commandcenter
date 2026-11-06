@@ -28,6 +28,10 @@ type Policy struct {
 	// DownloadedOnly (not stored; the repository.purge-unused task): with
 	// LastDownloadedDays, a component never downloaded is not selected.
 	DownloadedOnly bool
+	// Files (not stored; the same task, on a proxy): a scan also lists the
+	// cached files without a component that LastDownloadedDays selects
+	// (Evaluation.Files).
+	Files bool
 }
 
 // Criteria select components; every set criterion must hold (AND), and at
@@ -198,6 +202,13 @@ func Prerelease(format, version string) bool {
 		return strings.ContainsFunc(v, func(r rune) bool { return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' })
 	case "conan": // <version>#<rrev>: the recipe revision is not part of the version
 		version, _, _ = strings.Cut(version, "#")
+	case "helm": // helm reads 1.2-beta too, which semver.Parse does not
+		v, _, _ := strings.Cut(version, "+")
+		return strings.Contains(v, "-")
+	case "npm": // a version that is no semver (1.0-rc1, in a proxy's cache) with a "-", as Nexus reads it
+		if _, ok := semver.Parse(version); !ok {
+			return strings.Contains(version, "-")
+		}
 	}
 	v, ok := semver.Parse(version)
 	return ok && !v.Release()

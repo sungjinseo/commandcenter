@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"commandcenter/internal/meta"
@@ -105,7 +106,9 @@ func noProxy(host string, patterns []string) bool {
 var retryWait = time.Second
 
 // retryable reports whether req may be sent again: GET or HEAD with no
-// body, and the error is from the network, not from the caller's context.
+// body, and the error is from the network, not from the caller's context, and
+// a broken connection rather than an answer that a second try would only wait
+// for again: a timeout, a refused connection, a name that does not resolve.
 func retryable(req *http.Request, err error) bool {
 	if req.Method != http.MethodGet && req.Method != http.MethodHead || req.Body != nil && req.Body != http.NoBody {
 		return false
@@ -118,6 +121,10 @@ func retryable(req *http.Request, err error) bool {
 		err = urlErr.Err
 	}
 	var netErr net.Error
+	var dnsErr *net.DNSError
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.As(err, &dnsErr) || errors.As(err, &netErr) && netErr.Timeout() {
+		return false
+	}
 	// ponytail: a closed connection surfaces as io.EOF / "unexpected EOF"
 	// text, not a net.Error; match the text until net/http types it.
 	return errors.As(err, &netErr) || strings.Contains(err.Error(), "EOF") || strings.Contains(err.Error(), "connection reset")

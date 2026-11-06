@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"commandcenter/internal/ldap/ber"
+	"commandcenter/internal/meta"
 )
 
 // Search filter choices (RFC 4511 4.5.1).
@@ -46,6 +47,19 @@ func EscapeFilter(s string) string {
 // UserFilter substitutes the escaped user name for every {user} in filter.
 func UserFilter(filter, user string) string {
 	return strings.ReplaceAll(filter, "{user}", EscapeFilter(user))
+}
+
+// GroupFilter finds the static groups of a user: the named entries of the
+// group class whose member attribute holds the member format, filled in with
+// the user's id and DN in one pass (a name holding "${dn}" stays that name).
+// The whole value is escaped once: with it, no name or DN changes the filter,
+// and a search that hands out roles cannot be widened. A user id that could
+// also change the DN of a format like uid=${username},ou=people does not sign
+// in (meta.ValidUserID).
+func GroupFilter(cfg meta.LDAP, id, dn string) string {
+	member := strings.NewReplacer("${username}", id, "${dn}", dn).Replace(cfg.GroupMemberFormat)
+	return "(&(objectClass=" + EscapeFilter(cfg.GroupObjectClass) + ")(" + cfg.GroupIDAttr + "=*)(" +
+		cfg.GroupMemberAttr + "=" + EscapeFilter(member) + "))"
 }
 
 // CompileFilter parses an RFC 4515 filter string into its BER encoding. It

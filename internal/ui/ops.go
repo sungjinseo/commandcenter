@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,11 +42,12 @@ func (u *UI) opsRoutes(mux *http.ServeMux) {
 
 // ---- Prometheus ----
 
-// GET /-/metrics/prometheus: the text exposition format. Admins always;
-// anyone when the metricsAnonymous setting is on.
+// GET /-/metrics/prometheus: the text exposition format. Admins and holders
+// of the metrics privilege always; anyone when the metricsAnonymous setting
+// is on.
 func (u *UI) prometheus(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
-	if !p.Admin && !u.Auth.Snapshot().Settings().MetricsAnonymous {
+	if !u.Auth.CanReadMetrics(p) && !u.Auth.Snapshot().Settings().MetricsAnonymous {
 		if p.Anonymous() {
 			w.Header().Set("WWW-Authenticate", `Basic realm="commandcenter"`)
 			writeError(w, http.StatusUnauthorized, "authentication required")
@@ -259,9 +261,15 @@ func threadDump() []byte {
 	}
 }
 
-// GET /-/api/support/threads (admin): every goroutine's stack as text.
+// GET /-/api/support/threads (admin, or the metrics privilege as in Nexus):
+// every goroutine's stack as text; it shows code paths, never values.
 func (u *UI) threadDump(w http.ResponseWriter, r *http.Request) {
-	if _, ok := requireAdmin(w, r); !ok {
+	p, ok := requireUser(w, r)
+	if !ok {
+		return
+	}
+	if !u.Auth.CanReadMetrics(p) {
+		writeError(w, http.StatusForbidden, "admin only")
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -311,14 +319,40 @@ func (u *UI) apiJSON(r *http.Request, path string) json.RawMessage {
 	return body
 }
 
-// GET /-/api/support/zip (interactive admin): a zip of the information the
-// support pages show, for a bug report. Every entry is an API view, so no
-// secret is in it: passwords and keys appear only as "set" flags. The
-// bundle is bounded: 500 events, the log ring (1 MiB), the thread dump
-// (8 MiB) and the API listings.
+// SupportSections are the parts of the support bundle, by the names of
+// Nexus's support zip request.
+func SupportSections() []string {
+	return []string{"systemInformation", "threadDump", "metrics", "configuration", "security", "log", "taskLog", "auditLog"}
+}
+
+// supportTaskRuns is how many of a task's runs the bundle holds logs of: the
+// newest ones of the last supportTaskRunAge, and at least the newest one.
+const (
+	supportTaskRuns   = 5
+	supportTaskRunAge = 24 * time.Hour
+)
+
+// GET /-/api/support/zip?sections=a,b (interactive admin): a zip of the
+// information the support pages show, for a bug report: the named
+// SupportSections, without the parameter all of them; info.json is always
+// there. Every entry is an API view, so no secret is in it: passwords and
+// keys appear only as "set" flags. The bundle is bounded: 500 events, the log
+// ring (1 MiB), the thread dump (8 MiB), each task's latest run logs (64 KiB
+// each) and the API listings.
 func (u *UI) supportZip(w http.ResponseWriter, r *http.Request) {
 	if !requireAdminInteractive(w, r) {
 		return
+	}
+	want := func(string) bool { return true }
+	if q := r.URL.Query(); q.Has("sections") {
+		named := strings.FieldsFunc(q.Get("sections"), func(c rune) bool { return c == ',' })
+		for _, s := range named {
+			if !slices.Contains(SupportSections(), s) {
+				writeError(w, http.StatusBadRequest, "unknown section "+strconv.Quote(s)+": use "+strings.Join(SupportSections(), ", "))
+				return
+			}
+		}
+		want = func(s string) bool { return slices.Contains(named, s) }
 	}
 	host, _ := os.Hostname()
 	host = strings.Map(func(c rune) rune {
@@ -356,55 +390,101 @@ func (u *UI) supportZip(w http.ResponseWriter, r *http.Request) {
 		info["uptimeSeconds"] = int64(now.Sub(u.Started).Seconds())
 	}
 	addJSON("info.json", info)
-	process := map[string]any{}
-	if c := u.Config; c != nil {
-		process["dataDir"], process["listen"], process["memoryLimitMiB"] = c.DataDir, c.Listen, c.MemoryLimitMiB
-	}
-	addJSON("config.json", map[string]any{
-		"process":  process,
-		"settings": u.apiJSON(r, "/-/api/settings"),
-		"smtp":     u.apiJSON(r, "/-/api/settings/smtp"),
-		"realms":   u.apiJSON(r, "/-/api/realms"),
-		"ldap":     u.apiJSON(r, "/-/api/realms/ldap"),
-		"oidc":     u.apiJSON(r, "/-/api/realms/oidc"),
-		"saml":     u.apiJSON(r, "/-/api/realms/saml"),
-		"ssl":      u.apiJSON(r, "/-/api/ssl/certificates"),
-	})
-	addJSON("repositories.json", u.apiJSON(r, "/-/api/repositories"))
-	addJSON("blobstores.json", u.apiJSON(r, "/-/api/blobstores"))
-	addJSON("status.json", map[string]any{"checks": u.healthChecks(r.Context())})
-	addJSON("sysinfo.json", u.apiJSON(r, "/-/api/systeminformation"))
-	addJSON("nodes.json", u.apiJSON(r, "/-/api/nodes"))
-	addJSON("tasks.json", u.apiJSON(r, "/-/api/tasks"))
-	addJSON("webhooks.json", u.apiJSON(r, "/-/api/webhooks"))
-	addJSON("request-stats.json", u.apiJSON(r, "/-/api/stats/repositories?range=24h"))
-	if evs, err := u.DB.ListEvents(r.Context(), 500, 0, ""); err == nil {
-		rows := make([]map[string]any, 0, len(evs))
-		for _, e := range evs {
-			rows = append(rows, map[string]any{"id": e.ID, "at": rfc3339(e.At), "kind": e.Kind, "actor": e.Actor,
-				"repo": e.Repo, "subject": e.Subject, "detail": e.Detail})
+	cfg := map[string]any{}
+	if want("configuration") {
+		process := map[string]any{}
+		if c := u.Config; c != nil {
+			process["dataDir"], process["listen"], process["memoryLimitMiB"] = c.DataDir, c.Listen, c.MemoryLimitMiB
 		}
-		addJSON("events.json", map[string]any{"events": rows})
+		cfg["process"], cfg["settings"], cfg["smtp"] = process, u.apiJSON(r, "/-/api/settings"), u.apiJSON(r, "/-/api/settings/smtp")
+		addJSON("repositories.json", u.apiJSON(r, "/-/api/repositories"))
+		addJSON("blobstores.json", u.apiJSON(r, "/-/api/blobstores"))
+		addJSON("webhooks.json", u.apiJSON(r, "/-/api/webhooks"))
 	}
-	var logs bytes.Buffer
-	if u.Logs != nil {
-		recs := u.Logs.Snapshot(slog.LevelDebug, "", 0)
-		for i := len(recs) - 1; i >= 0; i-- {
-			logs.WriteString(recs[i].String())
-			logs.WriteByte('\n')
+	if want("security") {
+		for key, path := range map[string]string{"realms": "/-/api/realms", "ldap": "/-/api/realms/ldap", "oidc": "/-/api/realms/oidc",
+			"saml": "/-/api/realms/saml", "ssl": "/-/api/ssl/certificates"} {
+			cfg[key] = u.apiJSON(r, path)
 		}
 	}
-	add("logs.txt", logs.Bytes())
-	add("threads.txt", threadDump())
-	if b, err := u.prometheusText(r.Context()); err == nil {
-		add("metrics.txt", b)
-	} else {
-		add("metrics.txt", []byte("error: "+logsafe.Err(err)+"\n"))
+	if len(cfg) > 0 {
+		addJSON("config.json", cfg)
+	}
+	if want("systemInformation") {
+		addJSON("status.json", map[string]any{"checks": u.healthChecks(r.Context())})
+		addJSON("sysinfo.json", u.apiJSON(r, "/-/api/systeminformation"))
+		addJSON("nodes.json", u.apiJSON(r, "/-/api/nodes"))
+	}
+	if want("taskLog") {
+		addJSON("tasks.json", u.apiJSON(r, "/-/api/tasks"))
+		u.addTaskLogs(r.Context(), now, add)
+	}
+	if want("auditLog") {
+		if evs, err := u.DB.ListEvents(r.Context(), 500, 0, ""); err == nil {
+			rows := make([]map[string]any, 0, len(evs))
+			for _, e := range evs {
+				rows = append(rows, map[string]any{"id": e.ID, "at": rfc3339(e.At), "kind": e.Kind, "actor": e.Actor,
+					"repo": e.Repo, "subject": e.Subject, "detail": e.Detail})
+			}
+			addJSON("events.json", map[string]any{"events": rows})
+		}
+	}
+	if want("log") {
+		var logs bytes.Buffer
+		if u.Logs != nil {
+			recs := u.Logs.Snapshot(slog.LevelDebug, "", 0)
+			for i := len(recs) - 1; i >= 0; i-- {
+				logs.WriteString(recs[i].String())
+				logs.WriteByte('\n')
+			}
+		}
+		add("logs.txt", logs.Bytes())
+	}
+	if want("threadDump") {
+		add("threads.txt", threadDump())
+	}
+	if want("metrics") {
+		addJSON("request-stats.json", u.apiJSON(r, "/-/api/stats/repositories?range=24h"))
+		if b, err := u.prometheusText(r.Context()); err == nil {
+			add("metrics.txt", b)
+		} else {
+			add("metrics.txt", []byte("error: "+logsafe.Err(err)+"\n"))
+		}
 	}
 	if err := zw.Close(); err != nil {
 		return
 	}
-	u.emit(r, "support.zip", "", name, "")
+	u.emit(r, "support.zip", "", name, r.URL.Query().Get("sections"))
+}
+
+// addTaskLogs adds task-logs/<task>/<run>.txt for each task's latest runs.
+func (u *UI) addTaskLogs(ctx context.Context, now time.Time, add func(string, []byte)) {
+	if u.Tasks == nil {
+		return
+	}
+	list, err := u.Tasks.List(ctx)
+	if err != nil {
+		add("task-logs/error.txt", []byte("error: "+logsafe.Err(err)+"\n"))
+		return
+	}
+	for _, t := range list {
+		runs, err := u.DB.ListTaskRuns(ctx, t.ID)
+		if err != nil {
+			add("task-logs/"+t.ID+"/error.txt", []byte("error: "+logsafe.Err(err)+"\n"))
+			continue
+		}
+		for i, x := range runs {
+			if i >= supportTaskRuns || i > 0 && now.Sub(x.Run) > supportTaskRunAge {
+				break
+			}
+			run, err := u.DB.GetTaskRun(ctx, t.ID, x.Run.UnixMilli())
+			if err != nil {
+				continue
+			}
+			add(fmt.Sprintf("task-logs/%s/%s.txt", t.ID, x.Run.UTC().Format("20060102T150405.000Z")),
+				fmt.Appendf(nil, "task %s (%s), %s\nrun %s on %s: %s in %d ms: %s\n\n%s\n", t.ID, t.Type, t.Name, rfc3339(x.Run), run.Node, run.Result, run.DurationMs, run.Message, run.Log))
+		}
+	}
 }
 
 // ---- log level ----

@@ -35,6 +35,9 @@ func TestParseRoute(t *testing.T) {
 		{"@s/p/-/p-1.0.0.tgz/-rev/x", Route{Kind: KindRev, Package: "@s/p", File: "p-1.0.0.tgz", Rev: "x"}},
 		{"@acme/_internal/-/_internal-1.0.0.tgz", Route{Kind: KindTarball, Package: "@acme/_internal", File: "_internal-1.0.0.tgz"}},
 		{"-/user/token/cc_abc", Route{Kind: KindToken, Token: "cc_abc"}},
+		{"-/v1/search", Route{Kind: KindSearch}},
+		// GitHub Packages ends a tarball URL in a hash, which a lockfile written through Nexus holds.
+		{"@o/p/-/0123abcd", Route{Kind: KindTarball, Package: "@o/p", File: "0123abcd"}},
 	}
 	for _, c := range cases {
 		got, err := ParseRoute(c.in)
@@ -45,7 +48,7 @@ func TestParseRoute(t *testing.T) {
 }
 
 func TestParseRouteErrors(t *testing.T) {
-	notFound := []string{"-/v1/search", "-/user/token/", "-/user/token/a/b", "lodash/-/x/y", "lodash/a/b", "lodash/-/readme.md", "-/package/lodash", "@scope"}
+	notFound := []string{"-/v1/search/x", "-/user/token/", "-/user/token/a/b", "lodash/-/x/y", "lodash/a/b", "lodash/-/", "-/package/lodash", "@scope"}
 	for _, in := range notFound {
 		if _, err := ParseRoute(in); repo.StatusOf(err) != 404 {
 			t.Errorf("%s: err = %v, want 404", in, err)

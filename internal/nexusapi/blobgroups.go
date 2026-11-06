@@ -9,9 +9,9 @@ import (
 )
 
 // Blob store groups in Nexus's shape: {"name","members":[names],
-// "fillPolicy":"roundRobin"|"writeToFirst","softQuota":null}. Writes are the
-// UI's /-/api/blobstores calls; an update keeps the read-only flag of the
-// members it keeps (the Nexus shape has none).
+// "fillPolicy":"roundRobin"|"writeToFirst","softQuota":{"type","limit"}|null}.
+// Writes are the UI's /-/api/blobstores calls; an update keeps the read-only
+// flag of the members it keeps (the Nexus shape has none).
 
 func (h *Handler) blobGroupRoutes(m *http.ServeMux, p string) {
 	m.HandleFunc("GET "+p+"/blobstores/group", h.listBlobGroups)
@@ -28,7 +28,8 @@ type uiGroup struct {
 		Name     string `json:"name"`
 		ReadOnly bool   `json:"readOnly"`
 	} `json:"members"`
-	FillPolicy string `json:"fillPolicy"`
+	FillPolicy string   `json:"fillPolicy"`
+	Quota      *uiQuota `json:"quota"`
 }
 
 func (g uiGroup) nexus() map[string]any {
@@ -36,14 +37,15 @@ func (g uiGroup) nexus() map[string]any {
 	for _, m := range g.Members {
 		names = append(names, m.Name)
 	}
-	return map[string]any{"name": g.Name, "members": names, "fillPolicy": g.FillPolicy, "softQuota": nil}
+	return map[string]any{"name": g.Name, "members": names, "fillPolicy": g.FillPolicy, "softQuota": softQuota(g.Quota)}
 }
 
 // nexusGroup is the body of POST and PUT.
 type nexusGroup struct {
-	Name       string   `json:"name"`
-	Members    []string `json:"members"`
-	FillPolicy string   `json:"fillPolicy"`
+	Name       string      `json:"name"`
+	Members    []string    `json:"members"`
+	FillPolicy string      `json:"fillPolicy"`
+	SoftQuota  *nexusQuota `json:"softQuota"`
 }
 
 func (h *Handler) listBlobGroups(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +110,7 @@ func (h *Handler) createBlobGroup(w http.ResponseWriter, r *http.Request) {
 		members = append(members, map[string]any{"name": m})
 	}
 	status, body := h.call(r, http.MethodPost, "/-/api/blobstores",
-		map[string]any{"name": in.Name, "type": meta.BlobStoreGroup, "members": members, "fillPolicy": in.FillPolicy})
+		map[string]any{"name": in.Name, "type": meta.BlobStoreGroup, "members": members, "fillPolicy": in.FillPolicy, "quota": in.SoftQuota.ui()})
 	if status != http.StatusCreated {
 		writeUIError(w, status, body)
 		return
@@ -139,7 +141,7 @@ func (h *Handler) updateBlobGroup(w http.ResponseWriter, r *http.Request) {
 		members = append(members, map[string]any{"name": m, "readOnly": readOnly[m]})
 	}
 	status, body := h.call(r, http.MethodPut, "/-/api/blobstores/"+url.PathEscape(name),
-		map[string]any{"members": members, "fillPolicy": in.FillPolicy})
+		map[string]any{"members": members, "fillPolicy": in.FillPolicy, "quota": in.SoftQuota.ui()})
 	if status != http.StatusOK {
 		writeUIError(w, status, body)
 		return

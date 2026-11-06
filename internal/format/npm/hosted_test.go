@@ -327,3 +327,35 @@ func TestPublishRejectsEmptyPackage(t *testing.T) {
 		t.Fatalf("ghost package exists: %d", w.Code)
 	}
 }
+
+// npm-12, npm-13: _npmUser names who published, whatever the client claims,
+// with the rest of what it sent; the document repeats the description and
+// the like of its latest version at its top.
+func TestPublisherAndHoistedFields(t *testing.T) {
+	e := newEnv(t)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(publishBody("pkg", "1.0.0", []byte("x"), false)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	man := get(doc, "versions", "1.0.0").(map[string]any)
+	man["_npmUser"] = map[string]any{"name": "someone-else", "email": "me@example.com"}
+	man["license"], man["keywords"], man["bugs"] = "MIT", []string{"a", "b"}, map[string]any{"url": "https://example.com/bugs"}
+	b, _ := json.Marshal(doc)
+	if w := e.do("PUT", "npm-hosted", "pkg", string(b), ci); w.Code != 201 {
+		t.Fatalf("publish: %d %s", w.Code, w.Body.String())
+	}
+	m := jsonBody(t, e.do("GET", "npm-hosted", "pkg", "", anon))
+	if get(m, "versions", "1.0.0", "_npmUser", "name") != "ci" || get(m, "versions", "1.0.0", "_npmUser", "email") != "me@example.com" {
+		t.Fatalf("_npmUser = %v", get(m, "versions", "1.0.0", "_npmUser"))
+	}
+	if get(m, "description") != "test" || get(m, "license") != "MIT" || get(m, "bugs", "url") != "https://example.com/bugs" || len(get(m, "keywords").([]any)) != 2 || get(m, "homepage") != nil {
+		t.Fatalf("hoisted fields: %v", m)
+	}
+	// The fields follow latest.
+	if w := e.do("PUT", "npm-hosted", "pkg", publishBody("pkg", "1.1.0", []byte("y"), false), ci); w.Code != 201 {
+		t.Fatalf("publish 1.1.0: %d %s", w.Code, w.Body.String())
+	}
+	if m := jsonBody(t, e.do("GET", "npm-hosted", "pkg", "", anon)); get(m, "license") != nil || get(m, "dist-tags", "latest") != "1.1.0" {
+		t.Fatalf("after 1.1.0: license %v, latest %v", get(m, "license"), get(m, "dist-tags", "latest"))
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path"
@@ -18,7 +19,10 @@ import (
 	"commandcenter/internal/auth"
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
+	"commandcenter/internal/format/golang"
 	"commandcenter/internal/format/maven"
+	"commandcenter/internal/format/npm"
+	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/resolve"
@@ -247,6 +251,7 @@ var (
 	prereleaseKeys = []string{"prerelease", "isPrerelease"}
 	updatedKeys    = []string{"last_updated", "lastBlobUpdated", "last_modified"}
 	sumNames       = []string{"md5", "sha1", "sha256", "sha512"}
+	pypiAttrs      = []string{"classifiers", "description", "keywords", "summary"}
 	sortFields     = map[string]bool{"group": true, "name": true, "version": true, "repository": true, "format": true}
 )
 
@@ -257,10 +262,12 @@ var gavRE = regexp.MustCompile(`^([^\s:]+):([^\s:]+)(?::([^\s:]+))?(?::([^\s:]+)
 // of its files. Parameters Command Center does not know are ignored, as
 // Nexus ignores them.
 type criteria struct {
+	npm    map[string]term                // assets.attributes.npm.<field>: of a hosted package's manifest
 	comp   []func(c *comp) bool           // all must hold, on any one of the component's files
 	file   func(c *comp, p string) bool   // some file of the component must pass (q and its dependency form)
 	asset  []func(c *comp, p string) bool // asset parameters: they cut a component's files
 	sums   map[string]string              // asset checksums (md5, sha1, sha256, sha512), matched in the database
+	pypi   map[string]term                // the pypi.* parameters, by their last part: matched in a file's core metadata
 	since  time.Time                      // some file modified at or after it
 	format string                         // Command Center spelling; "" any
 	sort   string
@@ -297,7 +304,7 @@ func parseCriteria(q url.Values) (criteria, error) {
 	}
 	compTerm(groupKeys, groupForms)
 	compTerm(nameKeys, nameForms)
-	compTerm(versionKeys, func(c *comp) []string { return []string{c.version} })
+	compTerm(versionKeys, versionForms)
 	compTerm(baseKeys, func(c *comp) []string { return []string{baseVersion(c)} })
 	assetTerm(extensionKeys, func(c *comp, p string) string { _, ext := fileParts(c, p); return ext })
 	assetTerm(classifierKeys, func(c *comp, p string) string { cl, _ := fileParts(c, p); return cl })
@@ -316,6 +323,22 @@ func parseCriteria(q url.Values) (criteria, error) {
 				cr.sums = map[string]string{}
 			}
 			cr.sums[s] = strings.ToLower(v)
+		}
+	}
+	for _, a := range pypiAttrs {
+		if alts := splitValue(strings.TrimSpace(q.Get("pypi." + a))); len(alts) > 0 {
+			if cr.pypi == nil {
+				cr.pypi = map[string]term{}
+			}
+			cr.pypi[a] = newTerm(alts, false)
+		}
+	}
+	for k := range q {
+		if field, ok := strings.CutPrefix(k, "assets.attributes.npm."); ok {
+			if cr.npm == nil {
+				cr.npm = map[string]term{}
+			}
+			cr.npm[field] = newTerm(splitValue(strings.TrimSpace(q.Get(k))), false)
 		}
 	}
 	if v, _ := value(prereleaseKeys); v != "" {
@@ -360,7 +383,7 @@ func (cr *criteria) gav(m []string) {
 	parts := []struct {
 		v   string
 		get func(*comp) []string
-	}{{m[1], groupForms}, {m[2], nameForms}, {m[3], func(c *comp) []string { return []string{c.version} }}}
+	}{{m[1], groupForms}, {m[2], nameForms}, {m[3], versionForms}}
 	for _, part := range parts {
 		if part.v != "" {
 			t, get := literal(part.v), part.get
@@ -395,7 +418,7 @@ func parseBool(s string) (bool, error) {
 // npm.*, docker.*) implies when format is absent, as Nexus adds it.
 func impliedFormat(q url.Values) string {
 	for _, f := range []struct{ format, prefix string }{{"maven", "maven."}, {"maven", "attributes.maven2."},
-		{"maven", "assets.attributes.maven2."}, {"npm", "npm."}, {"docker", "docker."}} {
+		{"maven", "assets.attributes.maven2."}, {"npm", "npm."}, {"npm", "assets.attributes.npm."}, {"docker", "docker."}, {"pypi", "pypi."}, {"p2", "p2."}, {"p2", "attributes.p2."}} {
 		for k := range q {
 			if strings.HasPrefix(k, f.prefix) {
 				return f.format
@@ -415,26 +438,46 @@ func groupForms(c *comp) []string {
 		return []string{g, "@" + g}
 	case "raw":
 		return []string{g, strings.TrimPrefix(g, "/")}
+	case "p2":
+		return []string{c.group}
 	}
 	return []string{g}
 }
 
-// nameForms: a raw file's name with and without the leading "/".
+// nameForms: a raw file's name with and without the leading "/", a PyPI
+// project's normalized name with each of the separators PEP 503 folds, as
+// Nexus indexes it, a Go module's path as it is and case-escaped, as Nexus
+// names it.
 func nameForms(c *comp) []string {
-	if c.format == "raw" {
+	switch c.format {
+	case "raw":
 		return []string{"/" + c.name, c.name}
+	case "pypi":
+		return []string{c.name, strings.ReplaceAll(c.name, "-", "_"), strings.ReplaceAll(c.name, "-", ".")}
+	case "go":
+		return []string{c.name, golang.Escape(c.name)}
 	}
 	return []string{c.name}
 }
 
+// versionForms: a Go version as it is and case-escaped.
+func versionForms(c *comp) []string {
+	if c.format == "go" {
+		return []string{c.version, golang.Escape(c.version)}
+	}
+	return []string{c.version}
+}
+
 // compGroup is the group Nexus reports: an npm scope without "@", a raw
-// file's directory ("/" at the top level).
+// file's directory ("/" at the top level), none for p2.
 func compGroup(c *comp) string {
 	switch c.format {
 	case "raw":
 		return "/" + strings.TrimSuffix(path.Dir(c.name), ".")
 	case "npm":
 		return strings.TrimPrefix(c.group, "@")
+	case "p2":
+		return ""
 	}
 	return c.group
 }
@@ -529,6 +572,7 @@ func (h *Handler) searched(w http.ResponseWriter, r *http.Request, win window) (
 		writeValidation(w, []string{err.Error()})
 		return nil, cr, false
 	}
+	tooMany := h.filterP2Plugins(r.Context(), q, &cr)
 	v := h.viewOf(r)
 	names := strings.Join(q["repository"], " ")
 	repos, via, ok := v.searchRepos(names)
@@ -543,6 +587,10 @@ func (h *Handler) searched(w http.ResponseWriter, r *http.Request, win window) (
 	comps, err := h.find(r.Context(), repos, cr, q.Get("tag"), win, v.sees)
 	if err != nil {
 		h.fail(w, err)
+		return nil, cr, false
+	}
+	if *tooMany {
+		writeMessage(w, http.StatusBadRequest, fmt.Sprintf("p2.pluginName reads the bundles it searches, and more than %d qualify: narrow the search with repository or name", maxP2Plugins))
 		return nil, cr, false
 	}
 	for _, c := range comps {
@@ -676,6 +724,12 @@ func (h *Handler) find(ctx context.Context, repos []*repo.Repository, cr criteri
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+	if len(cr.pypi) > 0 {
+		sees := keep
+		keep = func(rp *repo.Repository, p string) bool {
+			return (sees == nil || sees(rp, p)) && h.pypiMatches(ctx, rp, p, cr.pypi)
+		}
+	}
 	s := &collector{cr: cr, win: win, keep: keep, tagged: tagged, open: map[string]*held{}}
 	for _, rp := range repos {
 		if rp.Type == "group" || (cr.format != "" && rp.Format != cr.format) || (tagged != nil && !tagged[meta.ComponentKey{Repo: rp.Name}]) {
@@ -690,6 +744,20 @@ func (h *Handler) find(ctx context.Context, repos []*repo.Repository, cr criteri
 		if !cr.since.IsZero() {
 			if s.recent, err = h.DB.AssetPathsWhere(ctx, rp.Name, nil, cr.since); err != nil {
 				return nil, err
+			}
+		}
+		if cr.npm != nil {
+			paths, err := h.npmManifestPaths(ctx, rp, cr.npm)
+			if err != nil {
+				return nil, err
+			}
+			for p := range s.sums {
+				if !paths[p] {
+					delete(s.sums, p)
+				}
+			}
+			if s.sums == nil {
+				s.sums = paths
 			}
 		}
 		if (s.sums != nil && len(s.sums) == 0) || (s.recent != nil && len(s.recent) == 0) {
@@ -714,6 +782,67 @@ func (h *Handler) find(ctx context.Context, repos []*repo.Repository, cr criteri
 		out[i] = e.comp
 	}
 	return out, nil
+}
+
+// pypiMatches reports whether the core metadata stored beside file p of rp
+// (a signature: beside its file) matches every term of a search's pypi.*
+// parameters. A file without it matches none. ponytail: reads a file per file
+// of the repository, only for a search with these parameters; keep the fields
+// in the row if such searches get frequent.
+func (h *Handler) pypiMatches(ctx context.Context, rp *repo.Repository, p string, terms map[string]term) bool {
+	if rp.Format != "pypi" || h.Store == nil {
+		return false
+	}
+	a, err := h.DB.GetAsset(ctx, rp.Name, strings.TrimSuffix(p, ".asc")+".metadata")
+	if err != nil {
+		return false
+	}
+	f, err := h.Store.Open(a)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, a.Size))
+	if err != nil {
+		return false
+	}
+	attrs := pypi.SearchAttributes(raw)
+	for name, t := range terms {
+		if !t.matches(attrs[name]...) {
+			return false
+		}
+	}
+	return true
+}
+
+// npmManifestPaths returns the tarballs of the versions of hosted rp whose
+// manifests match every term (npm.ManifestField; a field it does not know
+// matches nothing). A proxy keeps no manifests per version, so it has none.
+// ponytail: reads every version's row per search, for a parameter scripts
+// rarely use; attributes per asset if it comes to matter.
+func (h *Handler) npmManifestPaths(ctx context.Context, rp *repo.Repository, terms map[string]term) (map[string]bool, error) {
+	paths := map[string]bool{}
+	names, err := h.DB.ListPackageNames(ctx, rp.Name)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		rows, err := h.DB.ListPackages(ctx, rp.Name, name)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			ok := true
+			for field, t := range terms {
+				vals := npm.ManifestField(row.Attrs, field)
+				ok = ok && len(vals) > 0 && t.matches(vals...)
+			}
+			if ok {
+				paths[npm.TarballKey(name, npm.TarballFile(name, row.Version))] = true
+			}
+		}
+	}
+	return paths, nil
 }
 
 func (h *Handler) search(w http.ResponseWriter, r *http.Request) {

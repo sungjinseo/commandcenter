@@ -17,11 +17,13 @@ import (
 	"strconv"
 	"strings"
 
+	"commandcenter/internal/auth"
 	"commandcenter/internal/blob"
 	"commandcenter/internal/config"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/sysinfo"
+	"commandcenter/internal/ui"
 )
 
 // The rest of the Nexus REST surface the Terraform provider and scripts
@@ -44,6 +46,65 @@ func (h *Handler) repoAPIRoutes(m *http.ServeMux, p string) {
 	m.HandleFunc("GET /service/rest/metrics/prometheus", h.metricsPrometheus)
 	m.HandleFunc("GET /service/rest/metrics/data", h.metricsData)
 	m.HandleFunc("GET /service/rest/metrics/threads", h.metricsThreads)
+	m.HandleFunc("GET "+p+"/system/node", h.systemNode)
+	m.HandleFunc("POST "+p+"/support/supportzip", h.supportZip)
+}
+
+// systemNode is GET /v1/system/node: this node's id (admin). Unlike Nexus's
+// it is new for every start: it names a running process in the nodes table.
+func (h *Handler) systemNode(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.admin(w, r); !ok {
+		return
+	}
+	status, body := h.call(r, http.MethodGet, "/-/api/nodes", nil)
+	if status != http.StatusOK {
+		writeUIError(w, status, body)
+		return
+	}
+	var res struct {
+		Self string `json:"self"`
+	}
+	json.Unmarshal(body, &res)
+	writeJSON(w, http.StatusOK, map[string]string{"nodeId": res.Self})
+}
+
+// supportZip is POST /v1/support/supportzip: the support bundle streamed from
+// the UI's route, with the sections the body's flags switch on (an empty body:
+// all of them). jmx, replication, archivedLog and the size limits have nothing
+// to choose here: the bundle is bounded as it is.
+func (h *Handler) supportZip(w http.ResponseWriter, r *http.Request) {
+	p, ok := h.admin(w, r)
+	if !ok {
+		return
+	}
+	if p.Via == auth.ViaToken { // the UI's rule, answered here: below, its answer reaches the client as it is
+		deny(w, p)
+		return
+	}
+	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	var flags map[string]any
+	if err != nil || len(bytes.TrimSpace(b)) > 0 && json.Unmarshal(b, &flags) != nil {
+		writeMessage(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	target := "/-/api/support/zip"
+	if flags != nil {
+		sections := []string{}
+		for _, s := range ui.SupportSections() {
+			if flags[s] == true {
+				sections = append(sections, s)
+			}
+		}
+		target += "?" + url.Values{"sections": {strings.Join(sections, ",")}}.Encode()
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, target, nil)
+	if err != nil {
+		writeMessage(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	req.Header.Set("X-Request-Id", r.Header.Get("X-Request-Id"))
+	req.RemoteAddr = r.RemoteAddr
+	h.api.ServeHTTP(w, req)
 }
 
 // ---- format sections of repository bodies ----
@@ -53,10 +114,12 @@ func (h *Handler) repoAPIRoutes(m *http.ServeMux, p string) {
 // cannot honour instead of dropping it, so a client's plan converges.
 type formatBodies struct {
 	Docker *struct {
-		V1Enabled bool    `json:"v1Enabled"`
-		HTTPPort  *int    `json:"httpPort"`
-		HTTPSPort *int    `json:"httpsPort"`
-		Subdomain *string `json:"subdomain"`
+		V1Enabled      bool    `json:"v1Enabled"`
+		ForceBasicAuth *bool   `json:"forceBasicAuth"`
+		PathEnabled    bool    `json:"pathEnabled"`
+		HTTPPort       *int    `json:"httpPort"`
+		HTTPSPort      *int    `json:"httpsPort"`
+		Subdomain      *string `json:"subdomain"`
 	} `json:"docker"`
 	DockerProxy *struct {
 		IndexType                string   `json:"indexType"`
@@ -72,7 +135,8 @@ type formatBodies struct {
 		Keypair *string `json:"keypair"`
 	} `json:"yumSigning"`
 	NugetProxy *struct {
-		NugetVersion string `json:"nugetVersion"`
+		NugetVersion         string `json:"nugetVersion"`
+		QueryCacheItemMaxAge *int   `json:"queryCacheItemMaxAge"`
 	} `json:"nugetProxy"`
 	Npm       *quarantineBody  `json:"npm"`
 	Pypi      *quarantineBody  `json:"pypi"`
@@ -90,25 +154,44 @@ type requireAuthBody struct {
 	RequireAuthentication *bool `json:"requireAuthentication"`
 }
 
+// requireAuth maps a format's switch that makes every request carry
+// credentials (cargo, terraform and swift requireAuthentication, docker
+// forceBasicAuth) onto the repository's anonymousRead override: true turns
+// anonymous read off; false follows the global setting again, while an
+// explicit true stays; absent changes nothing.
+func requireAuth(out map[string]any, cur *config.Repository, v *bool) {
+	switch {
+	case v == nil:
+	case *v:
+		out["anonymousRead"] = false
+	case cur == nil || cur.AnonymousRead != nil && !*cur.AnonymousRead:
+		out["anonymousRead"] = nil
+	}
+}
+
+// requiresAuth is the answer of requireAuth's switch.
+func requiresAuth(d config.Repository) bool { return d.AnonymousRead != nil && !*d.AnonymousRead }
+
 // formatRequest maps the format sections onto out (the UI's request) and
-// returns the values Command Center cannot honour, as "field: why".
-func formatRequest(format, typ string, b repoBody, out map[string]any, cur *config.Repository) []string {
+// kept (the values that only read back), and returns the values Command
+// Center cannot honour, as "field: why".
+func formatRequest(format, typ string, b repoBody, out map[string]any, cur *config.Repository, kept *config.NexusKept) []string {
 	var errs []string
 	refuse := func(bad bool, msg string) {
 		if bad {
 			errs = append(errs, msg)
 		}
 	}
-	// component.proprietaryComponents is accepted and answered false: there
-	// is no proprietary-namespace protection here (earlier builds took it too).
 	const connector = ": every docker repository is served at /v2/<repository>/ on the server's own port; there are no per-repository connectors"
 	switch format {
 	case "docker":
-		if d := b.Docker; d != nil { // forceBasicAuth: Basic credentials and registry tokens are both accepted
+		if d := b.Docker; d != nil {
 			refuse(d.V1Enabled, "docker.v1Enabled: the Docker registry API v1 is not served")
 			refuse(d.HTTPPort != nil, "docker.httpPort"+connector)
 			refuse(d.HTTPSPort != nil, "docker.httpsPort"+connector)
 			refuse(d.Subdomain != nil && *d.Subdomain != "", "docker.subdomain"+connector)
+			requireAuth(out, cur, d.ForceBasicAuth)
+			kept.PathEnabled = d.PathEnabled
 		}
 		refuse(typ == "hosted" && b.Storage.LatestPolicy != nil && *b.Storage.LatestPolicy,
 			"storage.latestPolicy: every tag can be redeployed as the write policy allows")
@@ -117,6 +200,9 @@ func formatRequest(format, typ string, b repoBody, out map[string]any, cur *conf
 				"dockerProxy.indexType: there is no docker search index; use HUB or REGISTRY")
 			refuse(p.CacheForeignLayers, "dockerProxy.cacheForeignLayers: foreign layers are not cached; clients fetch them from their own URLs")
 			refuse(len(p.ForeignLayerURLWhitelist) > 0, "dockerProxy.foreignLayerUrlWhitelist: foreign layers are not cached")
+			if t := strings.ToUpper(p.IndexType); t == "HUB" || t == "REGISTRY" {
+				kept.IndexType = t
+			}
 		}
 	case "yum":
 		if y := b.Yum; y != nil && typ == "hosted" {
@@ -124,6 +210,9 @@ func formatRequest(format, typ string, b repoBody, out map[string]any, cur *conf
 				out["depth"] = *y.RepodataDepth // 0 to 5; the UI refuses others
 			}
 			depth, _ := out["depth"].(int)
+			if strings.EqualFold(y.DeployPolicy, "PERMISSIVE") { // at depth 0 it allows what STRICT does
+				kept.DeployPolicy = "PERMISSIVE"
+			}
 			refuse(depth > 0 && strings.EqualFold(y.DeployPolicy, "PERMISSIVE"),
 				"yum.deployPolicy: with a repodataDepth every RPM must be that many directories down (STRICT)")
 		}
@@ -131,8 +220,9 @@ func formatRequest(format, typ string, b repoBody, out map[string]any, cur *conf
 			refuse(s.Keypair != nil && *s.Keypair != "", "yumSigning.keypair: yum metadata is not signed")
 		}
 	case "nuget":
-		if n := b.NugetProxy; n != nil && typ == "proxy" { // queryCacheItemMaxAge: queries follow metadataMaxAge
+		if n := b.NugetProxy; n != nil && typ == "proxy" {
 			refuse(n.NugetVersion != "" && !strings.EqualFold(n.NugetVersion, "V3"), "nugetProxy.nugetVersion: only NuGet V3 remotes are proxied")
+			kept.QueryCacheItemMaxAge = n.QueryCacheItemMaxAge // queries follow metadataMaxAge
 		}
 	case "npm", "pypi":
 		q := b.Npm
@@ -144,15 +234,8 @@ func formatRequest(format, typ string, b repoBody, out map[string]any, cur *conf
 			refuse(q.RemoveNonCataloged, format+".removeNonCataloged: there is no component catalog")
 		}
 	case "cargo", "terraform", "swift":
-		a := map[string]*requireAuthBody{"cargo": b.Cargo, "terraform": b.Terraform, "swift": b.Swift}[format]
-		if a == nil || a.RequireAuthentication == nil {
-			break
-		}
-		switch {
-		case *a.RequireAuthentication: // the repository's anonymousRead override
-			out["anonymousRead"] = false
-		case cur == nil || cur.AnonymousRead != nil && !*cur.AnonymousRead:
-			out["anonymousRead"] = nil // follow the global setting; an explicit true stays
+		if a := map[string]*requireAuthBody{"cargo": b.Cargo, "terraform": b.Terraform, "swift": b.Swift}[format]; a != nil {
+			requireAuth(out, cur, a.RequireAuthentication)
 		}
 	}
 	return errs
@@ -163,27 +246,41 @@ func formatBlocks(out map[string]any, rp *repo.Repository) {
 	d := rp.Repository
 	switch {
 	case d.Format == "docker":
-		out["docker"] = map[string]any{"v1Enabled": false, "forceBasicAuth": true, "httpPort": nil, "httpsPort": nil, "subdomain": nil}
+		// forceBasicAuth is the anonymousRead override; pathEnabled reads
+		// back as written, though every repository is served by its path.
+		out["docker"] = map[string]any{"v1Enabled": false, "forceBasicAuth": requiresAuth(d), "pathEnabled": d.Nexus.PathEnabled,
+			"httpPort": nil, "httpsPort": nil, "subdomain": nil}
 		if d.Type == "hosted" {
 			out["storage"].(map[string]any)["latestPolicy"] = false
 		}
 		if d.Type == "proxy" {
-			index := "REGISTRY"
-			if rp.RemoteURL != nil && (rp.RemoteURL.Hostname() == "docker.io" || strings.HasSuffix(rp.RemoteURL.Hostname(), ".docker.io")) {
-				index = "HUB"
+			index := d.Nexus.IndexType // as written; else by the remote
+			if index == "" {
+				index = "REGISTRY"
+				if rp.RemoteURL != nil && (rp.RemoteURL.Hostname() == "docker.io" || strings.HasSuffix(rp.RemoteURL.Hostname(), ".docker.io")) {
+					index = "HUB"
+				}
 			}
 			out["dockerProxy"] = map[string]any{"indexType": index, "indexUrl": nil, "cacheForeignLayers": false, "foreignLayerUrlWhitelist": []string{}}
 		}
 	case d.Format == "yum" && d.Type == "hosted":
-		out["yum"] = map[string]any{"repodataDepth": d.Depth, "deployPolicy": "STRICT"}
+		policy := "STRICT"
+		if d.Depth == 0 && d.Nexus.DeployPolicy == "PERMISSIVE" {
+			policy = "PERMISSIVE"
+		}
+		out["yum"] = map[string]any{"repodataDepth": d.Depth, "deployPolicy": policy}
 	case d.Format == "nuget" && d.Type == "proxy":
-		out["nugetProxy"] = map[string]any{"queryCacheItemMaxAge": 3600, "nugetVersion": "V3"} // ponytail: Nexus's default; not a setting here
+		age := 3600 // Nexus's default; queries follow metadataMaxAge here
+		if v := d.Nexus.QueryCacheItemMaxAge; v != nil {
+			age = *v
+		}
+		out["nugetProxy"] = map[string]any{"queryCacheItemMaxAge": age, "nugetVersion": "V3"}
 	case d.Format == "npm" && d.Type == "proxy":
 		out["npm"] = map[string]any{"removeNonCataloged": false, "removeQuarantined": false}
 	case d.Format == "pypi" && d.Type == "proxy":
 		out["pypi"] = map[string]any{"removeQuarantined": false}
 	case d.Format == "cargo" || d.Format == "terraform" || d.Format == "swift":
-		out[d.Format] = map[string]any{"requireAuthentication": d.AnonymousRead != nil && !*d.AnonymousRead}
+		out[d.Format] = map[string]any{"requireAuthentication": requiresAuth(d)}
 	}
 }
 
@@ -206,11 +303,11 @@ func (h *Handler) storeOfType(w http.ResponseWriter, r *http.Request, name, typ 
 	return bs, false
 }
 
-// filePath is a file store's path as the Nexus API takes it on create: its
-// name for the default location under the data directory.
+// filePath is a file store's path as the Nexus API takes it on create:
+// relative to <dataDir>/blobstores, its name for the default location.
 func filePath(bs meta.BlobStore) string {
-	if bs.Path == filepath.Join("blobstores", bs.Name) {
-		return bs.Name
+	if rel, ok := strings.CutPrefix(bs.Path, "blobstores"+string(filepath.Separator)); ok {
+		return rel
 	}
 	return bs.Path
 }
@@ -237,6 +334,8 @@ func (h *Handler) deleteBlobStore(w http.ResponseWriter, r *http.Request) {
 		writeUIError(w, status, body)
 		return
 	}
+	h.DB.SetSetting(r.Context(), nexusS3SignerKey+r.PathValue("name"), "") // these only read back: a failure changes nothing
+	h.DB.SetSetting(r.Context(), nexusS3ExpirationKey+r.PathValue("name"), "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -258,6 +357,10 @@ type nexusS3 struct {
 			Region string `json:"region"`
 			Name   string `json:"name"`
 			Prefix string `json:"prefix"`
+			// Expiration is Nexus's days until a bucket lifecycle rule
+			// removes deleted blobs. There is no such rule here (the
+			// blobstore.compact task removes them): it only reads back.
+			Expiration *int `json:"expiration,omitempty"`
 		} `json:"bucket"`
 		Security     *s3Security   `json:"bucketSecurity,omitempty"`
 		SecurityIn   *s3Security   `json:"security,omitempty"`
@@ -298,7 +401,8 @@ type s3Failover struct {
 var sseNames = map[string]string{"AES256": "s3ManagedEncryption", "aws:kms": "kmsManagedEncryption"}
 
 // config maps the body onto Command Center's S3 settings; a secret sent as
-// the placeholder (or empty) is stored's. It returns what cannot be honoured.
+// the placeholder (or empty) beside an access key is stored's, while the
+// endpoint stays (setS3Connection). It returns what cannot be honoured.
 func (in nexusS3) config(stored *blob.S3Config) (blob.S3Config, []string) {
 	b := in.Bucket
 	c := blob.S3Config{Bucket: b.Bucket.Name, Prefix: b.Bucket.Prefix, Region: b.Bucket.Region}
@@ -311,10 +415,11 @@ func (in nexusS3) config(stored *blob.S3Config) (blob.S3Config, []string) {
 			errs = append(errs, msg)
 		}
 	}
+	refuse(b.Bucket.Expiration != nil && *b.Bucket.Expiration < -1, "bucketConfiguration.bucket.expiration: days, or -1 for none")
 	if s := cmp.Or(b.Security, b.SecurityIn); s != nil {
 		c.AccessKey, c.SecretKey = s.AccessKeyID, s.SecretAccessKey
-		if (c.SecretKey == "" || c.SecretKey == secretPlaceholder) && stored != nil {
-			c.SecretKey = stored.SecretKey
+		if c.SecretKey == secretPlaceholder {
+			c.SecretKey = ""
 		}
 		refuse(s.Role != "", "bucketConfiguration.bucketSecurity.role: assuming a role is not supported; use keys or the AWS_* environment")
 		refuse(s.SessionToken != "" && s.SessionToken != secretPlaceholder, "bucketConfiguration.bucketSecurity.sessionToken: a stored session token is not supported; use the AWS_* environment")
@@ -326,13 +431,47 @@ func (in nexusS3) config(stored *blob.S3Config) (blob.S3Config, []string) {
 		c.Endpoint, c.PathStyle = a.Endpoint, a.ForcePathStyle
 		refuse(a.SignerType != "" && a.SignerType != "DEFAULT" && a.SignerType != "AWSS3V4SignerType",
 			"bucketConfiguration.advancedBucketConnection.signerType: requests are signed with AWS Signature Version 4 only")
-		refuse(a.MaxConnections != nil, "bucketConfiguration.advancedBucketConnection.maxConnectionPoolSize: the connection pool is not set per store")
+		if a.MaxConnections != nil {
+			c.MaxConnections = *a.MaxConnections
+		}
 	}
 	for _, f := range b.Failover {
 		c.Failover = append(c.Failover, blob.S3Failover{Region: f.Region, Bucket: f.BucketName, Endpoint: f.Endpoint})
 	}
+	if b.Failover == nil && stored != nil { // no client but Command Center's knows them
+		c.Failover = stored.Failover
+	}
+	if c.AccessKey != "" && c.SecretKey == "" && stored != nil {
+		refuse(c.Endpoint != stored.Endpoint, "bucketConfiguration.bucketSecurity.secretAccessKey: re-enter the secret key when changing the endpoint")
+		c.SecretKey = stored.SecretKey
+	}
 	refuse(b.PreSigned != nil && *b.PreSigned, "bucketConfiguration.preSignedUrlEnabled: downloads are served by this server, not redirected to the bucket")
 	return c, errs
+}
+
+// nexusS3SignerKey is the prefix of the setting that keeps the signer type a
+// client wrote for a store (DEFAULT or AWSS3V4SignerType, which mean the same
+// here), so that it reads back as written.
+const nexusS3SignerKey = "nexusapi.s3signer."
+
+// nexusS3ExpirationKey likewise keeps bucket.expiration: most Nexus
+// configurations carry its default 3, which changes nothing here.
+const nexusS3ExpirationKey = "nexusapi.s3expiration."
+
+// keepS3Written stores in's signer type and expiration for the store.
+func (h *Handler) keepS3Written(r *http.Request, name string, in nexusS3) error {
+	exp := ""
+	if in.Bucket.Bucket.Expiration != nil {
+		exp = strconv.Itoa(*in.Bucket.Bucket.Expiration)
+	}
+	if err := h.DB.SetSetting(r.Context(), nexusS3ExpirationKey+name, exp); err != nil {
+		return err
+	}
+	a := cmp.Or(in.Bucket.Advanced, in.Bucket.AdvancedIn)
+	if a == nil {
+		return h.DB.SetSetting(r.Context(), nexusS3SignerKey+name, "")
+	}
+	return h.DB.SetSetting(r.Context(), nexusS3SignerKey+name, a.SignerType)
 }
 
 // s3Norm is c in one spelling, for comparing a request with the stored row.
@@ -367,6 +506,10 @@ func (h *Handler) createS3BlobStore(w http.ResponseWriter, r *http.Request) {
 		writeUIError(w, status, body)
 		return
 	}
+	if err := h.keepS3Written(r, in.Name, in); err != nil {
+		writeMessage(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	w.WriteHeader(http.StatusCreated)
 }
 
@@ -386,6 +529,13 @@ func (h *Handler) getS3BlobStore(w http.ResponseWriter, r *http.Request) {
 	out.Name, out.Type, out.SoftQuota = bs.Name, "S3", softQuota(bs.Quota)
 	b := &out.Bucket
 	b.Bucket.Region, b.Bucket.Name, b.Bucket.Prefix = cmp.Or(c.Region, "DEFAULT"), c.Bucket, c.Prefix
+	exp := -1
+	if v, _ := h.DB.GetSetting(r.Context(), nexusS3ExpirationKey+bs.Name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			exp = n
+		}
+	}
+	b.Bucket.Expiration = &exp
 	b.ActiveRegion = cmp.Or(c.Region, "us-east-1")
 	if c.AccessKey != "" { // never the secret itself
 		b.Security = &s3Security{AccessKeyID: c.AccessKey, SecretAccessKey: secretPlaceholder}
@@ -393,17 +543,34 @@ func (h *Handler) getS3BlobStore(w http.ResponseWriter, r *http.Request) {
 	if e := s3Norm(c).Encryption; e != nil {
 		b.Encryption = &s3Encryption{Type: e.Type, Key: e.KMSKeyID}
 	}
-	if c.Endpoint != "" || c.PathStyle {
+	if c.Endpoint != "" || c.PathStyle || c.MaxConnections > 0 {
 		b.Advanced = &s3Advanced{Endpoint: c.Endpoint, ForcePathStyle: c.PathStyle}
+		if c.MaxConnections > 0 {
+			b.Advanced.MaxConnections = &c.MaxConnections
+		}
 	}
 	for _, f := range c.Failover {
 		b.Failover = append(b.Failover, s3Failover{Region: f.Region, BucketName: f.Bucket, Endpoint: f.Endpoint})
 	}
+	if signer, _ := h.DB.GetSetting(r.Context(), nexusS3SignerKey+bs.Name); signer != "" {
+		b.Advanced = cmp.Or(b.Advanced, &s3Advanced{})
+		b.Advanced.SignerType = signer
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-// updateS3BlobStore changes the soft quota. The bucket settings cannot
-// change here (nor in the UI): the same ones are accepted, others refused.
+// s3Fixed is c without what an update may change.
+func s3Fixed(c blob.S3Config) blob.S3Config {
+	c = s3Norm(c)
+	c.AccessKey, c.SecretKey, c.Region, c.Endpoint, c.PathStyle, c.MaxConnections = "", "", "", "", false, 0
+	return c
+}
+
+// updateS3BlobStore changes the soft quota and, through the UI's update that
+// checks them against the bucket first, the credentials (an empty secret or
+// the placeholder keeps the stored one), endpoint, region, path style and
+// connection pool. The bucket, prefix, encryption and failover buckets cannot
+// change: the same ones are accepted, others refused.
 func (h *Handler) updateS3BlobStore(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.admin(w, r); !ok {
 		return
@@ -422,9 +589,9 @@ func (h *Handler) updateS3BlobStore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, errs := in.config(bs.S3)
-	if err := c.Validate(); err == nil && len(errs) == 0 && !reflect.DeepEqual(s3Norm(c), s3Norm(*bs.S3)) {
-		errs = append(errs, "bucketConfiguration: the bucket, its credentials, encryption and connection cannot be changed; "+
-			"create another blob store for other settings (only softQuota changes)")
+	if err := c.Validate(); err == nil && len(errs) == 0 && !reflect.DeepEqual(s3Fixed(c), s3Fixed(*bs.S3)) {
+		errs = append(errs, "bucketConfiguration: the bucket, prefix, encryption and failover buckets cannot be changed; "+
+			"create another blob store for other ones (softQuota, credentials, endpoint, region, path style and connection pool can)")
 	} else if err != nil {
 		errs = append(errs, "bucketConfiguration: "+err.Error())
 	}
@@ -432,9 +599,17 @@ func (h *Handler) updateS3BlobStore(w http.ResponseWriter, r *http.Request) {
 		writeValidation(w, errs)
 		return
 	}
-	status, body := h.call(r, http.MethodPut, "/-/api/blobstores/"+url.PathEscape(name), map[string]any{"quota": in.SoftQuota.ui()})
+	req := map[string]any{"quota": in.SoftQuota.ui()}
+	if !c.SameConnection(*bs.S3) {
+		req["s3"] = c
+	}
+	status, body := h.call(r, http.MethodPut, "/-/api/blobstores/"+url.PathEscape(name), req)
 	if status != http.StatusOK {
 		writeUIError(w, status, body)
+		return
+	}
+	if err := h.keepS3Written(r, name, in); err != nil {
+		writeMessage(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -454,7 +629,18 @@ type nexusEmail struct {
 	StartTLSRequired   bool    `json:"startTlsRequired"`
 	SSLOnConnect       bool    `json:"sslOnConnectEnabled"`
 	SSLIdentityCheck   bool    `json:"sslServerIdentityCheckEnabled"`
-	NexusTrustStoreUse bool    `json:"nexusTrustStoreEnabled"`
+	NexusTrustStoreUse *bool   `json:"nexusTrustStoreEnabled"` // absent: kept
+}
+
+// nexusEmailKey keeps the identity switch last set through this API, read
+// back while the mode it was set for is the one in use (as nexusRealmsKey
+// keeps the realm list). It changes nothing: over TLS the server's identity
+// is always checked, and without TLS it does not apply.
+const nexusEmailKey = "nexusapi.email"
+
+type emailSwitches struct {
+	Security string `json:"security"`
+	Identity bool   `json:"identity"`
 }
 
 func (h *Handler) getEmail(w http.ResponseWriter, r *http.Request) {
@@ -469,10 +655,19 @@ func (h *Handler) getEmail(w http.ResponseWriter, r *http.Request) {
 	var c meta.SMTP // the answer has no password
 	json.Unmarshal(body, &c)
 	tls := c.Security == meta.SMTPStartTLS || c.Security == meta.SMTPTLS
-	writeJSON(w, http.StatusOK, nexusEmail{Enabled: c.Enabled, Host: c.Host, Port: &c.Port, Username: c.Username, FromAddress: c.From,
+	identity := tls // what happens, unless a client wrote otherwise for this mode
+	var kept emailSwitches
+	if found, err := h.DB.GetSettingJSON(r.Context(), nexusEmailKey, &kept); err == nil && found && kept.Security == c.Security {
+		identity = kept.Identity
+	}
+	out := nexusEmail{Enabled: c.Enabled, Host: c.Host, Port: &c.Port, Username: c.Username, FromAddress: c.From,
 		StartTLSEnabled: c.Security == meta.SMTPStartTLS, StartTLSRequired: c.Security == meta.SMTPStartTLS, SSLOnConnect: c.Security == meta.SMTPTLS,
-		// TLS always checks the server's identity and trusts the SSL trust store beside the system roots.
-		SSLIdentityCheck: tls, NexusTrustStoreUse: tls})
+		// Unless told otherwise, TLS trusts the SSL trust store beside the system roots.
+		SSLIdentityCheck: identity, NexusTrustStoreUse: cmp.Or(c.TrustStore, &tls)}
+	if c.SubjectPrefix != "" {
+		out.SubjectPrefix = &c.SubjectPrefix
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // putEmail maps the TLS switches onto none, starttls (always required) or
@@ -503,16 +698,26 @@ func (h *Handler) putEmail(w http.ResponseWriter, r *http.Request) {
 	refuse(security == meta.SMTPStartTLS && in.StartTLSEnabled != in.StartTLSRequired,
 		"startTlsRequired: STARTTLS never falls back to plain text here; set startTlsEnabled and startTlsRequired together")
 	refuse(security != meta.SMTPNone && !in.SSLIdentityCheck, "sslServerIdentityCheckEnabled: the server's identity is always checked over TLS")
-	refuse(in.SubjectPrefix != nil && *in.SubjectPrefix != "", "subjectPrefix: a subject prefix is not supported")
 	if len(errs) > 0 {
 		writeValidation(w, errs)
 		return
 	}
-	req := map[string]any{"host": in.Host, "port": *in.Port, "security": security, "username": in.Username, "from": in.FromAddress, "enabled": in.Enabled}
+	req := map[string]any{"host": in.Host, "port": *in.Port, "security": security, "username": in.Username, "from": in.FromAddress, "enabled": in.Enabled,
+		"subjectPrefix": cmp.Or(in.SubjectPrefix, new(string))}
 	if in.Password != nil { // empty or absent keeps the stored password (re-entered when the server changes)
 		req["password"] = *in.Password
 	}
-	h.putSMTP(w, r, req)
+	if in.NexusTrustStoreUse != nil {
+		req["trustStore"] = *in.NexusTrustStoreUse
+	}
+	if !h.putSMTP(w, r, req) {
+		return
+	}
+	if err := h.DB.SetSettingJSON(r.Context(), nexusEmailKey, emailSwitches{security, in.SSLIdentityCheck}); err != nil {
+		writeMessage(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // deleteEmail resets the settings to none.
@@ -520,16 +725,24 @@ func (h *Handler) deleteEmail(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.admin(w, r); !ok {
 		return
 	}
-	h.putSMTP(w, r, map[string]any{"host": "", "port": 0, "security": meta.SMTPNone, "username": "", "from": "", "enabled": false, "clearPassword": true})
-}
-
-func (h *Handler) putSMTP(w http.ResponseWriter, r *http.Request, req map[string]any) {
-	status, body := h.call(r, http.MethodPut, "/-/api/settings/smtp", req)
-	if status != http.StatusOK {
-		writeUIError(w, status, body)
+	if !h.putSMTP(w, r, map[string]any{"host": "", "port": 0, "security": meta.SMTPNone, "username": "", "from": "", "enabled": false, "clearPassword": true, "subjectPrefix": ""}) {
+		return
+	}
+	if err := h.DB.SetSetting(r.Context(), nexusEmailKey, ""); err != nil {
+		writeMessage(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// putSMTP makes the change through the UI's API; it answers a refusal itself.
+func (h *Handler) putSMTP(w http.ResponseWriter, r *http.Request, req map[string]any) bool {
+	status, body := h.call(r, http.MethodPut, "/-/api/settings/smtp", req)
+	if status != http.StatusOK {
+		writeUIError(w, status, body)
+		return false
+	}
+	return true
 }
 
 // verifyEmail sends a test message to the address in the body (plain, or a
@@ -558,11 +771,11 @@ func (h *Handler) verifyEmail(w http.ResponseWriter, r *http.Request) {
 
 // ---- metrics: /service/rest/metrics/*, and /service/metrics/* redirects ----
 
-// metricsAllowed applies the rule of /-/metrics/prometheus: admins, or anyone
-// when metricsAnonymous is on.
+// metricsAllowed applies the rule of /-/metrics/prometheus: admins and holders
+// of the metrics privilege, or anyone when metricsAnonymous is on.
 func (h *Handler) metricsAllowed(w http.ResponseWriter, r *http.Request) bool {
 	p := principal(r)
-	if p.Admin || h.Auth.Snapshot().Settings().MetricsAnonymous {
+	if h.Auth.CanReadMetrics(p) || h.Auth.Snapshot().Settings().MetricsAnonymous {
 		return true
 	}
 	deny(w, p)
@@ -659,9 +872,11 @@ func (h *Handler) metricsData(w http.ResponseWriter, r *http.Request) {
 	enc.Encode(out)
 }
 
-// metricsThreads is the support thread dump (goroutines), admin only.
+// metricsThreads is the support thread dump (goroutines), for an admin or a
+// holder of the metrics privilege: metricsAnonymous does not open it.
 func (h *Handler) metricsThreads(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if p := principal(r); !h.Auth.CanReadMetrics(p) {
+		deny(w, p)
 		return
 	}
 	status, body := h.call(r, http.MethodGet, "/-/api/support/threads", nil)

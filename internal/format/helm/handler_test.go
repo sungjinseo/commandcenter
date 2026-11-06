@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -86,25 +87,34 @@ func sortedKeys(m map[string]string) []string {
 }
 
 type env struct {
-	h     *Handler
-	repos map[string]*repo.Repository
-	sink  *repotest.Sink
-	hits  atomic.Int32
-	index atomic.Pointer[string] // the upstream index.yaml
-	up    string                 // the upstream server URL
-	down  atomic.Bool            // the upstream answers 503
-	now   time.Time
+	h       *Handler
+	repos   map[string]*repo.Repository
+	sink    *repotest.Sink
+	hits    atomic.Int32
+	idxHits atomic.Int32           // requests for the upstream index.yaml
+	index   atomic.Pointer[string] // the upstream index.yaml
+	files   sync.Map               // more upstream files: URL path -> []byte
+	up      string                 // the upstream server URL
+	down    atomic.Bool            // the upstream answers 503
+	now     time.Time
 }
 
 // upstream serves a chart repository at /charts/: its index.yaml (e.index)
-// and charts, one of them at an absolute URL elsewhere on the server.
+// and charts, one of them at an absolute URL elsewhere on the server, and
+// what a test put into e.files.
 func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 	if e.down.Load() {
 		http.Error(w, "down", 503)
 		return
 	}
+	if b, ok := e.files.Load(r.URL.Path); ok {
+		e.hits.Add(1)
+		w.Write(b.([]byte))
+		return
+	}
 	switch r.URL.Path {
 	case "/charts/index.yaml":
+		e.idxHits.Add(1)
 		io.WriteString(w, *e.index.Load())
 	case "/charts/other-1.0.0.tgz", "/files/demo-2.0.0.tgz", "/charts/bad-1.0.0.tgz":
 		e.hits.Add(1)
@@ -273,7 +283,8 @@ func TestHostedRejections(t *testing.T) {
 		{"not a tarball", "demo-1.0.0.tgz", []byte("plain text"), 400, "not a gzip-compressed tar"},
 		{"no Chart.yaml", "demo-1.0.0.tgz", tgz(t, map[string]string{"demo/values.yaml": "a: 1\n"}), 400, "no Chart.yaml"},
 		{"Chart.yaml at the root", "demo-1.0.0.tgz", tgz(t, map[string]string{"Chart.yaml": "name: demo\nversion: 1.0.0\n"}), 400, "no Chart.yaml"},
-		{"not semver", "demo-1.0.tgz", chartTgz(t, "demo", "1.0", "name: demo\nversion: \"1.0\"\n"), 400, "SemVer 2"},
+		{"a version helm refuses", "demo-latest.tgz", chartTgz(t, "demo", "latest", "name: demo\nversion: latest\n"), 400, "a version helm accepts"},
+		{"four numbers", "demo-1.2.3.4.tgz", chartTgz(t, "demo", "1.2.3.4", "name: demo\nversion: 1.2.3.4\n"), 400, "a version helm accepts"},
 		{"no name", "demo-1.0.0.tgz", chartTgz(t, "demo", "1.0.0", "version: 1.0.0\n"), 400, "needs a name"},
 		{"name with a slash", "demo-1.0.0.tgz", chartTgz(t, "demo", "1.0.0", "name: ../demo\nversion: 1.0.0\n"), 400, "needs a name"},
 		{"Chart.yaml not a mapping", "demo-1.0.0.tgz", chartTgz(t, "demo", "1.0.0", "- a\n"), 400, "not a YAML mapping"},
@@ -299,14 +310,15 @@ func TestHostedRejections(t *testing.T) {
 		t.Fatalf("GET build metadata: %d", w.Code)
 	}
 	for _, c := range []struct{ method, path, allow string }{
-		{"DELETE", "index.yaml", "GET, HEAD"}, {"POST", "demo-1.0.0.tgz", "GET, HEAD, PUT"}, {"GET", "api/charts", "POST"},
+		{"DELETE", "index.yaml", "GET, HEAD"}, {"POST", "demo-1.0.0.tgz", "GET, HEAD, PUT, DELETE"}, {"POST", "demo-1.0.0.tgz.prov", "GET, HEAD, PUT, DELETE"},
+		{"GET", "api/charts", "POST"}, {"DELETE", "api/charts", "POST"},
 	} {
 		if w := e.do(c.method, "helm-hosted", c.path, nil); w.Code != 405 || w.Header().Get("Allow") != c.allow {
 			t.Errorf("%s %s: %d Allow %q", c.method, c.path, w.Code, w.Header().Get("Allow"))
 		}
 	}
 	// a proxy takes no upload: an empty Allow
-	for _, c := range []struct{ method, path, allow string }{{"PUT", "demo-1.0.0.tgz", "GET, HEAD"}, {"POST", "api/charts", ""}} {
+	for _, c := range []struct{ method, path, allow string }{{"PUT", "demo-1.0.0.tgz", "GET, HEAD"}, {"DELETE", "demo-1.0.0.tgz", "GET, HEAD"}, {"POST", "api/charts", ""}} {
 		w := e.do(c.method, "helm-proxy", c.path, chartTgz(t, "demo", "1.0.0", ""))
 		if w.Code != 405 || w.Header().Get("Allow") != c.allow {
 			t.Errorf("proxy %s %s: %d Allow %q", c.method, c.path, w.Code, w.Header().Get("Allow"))
@@ -453,6 +465,42 @@ func TestProxyUpstreamNotYAML(t *testing.T) {
 	e.index.Store(&idx)
 	if w := e.do("GET", "helm-proxy", "index.yaml", nil); w.Code != 502 {
 		t.Fatalf("invalid upstream index: %d %s", w.Code, w.Body)
+	}
+}
+
+// An answer that is no index does not replace a good one: the copy answers,
+// marked stale, nothing changes in the cache, and the next good answer counts.
+func TestProxyUpstreamNotYAMLKeepsTheIndex(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	if w := e.do("GET", "helm-proxy", "index.yaml", nil); w.Code != 200 {
+		t.Fatalf("index: %d %s", w.Code, w.Body)
+	}
+	cached, err := e.h.Store.Get(ctx, "helm-proxy", upstreamKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := *e.index.Load()
+	bad := "entries: [not, a, map\n"
+	e.index.Store(&bad)
+	e.now = e.now.Add(2 * time.Hour)
+	w := e.do("GET", "helm-proxy", "index.yaml", nil)
+	if w.Code != 200 || !strings.Contains(w.Header().Get("Warning"), "Stale") || len(index(t, w).Entries) == 0 {
+		t.Fatalf("during the bad answer: %d %v", w.Code, w.Header())
+	}
+	if w := e.do("GET", "helm-proxy", "demo-2.0.0.tgz", nil); w.Code != 200 {
+		t.Fatalf("a chart during the bad answer: %d %s", w.Code, w.Body)
+	}
+	if now, err := e.h.Store.Get(ctx, "helm-proxy", upstreamKey); err != nil || now.BlobSHA256 != cached.BlobSHA256 {
+		t.Fatalf("the cached index was replaced: %+v %v", now, err)
+	}
+	next := strings.Replace(good, "version: 1.0.0", "version: 1.0.1", 1)
+	e.index.Store(&next)
+	if w := e.do("GET", "helm-proxy", "index.yaml", nil); w.Code != 200 || w.Header().Get("Warning") != "" {
+		t.Fatalf("the next good answer: %d %v", w.Code, w.Header())
+	}
+	if now, err := e.h.Store.Get(ctx, "helm-proxy", upstreamKey); err != nil || now.BlobSHA256 == cached.BlobSHA256 {
+		t.Fatalf("the next good answer was not taken: %v", err)
 	}
 }
 

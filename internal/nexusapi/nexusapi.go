@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -104,7 +105,11 @@ func (h *Handler) init() {
 	m.HandleFunc("GET /service/rest/swagger.json", h.swagger) // outside the prefix; the server routes it here
 	m.HandleFunc("GET "+p+"/tasks", h.tasks)
 	h.securityRoutes(m, p)
+	h.samlRoutes(m, p)
+	h.ldapRoutes(m, p)
+	h.leftOutRoutes(m, p)
 	m.HandleFunc("GET "+p+"/security/ssl", h.sslList)
+	m.HandleFunc("GET "+p+"/security/ssl/truststore", h.sslTrustStore)
 	m.HandleFunc("POST "+p+"/security/ssl/truststore", h.sslAdd)
 	m.HandleFunc("DELETE "+p+"/security/ssl/truststore/{id}", h.sslRemove)
 	h.userTokenRoutes(m, p)
@@ -313,13 +318,18 @@ func ccFormat(f string) string {
 
 func (h *Handler) repoURL(name string) string { return h.BaseURL() + "/repository/" + name }
 
-// publicRemote is the remote without userinfo, query and fragment, which may
-// hold credentials (the UI shows the same).
+// publicRemote is the remote as it was written (a client that reads another
+// spelling, a trailing slash added, sees a change it did not make), without
+// the userinfo, query and fragment, which may hold credentials (the UI shows
+// the same).
 func publicRemote(rp *repo.Repository) string {
-	if rp.RemoteURL == nil {
+	ru, err := url.Parse(rp.Remote)
+	if err != nil {
 		return ""
 	}
-	ru := *rp.RemoteURL
+	if ru.User == nil && ru.RawQuery == "" && !ru.ForceQuery && ru.Fragment == "" {
+		return rp.Remote
+	}
 	ru.User = nil
 	ru.RawQuery, ru.ForceQuery, ru.Fragment, ru.RawFragment = "", false, "", ""
 	return ru.String()
@@ -342,7 +352,9 @@ func (h *Handler) usage(ctx context.Context) map[string]meta.RepoUsage {
 	return u
 }
 
-// minutes renders a config duration as Nexus does: minutes, -1 for never.
+// minutes renders a config duration as Nexus does: minutes, -1 for never,
+// rounded up: 0 means "always ask the remote", so a native 30s must not read
+// as 0 and come back from a client's read-then-write as that.
 func minutes(d config.Duration) int {
 	switch {
 	case d == config.Never:
@@ -350,12 +362,12 @@ func minutes(d config.Duration) int {
 	case d.Off():
 		return 0
 	}
-	return int(time.Duration(d) / time.Minute)
+	return int((time.Duration(d) + time.Minute - 1) / time.Minute)
 }
 
 func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 	d := rp.Repository
-	storage := map[string]any{"blobStoreName": repo.StoreOf(d), "strictContentTypeValidation": d.StrictContentTypeValidation}
+	storage := map[string]any{"blobStoreName": cmp.Or(d.Nexus.BlobStore, repo.StoreOf(d)), "strictContentTypeValidation": d.StrictContentTypeValidation}
 	if d.Type == "hosted" {
 		storage["writePolicy"] = strings.ToUpper(d.WritePolicy)
 	}
@@ -363,10 +375,15 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 	out := map[string]any{"name": d.Name, "format": nexusFormat(d.Format), "type": d.Type, "url": h.repoURL(d.Name),
 		"online": d.IsOnline(), "storage": storage}
 	if d.Type != "group" { // a Nexus group carries storage and group only
-		out["cleanup"] = map[string]any{"policyNames": policies}
+		// null without policies, as Nexus answers: the Terraform provider
+		// takes an empty list for a cleanup block its configuration lacks.
+		out["cleanup"] = nil
+		if len(policies) > 0 {
+			out["cleanup"] = map[string]any{"policyNames": policies}
+		}
 	}
 	if d.Type == "hosted" {
-		out["component"] = map[string]any{"proprietaryComponents": false}
+		out["component"] = map[string]any{"proprietaryComponents": d.Nexus.ProprietaryComponents}
 	}
 	formatBlocks(out, rp)
 	switch d.Type {
@@ -377,7 +394,7 @@ func (h *Handler) settingsJSON(rp *repo.Repository) map[string]any {
 		if a := d.RemoteAuth; a != nil && a.BearerToken != "" { // the proxy sends the token when there is one
 			hc["authentication"] = map[string]any{"type": "bearerToken"}
 		} else if a != nil && a.Username != "" {
-			hc["authentication"] = map[string]any{"type": "username", "username": a.Username}
+			hc["authentication"] = map[string]any{"type": "username", "username": a.Username, "preemptive": d.Nexus.Preemptive}
 		}
 		out["httpClient"] = hc
 		out["routingRule"], out["routingRuleName"] = d.RoutingRule, d.RoutingRule
@@ -448,11 +465,11 @@ func (h *Handler) listRepositories(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// getRepository answers a repository the caller may list, itself or through
+// a group that contains it.
 func (h *Handler) getRepository(w http.ResponseWriter, r *http.Request) {
-	if rp := h.readable(principal(r), r.PathValue("name")); rp != nil {
+	if rp := h.lookupRepo(w, r, r.PathValue("name")); rp != nil {
 		writeJSON(w, http.StatusOK, h.repoJSON(rp, h.usage(r.Context())))
-	} else {
-		h.hidden(w, principal(r))
 	}
 }
 
@@ -500,6 +517,9 @@ type repoBody struct {
 	Cleanup *struct {
 		PolicyNames []string `json:"policyNames"`
 	} `json:"cleanup"`
+	Component *struct {
+		ProprietaryComponents bool `json:"proprietaryComponents"`
+	} `json:"component"`
 	Proxy struct {
 		RemoteURL      string `json:"remoteUrl"`
 		ContentMaxAge  *int   `json:"contentMaxAge"`
@@ -513,14 +533,18 @@ type repoBody struct {
 		MemberNames    []string `json:"memberNames"`
 		WritableMember string   `json:"writableMember"`
 	} `json:"group"`
-	HTTPClient struct {
-		Blocked        bool  `json:"blocked"`
-		AutoBlock      *bool `json:"autoBlock"`
+	// HTTPClient is a proxy's; a body without one changes nothing of it.
+	HTTPClient *struct {
+		Blocked   bool  `json:"blocked"`
+		AutoBlock *bool `json:"autoBlock"`
+		// Authentication absent removes the stored credentials, as a Nexus
+		// PUT does. Preemptive is kept for the client (config.NexusKept).
 		Authentication *struct {
 			Type        string `json:"type"` // username (or empty), bearerToken; ntlm is refused
 			Username    string `json:"username"`
 			Password    string `json:"password"`
 			BearerToken string `json:"bearerToken"`
+			Preemptive  bool   `json:"preemptive"`
 		} `json:"authentication"`
 		// Connection is the proxy's own connection settings; absent keeps them.
 		Connection *config.Connection `json:"connection"`
@@ -584,15 +608,20 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 		"writePolicy":      strings.ToLower(b.Storage.WritePolicy),
 		"online":           b.Online,
 		"blobStore":        b.Storage.BlobStoreName,
+
+		"strictContentTypeValidation": b.Storage.StrictContentTypeValidation,
 	}
-	if typ == "hosted" {
-		out["strictContentTypeValidation"] = b.Storage.StrictContentTypeValidation
+	var kept config.NexusKept // what only reads back (hosted: proprietaryComponents)
+	if c := b.Component; c != nil && typ == "hosted" {
+		kept.ProprietaryComponents = c.ProprietaryComponents
 	}
 	if typ == "proxy" {
-		out["blocked"], out["autoBlock"] = b.HTTPClient.Blocked, b.HTTPClient.AutoBlock
 		out["negativeCacheEnabled"] = b.NegativeCache.Enabled
-		if c := b.HTTPClient.Connection; c != nil {
-			out["connection"] = c
+	}
+	if hc := b.HTTPClient; hc != nil && typ == "proxy" {
+		out["blocked"], out["autoBlock"] = hc.Blocked, hc.AutoBlock
+		if hc.Connection != nil {
+			out["connection"] = hc.Connection
 		}
 	}
 	if cur != nil {
@@ -621,31 +650,49 @@ func uiRepo(format, typ string, b repoBody, cur *config.Repository) (map[string]
 	}
 	if typ == "group" { // Nexus group bodies name a blob store and a maven object; Command Center groups have neither
 		out["blobStore"], out["versionPolicy"] = "", ""
+		kept.BlobStore = b.Storage.BlobStoreName
 	}
 	if b.RoutingRule != nil {
 		out["routingRule"] = *b.RoutingRule
 	} else if b.RoutingRuleName != nil {
 		out["routingRule"] = *b.RoutingRuleName
 	}
-	if b.Cleanup != nil {
+	// A Nexus PUT replaces the repository: a body without cleanup has no
+	// policies, and an httpClient without authentication no credentials
+	// (the Terraform provider removes both by leaving them out).
+	switch {
+	case b.Cleanup != nil:
 		out["cleanupPolicies"] = append([]string{}, b.Cleanup.PolicyNames...)
+	case typ != "group":
+		out["cleanupPolicies"] = []string{}
 	}
-	if a := b.HTTPClient.Authentication; a != nil {
-		if strings.EqualFold(a.Type, "bearerToken") { // an empty token on update keeps the stored one
+	if hc := b.HTTPClient; hc != nil {
+		switch a := hc.Authentication; {
+		case a == nil:
+			if cur != nil && cur.RemoteAuth != nil {
+				out["remoteAuth"] = map[string]any{"clearPassword": true, "clearBearerToken": true}
+			}
+		case strings.EqualFold(a.Type, "bearerToken"): // an empty token on update keeps the stored one
 			out["remoteAuth"] = map[string]any{"bearerToken": a.BearerToken, "clearPassword": true}
-		} else {
+		default:
 			out["remoteAuth"] = map[string]any{"username": a.Username, "password": a.Password, "clearBearerToken": a.Type != ""}
+			kept.Preemptive = a.Preemptive
 		}
 	}
 	if b.Replication != nil {
 		out["replication"] = b.Replication
 	}
-	return out, formatRequest(ccFormat(format), typ, b, out, cur)
+	errs := formatRequest(ccFormat(format), typ, b, out, cur, &kept)
+	out["nexus"] = kept
+	return out, errs
 }
 
 // supportedAuth refuses a remote authentication type Command Center does
 // not speak with 400, rather than sending the credentials as Basic.
 func supportedAuth(w http.ResponseWriter, b repoBody) bool {
+	if b.HTTPClient == nil {
+		return true
+	}
 	a := b.HTTPClient.Authentication
 	if a == nil || a.Type == "" || a.Type == "username" || a.Type == "bearerToken" {
 		return true
@@ -714,14 +761,18 @@ func (h *Handler) createRepository(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) updateRepository(w http.ResponseWriter, r *http.Request) {
-	if !h.signedIn(w, r) { // the UI checks repository-admin edit
+	name := r.PathValue("name")
+	// Before anything looks at the stored repository: a caller without the
+	// right gets one answer whether it exists or not. The UI checks again,
+	// with the password or session login a change also needs.
+	if p := principal(r); !h.Auth.CanAdminRepo(p, name, h.repoFormatOf(name), auth.Edit) {
+		deny(w, p)
 		return
 	}
 	b, ok := decodeRepoBody(w, r)
 	if !ok || !supportedAuth(w, b) {
 		return
 	}
-	name := r.PathValue("name")
 	var cur *config.Repository // nil: the UI answers 404
 	if rp := h.Repos.Get(name); rp != nil {
 		cur = &rp.Repository
@@ -831,6 +882,9 @@ func (h *Handler) walkComponents(ctx context.Context, rp *repo.Repository, prefi
 		return nil
 	}
 	return h.DB.WalkAssetPaths(ctx, rp.Name, prefix, func(p string) {
+		if rp.Format == "pypi" && strings.HasSuffix(p, ".metadata") {
+			return // a file's core metadata, generated: Nexus has no such asset, and a one-file release is one asset
+		}
 		if group, name, version, ok := component.DeriveAsset(rp.Format, p); ok {
 			fn(group, name, version, p)
 		}
@@ -859,7 +913,7 @@ func rfc3339(t time.Time) any {
 // leading "/", the download URL on via's URL ("": rp's; a group a search
 // went through), only the checksums stored, and the format's attributes
 // ({"maven2": {groupId, artifactId, version, extension, classifier}},
-// {"<format>": {}} for the others).
+// {"pypi": {name, version}}, {"<format>": {}} for the others).
 func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[string]any {
 	sums := map[string]string{}
 	for k, v := range map[string]string{"sha1": a.SHA1, "sha256": a.BlobSHA256, "md5": a.MD5, "sha512": a.SHA512} {
@@ -871,24 +925,50 @@ func (h *Handler) assetJSON(rp *repo.Repository, via string, a meta.Asset) map[s
 	if rp.Type == "proxy" {
 		verified = rfc3339(a.CheckedAt) // the last time the remote was consulted
 	}
-	attrs := map[string]string{}
-	if rp.Format == "maven" {
+	attrs, listed, contentType := map[string]string{}, a.Path, a.ContentType
+	switch rp.Format {
+	case "maven":
 		attrs = maven2Attributes(a.Path) // a SNAPSHOT build's own version
+	case "npm":
+		if attrs, listed = npmAttributes(a.Path); len(attrs) > 0 {
+			contentType = "application/x-tgz" // what a remote or a client declared says nothing
+		}
+	}
+	if rp.Format == "pypi" {
+		if _, name, version, ok := component.DeriveAsset("pypi", a.Path); ok {
+			attrs = map[string]string{"name": name, "version": version}
+		}
 	}
 	return map[string]any{
 		"id":           assetID(rp.Name, a.Path),
-		"path":         "/" + a.Path,
-		"downloadUrl":  h.repoURL(cmp.Or(via, rp.Name)) + "/" + escapePath(a.Path),
+		"path":         "/" + listed,
+		"downloadUrl":  h.repoURL(cmp.Or(via, rp.Name)) + "/" + escapePath(listed),
 		"repository":   rp.Name,
 		"format":       nexusFormat(rp.Format),
 		"checksum":     sums,
-		"contentType":  a.ContentType,
+		"contentType":  contentType,
 		"lastModified": rfc3339(a.LastModified), "blobCreated": rfc3339(a.CreatedAt), "lastDownloaded": rfc3339(a.LastDownloaded),
 		"blobUpdated": rfc3339(a.LastModified), "lastVerified": verified,
 		"fileSize": a.Size, "blobStoreName": repo.StoreOf(rp.Repository),
 		"uploader": nil, "uploaderIp": nil, // not recorded
 		nexusFormat(rp.Format): attrs,
 	}
+}
+
+// npmAttributes is an npm asset's "npm" object, as Nexus lists it (a
+// tarball's full name and version), and the path it is listed under: a
+// package document's is the package's URL.
+func npmAttributes(p string) (map[string]string, string) {
+	if g, n, v, ok := component.DeriveNpm(p); ok {
+		if g != "" {
+			n = g + "/" + n
+		}
+		return map[string]string{"name": n, "version": v}, p
+	}
+	if name, ok := strings.CutSuffix(p, "/package.json"); ok && !strings.Contains(name, "/-/") {
+		return map[string]string{}, name
+	}
+	return map[string]string{}, p
 }
 
 // maven2Attributes is a Maven asset's "maven2" object, as Nexus lists it:
@@ -1193,15 +1273,18 @@ func (h *Handler) getAsset(w http.ResponseWriter, r *http.Request) {
 
 // deleteAsset deletes one file, any format, by the format's rules:
 //   - a proxy's (any format) cached copy is dropped; the next request
-//     fetches it again;
+//     fetches it again; a Go version's .info, .mod and .zip go together;
 //   - a hosted Maven file goes through the Maven handler's delete, which
-//     rebuilds maven-metadata.xml;
+//     rebuilds maven-metadata.xml; a hosted Helm chart or provenance file,
+//     a hosted PyPI file and a yum comps.xml, each a file a client can
+//     address, go through their handler's delete too;
 //   - a hosted file that is a component of its own (a raw file, an npm
-//     tarball, a .deb or .rpm, a .nupkg, ...) goes through the component
-//     delete, which updates the format's index files;
+//     tarball, a .deb or .rpm, a .nupkg, ...) or a file of a Go version, whose
+//     files are one, goes through the component delete, which updates the
+//     format's index files;
 //   - anything else is part of a larger component (one layer of a docker
-//     image, one file of a Go module or a PyPI release) or generated
-//     metadata: 400, delete the component instead.
+//     image) or generated metadata: 400, delete
+//     the component instead.
 func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	p := principal(r)
 	if p.Anonymous() {
@@ -1215,8 +1298,8 @@ func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case rp.Type == "proxy":
 		h.dropCached(w, r, rp, a.Path)
-	case rp.Type == "hosted" && rp.Format == "maven":
-		h.deleteMavenFile(w, r, rp, a.Path)
+	case rp.Type == "hosted" && (rp.Format == "maven" || rp.Format == "helm" || rp.Format == "pypi" || rp.Format == "yum" && component.YumComps(a.Path)):
+		h.deleteFile(w, r, rp, a.Path)
 	case rp.Type == "hosted":
 		c, err := h.ownComponent(r.Context(), rp, a.Path)
 		switch {
@@ -1232,36 +1315,55 @@ func (h *Handler) deleteAsset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// dropCached deletes a proxy's cached file, after the delete check on its
-// path.
+// dropCached deletes a proxy's cached file, with the rest of a Go version,
+// after the delete check on each path.
 func (h *Handler) dropCached(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
 	pr := principal(r)
-	switch {
-	case !h.Auth.CanPath(pr, rp.Name, auth.Delete, selectorPath(rp, p)):
-		deny(w, pr)
-		return
-	case h.Store == nil:
+	paths := []string{p}
+	if _, _, ok := component.DeriveGo(p); ok && rp.Format == "go" {
+		stem := strings.TrimSuffix(p, path.Ext(p))
+		paths = []string{stem + ".info", stem + ".mod", stem + ".zip"}
+	}
+	for _, q := range paths {
+		if !h.Auth.CanPath(pr, rp.Name, auth.Delete, selectorPath(rp, q)) {
+			deny(w, pr)
+			return
+		}
+	}
+	if h.Store == nil {
 		writeMessage(w, http.StatusNotImplemented, "file deletion is not available")
 		return
 	}
+	var dropped []string
 	err := h.Store.Tx(r.Context(), rp, func(tx *meta.Tx) error {
-		_, err := tx.DeleteAsset(r.Context(), rp.Name, p)
-		return err
+		dropped = nil
+		for _, q := range paths {
+			switch _, err := tx.DeleteAsset(r.Context(), rp.Name, q); {
+			case err == nil:
+				dropped = append(dropped, q)
+			case !errors.Is(err, meta.ErrNotFound):
+				return err
+			}
+		}
+		return nil
 	})
 	switch {
-	case errors.Is(err, meta.ErrNotFound):
-		writeMessage(w, http.StatusNotFound, "asset not found")
 	case err != nil:
 		h.fail(w, err)
+	case len(dropped) == 0:
+		writeMessage(w, http.StatusNotFound, "asset not found")
 	default:
-		h.Store.Emit(r, "delete", rp.Name, p, "")
+		for _, q := range dropped {
+			h.Store.Emit(r, "delete", rp.Name, q, "")
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-// deleteMavenFile deletes a hosted Maven file as a client's DELETE does
-// (the server's checks, then the Maven handler).
-func (h *Handler) deleteMavenFile(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
+// deleteFile deletes a hosted file as a client's DELETE does (the server's
+// checks, then the format's handler). A path the handler takes no DELETE on
+// is generated metadata: 400, as for the other formats.
+func (h *Handler) deleteFile(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) {
 	if h.ServeRepository == nil {
 		writeMessage(w, http.StatusNotImplemented, "file deletion is not available")
 		return
@@ -1282,6 +1384,8 @@ func (h *Handler) deleteMavenFile(w http.ResponseWriter, r *http.Request, rp *re
 		w.WriteHeader(http.StatusNoContent)
 	case rec.status == http.StatusUnauthorized || rec.status == http.StatusForbidden:
 		deny(w, principal(r))
+	case rec.status == http.StatusMethodNotAllowed:
+		writeMessage(w, http.StatusBadRequest, "this file is generated metadata: delete the file it belongs to, or the component (DELETE /service/rest/v1/components/{id})")
 	default:
 		writeMessage(w, rec.status, strings.TrimSpace(rec.body.String()))
 	}
@@ -1295,6 +1399,9 @@ func (h *Handler) ownComponent(ctx context.Context, rp *repo.Repository, p strin
 	group, name, version, ok := component.DeriveAsset(rp.Format, p)
 	if !ok {
 		return nil, nil
+	}
+	if rp.Format == "go" { // a version's files are one: any of them deletes it, as the go handler's DELETE does
+		return &comp{repo: rp.Name, format: rp.Format, name: name, version: version, paths: []string{p}}, nil
 	}
 	n := 0
 	if err := h.DB.WalkAssetPaths(ctx, rp.Name, "", func(q string) {
@@ -1323,9 +1430,11 @@ func (h *Handler) statusWritable(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// statusCheck is the UI's health checks in Nexus's shape.
+// statusCheck is the UI's health checks in Nexus's shape, for an admin or a
+// holder of the metrics privilege (the UI checks the same).
 func (h *Handler) statusCheck(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.admin(w, r); !ok {
+	if p := principal(r); !h.Auth.CanReadMetrics(p) {
+		deny(w, p)
 		return
 	}
 	status, body := h.call(r, http.MethodGet, "/-/api/status/checks", nil)
@@ -1435,7 +1544,7 @@ type blobStoreRow struct {
 	Quota     *uiQuota `json:"quota"`
 	Violated  bool     `json:"quotaViolated"`
 
-	Unavailable string `json:"unavailable"` // why it did not open on this node
+	Unavailable string `json:"unavailable"` // why it did not open on this node, or why its probe failed
 }
 
 // quotaStatus: GET /blobstores/{name}/quota-status.
@@ -1472,10 +1581,11 @@ func (h *Handler) createFileBlobStore(w http.ResponseWriter, r *http.Request) {
 	if !decodeSmall(w, r, &b) {
 		return
 	}
-	if b.Path == b.Name { // Nexus's default, relative to its work directory: the default location here
-		b.Path = ""
+	req := map[string]any{"name": b.Name, "path": b.Path, "type": "file", "quota": b.SoftQuota.ui()}
+	if b.Path != "" && !filepath.IsAbs(b.Path) { // Nexus's are relative to its blobs directory: blobstores/ here
+		req["path"], req["relativePath"] = "", b.Path
 	}
-	status, body := h.call(r, http.MethodPost, "/-/api/blobstores", map[string]any{"name": b.Name, "path": b.Path, "type": "file", "quota": b.SoftQuota.ui()})
+	status, body := h.call(r, http.MethodPost, "/-/api/blobstores", req)
 	if status != http.StatusCreated {
 		writeUIError(w, status, body)
 		return
@@ -1495,7 +1605,7 @@ func (h *Handler) updateFileBlobStore(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if b.Path != "" && b.Path != filePath(bs) { // all nodes share the path: it cannot move
+	if b.Path != "" && filepath.Clean(b.Path) != filePath(bs) { // all nodes share the path: it cannot move
 		writeValidation(w, []string{"path: the path of blob store " + strconv.Quote(bs.Name) + " cannot be changed"})
 		return
 	}
@@ -1521,9 +1631,9 @@ func (h *Handler) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	json.Unmarshal(body, &res)
 	items := []map[string]any{}
-	typ := r.URL.Query().Get("type") // Nexus's type id, or Command Center's
+	typ := r.URL.Query().Get("type") // the id an item is labelled with, or Command Center's
 	for _, t := range res.Tasks {
-		if typ == "" || typ == t.Type || typ == nexusTaskType(t.Type) {
+		if typ == "" || typ == t.Type || typ == nexusTaskID(t) {
 			items = append(items, nexusTaskItem(t))
 		}
 	}

@@ -428,16 +428,25 @@ async function viewLogging(view) {
 // ---- support ZIP -----------------------------------------------------------------------
 //   #admin/support/supportzip
 
-const ZIP_ENTRIES = ["info.json", "config.json", "repositories.json", "blobstores.json", "status.json", "sysinfo.json", "tasks.json", "webhooks.json", "request-stats.json", "events.json", "logs.txt", "threads.txt", "metrics.txt"];
+// The bundle's sections (?sections=, the server's SupportSections) and the files each adds.
+const ZIP_SECTIONS = [["systemInformation", "status.json, sysinfo.json, nodes.json"], ["threadDump", "threads.txt"], ["metrics", "metrics.txt, request-stats.json"],
+  ["configuration", "config.json, repositories.json, blobstores.json, webhooks.json"], ["security", "config.json"], ["log", "logs.txt"], ["taskLog", "tasks.json, task-logs/"], ["auditLog", "events.json"]];
+const SEC = "sup.sec."; // + the section
 
 async function viewSupportZip(view) {
-  // a plain link, so the browser saves the zip
+  const secs = checks(ZIP_SECTIONS.map(([k, files]) => [k, h("span", null, t(SEC + k), " ", h("span", { class: "tiny muted mono" }, files))]), ZIP_SECTIONS.map(([k]) => k));
+  secs.el.classList.add("rows");
+  // a plain link, so the browser saves the zip; all sections need no parameter
+  const link = h("a", { class: "btn primary", href: "/-/api/support/zip", download: "" }, t("sup.zipDownload"));
+  secs.el.addEventListener("change", () => {
+    const v = secs.values();
+    link.setAttribute("href", "/-/api/support/zip" + (v.length === ZIP_SECTIONS.length ? "" : "?sections=" + v.join(",")));
+  });
   put(view, pageHead(t("nav.supportzip"), sub(t("sup.zipSub"))),
     card(t("sup.zipTitle"), null, [
-      h("p", { class: "tiny" }, t("sup.zipContains")),
-      h("p", { class: "tiny mono zip-entries" }, ZIP_ENTRIES.join(" · ")),
+      h("div", { class: "field full", role: "group", "aria-label": t("sup.sections") }, h("span", { class: "flabel" }, t("sup.sections")), secs.el, h("small", null, t("sup.sectionsHelp"))),
       h("div", { class: "notice" }, t("sup.zipRedacted")),
-      h("div", { class: "actions" }, h("a", { class: "btn primary", href: "/-/api/support/zip", download: "" }, t("sup.zipDownload")))]));
+      h("div", { class: "actions" }, link)]));
 }
 
 // ---- system information ---------------------------------------------------------------

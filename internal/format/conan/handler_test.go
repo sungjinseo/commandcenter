@@ -321,9 +321,11 @@ func (e *env) search(t *testing.T, repoName, path string) []string {
 func TestPing(t *testing.T) {
 	e := newEnv(t)
 	for _, r := range []string{"conan-hosted", "conan-proxy", "conan-all"} {
-		w := e.do("GET", r, "v1/ping", nil)
-		if w.Code != 200 || w.Header().Get("X-Conan-Server-Capabilities") != Capabilities {
-			t.Errorf("%s: %d %v", r, w.Code, w.Header())
+		for _, p := range []string{"v1/ping", "v2/ping"} {
+			w := e.do("GET", r, p, nil)
+			if w.Code != 200 || w.Header().Get("X-Conan-Server-Capabilities") != Capabilities {
+				t.Errorf("%s %s: %d %v", r, p, w.Code, w.Header())
+			}
 		}
 	}
 	if w := e.do("POST", "conan-hosted", "v1/ping", nil); w.Code != 405 || w.Header().Get("Allow") != "GET, HEAD" {
@@ -627,6 +629,34 @@ func TestV1(t *testing.T) {
 	}
 }
 
+// TestPackageSearchLatest: Conan 1 with revisions asks v2/conans/<ref>/search
+// without a revision, and gets the latest revision's packages. Every binary
+// is listed: q is not read, each client filters by its -q on its side.
+func TestPackageSearchLatest(t *testing.T) {
+	e := newEnv(t)
+	e.uploadRecipe(t, "conan-hosted", zlib, "aaaa", "a")
+	e.uploadPackage(t, "conan-hosted", zlib, "aaaa", "old1", "p1", "a")
+	e.uploadRecipe(t, "conan-hosted", zlib, "bbbb", "b")
+	e.uploadPackage(t, "conan-hosted", zlib, "bbbb", "pkg1", "p1", "b")
+	e.uploadPackage(t, "conan-hosted", zlib, "bbbb", "pkg2", "p1", "c")
+	for _, r := range []string{"conan-hosted", "conan-all"} {
+		var got map[string]any
+		decode(t, e.do("GET", r, "v2/conans/zlib/1.3/_/_/search?q=os%3DWindows", nil), &got)
+		if len(got) != 2 || got["pkg1"] == nil || got["pkg2"] == nil {
+			t.Errorf("%s: %v", r, got)
+		}
+	}
+	// through a proxy, from the remote's latest revision
+	var got map[string]any
+	decode(t, e.do("GET", "conan-proxy", "v2/conans/zlib/1.3/_/_/search", nil), &got)
+	if len(got) != 1 || got["pkg1"] == nil {
+		t.Errorf("proxy: %v", got)
+	}
+	if w := e.do("GET", "conan-hosted", "v2/conans/none/1.0/_/_/search", nil); w.Code != 404 {
+		t.Errorf("unknown recipe: %d", w.Code)
+	}
+}
+
 func TestProxy(t *testing.T) {
 	e := newEnv(t)
 	if got := e.latest(t, "conan-proxy", zlib.dir()+"latest"); got.Revision != "aaaa" {
@@ -898,7 +928,14 @@ func TestParseRoute(t *testing.T) {
 		file string
 	}{
 		{"v1/ping", KindPing, true, ""},
+		{"v2/ping", KindPing, false, ""},
+		{"v1/users/authenticate", KindAuthenticate, true, ""},
+		{"v2/users/authenticate", KindAuthenticate, false, ""},
+		{"v1/users/check_credentials", KindCheckCredentials, true, ""},
+		{"v2/users/check_credentials", KindCheckCredentials, false, ""},
 		{"v2/conans/search", KindSearch, false, ""},
+		{"v2/conans/zlib/1.3/_/_/search", KindPkgSearch, true, ""},
+		{"v2/conans/zlib/1.3/_/_/revisions/aaaa/search", KindPkgSearch, false, ""},
 		{"v2/conans/zlib/1.3/_/_", KindRecipe, false, ""},
 		{"v2/conans/zlib/1.3/_/_/latest", KindLatest, false, ""},
 		{"v2/conans/zlib/1.3/_/_/revisions/aaaa", KindRevision, false, ""},

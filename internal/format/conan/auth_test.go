@@ -21,11 +21,12 @@ import (
 
 // TestLoginAndPrivileges runs the handler behind the real server: `conan
 // remote login` (Basic with the password or an API token at
-// v1/users/authenticate) gets a token that the server accepts as Bearer
-// on every route; an upload needs add (a format:conan privilege works), a
-// delete needs delete; ping is public, reads are anonymous when
-// anonymousRead is on and a 401 Basic challenge otherwise; an expired or
-// forged token is refused.
+// v2/users/authenticate for Conan 2, v1/ for Conan 1) gets a token that the
+// server accepts as Bearer on every route; an upload needs add (a
+// format:conan privilege works), a delete needs delete; ping is public,
+// reads are anonymous when anonymousRead is on and a 401 Basic challenge
+// otherwise; a token long past the hour it used to last still works, one
+// that expired, whose password changed or that is forged is refused.
 func TestLoginAndPrivileges(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -150,9 +151,71 @@ func TestLoginAndPrivileges(t *testing.T) {
 			t.Errorf("%s: no Basic challenge (%q)", c.name, hdr.Get("WWW-Authenticate"))
 		}
 	}
-	// An expired token is refused (Conan then logs in again).
-	e.now = e.now.Add(TokenTTL + time.Minute)
+	// Conan 2 logs in under v2/: the same routes, public as well.
+	if st, hdr, _ := do("GET", "conan-private/v2/ping", nil, nil); st != 200 || hdr.Get("X-Conan-Server-Capabilities") != Capabilities {
+		t.Fatalf("v2 ping: %d %v", st, hdr)
+	}
+	if st, hdr, _ := do("GET", "conan-private/v2/users/authenticate", nil, nil); st != 401 || hdr.Get("WWW-Authenticate") != `Basic realm="commandcenter"` {
+		t.Fatalf("anonymous v2 login: %d %v", st, hdr)
+	}
+	st, hdr, v2token := do("GET", "conan-private/v2/users/authenticate", nil, basic("uploader", "pw"))
+	if st != 200 || hdr.Get("Content-Type") != ctText || v2token == "" {
+		t.Fatalf("v2 login: %d %v %q", st, hdr, v2token)
+	}
+	if st, _, body := do("GET", "conan-private/v2/users/check_credentials", nil, bearer(v2token)); st != 200 || body != "uploader" {
+		t.Fatalf("v2 check_credentials: %d %q", st, body)
+	}
+	if st, _, _ := do("GET", "conan-private/v2/users/check_credentials", nil, bearer(v2token+"x")); st != 401 {
+		t.Fatalf("v2 forged token: %d", st)
+	}
+
+	// CI that logged in once keeps working: months later the same bearer uploads.
+	e.now = e.now.Add(180 * 24 * time.Hour)
+	if st, _, body := do("PUT", file("eeee"), []byte("e"), bearer(token)); st != 201 {
+		t.Errorf("upload six months after the login: %d %s", st, body)
+	}
+	// Past its lifetime a token is refused (Conan then logs in again).
+	e.now = e.now.Add(TokenTTL)
 	if st, _, _ := do("GET", "conan-hosted/v1/users/check_credentials", nil, bearer(token)); st != 401 {
 		t.Errorf("expired token: %d", st)
+	}
+	// A changed password ends the user's tokens; other users' stay; the new password logs in.
+	_, _, token = do("GET", "conan-hosted/v2/users/authenticate", nil, basic("uploader", "pw"))
+	_, _, reader := do("GET", "conan-hosted/v2/users/authenticate", nil, basic("reader", "pw"))
+	if st, _, _ := do("GET", "conan-hosted/v2/users/check_credentials", nil, bearer(token)); st != 200 {
+		t.Fatalf("fresh token: %d", st)
+	}
+	newHash, _ := bcrypt.GenerateFromPassword([]byte("pw2"), bcrypt.MinCost)
+	if _, err := db.ResetLocalPassword(ctx, "uploader", string(newHash), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, _ := do("GET", "conan-hosted/v2/users/check_credentials", nil, bearer(token)); st != 401 {
+		t.Errorf("token after a password change: %d", st)
+	}
+	if st, _, body := do("GET", "conan-hosted/v2/users/check_credentials", nil, bearer(reader)); st != 200 || body != "reader" {
+		t.Errorf("another user's token: %d %q", st, body)
+	}
+	if st, _, tok := do("GET", "conan-hosted/v2/users/authenticate", nil, basic("uploader", "pw2")); st != 200 {
+		t.Errorf("login with the new password: %d", st)
+	} else if st, _, _ := do("GET", "conan-hosted/v2/users/check_credentials", nil, bearer(tok)); st != 200 {
+		t.Errorf("token of the new password: %d", st)
+	}
+	// A disabled user's token is refused at once.
+	u, err := db.GetUser(ctx, "reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Status = meta.StatusDisabled
+	if err := db.UpdateUser(ctx, u); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, _ := do("GET", "conan-hosted/v2/users/check_credentials", nil, bearer(reader)); st != 401 {
+		t.Errorf("disabled user's token: %d", st)
 	}
 }

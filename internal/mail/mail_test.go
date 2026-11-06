@@ -27,6 +27,7 @@ import (
 
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo/repotest"
+	"commandcenter/internal/truststore"
 )
 
 type captured struct {
@@ -378,4 +379,38 @@ func TestSendAsyncFullQueueDrops(t *testing.T) {
 	}
 	closeTimeout = 100 * time.Millisecond
 	s.Close()
+}
+
+// core-55: the subject prefix goes before every subject, once, in one line.
+func TestSendNowSubjectPrefix(t *testing.T) {
+	f := newFake(t, nil, false)
+	s := testSender(&repotest.Sink{})
+	defer s.Close()
+	cfg := meta.SMTP{Host: "127.0.0.1", Port: f.port(), Security: meta.SMTPNone, From: "cc@example.com", SubjectPrefix: "[cc]"}
+	if err := s.SendNow(context.Background(), cfg, []string{"a@example.com"}, "hi", "body"); err != nil {
+		t.Fatal(err)
+	}
+	if m := f.messages(); len(m) != 1 || !strings.Contains(m[0].data, "\r\nSubject: [cc] hi\r\n") {
+		t.Fatalf("messages: %+v", m)
+	}
+}
+
+// rest-25: TrustStore false leaves the SSL trust store out of TLS verification.
+func TestSendNowTrustStoreSwitch(t *testing.T) {
+	srvConf, pool := selfSigned(t)
+	truststore.Set(pool)
+	t.Cleanup(func() { truststore.Set(nil) })
+	f := newFake(t, srvConf, true)
+	s := testSender(&repotest.Sink{})
+	defer s.Close()
+	off, on := false, true
+	for _, tc := range []struct {
+		trust *bool
+		ok    bool
+	}{{nil, true}, {&on, true}, {&off, false}} {
+		cfg := meta.SMTP{Host: "127.0.0.1", Port: f.port(), Security: meta.SMTPTLS, From: "cc@example.com", TrustStore: tc.trust}
+		if err := s.SendNow(context.Background(), cfg, []string{"a@example.com"}, "hi", "body"); (err == nil) != tc.ok {
+			t.Errorf("trust store %v: %v", tc.trust, err)
+		}
+	}
 }

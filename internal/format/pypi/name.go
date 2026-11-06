@@ -31,6 +31,7 @@ const (
 	KindFile                 // /packages/{project}/{file} or /packages/{project}/{version}/{file}
 	KindMetadata             // /packages/{project}/{file}.metadata (PEP 658)
 	KindJSON                 // /pypi/{project}/json or /pypi/{project}/{version}/json
+	KindSearch               // POST /pypi, the XML-RPC search of pip search
 )
 
 // Route is a parsed request path. Name is normalized.
@@ -50,6 +51,8 @@ func ParseRoute(path string) (Route, error) {
 	switch {
 	case trimmed == "simple":
 		return Route{Kind: KindRoot}, nil
+	case trimmed == "pypi":
+		return Route{Kind: KindSearch}, nil
 	case segs[0] == "simple" && len(segs) == 2:
 		if !ValidName(segs[1]) {
 			return Route{}, invalidName(segs[1])
@@ -128,6 +131,15 @@ func fileKey(project, file string) string { return "packages/" + project + "/" +
 
 // metadataKey is the asset path of a file's PEP 658 core metadata sidecar.
 func metadataKey(project, file string) string { return fileKey(project, file) + ".metadata" }
+
+// sigExt ends the asset path of a file's detached signature (twine upload --sign).
+const sigExt = ".asc"
+
+// fileKeys are the asset paths that stay and go with a distribution file: the
+// file, its core metadata and its signature.
+func fileKeys(project, file string) []string {
+	return []string{fileKey(project, file), metadataKey(project, file), fileKey(project, file) + sigExt}
+}
 
 // uploadExts are the distribution extensions accepted for new uploads.
 var uploadExts = []string{".whl", ".tar.gz", ".zip"}

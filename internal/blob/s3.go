@@ -2,6 +2,7 @@ package blob
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -18,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,6 +48,10 @@ type S3Config struct {
 	// deletes and listings stay on this bucket. They share the prefix,
 	// credentials and path style.
 	Failover []S3Failover `json:"failover,omitempty"`
+	// MaxConnections bounds the connections open to the endpoint at once
+	// (Nexus's maxConnectionPoolSize): a request beyond it waits for one. 0:
+	// no bound, two kept idle.
+	MaxConnections int `json:"maxConnections,omitempty"`
 }
 
 // S3Encryption is an S3 store's server-side encryption.
@@ -75,6 +81,9 @@ var (
 // maxS3Failover is how many failover buckets a store may list.
 const maxS3Failover = 5
 
+// s3DefaultRegion is an empty region's.
+const s3DefaultRegion = "us-east-1"
+
 // Validate reports the first thing wrong with c, after trimming the slashes
 // of its prefix. It does not touch the bucket.
 func (c *S3Config) Validate() error {
@@ -90,6 +99,8 @@ func (c *S3Config) Validate() error {
 		return errors.New("accessKey and secretKey go together (leave both empty for the AWS_* environment)")
 	case len(c.Failover) > maxS3Failover:
 		return fmt.Errorf("failover lists at most %d buckets", maxS3Failover)
+	case c.MaxConnections < 0:
+		return errors.New("maxConnections must not be negative")
 	}
 	if err := validEndpoint(c.Endpoint); err != nil {
 		return errors.New("endpoint " + err.Error())
@@ -154,6 +165,17 @@ type s3 struct {
 // OpenS3 opens a store whose blobs live in the bucket cfg describes;
 // root/tmp holds its uploads in progress and Docker sessions, as for Open.
 func OpenS3(root string, cfg S3Config) (*Store, error) {
+	be, err := openS3Bucket(cfg)
+	if err != nil {
+		return nil, err
+	}
+	l := &s3Live{}
+	l.cur.Store(be)
+	return open(root, l)
+}
+
+// openS3Bucket is the backend for cfg with its failover buckets.
+func openS3Bucket(cfg S3Config) (*s3, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -173,13 +195,86 @@ func OpenS3(root string, cfg S3Config) (*Store, error) {
 		}
 		be.failover = append(be.failover, fb)
 	}
-	return open(root, be)
+	return be, nil
+}
+
+// s3Live is an S3 store's backend: the bucket's as its settings are now.
+// SetS3 replaces it; what holds the old one (a request on its way, an open
+// file, a multipart upload) finishes with it.
+type s3Live struct{ cur atomic.Pointer[s3] }
+
+func (l *s3Live) put(tmp string, sums Sums) error       { return l.cur.Load().put(tmp, sums) }
+func (l *s3Live) open(sha string) (File, error)         { return l.cur.Load().open(sha) }
+func (l *s3Live) stat(sha string) (Info, error)         { return l.cur.Load().stat(sha) }
+func (l *s3Live) remove(sha string) error               { return l.cur.Load().remove(sha) }
+func (l *s3Live) check() error                          { return l.cur.Load().check() }
+func (l *s3Live) putMeta(key string, data []byte) error { return l.cur.Load().putMeta(key, data) }
+func (l *s3Live) getMeta(key string) ([]byte, error)    { return l.cur.Load().getMeta(key) }
+func (l *s3Live) removeMeta(key string) error           { return l.cur.Load().removeMeta(key) }
+func (l *s3Live) walk(fn func(sha string, size int64, modTime time.Time) error) error {
+	return l.cur.Load().walk(fn)
+}
+func (l *s3Live) listMeta(prefix string, fn func(key string) error) error {
+	return l.cur.Load().listMeta(prefix, fn)
+}
+
+// S3 returns an S3 store's configuration; ok is false for any other.
+func (s *Store) S3() (cfg S3Config, ok bool) {
+	l, ok := s.be.(*s3Live)
+	if !ok {
+		return S3Config{}, false
+	}
+	return l.cur.Load().cfg, true
+}
+
+// SameConnection reports whether c and o reach their bucket the same way:
+// the settings SetS3 changes.
+func (c S3Config) SameConnection(o S3Config) bool {
+	return c.AccessKey == o.AccessKey && c.SecretKey == o.SecretKey && c.Endpoint == o.Endpoint && c.PathStyle == o.PathStyle &&
+		c.MaxConnections == o.MaxConnections && cmp.Or(c.Region, s3DefaultRegion) == cmp.Or(o.Region, s3DefaultRegion)
+}
+
+// CheckS3 is Check for the settings cfg, without opening a store.
+func CheckS3(cfg S3Config) error {
+	be, err := openS3Bucket(cfg)
+	if err != nil {
+		return err
+	}
+	defer be.closeIdle()
+	return be.check()
+}
+
+// SetS3 replaces an S3 store's credentials, endpoint, region, path style and
+// connection bound (rotated keys, a moved endpoint); its bucket and prefix
+// stay. The caller checked cfg (CheckS3) and stored it. A group holding the
+// store as a member uses the new settings too.
+func (s *Store) SetS3(cfg S3Config) error {
+	l, ok := s.be.(*s3Live)
+	if !ok {
+		return errors.New("not an S3 blob store")
+	}
+	be, err := openS3Bucket(cfg)
+	if err != nil {
+		return err
+	}
+	if cur := l.cur.Load().cfg; be.cfg.Bucket != cur.Bucket || be.cfg.Prefix != cur.Prefix {
+		return errors.New("an S3 store's bucket and prefix cannot change")
+	}
+	l.cur.Swap(be).closeIdle()
+	return nil
+}
+
+func (s *s3) closeIdle() {
+	s.client.CloseIdleConnections()
+	for _, f := range s.failover {
+		f.client.CloseIdleConnections()
+	}
 }
 
 // newS3 is the backend for the bucket of cfg, which passed Validate.
 func newS3(cfg S3Config) (*s3, error) {
 	if cfg.Region == "" {
-		cfg.Region = "us-east-1"
+		cfg.Region = s3DefaultRegion
 	}
 	be := &s3{cfg: cfg, accessKey: cfg.AccessKey, secretKey: cfg.SecretKey, now: time.Now}
 	if be.accessKey == "" {
@@ -200,6 +295,9 @@ func newS3(cfg S3Config) (*s3, error) {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.ResponseHeaderTimeout = 30 * time.Second
 	tr.DisableCompression = true // a gateway that gzips would hide the object's size
+	if n := cfg.MaxConnections; n > 0 {
+		tr.MaxConnsPerHost, tr.MaxIdleConnsPerHost = n, n
+	}
 	// S3 never redirects a well-formed request; a 301 names the right
 	// endpoint, which do reports, and following one off the host would
 	// relay another server's reply as the object.
@@ -211,10 +309,7 @@ func newS3(cfg S3Config) (*s3, error) {
 // endpoint for an empty one, scheme and host lower-cased, a default port
 // and a trailing slash dropped. c must have passed Validate.
 func (c S3Config) endpointURL() *url.URL {
-	region := c.Region
-	if region == "" {
-		region = "us-east-1"
-	}
+	region := cmp.Or(c.Region, s3DefaultRegion)
 	ep := c.Endpoint
 	if ep == "" {
 		ep = "https://s3." + region + ".amazonaws.com"

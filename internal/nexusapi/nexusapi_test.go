@@ -169,8 +169,8 @@ func TestRepositoriesListAndSettings(t *testing.T) {
 		t.Fatalf("proxy settings = %v", s)
 	}
 	e.get(v1+"/repositories/maven/hosted/maven-releases", "admin", &s)
-	if s["storage"].(map[string]any)["writePolicy"] != "ALLOW_ONCE" || s["cleanup"].(map[string]any)["policyNames"] == nil {
-		t.Fatalf("hosted settings = %v", s)
+	if _, has := s["cleanup"]; s["storage"].(map[string]any)["writePolicy"] != "ALLOW_ONCE" || !has || s["cleanup"] != nil {
+		t.Fatalf("hosted settings = %v", s) // cleanup is null without policies, as Nexus answers
 	}
 	e.get(v1+"/repositories/maven/group/maven-public", "admin", &s)
 	if members := s["group"].(map[string]any)["memberNames"].([]any); len(members) != 2 || members[0] != "maven-releases" {
@@ -226,7 +226,7 @@ func TestRepositoriesCreateUpdateDelete(t *testing.T) {
 	var s map[string]any
 	e.get(v1+"/repositories/npm/proxy/npm-proxy", "admin", &s)
 	proxyS, nc, hc := s["proxy"].(map[string]any), s["negativeCache"].(map[string]any), s["httpClient"].(map[string]any)
-	if proxyS["remoteUrl"] != "https://registry.npmjs.org/" || proxyS["contentMaxAge"] != float64(1440) || proxyS["metadataMaxAge"] != float64(60) ||
+	if proxyS["remoteUrl"] != "https://registry.npmjs.org" || proxyS["contentMaxAge"] != float64(1440) || proxyS["metadataMaxAge"] != float64(60) ||
 		nc["timeToLive"] != float64(5) || hc["authentication"].(map[string]any)["username"] != "bob" || s["format"] != "npm" {
 		t.Fatalf("npm proxy settings = %v", s)
 	}

@@ -2,17 +2,25 @@ package conda
 
 import (
 	"bufio"
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/http"
 	"regexp"
 	"sort"
 	"strings"
 
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
+	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
+	"commandcenter/internal/resolve"
 )
 
 // maxDoc bounds a member document a group merge reads (conda-forge's
@@ -223,53 +231,225 @@ func (h *Handler) rebuild(ctx context.Context, tx *meta.Tx, rp *repo.Repository,
 	return nil
 }
 
-// Group merges. A group's <subdir>/repodata.json lists every member's
-// packages of that subdir, a file name listed by several members being
-// the first member's (the member that answers for the file, as Lookup
-// does); channeldata.json likewise by package name, its subdirs the
-// union. Members are read a package at a time, never whole.
+// Group merges. A group's <subdir>/repodata.json lists its members' packages
+// of that subdir (firstRepodata, or mergeRepodata with mergeMembers);
+// channeldata.json is the first member's entry per package name, its subdirs
+// the union. Members are read a package at a time, never whole.
 
-// mergeRepodata is the resolve.MergeFunc of <subdir>/repodata.json: the
-// members' "packages" then their "packages.conda", each member read once
-// per section (the sections of one output object cannot interleave).
+// mergeRepodata is the resolve.MergeFunc of <subdir>/repodata.json of a group
+// with mergeMembers: every member's files, a file listed by several members
+// being the first's.
 // ponytail: the seen set holds every file name of the merged channel (a
 // few hundred thousand for conda-forge); a bloom filter if that bites.
 func mergeRepodata(subdir string) func(ctx context.Context, members []io.ReadSeeker, w io.Writer) error {
 	return func(ctx context.Context, members []io.ReadSeeker, w io.Writer) error {
-		bw := bufio.NewWriterSize(w, 64<<10)
 		seen := map[string]bool{}
-		if _, err := fmt.Fprintf(bw, `{"info":{"subdir":%s},"packages":{`, jsonString(subdir)); err != nil {
-			return err
-		}
-		for i, section := range []string{"packages", "packages.conda"} {
-			if i > 0 {
-				bw.WriteString(`},"packages.conda":{`)
+		return writeMerged(w, subdir, members, func(_ int, file string, _ json.RawMessage) bool {
+			if seen[file] {
+				return false
 			}
-			first := true
-			for _, m := range members {
-				if _, err := m.Seek(0, io.SeekStart); err != nil {
-					return err
-				}
-				err := topLevel(m, func(key string, dec *json.Decoder) error {
-					if key != section {
-						return skipValue(dec)
-					}
-					return entries(dec, func(file string, raw json.RawMessage) error {
-						if seen[file] {
-							return nil
-						}
-						seen[file] = true
-						return writeEntry(bw, &first, file, raw)
-					})
-				})
-				if err != nil {
-					return err
-				}
-			}
-		}
-		bw.WriteString(`},"removed":[],"repodata_version":1}`)
-		return bw.Flush()
+			seen[file] = true
+			return true
+		})
 	}
+}
+
+// writeMerged writes the members' "packages" then their "packages.conda" as
+// <subdir>/repodata.json, each member read once per section (the sections of
+// one output object cannot interleave), the entries keep allows.
+func writeMerged(w io.Writer, subdir string, members []io.ReadSeeker, keep func(member int, file string, raw json.RawMessage) bool) error {
+	bw := bufio.NewWriterSize(w, 64<<10)
+	if _, err := fmt.Fprintf(bw, `{"info":{"subdir":%s},"packages":{`, jsonString(subdir)); err != nil {
+		return err
+	}
+	for i, section := range []string{"packages", "packages.conda"} {
+		if i > 0 {
+			bw.WriteString(`},"packages.conda":{`)
+		}
+		first := true
+		for n, m := range members {
+			if _, err := m.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			err := topLevel(m, func(key string, dec *json.Decoder) error {
+				if key != section {
+					return skipValue(dec)
+				}
+				return entries(dec, func(file string, raw json.RawMessage) error {
+					if !keep(n, file, raw) {
+						return nil
+					}
+					return writeEntry(bw, &first, file, raw)
+				})
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	bw.WriteString(`},"removed":[],"repodata_version":1}`)
+	return bw.Flush()
+}
+
+// firstPrefix marks a group's repodata of firstRepodata: flipping
+// mergeMembers merges again.
+const firstPrefix = "conda-first:"
+
+// member is what a group reads of a leaf member: doc is its repodata for the
+// path asked, names its channeldata.json; nil for what it does not have.
+type member struct{ doc, names *meta.Asset }
+
+// firstRepodata is group rp's document p (subdir's repodata.json or
+// current_repodata.json) without mergeMembers: a package name is listed from
+// the first member that has it, with all the builds that member lists,
+// whatever a later member has. So a newer public build never beats an
+// internal package of the same name, which conda would otherwise install
+// (dependency confusion). A name counts wherever the member has it, as a
+// client reads its platform's subdir and noarch: so channeldata.json, which
+// names a channel's packages of all subdirs, is read too, of every member but
+// the last (nothing comes after it to hide). The result is stored in rp's
+// namespace and reused until one of those documents changes. A member that
+// fails is left out only while no later member answers: a later (public)
+// member never stands in for an earlier (internal) one.
+func (h *Handler) firstRepodata(ctx context.Context, rp *repo.Repository, p, subdir string) (meta.Asset, error) {
+	leaves := resolve.Leaves(rp)
+	members := make([]member, len(leaves))
+	sum := sha256.New()
+	var failed error
+	answered := 0
+	look := func(m *repo.Repository, file string) (*meta.Asset, error) {
+		res, err := h.Resolver.LookupTarget(ctx, m, proxy.Target{Key: file, Remote: file, Route: p, NotHTML: true}, proxy.Metadata)
+		switch {
+		case err == nil && failed != nil:
+			return nil, failed
+		case err == nil:
+			answered++
+			fmt.Fprintln(sum, file, res.Asset.BlobSHA256)
+			return &res.Asset, nil
+		case repo.StatusOf(err) != http.StatusNotFound:
+			slog.Warn("group member document failed", "group", rp.Name, "member", m.Name, "path", file, "err", logsafe.Err(err))
+			failed = cmp.Or(failed, err)
+		}
+		return nil, nil
+	}
+	var only *meta.Asset
+	for i, m := range leaves {
+		var err error
+		if members[i].doc, err = look(m, p); err != nil {
+			return meta.Asset{}, err
+		}
+		only = cmp.Or(only, members[i].doc)
+		if i < len(leaves)-1 {
+			if members[i].names, err = look(m, "channeldata.json"); err != nil {
+				return meta.Asset{}, err
+			}
+		}
+	}
+	switch {
+	case only == nil && failed != nil:
+		return meta.Asset{}, failed
+	case only == nil:
+		return meta.Asset{}, repo.ErrNotFound
+	}
+	fp := firstPrefix + hex.EncodeToString(sum.Sum(nil))
+	stored, err := h.Store.Get(ctx, rp.Name, p)
+	if err == nil && stored.RemoteETag == fp {
+		return stored, nil
+	}
+	if err != nil && answered == 1 {
+		// One document and no name to hide, and no merged copy was ever
+		// served: the member's document as it is, as resolve.Merged does.
+		return *only, nil
+	}
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pw.CloseWithError(h.writeFirst(pw, subdir, members))
+	}()
+	a, err := h.Store.Put(ctx, rp.Name, p, ctJSON, pr, func(a *meta.Asset) { a.RemoteETag = fp })
+	pr.Close() // unblocks the merger if Put stopped early
+	<-done
+	return a, err
+}
+
+// writeFirst writes firstRepodata's document. A name's owner is the index in
+// docs of the first member that has it, -1 when that member has no document
+// for this subdir and so lists nothing here. A name no earlier member claimed
+// belongs to whoever lists it.
+func (h *Handler) writeFirst(w io.Writer, subdir string, members []member) error {
+	var docs []io.ReadSeeker
+	owner := map[string]int{}
+	for i, m := range members {
+		mine := -1
+		if m.doc != nil {
+			f, err := h.Store.Open(*m.doc)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			mine = len(docs)
+			docs = append(docs, f)
+		}
+		if i == len(members)-1 {
+			break
+		}
+		claim := func(name string) {
+			if _, ok := owner[name]; !ok {
+				owner[name] = mine
+			}
+		}
+		if m.names != nil {
+			f, err := h.Store.Open(*m.names)
+			if err != nil {
+				return err
+			}
+			err = topLevel(f, func(key string, dec *json.Decoder) error {
+				if key != "packages" {
+					return skipValue(dec)
+				}
+				return entries(dec, func(name string, _ json.RawMessage) error {
+					claim(strings.ToLower(name))
+					return nil
+				})
+			})
+			f.Close()
+			if err != nil {
+				return err
+			}
+		}
+		if m.doc != nil {
+			err := topLevel(docs[mine], func(key string, dec *json.Decoder) error {
+				if key != "packages" && key != "packages.conda" {
+					return skipValue(dec)
+				}
+				return entries(dec, func(_ string, raw json.RawMessage) error {
+					claim(entryName(raw))
+					return nil
+				})
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return writeMerged(w, subdir, docs, func(n int, _ string, raw json.RawMessage) bool {
+		if len(owner) == 0 {
+			return true
+		}
+		o, ok := owner[entryName(raw)]
+		return !ok || o == n
+	})
+}
+
+// entryName is the package name of a repodata entry, in lower case as conda
+// compares names.
+func entryName(raw json.RawMessage) string {
+	var e struct {
+		Name string `json:"name"`
+	}
+	json.Unmarshal(raw, &e) // not an object: a name nobody claims
+	return strings.ToLower(e.Name)
 }
 
 // mergeChanneldata merges the members' channeldata.json.

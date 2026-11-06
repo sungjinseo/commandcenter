@@ -165,13 +165,22 @@ func TestPrereleasePerFormat(t *testing.T) {
 		{"maven", "1.0.0-rc1", false}, // a Maven release, whatever its name
 		{"npm", "1.0.0", false},
 		{"npm", "1.0.0-beta.1", true},
-		{"npm", "not-semver", false},
+		{"npm", "notsemver", false},
+		{"npm", "1.0", false},
+		{"npm", "1.0-rc1", true}, // no semver, with a "-": as Nexus reads it
 		{"go", "v1.2.3", false},
 		{"go", "v1.2.3-rc.1", true},
 		{"go", "v0.0.0-20240101000000-abcdef123456", true}, // pseudo-version
 		{"go", "v2.0.0+incompatible", false},
 		{"cargo", "1.0.0", false},
 		{"cargo", "1.0.0-alpha", true},
+		{"helm", "1.0.0", false},
+		{"helm", "v1.2.3", false},
+		{"helm", "1.2", false},
+		{"helm", "1.2.3+build-5", false},
+		{"helm", "1.0.0-rc.1", true},
+		{"helm", "v1.0.0-rc.1", true},
+		{"helm", "1.2-beta", true}, // helm reads it, semver.Parse does not
 		{"pypi", "1.0", false},
 		{"pypi", "1.0.post1", false},
 		{"pypi", "1.0rc1", true},

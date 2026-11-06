@@ -27,32 +27,57 @@ func badPackage(format string, args ...any) error {
 	return repo.Errorf(http.StatusBadRequest, "package: "+format, args...)
 }
 
-// row is one stored version of a hosted package: the normalized version
-// and the metadata entry the upload stored as the row's attrs.
-type row struct {
-	version string
-	entry   entry
-	pkg     meta.Package
+// rowEntry is the metadata entry the upload stored as a row's attrs. A row
+// whose attrs cannot be read still lists with its name and version.
+func rowEntry(p meta.Package) entry {
+	var e entry
+	if json.Unmarshal([]byte(p.Attrs), &e) != nil || e["name"] == nil {
+		return entry{"name": p.Name, "version": p.Version, "version_normalized": p.Version}
+	}
+	return e
 }
 
-// rows lists the versions of name in hosted rp, highest normalized version
-// first (by string: Composer sorts versions itself). A row whose attrs
-// cannot be read still lists with its name and version.
-func (h *Handler) rows(ctx context.Context, rp *repo.Repository, name string) ([]row, error) {
-	pkgs, err := h.Store.DB.ListPackages(ctx, rp.Name, name)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]row, 0, len(pkgs))
-	for _, p := range pkgs {
-		r := row{version: p.Version, pkg: p}
-		if json.Unmarshal([]byte(p.Attrs), &r.entry) != nil || r.entry["name"] == nil {
-			r.entry = entry{"name": p.Name, "version": p.Version, "version_normalized": p.Version}
+// writeHostedMetadata writes p2/<name>.json or ~dev.json of hosted rp, highest
+// normalized version first (by string: Composer sorts versions itself), a
+// batch of rows at a time: a package with 1500 versions is over a megabyte,
+// and holding them per request took a 128 MiB server down at 32 clients.
+func (h *Handler) writeHostedMetadata(ctx context.Context, w io.Writer, rp *repo.Repository, rt Route, versions []meta.Package, base string) error {
+	var wanted []string
+	for _, p := range versions {
+		if IsDev(p.Version) == rt.Dev {
+			wanted = append(wanted, p.Version)
 		}
-		out = append(out, r)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].version > out[j].version })
-	return out, nil
+	sort.Sort(sort.Reverse(sort.StringSlice(wanted)))
+	name, err := json.Marshal(rt.Name)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, `{"packages":{%s:[`, name)
+	n := 0
+	err = h.Store.DB.EachPackage(ctx, rp.Name, rt.Name, wanted, func(p meta.Package) error {
+		e := rowEntry(p)
+		dist, _ := e["dist"].(map[string]any)
+		if dist == nil {
+			dist = entry{}
+		}
+		dist["type"], dist["url"] = "zip", base+"/"+distPath(rt.Name, p.Version)
+		e["dist"] = dist
+		b, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		if n++; n > 1 {
+			io.WriteString(w, ",")
+		}
+		_, err = w.Write(b)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, "]}}")
+	return err
 }
 
 // upload takes a version into hosted rp: `PUT packages/upload/<vendor>/

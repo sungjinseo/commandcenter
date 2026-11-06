@@ -99,6 +99,42 @@ func TestAutoBlockOffAndManualBlock(t *testing.T) {
 	}
 }
 
+// Request is a remote request like a fetch's: its failures count for
+// auto-block and a blocked remote is not asked.
+func TestRequestAutoBlock(t *testing.T) {
+	rm := &remote{}
+	f, rp, _ := setup(t, rm)
+	u := rp.RemoteURL.String() + "/search"
+	rm.status.Store(503)
+	for i := 0; i < autoBlockAfter; i++ {
+		resp, err := f.Request(ctx, rp, u)
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		resp.Body.Close()
+	}
+	if st := f.Remote(rp); !st.Blocked || !st.Auto {
+		t.Fatalf("status %+v", st)
+	}
+	hits := rm.hits.Load()
+	if _, err := f.Request(ctx, rp, u); !errors.Is(err, ErrRemote) || rm.hits.Load() != hits {
+		t.Fatalf("a blocked remote: %v, %d hits, want %d", err, rm.hits.Load(), hits)
+	}
+}
+
+// Forward passes the query string on.
+func TestForwardQuery(t *testing.T) {
+	rm := &remote{}
+	f, rp, _ := setup(t, rm)
+	r := httptest.NewRequest("POST", "/repository/p/audit?a=1&b=2", strings.NewReader("{}"))
+	if err := f.Forward(ctx, rp, httptest.NewRecorder(), r, "audit", 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	if q := rm.query.Load(); q != "a=1&b=2" {
+		t.Fatalf("query %v", q)
+	}
+}
+
 // A connection error counts as a failure, like a 5xx.
 func TestAutoBlockConnectionError(t *testing.T) {
 	f, rp, _ := setup(t, &remote{})

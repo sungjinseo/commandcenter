@@ -17,7 +17,7 @@ type Kind int
 const (
 	KindPackument Kind = iota // /{pkg}
 	KindVersion               // /{pkg}/{version or tag}
-	KindTarball               // /{pkg}/-/{file}.tgz
+	KindTarball               // /{pkg}/-/{file}
 	KindDistTags              // /-/package/{pkg}/dist-tags
 	KindDistTag               // /-/package/{pkg}/dist-tags/{tag}
 	KindLogin                 // /-/user/org.couchdb.user:{user}
@@ -27,6 +27,7 @@ const (
 	KindAudit                 // /-/npm/v1/security/...
 	KindRev                   // /{pkg}/-rev/{rev}, /{pkg}/-/{file}.tgz/-rev/{rev} (unpublish)
 	KindToken                 // /-/user/token/{token} (logout)
+	KindSearch                // /-/v1/search
 )
 
 // Route is a parsed npm request path.
@@ -71,6 +72,8 @@ func ParseRoute(path string) (Route, error) {
 		return Route{Kind: KindPing}, nil
 	case "-/v1/login":
 		return Route{Kind: KindWebLogin}, nil
+	case "-/v1/search":
+		return Route{Kind: KindSearch}, nil
 	case "-/npm/v1/security/advisories/bulk", "-/npm/v1/security/audits", "-/npm/v1/security/audits/quick":
 		return Route{Kind: KindAudit, Path: path}, nil
 	}
@@ -143,7 +146,10 @@ func ParseRoute(path string) (Route, error) {
 			return Route{}, segmentError(rest[0])
 		}
 		return Route{Kind: KindVersion, Package: name, Version: rest[0]}, nil
-	case len(rest) == 2 && rest[0] == "-" && strings.HasSuffix(rest[1], ".tgz"):
+	case len(rest) == 2 && rest[0] == "-" && rest[1] != "":
+		// Any file name: a lockfile written through Nexus may hold the last
+		// segment of a remote's tarball URL, a hash at GitHub Packages
+		// (proxyTarball).
 		if !validSegment(rest[1]) {
 			return Route{}, segmentError(rest[1])
 		}

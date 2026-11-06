@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -835,4 +836,160 @@ func (a *Authenticator) clearPassCacheForTest() {
 	a.mu.Lock()
 	a.cache = map[string]time.Time{}
 	a.mu.Unlock()
+}
+
+// useStaticGroups turns the fixture to static groups: the entries under
+// ou=groups say who is in them, and the memberOf alice has says nothing.
+func (f *ldapFixture) useStaticGroups(members ...string) {
+	f.settings.LDAP.GroupType, f.settings.LDAP.GroupBaseDN = meta.LDAPGroupsStatic, "ou=groups,dc=example,dc=org"
+	f.settings.LDAP.GroupObjectClass, f.settings.LDAP.GroupIDAttr, f.settings.LDAP.GroupMemberAttr = "groupOfNames", "cn", "member"
+	f.settings.LDAP.GroupMemberFormat = "${dn}"
+	f.setGroup("cc-admins", members...)
+	f.apply()
+}
+
+func (f *ldapFixture) setGroup(name string, members ...string) {
+	f.srv.Add(ldaptest.Entry{DN: "cn=" + name + ",ou=groups,dc=example,dc=org",
+		Attrs: map[string][]string{"objectClass": {"groupOfNames"}, "cn": {name}, "member": members}})
+}
+
+const bobDN = "uid=bob,ou=people,dc=example,dc=org"
+
+// Static groups feed the mappings and groupsAsRoles at sign-in and at the
+// re-check, on the usual schedule.
+func TestLDAPStaticGroups(t *testing.T) {
+	f := newLDAPFixture(t)
+	f.useStaticGroups(bobDN)
+	ctx := context.Background()
+	if p, err := f.a.CheckPassword(ctx, "bob", "bob-pw"); err != nil || !p.Admin {
+		t.Fatalf("bob, in the group's entry: %+v %v", p, err)
+	}
+	if p, err := f.a.CheckPassword(ctx, "alice", "alice-pw"); err != nil || p.Admin {
+		t.Fatalf("alice, with the group in her attribute only: %+v %v", p, err)
+	}
+	// Group changes apply at the re-check, without another password.
+	f.setGroup("cc-admins", aliceDN)
+	if p, ok := f.a.Lookup("ldap:bob"); !ok || !p.Admin {
+		t.Fatalf("before the minute passed: %+v %v", p, ok)
+	}
+	searches := f.srv.Searches()
+	f.advance(ldapRecheck)
+	if p, ok := f.a.Lookup("ldap:bob"); !ok || p.Admin {
+		t.Fatalf("bob, taken out: %+v %v", p, ok)
+	}
+	if p, ok := f.a.Lookup("ldap:alice"); !ok || !p.Admin {
+		t.Fatalf("alice, put in: %+v %v", p, ok)
+	}
+	if got := f.srv.Searches() - searches; got != 4 {
+		t.Errorf("%d searches for two re-checks, want the user and the groups of each", got)
+	}
+
+	// groupsAsRoles: the role of the group's name, not the administrators'.
+	f.roles = append(f.roles, meta.Role{ID: "devs", Privileges: []meta.Privilege{{Target: "repo:releases", Actions: []string{meta.ActionRead}}}})
+	f.settings.LDAP.GroupsAsRoles = true
+	f.settings.LDAP.GroupMappings = nil
+	f.setGroup("devs", aliceDN)
+	f.setGroup("admin", aliceDN)
+	f.apply()
+	p, err := f.a.CheckPassword(ctx, "alice", "alice-pw")
+	if err != nil || p.Admin || !hasRole(p.Roles(), "devs") || hasRole(p.Roles(), "admin") {
+		t.Fatalf("groups as roles: %+v %v", p, err)
+	}
+	if p, ok := f.a.Lookup("ldap:bob"); !ok || hasRole(p.Roles(), "devs") {
+		t.Fatalf("outside the group: %+v %v", p, ok)
+	}
+}
+
+// A failed search for groups signs the user in with what needs no group, and
+// says so in the log; the next re-check finds the groups again. A caller that
+// left leaves nothing behind.
+func TestLDAPStaticGroupSearchFails(t *testing.T) {
+	f := newLDAPFixture(t)
+	f.useStaticGroups(bobDN)
+	f.settings.LDAP.DefaultRoles = []string{"browser"}
+	f.apply()
+	var logs strings.Builder
+	f.a.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	ctx := context.Background()
+	fail := func(base string) int64 {
+		if strings.HasPrefix(base, "ou=groups") {
+			return 50
+		}
+		return -1
+	}
+	f.srv.SetSearchHook(fail)
+	p, err := f.a.CheckPassword(ctx, "bob", "bob-pw")
+	if err != nil || p.Admin || !hasRole(p.Roles(), "browser") || hasRole(p.Roles(), "admin") {
+		t.Fatalf("sign-in while the search fails: %+v %v", p, err)
+	}
+	if !strings.Contains(logs.String(), "ldap group search failed") || !strings.Contains(logs.String(), "result code 50") || !strings.Contains(logs.String(), "user=bob") {
+		t.Fatalf("logs: %s", logs.String())
+	}
+	if _, err := f.a.CheckPassword(ctx, "bob", "wrong"); !errors.Is(err, ErrBadCredentials) {
+		t.Fatalf("a wrong password: %v", err)
+	}
+	f.srv.SetSearchHook(nil)
+	if p, ok := f.a.Lookup("ldap:bob"); !ok || p.Admin {
+		t.Fatalf("until the next re-check: %+v %v", p, ok)
+	}
+	f.advance(ldapRecheck)
+	if p, ok := f.a.Lookup("ldap:bob"); !ok || !p.Admin {
+		t.Fatalf("after the re-check: %+v %v", p, ok)
+	}
+
+	// At a re-check: the roles from groups go, the user stays, and comes back.
+	f.srv.SetSearchHook(fail)
+	f.advance(ldapRecheck)
+	if p, ok := f.a.Lookup("ldap:bob"); !ok || p.Admin || !hasRole(p.Roles(), "browser") {
+		t.Fatalf("a re-check while the search fails: %+v %v", p, ok)
+	}
+	f.srv.SetSearchHook(nil)
+	f.advance(ldapRecheck)
+	if p, ok := f.a.Lookup("ldap:bob"); !ok || !p.Admin {
+		t.Fatalf("the re-check after it: %+v %v", p, ok)
+	}
+
+	// The caller hangs up during the search: no entry without groups stays.
+	left, cancel := context.WithCancel(ctx)
+	defer cancel()
+	f.srv.SetSearchHook(func(base string) int64 {
+		if strings.HasPrefix(base, "ou=groups") {
+			cancel()
+			time.Sleep(100 * time.Millisecond)
+		}
+		return -1
+	})
+	f.advance(ldapRecheck)
+	if _, ok := f.a.ldapLookup(left, "bob"); ok {
+		t.Fatal("a cancelled re-check allowed the user")
+	}
+	f.srv.SetSearchHook(nil)
+	if p, ok := f.a.Lookup("ldap:bob"); !ok || !p.Admin {
+		t.Fatalf("the next caller: %+v %v", p, ok)
+	}
+}
+
+// A role named as a group makes no administrator through a role it contains
+// either, with groups of either type; a mapping to it still does.
+func TestLDAPGroupsAsRolesNoAdminThroughContainedRole(t *testing.T) {
+	f := newLDAPFixture(t)
+	f.roles = append(f.roles, meta.Role{ID: "ops", Roles: []string{"admin"}})
+	f.settings.LDAP.GroupsAsRoles = true
+	f.settings.LDAP.GroupMappings = nil
+	f.srv.Add(ldaptest.Entry{DN: aliceDN, Password: "alice-pw", Attrs: map[string][]string{"uid": {"alice"}, "memberOf": {"cn=ops,ou=groups,dc=example,dc=org"}}})
+	f.apply()
+	ctx := context.Background()
+	if p, err := f.a.CheckPassword(ctx, "alice", "alice-pw"); err != nil || p.Admin || hasRole(p.Roles(), "ops") {
+		t.Fatalf("dynamic: %+v %v", p, err)
+	}
+	f.useStaticGroups()
+	f.setGroup("ops", aliceDN)
+	if p, err := f.a.CheckPassword(ctx, "alice", "alice-pw"); err != nil || p.Admin || hasRole(p.Roles(), "ops") {
+		t.Fatalf("static: %+v %v", p, err)
+	}
+	f.settings.LDAP.GroupMappings = []meta.GroupMapping{{Group: "ops", Roles: []string{"ops"}}}
+	f.apply()
+	if p, err := f.a.CheckPassword(ctx, "alice", "alice-pw"); err != nil || !p.Admin {
+		t.Fatalf("mapped: %+v %v", p, err)
+	}
 }

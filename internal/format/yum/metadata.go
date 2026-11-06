@@ -25,6 +25,20 @@ const (
 	ctRPM  = "application/x-rpm"
 )
 
+// docs are the three documents of repodata/ that list packages: the root
+// element of each and what it declares.
+var docs = map[string]struct{ root, xmlns string }{
+	"primary":   {"metadata", `xmlns="http://linux.duke.edu/metadata/common" xmlns:rpm="http://linux.duke.edu/metadata/rpm"`},
+	"filelists": {"filelists", `xmlns="http://linux.duke.edu/metadata/filelists"`},
+	"other":     {"otherdata", `xmlns="http://linux.duke.edu/metadata/other"`},
+}
+
+// docStart is the document of type typ up to its first package, n being how
+// many it lists.
+func docStart(typ string, n int) string {
+	return `<?xml version="1.0" encoding="UTF-8"?>` + "\n<" + docs[typ].root + " " + docs[typ].xmlns + ` packages="` + strconv.Itoa(n) + `">` + "\n"
+}
+
 // primaryFileRE selects the files primary.xml lists (createrepo's rule):
 // everything under /etc, sendmail, and anything in a bin directory. The
 // rest is only in filelists.xml.
@@ -111,7 +125,7 @@ func (w *xw) pkgOpen(p *Package) {
 // that holds repodata/.
 func Primary(pkgs []*Package) string {
 	var w xw
-	w.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n" + `<metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:rpm="http://linux.duke.edu/metadata/rpm" packages="` + strconv.Itoa(len(pkgs)) + `">` + "\n")
+	w.WriteString(docStart("primary", len(pkgs)))
 	for _, p := range pkgs {
 		w.WriteString(`<package type="rpm">` + "\n")
 		w.elem("  ", "name", p.Name, false)
@@ -155,7 +169,7 @@ func Primary(pkgs []*Package) string {
 // Filelists renders filelists.xml: every file of every package.
 func Filelists(pkgs []*Package) string {
 	var w xw
-	w.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n" + `<filelists xmlns="http://linux.duke.edu/metadata/filelists" packages="` + strconv.Itoa(len(pkgs)) + `">` + "\n")
+	w.WriteString(docStart("filelists", len(pkgs)))
 	for _, p := range pkgs {
 		w.pkgOpen(p)
 		for _, f := range p.Files {
@@ -192,7 +206,7 @@ func changelog(p *Package) []Changelog {
 // Other renders other.xml: the changelogs.
 func Other(pkgs []*Package) string {
 	var w xw
-	w.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n" + `<otherdata xmlns="http://linux.duke.edu/metadata/other" packages="` + strconv.Itoa(len(pkgs)) + `">` + "\n")
+	w.WriteString(docStart("other", len(pkgs)))
 	for _, p := range pkgs {
 		w.pkgOpen(p)
 		for _, c := range changelog(p) {
@@ -209,9 +223,11 @@ func Other(pkgs []*Package) string {
 	return w.String()
 }
 
-// repoData is one <data> of repomd.xml.
+// repoData is one <data> of repomd.xml: a document this server wrote, under
+// its sha256 name, or (href) a file stored as it came, without open-checksum.
 type repoData struct {
 	typ            string
+	href           string
 	gz, open       []byte
 	sum, openSum   string
 	size, openSize int64
@@ -227,27 +243,40 @@ func newRepoData(typ, open string) (repoData, error) {
 	return repoData{typ: typ, gz: buf.Bytes(), open: []byte(open), sum: sha256Hex(buf.Bytes()), openSum: sha256Hex([]byte(open)), size: int64(buf.Len()), openSize: int64(len(open))}, nil
 }
 
-func (d repoData) file() string { return "repodata/" + d.sum + "-" + d.typ + ".xml.gz" }
+func (d repoData) file() string {
+	if d.href != "" {
+		return d.href
+	}
+	return "repodata/" + d.sum + "-" + d.typ + ".xml.gz"
+}
 
 func sha256Hex(b []byte) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
 
-// Repomd renders repomd.xml for the data files.
-func Repomd(data []repoData, now time.Time) string {
+// Repomd renders repomd.xml for the data files; extra are <data> elements
+// taken as they are.
+func Repomd(data []repoData, now time.Time, extra ...string) string {
 	ts := strconv.FormatInt(now.Unix(), 10)
 	var w xw
 	w.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n" + `<repomd xmlns="http://linux.duke.edu/metadata/repo" xmlns:rpm="http://linux.duke.edu/metadata/rpm">` + "\n  <revision>" + ts + "</revision>\n")
 	for _, d := range data {
 		w.WriteString(`  <data type="` + d.typ + `">` + "\n")
 		w.WriteString(`    <checksum type="sha256">` + d.sum + "</checksum>\n")
-		w.WriteString(`    <open-checksum type="sha256">` + d.openSum + "</open-checksum>\n")
+		if d.openSum != "" {
+			w.WriteString(`    <open-checksum type="sha256">` + d.openSum + "</open-checksum>\n")
+		}
 		w.WriteString(`    <location href="` + d.file() + `"/>` + "\n")
 		w.WriteString("    <timestamp>" + ts + "</timestamp>\n")
 		w.WriteString("    <size>" + strconv.FormatInt(d.size, 10) + "</size>\n")
-		w.WriteString("    <open-size>" + strconv.FormatInt(d.openSize, 10) + "</open-size>\n")
+		if d.openSum != "" {
+			w.WriteString("    <open-size>" + strconv.FormatInt(d.openSize, 10) + "</open-size>\n")
+		}
 		w.WriteString("  </data>\n")
+	}
+	for _, e := range extra {
+		w.WriteString(e)
 	}
 	w.WriteString("</repomd>\n")
 	return w.String()
@@ -296,7 +325,9 @@ func packagesOf(ctx context.Context, tx *meta.Tx, rp *repo.Repository, dir strin
 
 // rebuild writes dir's repodata from rp's rows, in the transaction that
 // changed them: the three sha256-named data files, repomd.xml, and the
-// previous data files removed. The hrefs are relative to dir.
+// previous data files removed; an uploaded comps.xml stays and is listed by
+// a copy under its sha256, so that repomd.xml and the file it names always
+// agree, in a proxy's cache too. The hrefs are relative to dir.
 func (h *Handler) rebuild(ctx context.Context, tx *meta.Tx, rp *repo.Repository, dir string) error {
 	pkgs, err := packagesOf(ctx, tx, rp, dir)
 	if err != nil {
@@ -323,6 +354,22 @@ func (h *Handler) rebuild(ctx context.Context, tx *meta.Tx, rp *repo.Repository,
 		if err := tx.PutAsset(ctx, h.Store.NewAsset(rp.Name, dir+d.file(), ctGzip, sums)); err != nil {
 			return err
 		}
+	}
+	for _, c := range compsFiles {
+		a, err := tx.GetAsset(ctx, rp.Name, dir+"repodata/"+c.name)
+		if errors.Is(err, meta.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		d := repoData{typ: c.typ, href: "repodata/" + a.BlobSHA256 + "-" + c.name, sum: a.BlobSHA256, size: a.Size}
+		keep[a.Path], keep[dir+d.href] = true, true
+		a.Path = dir + d.href
+		if err := tx.PutAsset(ctx, a); err != nil {
+			return err
+		}
+		data = append(data, d)
 	}
 	sums, err := h.Store.WriteBlob(rp.Name, strings.NewReader(Repomd(data, h.Now())), nil)
 	if err != nil {

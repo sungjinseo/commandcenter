@@ -17,12 +17,16 @@ import (
 // Content-Type's major type (text/* that sniffs as binary, image/* that is
 // a zip). A format package passes its upload body through StrictBody and
 // stores the reader it returns (raw, maven). npm, PyPI, NuGet and Helm parse
-// every upload as a package whatever the setting, so they need no hook.
+// every upload as a package whatever the setting, so they need no hook. A
+// proxy with the setting checks what it fetches against the path alone
+// (proxy.Fetcher): remotes declare types too loosely to hold them to it.
+
+const zipMagic = "PK\x03\x04"
 
 // magic is what an extension's content must start with.
 var magic = map[string][]byte{
-	".jar": []byte("PK\x03\x04"), ".war": []byte("PK\x03\x04"), ".ear": []byte("PK\x03\x04"), ".zip": []byte("PK\x03\x04"),
-	".whl": []byte("PK\x03\x04"), ".egg": []byte("PK\x03\x04"), ".nupkg": []byte("PK\x03\x04"),
+	".jar": []byte(zipMagic), ".war": []byte(zipMagic), ".ear": []byte(zipMagic), ".zip": []byte(zipMagic),
+	".whl": []byte(zipMagic), ".egg": []byte(zipMagic), ".nupkg": []byte(zipMagic),
 	".tgz": {0x1f, 0x8b}, ".gz": {0x1f, 0x8b}, ".crate": {0x1f, 0x8b},
 	".rpm": {0xed, 0xab, 0xee, 0xdb}, ".deb": []byte("!<arch>\n"),
 	".pom": []byte("<"), ".xml": []byte("<"),
@@ -55,7 +59,8 @@ func CheckContent(p, declared string, body io.Reader) (io.Reader, error) {
 		if string(want) == "<" { // XML may start with a byte order mark and blank lines
 			head = bytes.TrimLeft(head, " \t\r\n\xef\xbb\xbf")
 		}
-		if !bytes.HasPrefix(head, want) {
+		// An archive without entries is its end record alone, and valid.
+		if !bytes.HasPrefix(head, want) && !(string(want) == zipMagic && bytes.HasPrefix(head, []byte("PK\x05\x06"))) {
 			return nil, errContentType(p, "not a valid "+strings.TrimPrefix(ext, ".")+" file")
 		}
 		return br, nil

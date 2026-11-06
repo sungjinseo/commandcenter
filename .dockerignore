@@ -6,3 +6,5 @@ test/smoke/.work
 config.yaml
 test/smoke/project/target
 commandcenter
+test
+**/*_test.go

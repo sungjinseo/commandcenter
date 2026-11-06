@@ -1,6 +1,9 @@
 package component
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDeriveMaven(t *testing.T) {
 	tests := []struct {
@@ -142,8 +145,13 @@ func TestDeriveAsset(t *testing.T) {
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.bz2", "", "demo-pkg", "1.2.0", true},
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0-py3-none-any.whl.metadata", "", "demo-pkg", "1.2.0", true},
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.gz.metadata", "", "demo-pkg", "1.2.0", true},
+		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.gz.asc", "", "demo-pkg", "1.2.0", true}, // the signature goes with its file
+		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.gz.metadata.asc", "", "", "", false},
 		{"pypi", "packages/demo-pkg/.metadata", "", "", "", false},
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.txt", "", "", "", false},
+		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tgz", "", "demo-pkg", "1.2.0", true}, // old files a proxy serves
+		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.xz", "", "demo-pkg", "1.2.0", true},
+		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.win32.exe", "", "demo-pkg", "1.2.0.win32", true},
 		{"pypi", "packages/demo-pkg/demo_pkg-1.2.0.tar.gz.sha256", "", "", "", false},
 		{"pypi", "simple/demo-pkg/", "", "", "", false},
 		{"pypi", "packages/demo-pkg", "", "", "", false},
@@ -152,8 +160,12 @@ func TestDeriveAsset(t *testing.T) {
 		{"cargo", "index/se/rd/serde", "", "", "", false},
 		{"helm", "demo-1.0.0.tgz", "", "demo", "1.0.0", true},
 		{"helm", "ingress-nginx-4.10.0-rc.1.tgz", "", "ingress-nginx", "4.10.0-rc.1", true}, // "-" in the name and the prerelease
-		{"helm", "demo-1.0.0_build.2.tgz", "", "demo", "1.0.0+build.2", true},               // helm package writes "+" as "_"
-		{"helm", "demo-1.0.tgz", "", "", "", false},                                         // not SemVer 2
+		{"helm", "demo-1.0.0_build.2.tgz", "", "demo", "1.0.0+build.2", true},               // "+" may be written "_"
+		{"helm", "demo-1.0.tgz", "", "demo", "1.0", true},                                   // not SemVer 2, but a version helm reads
+		{"helm", "cert-manager-v1.13.2.tgz", "", "cert-manager", "v1.13.2", true},
+		{"helm", "demo-1.0.0.tgz.prov", "", "demo", "1.0.0", true}, // the provenance file goes with its chart
+		{"helm", "demo-latest.tgz", "", "", "", false},
+		{"helm", "demo-1.0.0.prov", "", "", "", false},
 		{"helm", "index.yaml", "", "", "", false},
 		{"helm", "upstream/index.yaml", "", "", "", false},
 		{"helm", "a/demo-1.0.0.tgz", "", "", "", false},
@@ -199,7 +211,11 @@ func TestDeriveAsset(t *testing.T) {
 		{"conda", "noarch/foo--0.conda", "", "", "", false}, // no version
 		{"conda", "foo-1.0-0.conda", "", "", "", false},     // no subdir
 		{"conda", "Noarch/foo-1.0-0.conda", "", "", "", false},
-		{"conda", "noarch/a/foo-1.0-0.conda", "", "", "", false},
+		{"conda", "main/linux-64/foo-1.0-0.conda", "linux-64", "foo", "1.0-0", true},               // a channel below the root: the channel stays in the path only
+		{"conda", "conda-forge/label/rc/noarch/foo-1.0-0.tar.bz2", "noarch", "foo", "1.0-0", true}, // several segments
+		{"conda", "main/Noarch/foo-1.0-0.conda", "", "", "", false},
+		{"conda", "main/linux-64/repodata.json", "", "", "", false},
+		{"conda", "main/noarch/index.html", "", "", "", false},
 		{"conda", "noarch/repodata.json", "", "", "", false}, // metadata
 		{"conda", "channeldata.json", "", "", "", false},
 		{"r", "src/contrib/foo_1.0.0.tar.gz", "src/contrib", "foo", "1.0.0", true}, // the contrib directory is the group
@@ -337,6 +353,46 @@ func TestMavenBaseVersionAndParts(t *testing.T) {
 		cl, ext, ok := MavenFileParts(tc.file, "app", tc.version)
 		if cl != tc.cl || ext != tc.ext || ok != (tc.ext != "") {
 			t.Errorf("MavenFileParts(%q, %q) = %q %q %v, want %q %q", tc.file, tc.version, cl, ext, ok, tc.cl, tc.ext)
+		}
+	}
+}
+
+// The chart versions the helm client takes and refuses: what `helm package`
+// of helm 3.22.1 and 4.3.1 did with each (wave 7, test/smoke/helm-smoke.sh
+// repeats a few).
+func TestHelmVersion(t *testing.T) {
+	for _, v := range []string{"1.2.3", "v1.2.3", "1.2", "1", "v1", "v1.2", "1.2.3-rc.1", "1.2.3+build.5", "v1.2.3-rc.1+b.7",
+		"01.2.3", "1.02.3", "0.46.00", "v01", "1.2-beta", "1.2+b", "1.2.3--", "1.2.3-rc.1-", "1.2.3-0", "1.2.3-0a", "1.2.3+001",
+		"18446744073709551615.0.0"} {
+		if !HelmVersion(v) {
+			t.Errorf("HelmVersion(%q) = false, helm packages it", v)
+		}
+	}
+	for _, v := range []string{"", "1.2.3.4", "latest", "1.2.3-", "=1.2.3", "1.2.3-01", "1.2.3-00", "V1.2.3", "1.2.3-rc_1", "1.2.3 ", " 1.2.3", "v", "1..2",
+		"1.2.3+", "1.2.3-alpha+", "1.2.3-a..b", "1.2.3-é", "18446744073709551616.0.0"} {
+		if HelmVersion(v) {
+			t.Errorf("HelmVersion(%q) = true, helm refuses it", v)
+		}
+	}
+	if HelmVersion("1." + strings.Repeat("0", 300)) {
+		t.Error("a version over 256 bytes")
+	}
+}
+
+// A strict SemVer split wins over a looser one, so the file names that
+// split before the looser versions were accepted split as they did.
+func TestSplitHelmStrictFirst(t *testing.T) {
+	for file, want := range map[string][2]string{
+		"app-1.0.0-42.tgz":                     {"app", "1.0.0-42"}, // not ("app-1.0.0", "42")
+		"api-v2-1.2.3.tgz":                     {"api-v2", "1.2.3"}, // not ("api", "v2-1.2.3")
+		"k8s-1-28-upgrade-0.1.tgz":             {"k8s-1-28-upgrade", "0.1"},
+		"cert-manager-v1.16.0-alpha.0.tgz":     {"cert-manager", "v1.16.0-alpha.0"},
+		"argo-workflows-0.46.00.tgz":           {"argo-workflows", "0.46.00"},
+		"crd.projectcalico.org.v1-v3.32.0.tgz": {"crd.projectcalico.org.v1", "v3.32.0"},
+		"demo-1.2_b.tgz":                       {"demo", "1.2+b"},
+	} {
+		if name, version, ok := SplitHelm(file); !ok || name != want[0] || version != want[1] {
+			t.Errorf("SplitHelm(%q) = %q %q %v, want %q %q", file, name, version, ok, want[0], want[1])
 		}
 	}
 }

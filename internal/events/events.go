@@ -52,6 +52,11 @@ type Recorder struct {
 	pruneEvery int
 	Now        func() time.Time // test hook; read only before the first Emit
 	Node       string           // this process's node id, recorded with each event; set before the first Emit
+	// Audit, if set, gets one log record per event, "audit": true among its
+	// attributes, from the caller as a request's log line is, whether or not
+	// the event reaches the table: a log shipper keeps what the table's window
+	// drops. Set before the first Emit.
+	Audit *slog.Logger
 
 	mu     sync.RWMutex // guards closed and sends on ch
 	closed bool
@@ -93,6 +98,10 @@ func (r *Recorder) EmitCtx(ctx context.Context, kind, actor, repo, subject, deta
 func (r *Recorder) emit(ip, kind, actor, repo, subject, detail string) {
 	e := meta.Event{At: r.Now(), Kind: clip(kind, maxField), Actor: clip(actor, maxField), Repo: clip(repo, maxField),
 		Subject: clip(subject, maxSubject), Detail: clip(detail, maxDetail), IP: clip(ip, maxField), Node: r.Node}
+	if r.Audit != nil {
+		r.Audit.Info("audit", "audit", true, "kind", e.Kind, "actor", e.Actor, "repo", e.Repo,
+			"subject", logsafe.URLs(e.Subject), "detail", logsafe.URLs(e.Detail), "ip", e.IP, "node", e.Node)
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.closed {

@@ -212,7 +212,8 @@ func (s *Server) repository(w http.ResponseWriter, r *http.Request) {
 	}
 	// A proxy's routing rule refuses the path before anything is served,
 	// cached or not (a group member's rule makes the member skip the path).
-	if rp.Type == "proxy" && !s.Registry.RouteAllowed(rp, path) {
+	// A path the format never asks a remote for is not the rule's to decide.
+	if rf, ok := h.(repo.RouteFilter); rp.Type == "proxy" && (!ok || rf.Routed(path)) && !s.Registry.RouteAllowed(rp, path) {
 		err := repo.Errorf(http.StatusForbidden, "path %q is blocked by routing rule %q", "/"+path, rp.RoutingRule)
 		if ew, ok := h.(repo.ErrorWriter); ok {
 			ew.WriteError(w, r, err)

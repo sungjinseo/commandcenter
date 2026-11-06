@@ -27,10 +27,11 @@ import (
 
 // Handler serves Conan remotes. Reads need Read, an upload (PUT of a file,
 // POST of v1 upload_urls) Add, a delete Delete; overwriting a file under
-// writePolicy allow needs Edit, checked here. v1/ping and the v1/users
-// endpoints are public (Access): v1/users/authenticate turns the server's
-// Basic principal into a signed token the client sends back as Bearer,
-// which auth.Authenticator accepts through VerifyToken.
+// writePolicy allow needs Edit, checked here. The ping and users endpoints
+// are public (Access), under v1/ and under v2/ (Conan 2 pings v1 and logs
+// in at v2): users/authenticate turns the server's Basic principal into a
+// signed token the client sends back as Bearer, which auth.Authenticator
+// accepts through VerifyToken.
 type Handler struct {
 	Store   *repo.Store
 	Fetcher *proxy.Fetcher // of proxies: NewFetcher, whose client logs in to the remote
@@ -60,7 +61,8 @@ type doc struct {
 // public, the rest follows the server's default rule.
 func (h *Handler) Access(r *http.Request, rp *repo.Repository, path string) auth.Access {
 	switch path {
-	case "v1/ping", "v1/users/authenticate", "v1/users/check_credentials":
+	case "v1/ping", "v1/users/authenticate", "v1/users/check_credentials",
+		"v2/ping", "v2/users/authenticate", "v2/users/check_credentials":
 		return auth.Public
 	}
 	switch r.Method {

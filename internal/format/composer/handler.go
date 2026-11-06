@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,15 +36,32 @@ func New(store *repo.Store, fetcher *proxy.Fetcher, authn *auth.Authenticator, b
 }
 
 // doc is a derived JSON document and, for a proxy, the cached upstream
-// asset it came from (its staleness and modification time).
+// asset it came from (its staleness and modification time). Package metadata
+// has write instead of body: it is written a version at a time.
 type doc struct {
-	body []byte
-	res  proxy.Result
+	body  []byte
+	res   proxy.Result
+	write func(io.Writer) error
 }
 
 // entry is one version of a package as Composer's metadata lists it: the
 // composer.json fields plus version_normalized, dist and time.
 type entry = map[string]any
+
+// Access implements repo.AccessDecider: a POST of names to the advisories API
+// is a read; the rest follows the server's default rule.
+func (h *Handler) Access(r *http.Request, rp *repo.Repository, path string) auth.Access {
+	if rt, err := ParseRoute(path); err == nil && rt.Kind == KindAdvisories {
+		return auth.Read
+	}
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		return auth.Read
+	case http.MethodDelete:
+		return auth.Delete
+	}
+	return auth.Add
+}
 
 func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, path string) {
 	rt, err := ParseRoute(path)
@@ -55,6 +74,9 @@ func (h *Handler) Serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 }
 
 func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Repository, rt Route) error {
+	if rt.Kind == KindAdvisories {
+		return h.advisories(w, r, rp)
+	}
 	if rt.Kind == KindUpload {
 		allow := "PUT, DELETE"
 		if !repo.AcceptsWrites(rp) {
@@ -100,7 +122,10 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		return err
 	}
 	proxy.SetStaleHeader(w, d.res)
-	repo.ServeText(w, r, string(d.body), ctJSON, d.res.Asset.LastModified)
+	if d.write != nil {
+		return repo.ServeStream(w, r, ctJSON, d.res.Asset.LastModified, d.write)
+	}
+	repo.ServeBytes(w, r, d.body, ctJSON, d.res.Asset.LastModified)
 	return nil
 }
 
@@ -115,8 +140,7 @@ func (h *Handler) repoURL(rp *repo.Repository) string {
 }
 
 // rootDoc is the packages.json of a repository served at base: metadata
-// per package under p2/ and search. The versions are sent expanded, so the
-// root carries no "minified" key.
+// per package under p2/ and search. "minified" is said per metadata file.
 func rootDoc(base string) map[string]any {
 	return map[string]any{
 		"packages":     map[string]any{},
@@ -127,7 +151,9 @@ func rootDoc(base string) map[string]any {
 
 // root is packages.json. A hosted repository lists its packages as
 // available-packages, so Composer asks it only for those; a group cannot
-// enumerate its proxies and lists none.
+// enumerate its proxies and lists none. A group with a proxy offers the
+// advisories API without asking the proxy's upstream, so its packages.json goes
+// on working when that is down: the API then fails, where a client should see it.
 func (h *Handler) root(ctx context.Context, rp *repo.Repository) (doc, error) {
 	switch rp.Type {
 	case "hosted":
@@ -145,7 +171,12 @@ func (h *Handler) root(ctx context.Context, rp *repo.Repository) (doc, error) {
 	case "proxy":
 		return h.proxyRoot(ctx, rp)
 	case "group":
-		body, err := json.Marshal(rootDoc(h.repoURL(rp)))
+		base := h.repoURL(rp)
+		out := rootDoc(base)
+		if online, offline := proxyMembers(rp); online+offline > 0 {
+			out["security-advisories"] = advisoryConfig(base)
+		}
+		body, err := json.Marshal(out)
 		return doc{body: body}, err
 	}
 	return doc{}, fmt.Errorf("unknown repository type %q", rp.Type)
@@ -156,35 +187,15 @@ func (h *Handler) root(ctx context.Context, rp *repo.Repository) (doc, error) {
 func (h *Handler) metadata(ctx context.Context, serving, rp *repo.Repository, rt Route) (doc, error) {
 	switch rp.Type {
 	case "hosted":
-		rows, err := h.rows(ctx, rp, rt.Name)
+		versions, err := h.Store.DB.ListPackageVersions(ctx, rp.Name, rt.Name)
 		if err != nil {
 			return doc{}, err
 		}
-		if len(rows) == 0 {
+		if len(versions) == 0 {
 			return doc{}, repo.ErrNotFound
 		}
 		base := h.repoURL(serving)
-		entries := []entry{}
-		for _, r := range rows {
-			if IsDev(r.version) != rt.Dev {
-				continue
-			}
-			e := entry{}
-			for k, v := range r.entry {
-				e[k] = v
-			}
-			dist := entry{}
-			if d, ok := r.entry["dist"].(map[string]any); ok {
-				for k, v := range d {
-					dist[k] = v
-				}
-			}
-			dist["type"], dist["url"] = "zip", base+"/"+distPath(rt.Name, r.version)
-			e["dist"] = dist
-			entries = append(entries, e)
-		}
-		body, err := json.Marshal(map[string]any{"packages": map[string]any{rt.Name: entries}})
-		return doc{body: body}, err
+		return doc{write: func(w io.Writer) error { return h.writeHostedMetadata(ctx, w, rp, rt, versions, base) }}, nil
 	case "proxy":
 		return h.proxyMetadata(ctx, serving, rp, rt)
 	case "group":
@@ -279,7 +290,7 @@ const maxSearchResults = 100
 
 // hostedSearch lists the packages of hosted rp whose name or description
 // (of the newest version) contains q, of type typ when given.
-// ponytail: reads every package's rows; a search index if repositories
+// ponytail: reads every package's newest row; a search index if repositories
 // grow past a few thousand packages.
 func (h *Handler) hostedSearch(ctx context.Context, rp *repo.Repository, q, typ string) ([]entry, error) {
 	names, err := h.Store.DB.ListPackageNames(ctx, rp.Name)
@@ -289,14 +300,22 @@ func (h *Handler) hostedSearch(ctx context.Context, rp *repo.Repository, q, typ 
 	q = strings.ToLower(strings.TrimSpace(q))
 	var results []entry
 	for _, name := range names {
-		rows, err := h.rows(ctx, rp, name)
+		versions, err := h.Store.DB.ListPackageVersions(ctx, rp.Name, name)
 		if err != nil {
 			return nil, err
 		}
-		if len(rows) == 0 {
+		if len(versions) == 0 {
 			continue
 		}
-		e := rows[0].entry
+		newest := slices.MaxFunc(versions, func(a, b meta.Package) int { return strings.Compare(a.Version, b.Version) })
+		p, err := h.Store.DB.GetPackage(ctx, rp.Name, name, newest.Version)
+		if errors.Is(err, meta.ErrNotFound) { // deleted since the list
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		e := rowEntry(p)
 		desc, _ := e["description"].(string)
 		ptype, _ := e["type"].(string)
 		if ptype == "" {
@@ -337,11 +356,10 @@ func (h *Handler) has(ctx context.Context, rp *repo.Repository, name string) (bo
 	var err error
 	switch rp.Type {
 	case "hosted":
-		var pkgs []meta.Package
-		pkgs, err = h.Store.DB.ListPackages(ctx, rp.Name, name)
-		return len(pkgs) > 0, err
+		st, err := h.Store.DB.PackageStamp(ctx, rp.Name, name)
+		return st.Count > 0, err
 	case "proxy":
-		_, _, err = h.proxyDoc(ctx, rp, name, false)
+		_, err = h.metadataFile(ctx, rp, name, false)
 	case "group":
 		_, err = h.owner(ctx, rp, name)
 	default:

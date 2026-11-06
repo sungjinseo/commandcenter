@@ -2,6 +2,8 @@ package p2
 
 import (
 	"archive/zip"
+	"cmp"
+	"encoding/xml"
 	"io"
 	"strings"
 )
@@ -33,6 +35,77 @@ func ReadManifest(r io.ReaderAt, size int64) map[string]string {
 		return parseManifest(string(b))
 	}
 	return nil
+}
+
+// PluginName is the name of the cached bundle r for people, what a
+// p2.pluginName search matches: a plugin's Bundle-Name or a feature's label,
+// with a %key value looked up in the jar's properties file; "" when it has
+// none.
+func PluginName(r io.ReaderAt, size int64) string {
+	zr, err := zip.NewReader(r, size)
+	if err != nil {
+		return ""
+	}
+	var name, props string
+	if b := readEntry(zr, "feature.xml"); b != nil {
+		var f struct {
+			Label string `xml:"label,attr"`
+		}
+		if xml.Unmarshal(b, &f) != nil {
+			return ""
+		}
+		name, props = f.Label, "feature.properties"
+	} else {
+		mf := parseManifest(string(readEntry(zr, "META-INF/MANIFEST.MF")))
+		name, props = mf["Bundle-Name"], cmp.Or(mf["Bundle-Localization"], "OSGI-INF/l10n/bundle")+".properties"
+	}
+	if key, ok := strings.CutPrefix(name, "%"); ok {
+		if v, ok := parseProperties(string(readEntry(zr, props)))[key]; ok {
+			return v
+		}
+	}
+	return name
+}
+
+// readEntry returns the file name of the jar, nil when it has none.
+func readEntry(zr *zip.Reader, name string) []byte {
+	f, err := zr.Open(name)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxManifest))
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// parseProperties reads a Java properties file. ponytail: key = value lines
+// and continuations, no \\uXXXX escapes; bundle names rarely hold any.
+func parseProperties(s string) map[string]string {
+	out := map[string]string{}
+	key, more := "", false
+	for _, line := range strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		cont := strings.HasSuffix(line, "\\")
+		line = strings.TrimSuffix(line, "\\")
+		switch {
+		case more:
+			out[key] += line
+		case line == "" || line[0] == '#' || line[0] == '!':
+			continue
+		default:
+			i := strings.IndexAny(line, "=:")
+			if i < 0 {
+				continue
+			}
+			key = strings.TrimSpace(line[:i])
+			out[key] = strings.TrimSpace(line[i+1:])
+		}
+		more = cont
+	}
+	return out
 }
 
 func parseManifest(s string) map[string]string {

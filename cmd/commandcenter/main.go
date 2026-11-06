@@ -125,7 +125,8 @@ func serve(args []string) error {
 	if os.Getenv("GOMEMLIMIT") == "" && cfg.MemoryLimitMiB > 0 {
 		debug.SetMemoryLimit(int64(cfg.MemoryLimitMiB) << 20)
 	}
-	a, err := app.New(cfg, log, app.WithLogRing(ring), app.WithLogLevel(level), app.AsServer())
+	audit := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	a, err := app.New(cfg, log, app.WithLogRing(ring), app.WithLogLevel(level), app.WithAuditLog(audit), app.AsServer())
 	if err != nil {
 		return err
 	}

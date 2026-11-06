@@ -23,6 +23,10 @@ type MergeFunc func(ctx context.Context, members []io.ReadSeeker, w io.Writer) e
 type Resolver struct {
 	Store   *repo.Store
 	Fetcher *proxy.Fetcher
+	// Proxy, if set, looks a target up in a proxy instead of Fetcher: for a
+	// format whose fetch depends on the member (npm: the remote's URL of a
+	// scoped name, the check of what it answers, a tarball's second place).
+	Proxy func(ctx context.Context, rp *repo.Repository, t proxy.Target, kind proxy.Kind) (proxy.Result, error)
 }
 
 func pathTarget(path string) proxy.Target { return proxy.Target{Key: path, Remote: path} }
@@ -45,6 +49,9 @@ func (r *Resolver) LookupTarget(ctx context.Context, rp *repo.Repository, t prox
 		a, err := r.Store.Get(ctx, rp.Name, t.Key)
 		return proxy.Result{Asset: a}, err
 	case "proxy":
+		if r.Proxy != nil {
+			return r.Proxy(ctx, rp, t, kind)
+		}
 		return r.Fetcher.FetchTarget(ctx, rp, t, kind)
 	case "group":
 		var firstErr error

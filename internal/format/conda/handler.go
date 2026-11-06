@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -91,9 +92,10 @@ func isPackage(p string) bool {
 
 // doc classifies the documents a hosted channel generates and a group
 // merges: "repodata" for <subdir>/repodata.json and current_repodata.json,
-// "channeldata" for channeldata.json, "variant" for the compressed or
-// patch forms of repodata (.bz2, .zst, .jlap) a hosted channel does not
-// make, and "" for anything else.
+// "channeldata" for channeldata.json, "variant" for every other form of
+// repodata a hosted channel does not make (.bz2, .zst, .jlap, the
+// repodata_shards.msgpack.zst micromamba asks for first), and "" for
+// anything else.
 func doc(p string) (kind, subdir string) {
 	if p == "channeldata.json" {
 		return "channeldata", ""
@@ -102,10 +104,10 @@ func doc(p string) (kind, subdir string) {
 	if !ok || strings.Contains(file, "/") || !condaSubdir(subdir) {
 		return "", ""
 	}
-	switch file {
-	case "repodata.json", "current_repodata.json":
+	switch {
+	case file == "repodata.json" || file == "current_repodata.json":
 		return "repodata", subdir
-	case "repodata.json.bz2", "repodata.json.zst", "current_repodata.json.bz2", "current_repodata.json.zst", "repodata.jlap":
+	case strings.HasPrefix(file, "repodata") || strings.HasPrefix(file, "current_repodata"):
 		return "variant", subdir
 	}
 	return "", ""
@@ -119,19 +121,26 @@ func condaSubdir(s string) bool {
 // get serves a file of rp. Packages are content, everything else (the
 // repodata and its variants, channeldata) metadata, re-checked by a proxy
 // every metadataMaxAge. A group merges the members' repodata.json and
-// channeldata.json (cached until a member's document changes) and has no
-// compressed repodata, so clients fall back to the merged repodata.json.
+// channeldata.json (cached until a member's document changes) and answers
+// no other form of repodata, which one member alone would answer without
+// the others' packages, so clients fall back to the merged repodata.json.
 // A hosted channel or group without a document yet answers an empty one
 // (conda takes a missing subdir of a channel as an error, not as empty).
+// A remote's HTML answer is a miss, except the index.html pages a channel
+// has for people to read.
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, rp *repo.Repository, p string) error {
 	ctx := r.Context()
 	kind, subdir := doc(p)
-	t := proxy.Target{Key: p, Remote: p, NotHTML: true}
+	t := proxy.Target{Key: p, Remote: p, NotHTML: path.Base(p) != "index.html"}
 	var res proxy.Result
 	var err error
 	switch {
 	case rp.Type == "group" && kind == "repodata":
-		res.Asset, err = h.Resolver.MergedTarget(ctx, rp, t, ctJSON, mergeRepodata(subdir))
+		if rp.MergeMembers {
+			res.Asset, err = h.Resolver.MergedTarget(ctx, rp, t, ctJSON, mergeRepodata(subdir))
+		} else {
+			res.Asset, err = h.firstRepodata(ctx, rp, p, subdir)
+		}
 	case rp.Type == "group" && kind == "channeldata":
 		res.Asset, err = h.Resolver.MergedTarget(ctx, rp, t, ctJSON, mergeChanneldata)
 	case rp.Type == "group" && kind == "variant":

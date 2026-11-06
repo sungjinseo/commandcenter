@@ -65,7 +65,7 @@ const (
 )
 
 var purgeFields = []ParamSpec{
-	{Name: "repository", Type: "repository", Required: true, Help: `a Maven hosted or proxy repository, a group (its members) or "*" (every one); not RELEASE`},
+	{Name: "repository", Type: "repository", Required: true, Help: `a Maven hosted or proxy repository, a group (its members), "*" (every one) or several names with commas; not RELEASE`},
 	{Name: "scope", Type: "string", Default: ScopeBuild, Help: `"build": the builds within each SNAPSHOT version (Nexus); "version": whole SNAPSHOT versions per GA, one hosted repository`},
 	{Name: "minimumRetained", Type: "int", Default: DefaultMinimumRetained, Help: "newest builds kept per SNAPSHOT version (scope version: versions per GA); -1: remove none by age"},
 	{Name: "snapshotRetentionDays", Type: "int", Default: DefaultSnapshotDays, Help: "remove older ones than this; 0: any age"},
@@ -76,7 +76,7 @@ var purgeFields = []ParamSpec{
 }
 
 var mavenPurgeUnusedFields = []ParamSpec{
-	{Name: "repository", Type: "repository", Required: true, Help: `a Maven hosted repository, a group (its hosted members) or "*"; not RELEASE`},
+	{Name: "repository", Type: "repository", Required: true, Help: `a Maven hosted repository, a group (its hosted members), "*" or several names with commas; not RELEASE`},
 	{Name: "lastUsed", Type: "int", Default: 1, Help: "remove SNAPSHOT builds not downloaded (never downloaded: not stored) for this many days, at least 1"},
 	{Name: "preview", Type: "bool", Default: false, Help: "only log what would be removed"},
 }
@@ -96,7 +96,7 @@ func purgeParamsOf(s *Service, raw json.RawMessage, check bool) (string, []strin
 	if err := decodeParams(raw, &in); err != nil {
 		return "", []string{err.Error()}
 	}
-	p := purgeParams{Repository: in.Repository, Scope: in.Scope, MinimumRetained: DefaultMinimumRetained, SnapshotRetentionDays: DefaultSnapshotDays,
+	p := purgeParams{Repository: strings.Join(purgeNames(in.Repository), ","), Scope: in.Scope, MinimumRetained: DefaultMinimumRetained, SnapshotRetentionDays: DefaultSnapshotDays,
 		LastDownloadedDays: in.LastDownloadedDays, RemoveIfReleased: in.RemoveIfReleased, GracePeriodDays: in.GracePeriodDays, Preview: in.Preview}
 	if p.Scope == "" {
 		p.Scope = ScopeBuild
@@ -158,7 +158,7 @@ func mavenPurgeUnusedParamsOf(s *Service, raw json.RawMessage, check bool) (stri
 	if err := decodeParams(raw, &in); err != nil {
 		return "", []string{err.Error()}
 	}
-	u := unusedParams{Repository: in.Repository, LastUsed: 1, Preview: in.Preview}
+	u := unusedParams{Repository: strings.Join(purgeNames(in.Repository), ","), LastUsed: 1, Preview: in.Preview}
 	if in.LastUsed != nil {
 		u.LastUsed = *in.LastUsed
 	}
@@ -193,8 +193,37 @@ func keepScope(params json.RawMessage, stored string) json.RawMessage {
 	return b
 }
 
-// checkPurgeRepo checks the repository a purge names.
+// purgeNames splits a purge's repository on commas, as Nexus's task does.
+func purgeNames(repository string) []string {
+	var names []string
+	for _, n := range strings.Split(repository, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
+// checkPurgeRepo checks the repository a purge names. In a list of several,
+// each must be a Maven repository; what the run skips in a group or in "*"
+// (RELEASE, read-only, a proxy for the unused task) it skips there too.
 func (s *Service) checkPurgeRepo(p purgeParams, check bool) []string {
+	if names := purgeNames(p.Repository); len(names) > 1 && check {
+		var errs []string
+		for _, n := range names {
+			rp := s.Repos.Get(n)
+			switch {
+			case p.Scope == ScopeVersion:
+				return []string{"scope version takes one Maven hosted repository"}
+			case n == "*":
+			case rp == nil:
+				errs = append(errs, fmt.Sprintf("repository %q does not exist", n))
+			case rp.Format != "maven":
+				errs = append(errs, fmt.Sprintf("repository %q is %s %s: the task takes Maven repositories", n, rp.Format, rp.Type))
+			}
+		}
+		return errs
+	}
 	rp := s.Repos.Get(p.Repository)
 	switch {
 	case p.Repository == "":
@@ -227,6 +256,31 @@ func unusedKinds(unused bool) string {
 // hosted (and, unless unused, proxy) ones that may hold snapshots.
 func (s *Service) purgeTargets(p purgeParams, log *RunLog) ([]*repo.Repository, error) {
 	var cands []*repo.Repository
+	names := purgeNames(p.Repository)
+	if len(names) > 1 {
+		seen := map[string]bool{}
+		for _, n := range names {
+			rp := s.Repos.Get(n)
+			var some []*repo.Repository
+			switch {
+			case n == "*":
+				some = s.Repos.Snapshot().Sorted
+			case rp == nil: // a list outlives one of its names, as "*" does
+				log.Warnf("%s: skipped: no such repository", n)
+			case rp.Type == "group":
+				some = leafMembers(rp)
+			default:
+				some = []*repo.Repository{rp}
+			}
+			for _, m := range some {
+				if !seen[m.Name] {
+					seen[m.Name] = true
+					cands = append(cands, m)
+				}
+			}
+		}
+		return purgeable(p, cands, log), nil
+	}
 	switch rp := s.Repos.Get(p.Repository); {
 	case p.Repository == "*":
 		cands = s.Repos.Snapshot().Sorted
@@ -243,6 +297,12 @@ func (s *Service) purgeTargets(p purgeParams, log *RunLog) ([]*repo.Repository, 
 	default:
 		cands = []*repo.Repository{rp}
 	}
+	return purgeable(p, cands, log), nil
+}
+
+// purgeable keeps the hosted (and, unless unused, proxy) Maven repositories
+// of cands that may hold snapshots.
+func purgeable(p purgeParams, cands []*repo.Repository, log *RunLog) []*repo.Repository {
 	var out []*repo.Repository
 	for _, rp := range cands {
 		switch {
@@ -255,7 +315,7 @@ func (s *Service) purgeTargets(p purgeParams, log *RunLog) ([]*repo.Repository, 
 			out = append(out, rp)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // leafMembers flattens nested groups into their non-group members, each once.

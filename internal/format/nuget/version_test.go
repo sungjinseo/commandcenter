@@ -77,8 +77,10 @@ func TestParseRoute(t *testing.T) {
 		{"index.json", Route{Kind: KindIndex}, true},
 		{"query", Route{Kind: KindSearch}, true},
 		{"api/v2/package", Route{Kind: KindPublish}, true},
+		{"api/v2/package/", Route{Kind: KindPublish}, true}, // as dotnet nuget push asks
 		{"api/v2/package/Demo.Pkg/1.0.0.0", Route{Kind: KindPublish, ID: "demo.pkg", Version: "1.0.0"}, true},
 		{"api/v2/symbolpackage", Route{Kind: KindSymbols}, true},
+		{"api/v2/symbolpackage/", Route{Kind: KindSymbols}, true},
 		{"v3-flatcontainer/Demo.Pkg/index.json", Route{Kind: KindFlatIndex, ID: "demo.pkg"}, true},
 		{"v3-flatcontainer/demo.pkg/1.0.0-Beta/demo.pkg.1.0.0-beta.nupkg", Route{Kind: KindFlatFile, ID: "demo.pkg", Version: "1.0.0-beta", File: "demo.pkg.1.0.0-beta.nupkg"}, true},
 		{"v3-flatcontainer/demo.pkg/1.0.0/demo.pkg.1.0.0.nuspec", Route{Kind: KindFlatFile, ID: "demo.pkg", Version: "1.0.0", File: "demo.pkg.1.0.0.nuspec"}, true},
@@ -91,6 +93,7 @@ func TestParseRoute(t *testing.T) {
 		{"registration/demo.pkg/../x.json", Route{}, false},
 		{"registration/demo.pkg/index.html", Route{}, false},
 		{"api/v2/package/demo/", Route{}, false},
+		{"api/v2/package//", Route{}, false},
 		{"", Route{}, false},
 		{"nuget/index.json", Route{}, false},
 	}

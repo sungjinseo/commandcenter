@@ -50,6 +50,134 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (terraform, tofu), `huggingface-smoke.sh` (huggingface_hub, transformers), `swift-smoke.sh` (SwiftPM).
 - Yum: a repodata depth up to 5 as in Nexus (`depth`, `yum.repodataDepth`), for layouts like
   `7/os/x86_64/`.
+- Real-client smoke tests for R, Conan and Conda: `test/smoke/r-smoke.sh` (R, remotes, renv, pak),
+  `test/smoke/conan-smoke.sh` (Conan 2 and Conan 1) and `test/smoke/conda-smoke.sh` (micromamba, conda).
+- R hosted repositories take a package in any directory at least two levels deep, as Nexus does, each with its own
+  index files: `src/contrib/Archive/<pkg>/`, `prod/src/contrib/`, a binary layout of your own. The file must still be
+  `<Package>_<Version>`; `.zip` goes under `bin/windows` and `.tgz` under `bin/macosx`.
+- `repository.rebuild-metadata` rebuilds the index files of R hosted repositories.
+- A conda proxy lets a channel's `index.html` pages through, as metadata.
+- S3 blob stores: `PUT /service/rest/v1/blobstores/s3/{name}` and `PUT /-/api/blobstores/{name}` with `s3` change the
+  credentials, endpoint, region, path style and connection pool: keys can be rotated. The bucket must list with the new
+  settings first, an empty secret keeps the stored one (a new endpoint needs it again), and every live node uses them
+  when the PUT answers. Bucket, prefix, encryption and failover buckets stay fixed.
+- Health checks under Nexus's names beside Command Center's: `Blob Stores Ready`, with a per-store probe (temp file and
+  free space, or the bucket lists; 2 s timeout, 30 s cache, on each node) that also feeds `unavailable` in the blob store
+  lists, `Blob Stores Quota` and `Available CPUs`, and `Scheduler`.
+- The leader checks soft quotas every minute without a client asking: a WARN line while a store is over, one event per flip.
+- `PUT /-/api/tasks/scheduler {"paused": true}` holds scheduled and queued runs on every node; an administrator's run
+  now still runs; `paused` is in `GET /-/api/tasks`.
+- One JSON line per activity event on stdout (`"audit":true`), independent of the log level, for a log shipper; the
+  events table keeps its windows.
+- Support bundle: `task-logs/` with the latest run logs, `?sections=` with Nexus's flag names, and
+  `POST /service/rest/v1/support/supportzip`. `GET /service/rest/v1/system/node`.
+- `app:tags` delegates creating, editing and deleting tags, tokens included (`nx-tags-*`), so that CI making a tag per
+  build needs no admin account. The web UI's role editor does not offer it yet.
+- E-mail: `subjectPrefix` (setting and use), `nexusTrustStoreEnabled` kept and honoured; `import-nexus -config` carries them
+  and `maxConnectionPoolSize`.
+- `POST /v1/blobstores/file` takes a relative path (under `<dataDir>/blobstores`), `maxConnectionPoolSize` on S3 stores,
+  a comma list in `repositoryName` of the Maven snapshot tasks, `nx-privileges-*` as the roles domain.
+- Real-client end-to-end tests for NuGet, RubyGems and Composer: `test/smoke/nuget-smoke.sh` (.NET SDK 10:
+  pack, push, restore, search, delete), `test/smoke/rubygems-smoke.sh` (RubyGems 4 and Bundler 4: push,
+  install, bundle, search, yank) and `test/smoke/composer-smoke.sh` (Composer 2.11: upload, require, update,
+  `auth.json`, audit), each against a hosted, a proxy and a group repository, with the client on a
+  network that has no route to the internet and 16 clients at once on the largest document.
+- PyPI: `twine upload --sign` keeps the signature. A `gpg_signature` part is stored at `<file>.asc`,
+  served at both path forms and through groups, marked on the file's link (`data-gpg-sig`, `gpg-sig`)
+  and in the JSON API (`has_sig`), and deleted with its file. A proxy fetches one its upstream marks.
+- PyPI: `pip search` of hosted repositories and groups (XML-RPC, `POST <repository>/pypi`): name and
+  summary, one hit per version. A proxy answers nothing.
+- PyPI: `mergeMembers: true` on a group merges the project pages of its members, as Nexus does; the
+  default stays the first member that has the project.
+- PyPI: `DELETE /repository/<hosted>/packages/<project>/<file>` deletes one file, with its core
+  metadata and signature; `<file>.asc` deletes the signature alone.
+- Helm: provenance files. `PUT <chart>.tgz.prov`, the `prov` field of `POST api/charts` and the
+  component upload store one beside its chart, so `helm pull --verify` works, also through a proxy,
+  which fetches `<chart URL>.prov`. It goes with its chart. The chart must be there, with the sha256
+  the file signs.
+- Helm: `DELETE <chart>.tgz` removes a version from a hosted repository (200, 404 when gone).
+- Nexus API: search parameters `pypi.classifiers`, `pypi.description`, `pypi.keywords`, `pypi.summary`;
+  a PyPI asset's `pypi` object has `name` and `version`.
+- npm: `npm search` (`GET /-/v1/search`) on hosted, proxy and group repositories. Hosted looks through name, description and
+  keywords of each package's `latest`, with Nexus's qualifiers; a proxy passes the request on, uncached; a group lists its
+  members' hits in order, each name once.
+- npm: `mergeMembers` on a group now merges: every member's versions, dist-tags and time, the first member winning, `latest` the
+  highest of the members', tarballs from the first member that has the file. The default stays the first member alone.
+- npm proxy: remotes that keep tarballs elsewhere (GitHub Packages, GitLab). A tarball not found at `<name>/-/<file>` is fetched
+  from the URL the package document names; the routing rule sees the request path. A URL ending in a hash is offered as
+  `<base>-<version>.tgz`, and the hash is still answered for lockfiles written through Nexus.
+- npm: documents have an `ETag` and answer `If-None-Match` and `If-Modified-Since` with 304, so a warm client cache does not
+  download them again.
+- npm: `DELETE <package>` and `DELETE <package>/-/<file>` without a revision, as Nexus takes them.
+- `repository.rebuild-metadata` regenerates npm package documents; Nexus's `repository.npm.reindex` creates that task.
+- Nexus API: tarball assets carry `npm: {name, version}` and `contentType: application/x-tgz`; search takes
+  `assets.attributes.npm.author`, `.description`, `.keywords` and `.license` (hosted repositories).
+- `test/smoke/npm-smoke.sh` runs yarn classic, yarn berry and pnpm through the group as well as npm, against the public registry
+  and a fake remote.
+- CocoaPods: a git source on github.com, bitbucket.org or gitlab.com is answered as a tarball through
+  the repository, so `pod install` works where clients cannot reach the git host.
+- p2: the REST search parameter `p2.pluginName` (a bundle's Bundle-Name or a feature's label).
+- Real-client smoke tests for CocoaPods (`test/smoke/cocoapods-smoke.sh`, CocoaPods 1.17 on Linux) and p2
+  (`test/smoke/p2-smoke.sh`, the Eclipse p2 director and Tycho on a closed network).
+- `test/compat/terraform.sh` runs the Terraform provider for Nexus (`datadrivers/nexus` 3.0.1) against
+  Command Center from the official OpenTofu image (or Terraform, `TF_IMAGE`): apply, an empty plan,
+  update, import and destroy of one resource of every kind, with S3 (SeaweedFS), Azure (Azurite) and
+  a real directory (OpenLDAP). 62 of the provider's 70 resources work; `nexus_script`,
+  `nexus_privilege_script`, `nexus_capability`, `nexus_iqserver`, `nexus_security_oidc` and the
+  `nexus_repository_bower_*` fail with the reason.
+- Nexus API: `GET/PUT/DELETE /v1/security/saml`, `GET /v1/security/ssl/truststore` and the LDAP server
+  list (`/v1/security/ldap`, `change-order`) over Command Center's one directory.
+- LDAP: `userOneLevel` (Nexus `userSubtree: false`) and `groupsAsRoles` (Nexus `ldapGroupsAsRoles`; a
+  group's name grants that role, never `admin`). Both off by default.
+- `strictContentTypeValidation` on a proxy: a remote file whose first bytes contradict its name is not
+  cached and answers 404.
+- Built-in privilege `nx-usertoken-current`.
+- Yum: `mergeMembers` on a group: `repodata/repomd.xml` describes the merged metadata of the members
+  that have it at that path, so that one `baseurl` shows and installs the packages of all of them,
+  a proxy's too, the first member keeping a package and a path. Without the setting nothing changes.
+  The merge streams (100,000 packages in a 128 MiB server: about 10 s, 45 MiB RSS), is made once across
+  the nodes and again when a member's `repomd.xml` changes. A member that fails or cannot be read
+  fails it: the previous merge with a `Warning`, or a 502, never a partial index.
+- Yum: package groups. `repodata/comps.xml` or `comps.xml.gz` is taken by PUT and listed in `repomd.xml`
+  for `dnf group list` and `dnf group install`; `DELETE` of that path or the asset API removes it.
+- Composer proxies and groups pass security advisories on: `packages.json` offers the repository's own
+  `api/security-advisories/`, which asks the upstream's API. `composer audit` reports advisories and
+  `audit.block-insecure` refuses those versions as against Packagist, from a client with no route out.
+  A name any hosted repository holds is never sent to an upstream. Nothing is cached, and an upstream
+  failure is an error for the client (502, 429), never an empty list.
+- NuGet proxies and groups serve `VulnerabilityInfo/6.7.0` (`vulnerabilities/index.json` and its pages,
+  cached for `metadataMaxAge`): `dotnet restore` warns NU1901 to NU1904 as against nuget.org, from a
+  client with no route out, and NU1900 when the upstream fails with nothing cached. A group serves
+  the first member that has the resource.
+- `test/smoke/composer-smoke.sh` and `test/smoke/nuget-smoke.sh` test advisories with the real clients
+  on real packages. The Composer script also checks, against an upstream that logs what it hears, that a
+  hosted name never reaches it and that a failing API is a failure.
+- LDAP static groups, as in Nexus: `groupType: static` reads a user's groups from the group entries that list
+  them (`groupOfNames`/`member`, `groupOfUniqueNames`/`uniqueMember`, `posixGroup`/`memberUid`), set with
+  `groupBaseDN`, `groupSubtree`, `groupObjectClass`, `groupIdAttr`, `groupMemberAttr` and `groupMemberFormat`
+  (`${username}`, `${dn}`). The search runs as the service account after the password bind and at every
+  re-check, and feeds `groupMappings` and `groupsAsRoles`. Dynamic groups stay the default and do not change.
+  If the search fails, the user signs in without roles from groups, with a WARN line and a failing `groups`
+  step in the LDAP test. `test/smoke/ldap-smoke.sh` proves it against OpenLDAP.
+- Web UI: a `mergeMembers` switch on npm, PyPI, R, Conda and yum group forms, off by default, with the
+  dependency-confusion warning; the group's page says whether it is on.
+- Web UI: the role editor offers the `tags` domain, and the tag screens follow its add, edit and delete
+  actions instead of asking for an administrator.
+- Web UI: the e-mail form has the subject prefix and, with TLS, the trust store switch.
+- Web UI: an S3 store's page has an "S3 connection" form for keys, endpoint, region, path style and
+  maximum connections; it shows the server's answer when the secret has to be entered again.
+- Web UI: "Pause scheduler" and "Resume scheduler" on the tasks screen, a banner while paused, and
+  "Stop" on a queued run, which drops it.
+- Web UI: the repository of the Maven snapshot tasks is a text field that takes several names with
+  commas, or `*`.
+- Web UI: check boxes on the support page choose the sections of the bundle.
+- Web UI: a repository administrator gets "Invalidate cache" on the proxies and groups they can open.
+- Web UI: a note beside a p2 proxy's remote says that changing it deletes the cache.
+- `test/smoke/purge-smoke.sh`: the purge with real npm, pip and go against the public registries.
+- Web UI: the LDAP form has the group type, the static group settings with a quick fill for `groupOfNames`,
+  `groupOfUniqueNames` and `posixGroup`, and the `userOneLevel` and `groupsAsRoles` check boxes.
+- Web UI: a proxy's form has the `strictContentTypeValidation` switch ("Do not cache remote files whose first
+  bytes contradict their name").
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -58,6 +186,109 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with script creation turned off and say why there is no script API (200 `[]`, 410, 404), instead of a bare
   404 `not found`; anonymous callers get 401. nexus3-cli's repository and file commands, which need that API,
   now fail with this message.
+- An R group lists a package name once per directory, from the first member that has it, with all the versions that
+  member lists. A newer public version no longer beats an internal package of the same name, in the source index or
+  in a binary one. A failing member is left out only when no later member answers.
+- Conan login tokens last a year instead of an hour, so CI that logged in once keeps working. A changed password ends
+  a local user's tokens; a disabled or deleted user is refused at once.
+- An R proxy treats only package archives as content; every other file is re-checked every `metadataMaxAge`.
+- A conda group lists a package name from the first member that has it, in any subdir, with all the
+  builds that member lists, so a newer public build no longer beats an internal package of the same
+  name. The key `mergeMembers` lists every member's builds again; it also lists every member's
+  versions in an R group. A failing member is left out only when no later member answers.
+- A cached proxy file whose remote now answers 404 or 410 is served, with `Warning: 110` and a WARN line, as in Nexus; it
+  was a 404. npm packuments and PyPI project pages too: a proxied internal registry's 404 no longer hands a
+  package to the next group member. Delete what must go.
+- `PUT /v1/security/realms/active`: a list that names no token realm leaves the `token` realm as it is, so Nexus's default
+  list no longer stops every API token. Turn it off with `PUT /-/api/realms`.
+- Task states in the Nexus API: `DISABLED` reads `WAITING`, a queued run `RUNNING`, a stopped run's result `CANCELED`; a
+  run of a disabled task is 405 there. A stop drops a queued run.
+- The metrics privilege opens `/service/rest/metrics/*` (threads too) and `/v1/status/check`.
+- `invalidate-cache` and `rebuild-index` take repository-admin edit, not admin.
+- A HEAD of a raw or Maven file a proxy does not hold asks the remote with a HEAD and stores nothing, when the remote
+  answers 200; otherwise it is the GET it was. Pull replication still fills the cache.
+- Timeouts, refused connections and unresolvable names are no longer retried (`http.retries`, `connection.retries`).
+- The SMTP test send works while e-mail is switched off.
+- RubyGems groups: the merged `versions` file is kept until a member's file changes instead of for a
+  minute, so a pushed or yanked version shows to Bundler through the group at once, on every node. Its
+  header is the first member's: Bundler gets a 304 while nothing changed and only the new lines when the
+  last member (the proxy) grew. It used to download the whole file (24 MiB with a rubygems.org proxy) on
+  every run.
+- RubyGems documents built per request (specs indexes, gemspecs, dependency API, hosted `info/`, group
+  `versions` and `names`) carry no `Last-Modified`.
+- Composer proxies serve package metadata minified as the upstream wrote it (Composer expands it), and
+  keep only inline packages and notices of the upstream's `packages.json`.
+- NuGet search: the `versions` of a hosted hit are spelled in lower case (`1.0.0-beta`), as they are stored;
+  the hit's own `version` keeps the spelling of the `.nuspec`.
+- PyPI: `writePolicy: allow` is honoured. Uploading a file the repository has, in any spelling,
+  replaces it, for a user with edit as well as add. `allow_once` (the default) still refuses it.
+- PyPI: the `/simple/` list of a proxy is its remote's (pypi.org: 48 MB, 930 000 projects, fetched
+  when the page is asked for, cached by `metadataMaxAge`, streamed) plus its cached projects, and a
+  group's its members'. Without a usable remote page it lists the cached projects as before.
+- Helm: hosted repositories take every chart version the helm client takes (`v1.2.3`, `1.2`,
+  `0.46.00`), not only strict SemVer 2. Such files in a proxy are components now: in search, in the
+  browser and in cleanup.
+- Nexus API: a PyPI file's generated `.metadata` is no asset of its component. A release of one wheel
+  is one asset, and `search/assets/download` finds it.
+- Nexus API: `DELETE /assets/{id}` deletes a hosted PyPI file or Helm chart (or provenance file)
+  through the format's handler instead of answering 400 for part of a larger component.
+- Routing rules on PyPI and Helm proxies see the request path, not the path of the file's upstream
+  URL, and refuse before the cache is read, through a group too.
+- npm honours `writePolicy`: `deny` refuses publish, dist-tag changes and deprecation with 400 (they were accepted), `allow` lets a
+  publish replace a version (it needs edit as well as add). `allow_once`, the default, is unchanged.
+- npm proxy: versions the remote no longer lists stay in the document while their tarball is cached, and a remote 404 or 410 for
+  a cached document or tarball answers the copy, as Nexus does. Delete the cached assets to forget them.
+- npm: a user keeps the 100 tokens from `npm login` used last; older ones are revoked at the next login. Tokens made by hand do
+  not count.
+- npm proxy: a changed `remote` makes the cached content stale at once, as Nexus does.
+- npm proxy: a scoped package's document is requested as `@scope%2fname`, as the npm client does.
+- npm: `_npmUser.name` of a published version is the authenticated user, and a hosted document repeats the description, license
+  and the like of `latest` at its top.
+- Nexus API: an npm package document is listed as path `/<package>` with that download URL (it was `/<package>/package.json`).
+- Cleanup: an npm version that is no SemVer and contains `-` is a prerelease, as Nexus reads it.
+- CocoaPods: podspecs are metadata, re-checked every `metadataMaxAge`; archives are cached at their
+  request path `pods/<Pod>/<version>/<file>`, and only a downloaded archive makes a component.
+- p2: `p2.mirrorsURL` is removed from `artifacts.xml`, `.jar` and `.xml.xz`, so clients fetch bundles
+  through the proxy; the rewritten document replaces the cached one.
+- p2: changing a proxy's `remote` deletes its cached files.
+- p2: a group's children are relative to the URL the client used (no `baseURL` needed), and its
+  documents carry the time the group or a member last changed as `Last-Modified`.
+- p2: the Nexus API reports `group: null` for components; `group=` searches keep working.
+- Nexus API, repositories: a PUT replaces as Nexus's does. A body without `cleanup` clears the policies,
+  and an `httpClient` without `authentication` clears the remote's credentials.
+- Nexus API: `docker.forceBasicAuth` is the repository's anonymous-read override, set and answered (it
+  was always answered `true` and did nothing).
+- Nexus API: an S3 `bucket.expiration` reads back as written; it changes nothing, as there is no bucket
+  lifecycle rule (it was dropped and answered -1).
+- `import-nexus -config` carries `strictContentTypeValidation` of proxies, a blob store group's soft
+  quota and `userSubtree: false`.
+- Yum: a PUT or component upload under a name other than the package's, as Nexus documents with
+  `.../yum-hosted/test.rpm`, is accepted (was 400). The package is stored in that directory under its
+  own name, which the 201's `Location` gives; a GET of the name uploaded to is a 404.
+- After an upgrade Composer and `dotnet restore` refuse or warn about versions they used to take
+  through a proxy or a group, as they do against Packagist and nuget.org. With `TreatWarningsAsErrors` a
+  build can fail. An allow-list routing rule must let `/api/security-advisories/` (Composer) and
+  `/vulnerabilities/` (NuGet) through, or the proxy goes on without warnings.
+- A Composer proxy's `packages.json` has no `Last-Modified`: clients would have kept a copy without the
+  advisories offer for as long as the upstream's file did not change.
+- npm audit: a request that is not JSON is a 400 here instead of going to the remote.
+- `/v1/security/ldap`: `groupType: static` with `ldapGroupsAsRoles` is accepted and acts, and reads back as
+  written; an incomplete set is a 400 with `ldapGroupsAsRoles` on and does nothing with it off. A complete set
+  with it off now feeds `groupMappings`. Any other `groupType` is a 400.
+- LDAP searches stop at 4 MiB of messages per search; the limit on messages now follows the size limit.
+- Web UI: client setup hints now show the upload command of Go, Cargo, npm and Helm repositories and
+  yum's `comps.xml`, Raw repositories have hints at all, and read credentials are shown for every host
+  with a note saying when they are needed, not only for hosts other than localhost.
+- `repository.purge-unused` also deletes a proxy's cached files without a component (package documents, indexes) that no
+  one read and the proxy did not check in the last `lastUsed` days, as Nexus does; the disk space comes back at the next
+  `blobstore.compact`. It keeps those of a blocked proxy, those of a proxy another group member follows where the format
+  answers from the first member that has a package, an npm document or PyPI project page while files of it are cached,
+  and a proxy's own records. A run deletes at most `maxComponents` such files.
+- A read of a proxy's cached document moves its last download time, at most hourly, without counting a download.
+- PyPI proxy: an answer that is no page of the project (a sign-in or error page with 200; also an empty HTML page) is a
+  502 and is not cached, a cached page keeps answering, and a group's next member no longer stands in. It was a 404.
+- `Fetcher.Request` honours a blocked remote and counts for auto-block: a blocked Terraform proxy no longer asks the
+  remote's module download endpoint and uses the answer it kept.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -91,6 +322,92 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Hugging Face: Xet tokens are no longer passed through and cached: any reader could get one made for
   the `remoteAuth` account.
 - Swift: SwiftPM on Linux no longer hangs without or with wrong credentials: it gets a Bearer challenge.
+- Conan 2 could not log in: `v2/users/authenticate`, `v2/users/check_credentials` and `v2/ping` answered 404.
+- `conan search <ref> -q` of Conan 1 with revisions failed: `v2/conans/<ref>/search` answered 404.
+- A conda group hid its hosted packages from micromamba and conda, which read sharded repodata first and got only a
+  proxy member's. A group now answers only its merged `repodata.json`.
+- Conda packages of a channel below a proxy's root (`<repo>/conda-forge/...`) were not components, so search, cleanup
+  and purge-unused skipped them and the cache only grew.
+- An R group left out a member whose remote has only `PACKAGES.gz`, such as a Nexus hosted repository.
+- R packages a proxy caches outside CRAN's directories were not components.
+- The repository PUT of the Nexus API told a caller without rights whether a repository exists.
+- `GET /v1/tasks?type=` missed alias ids and listed apt rebuilds under the Maven rebuild id.
+- `blobsOlderThan: ""` was refused. Sub-minute durations read as 0 in the Nexus API, which a read-then-write stored as
+  "always revalidate"; they now round up.
+- `GET /v1/repositories/{name}` ignored a grant on a group that contains the repository.
+- NuGet: `dotnet nuget push` got 404. The client sends its PUT to the push URL with a `/` appended
+  (`api/v2/package/`), which was not a known path.
+- A few concurrent clients with read access could kill a server in the default 128 MiB container: 2 on a
+  NuGet search with `take=1000`, 8 on a large Composer proxy metadata file (Packagist's
+  `aws/aws-sdk-php`), 64 on NuGet registration pages. These documents are now written as they are read.
+- A hosted NuGet, RubyGems or Composer package with many versions no longer takes every row into memory
+  per request: at 1500 versions 8 to 32 clients could kill a 128 MiB server, and now 64 stay under 90 MiB.
+- RubyGems: the first `gem install` or `bundle install` through a group with a rubygems.org proxy took
+  about 200 MiB to merge the `versions` files and killed a server in the default 128 MiB container, whatever
+  the member order. The members are read as streams and one merge is built at a time.
+- RubyGems hosted: `gem list -r` and `gem search` within a second of a push or yank got a 304 and showed the
+  index from before.
+- Composer proxy: `composer audit` failed on a closed network, because Packagist's `filter.summary-url` was
+  passed on to the client.
+- PyPI: an upload with more than 256 form fields was refused with 413. twine sends one per
+  `Requires-Dist`, `Provides-Extra` and classifier.
+- PyPI: an ALLOW routing rule that names projects refused every file not cached yet.
+- PyPI: a sign-in or error page answered with 200 by an upstream made the project exist in the proxy,
+  and the proxy its owner in a group.
+- PyPI: REST search found a project only by its normalized name; `my_pkg` and `my.pkg` find `my-pkg`.
+  Old file types a proxy serves (`.tgz`, `.exe`, ...) are components, so cleanup reaches them.
+- Helm: a cached chart was returned before any freshness check, so `contentMaxAge` and
+  invalidate-cache did nothing and a version published again kept its old bytes.
+- Helm: a chart newer than the proxy's cached index was 404 until `metadataMaxAge` passed. The remote
+  is asked for its index again, at most once a minute per node.
+- Helm: a second chart whose file name reads the same (`demo` `1.0.0-2.3.4`, `demo-1.0.0` `2.3.4`) took
+  over the first one's file; it is 409 now.
+- npm proxy: a sign-in or error page answered with 200 was cached as a package document or a tarball, and the tarball stayed until
+  an admin deleted it. Nothing that is not a package document or a gzip file matching the document's checksums is cached now; the
+  client gets 502 or the copy cached before.
+- npm: the download URL of a package document in `/v1/assets` and the HTML browse answered 404.
+- CocoaPods: the REST `downloadUrl` of a cached archive answered 404.
+- CocoaPods, p2: a routing rule was applied to the upstream URL's path of an archive or of a mirrored
+  child's file as well as to the request path.
+- Go: a proxy's routing rule answered 403 for `sumdb/...`, which made the go command fail verification.
+- Go: `DELETE /v1/assets/{id}` deletes a version's `.info`, `.mod` and `.zip` together (hosted: 400 before).
+- Go: REST search finds components by the case-escaped spelling in `name=` and `version=`.
+- p2: bundles below a composite child's directory were not components (search, cleanup, metadata tab).
+- Nexus API answers that kept the Terraform provider's plan from ever being empty: `cleanup` is `null`
+  without policies, `proxy.remoteUrl` as written, and read back as written `strictContentTypeValidation`
+  on proxies and groups, a group's `blobStoreName`, `proprietaryComponents`, `pathEnabled`, `indexType`,
+  `queryCacheItemMaxAge`, `deployPolicy` at depth 0, `preemptive`, `signerType`, and the e-mail identity
+  switch without TLS.
+- A blob store group's `softQuota` was silently dropped by the Nexus API.
+- `nexus_security_ssl_truststore` left an orphan certificate behind: its create failed after the POST.
+- Turning two realms off at the same time could undo one of them (`PUT /-/api/realms` `off`, under the lock).
+- A zip without entries failed strict content type validation.
+- `import-nexus -update` keeps a proxy's credentials on the target.
+- npm audit sent every name in the client's lock file to the remote, through a proxy and through a group,
+  including packages from hosted repositories. Names a hosted repository holds, and names the routing
+  rule refuses, are now removed first, as are the project's name and `install` and `remove` lists.
+- LDAP `groupsAsRoles` no longer makes an administrator through a role that contains `admin`, when a group
+  has that role's name. A mapping to that role still does.
+- Web UI: client setup hints that did not work: `dotnet` without `--allow-insecure-connections` on an
+  http source, Composer without `secure-http false` on http and with `http-basic.<host>` lacking the
+  port, `gem push --key <token>` (`--key` names a credentials entry; the hint now uses
+  `GEM_HOST_API_KEY`), the RubyGems default source left in place, `helm cm-push` without
+  `--context-path`, `swift package-registry login` without `--no-confirm` and offered over http where
+  it cannot work, `git credential approve` without a credential helper, a `conan remote login` hidden
+  on localhost although uploads need it, and pip `trusted-host` on https hosts.
+- Web UI: forms other than the repository form said "Could not save the repository" on any error.
+- Web UI: the notice of an unavailable blob store no longer says its repositories answer 503 when only
+  the probe failed.
+- npm proxy: what a remote answers is checked before it is stored. A crash could leave a sign-in page cached (a tarball
+  until an admin deleted it), a refused page made a created and a deleted webhook, clocks over 30 s apart could serve the
+  page, and a hanging remote made a node's requests wait behind the others' fetches.
+- Composer proxy: an archive that does not match its `shasum` is no longer stored and deleted again.
+- Helm proxy: an upstream answer that is no index no longer replaces a good index, which made every read a 502 until
+  `metadataMaxAge`.
+- Go and Cargo proxies, and PyPI files the index gives no hash for: a web page answered with 200 is no longer cached (a
+  Go `.zip` stayed until an admin deleted it).
+- apt proxy: a Release fetched with no copy before it expires the metadata beside it.
+- npm audit passes the request's query string to the remote.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -101,6 +418,85 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Hugging Face: tree listings are cached under a new key, so each is fetched once more; the old copies stay
   until the repository is deleted. A proxy cut off from the Hub cannot serve a listing cached only before
   the upgrade. Listings of more than 1000 files need `baseURL` to be what clients open.
+- **R groups list less.** An internal package now hides every public version of that name, including public binaries.
+  A client that was getting the public version of a colliding name now gets the internal one: that is the point of the
+  fix, but check for accidental collisions. The merge is redone once on the first read after the upgrade.
+- **R proxies** re-check every file that is not an archive each `metadataMaxAge`. Conditional requests only.
+- **Cleanup on proxies:** cached R packages outside CRAN's directories and conda packages below a channel were
+  invisible and now count as components, so an existing policy can select them. They are fetched again on demand.
+- **Conan tokens:** tokens issued before the upgrade keep working until their hour ends; new ones last a year. In a
+  mixed cluster an old node accepts new tokens and ignores `pwd`.
+- **HA:** nothing new is shared. Tokens stay signed and stateless, `PasswordStamp` reads the node's snapshot, which user
+  changes already refresh; merges are stored by fingerprint as before.
+- **Conda groups list less.** An internal package now hides every public build of that name. A client
+  that was getting a public build of a colliding name now gets the internal one, or none on a platform
+  the internal package does not have. Set `mergeMembers: true` on the group to keep the old merge.
+- **Proxies keep serving what the remote lost.** An expired cached file whose remote answers 404 or 410 was a 404 and now is the cached copy with `Warning: 110`, a WARN log per request and a remote request per request, for as long as the remote says so. A package withdrawn upstream stays downloadable by its URL until it is deleted (`DELETE /v1/assets/{id}`, the component, or a cleanup policy); the firewall still applies. `invalidate-cache` does not remove it. npm packuments and PyPI project pages too, so a package stays with its group member until the copy is deleted there.
+- **A realm list no longer turns API tokens off.** Use `PUT /-/api/realms`. Check any script that removes the token ids to disable tokens.
+- **Monitoring**: `DISABLED` is gone from the task API; a run of a disabled task is 405 where it ran; a store's `unavailable` can now be true for a store that is open; `Blob Stores Ready` can fail when an S3 replica is down, even though the primary works.
+- **Rolling upgrade**: older nodes do not apply new S3 settings in place. Finish the upgrade before rotating S3 keys; such a node uses the old keys until restarted.
+- **`commandcenter config apply`** still refuses a changed `s3` ("cannot be changed"), so export again after changing a store through the API.
+- **HEAD on a raw or Maven proxy** no longer fills the cache when the remote answers it. A script that warms a cache with `curl -I` must GET.
+- **`http.retries` and `connection.retries`** no longer retry timeouts and refused connections. A setup that relied on riding out a refused connection needs another way.
+- **Logs**: one more JSON line per activity event on stdout (each upload, delete, sign-in...). A shipper can select `audit=true`, or drop them.
+- **A hosted PyPI repository with `writePolicy: allow`** was accepted before but refused every repeated file. It now replaces. The default `allow_once` is unchanged. Check repositories set to `allow` that relied on the refusal.
+- **Routing rules on PyPI and Helm proxies** now see the request path, not the upstream URL's path. A rule written for the upstream path (`^/packages/aa/bb/.*`, `^/charts/.*`) no longer matches and must name the request path. ALLOW rules naming projects or charts start to work; a cached file a rule refuses is no longer served through a group.
+- **A PyPI proxy's `/simple/`**: the first GET after an upgrade (and after each `metadataMaxAge`, default 24 h, when the page changed) downloads the remote's root page, 48 MB for pypi.org, into the blob store. An old copy is reclaimed by the compact task like any other. pip and uv never ask for it. A monitor polling `GET /simple/` should move to HEAD.
+- **A Helm proxy** reads its upstream table on every chart request: after a restart the first request parses the cached index once. A republished version upstream is now fetched again; before it kept its old bytes.
+- **REST**: scripts that expected `.metadata` assets in components no longer see them (they remain in `/v1/assets` and at their URLs). Scripts that relied on the 400 of `DELETE /v1/assets/{id}` for a PyPI file now delete the file.
+- **Rolling upgrade (N-1)**: an old node answers 404 for `.prov` and for `.asc` until it is upgraded, and ignores `has_sig`. Nothing is stored that an old node misreads. No schema change.
+- **An npm repository with `writePolicy: deny` becomes read-only for clients.** It was not before, whatever the UI said. Check such
+  repositories before upgrading. One with `allow` now takes a re-publish.
+- **A proxy no longer follows a removal at the remote.** A version or package unpublished upstream stays installable from the
+  proxy if its tarball was cached. That is what Nexus does and what the owner asked for; to forget one, delete its tarball and the package document
+  (`DELETE /service/rest/v1/assets/{id}`), and the firewall still blocks what it knows.
+- A remote whose tarballs are not gzip can no longer be proxied (no real registry was found to do that; clients would need a plain tar).
+- Hosted documents get the hoisted fields at their next write, or at once with `repository.rebuild-metadata` (`format: npm`).
+- Scripts that read `/v1/assets` and match `/<name>/package.json` see `/<name>`. The old URL keeps answering.
+- Nothing to migrate; `schemaVersion` is unchanged. An older node in a rolling upgrade serves as before; a `login-` token works on it.
+- **CocoaPods**: the server now needs `github.com`, `codeload.github.com`, `bitbucket.org` and `gitlab.com`
+  for pods with git sources; a site where only the clients reach them breaks. `SPEC CHECKSUMS` in
+  `Podfile.lock` change, so pods reinstall once: commit the lock file. Component lists shrink, and cleanup
+  policies now remove archives only; cached podspecs stay. More conditional requests go upstream.
+- **p2**: the first read rewrites each cached artifacts document (the old blob is reclaimed by compact).
+  Changing a remote deletes the cache. Bundles below child directories become components, so `format: p2`
+  cleanup policies now apply to them (fetched again on demand).
+- **Go**: no data change. Paths that are not GOPROXY routes answer 400 or 404 instead of the rule's 403.
+- An older node ignores the new keys in a repository's definition and the new settings rows.
+- Saving in the web UI of an older node a proxy that has strict on is 400 (its rule), and it drops the `nexus` values, which only read back: the next plan shows and restores them.
+- Saving the LDAP form on an older node drops `userOneLevel` and `groupsAsRoles`, and an older node does not honour them. Set them when every node is upgraded.
+
+- **A PUT now replaces.** A script that PUTs a repository without `cleanup` loses the cleanup policies, and one that sends `httpClient` without `authentication` loses the remote's credentials. Read, change, PUT back; the secrets are never in the answer, so send the password again or leave `httpClient` out.
+- `GET` of a repository has `cleanup: null` in place of `{"policyNames": []}`; `proxy.remoteUrl` no longer gains a `/`.
+- **`docker.forceBasicAuth: true` now acts**, and it is Nexus's default and the usual value. A script or configuration sending it turns anonymous pull off for that repository, as in Nexus. Stored repositories do not change until one sends it. Answers change: a repository without an override reads `false`.
+- **`strictContentTypeValidation: true` on a proxy now acts** on the next PUT that sends it, and scripts and provider configurations usually send `true`. A remote that serves another type under a known extension (a `.jar` that is not a zip) then answers 404 and is not cached. Stored proxies have it off.
+- A PUT on `/blobstores/group/{name}` without `softQuota` removes a quota set in the web UI.
+- `import-nexus -config` run again against a Nexus with `userSubtree: false` says `differs: userOneLevel`; `-update` sets it. Until then the target searches the whole subtree, as it always did.
+- A script that relied on the 400 for a wrong file name now gets a 201.
+- Turn `mergeMembers` on a yum group only once every node runs this version: an older node refuses the definition or, if it
+  loads it, answers from the first member.
+- A merging group stores up to two generations of merged metadata per path in the default blob store. A path that stops merging
+  keeps its copies until the group is deleted.
+- A proxy member now downloads filelists and other too, which dnf alone rarely asks for (Rocky 9: 30 MiB more per metadata
+  change). Old hash-named repodata files stay in a proxy's cache as before; nothing in cleanup removes them (not changed here).
+- The proxied metadata age now decides how fresh the merge is: `metadataMaxAge` of the proxy, 24 h by default.
+> **After this upgrade clients refuse or warn about versions they used to take.** This is what they do against Packagist and nuget.org.
+
+- **Composer.** Through a proxy or a group with a proxy, `composer update` and `composer require` no longer pick a version with a security advisory; a project pinned to one fails to resolve ("... were not loaded, because they are affected by security advisories"). `composer audit` exits 1 when it finds any. `composer install` from a lock file is not affected. Ways out, all Composer's: update the package, `policy.advisories.ignore` or `ignore-id`, `policy.advisories.block: false`, `--no-blocking`.
+- **Composer, the server's network.** The server must reach the API the upstream names, for Packagist `packagist.org`, not only `repo.packagist.org`. If it cannot: `composer audit` exits 100, `composer update` warns and goes on.
+- **NuGet.** `dotnet restore` through a proxy or a group warns NU1901 to NU1904. With `TreatWarningsAsErrors` that fails a build that used to pass, and an unreachable upstream with nothing cached does the same through NU1900. Ways out: update the package, `NuGetAuditSuppress`, `NuGetAuditLevel`, `NuGetAuditMode`, `WarningsNotAsErrors`, `NuGetAudit=false`. A client sees the new resource once its cached copy of the service index expires.
+- **Routing rules.** An allow-list rule on a proxy must let `/api/security-advisories/` (Composer) and `/vulnerabilities/` (NuGet) through, or that proxy goes on without warnings, as before. A rule refusing `p2/<name>.json` now also keeps the name out of the POST.
+- **Content selectors.** A user with only a selector needs it to match those paths too: otherwise a 403, which `composer audit` reports as a failure, `composer update` warns about, and NuGet turns into NU1900.
+- **npm.** A malformed audit body is a 400 from here. Results for private names are gone from the report, as they should be. A group is still answered by its first proxy alone.
+- No stored data changes meaning, nothing to migrate.
+- Set LDAP static groups when every node is upgraded. An older node does not honour them, and saving the LDAP form on one drops them.
+- A body already stored through `/v1/security/ldap` with `groupType: static`, `ldapGroupsAsRoles: false` and a complete set is derived from the directory until it is written again. From then on the mappings read the group entries. Terraform shows this once as drift.
+- Anyone relying on a directory group named as an admin-containing role, through `groupsAsRoles`, must map it.
+- **A scheduled `repository.purge-unused` now removes more.** Check that the proxies it covers can fetch again. Nothing is lost that the remote still has; what the remote lost is lost if no one used it in `lastUsed` days.
+- **Before the first purge, let the proxies serve for a while.** A document's reads are recorded from this version on. One read only from the cache since before the upgrade (a failing or never-expiring remote) looks unused until it is read once; an hour or a day of traffic is enough. Blocked proxies are not touched anyway.
+- **PyPI**: a remote that answers 200 with an empty HTML page for projects it does not have now fails a group it stands ahead of with 502, instead of passing to the next member. No index I know of does that (pypi.org, Nexus, Artifactory, devpi, pypiserver answer 404, by memory; only pypi.org was run). The log says `not the page of project`. Reorder the group or fix the remote.
+- Pages and documents cached wrongly by older builds stay until their `metadataMaxAge`; a tarball or `.zip` of a sign-in page cached by an older build stays until deleted, as before.
+- Rolling upgrade: nothing to migrate. An older node still stores and undoes for npm, so while both run, a new node can read what an old node is about to undo; that ends with the rollout. `Used` writes through the existing counters.
 
 ## [0.4.0] - 2026-11-05
 

@@ -35,6 +35,9 @@ func get(m map[string]any, path ...string) any {
 
 func url(file string) string { return "http://repo/repository/npm-all/left-pad/-/" + file }
 
+// rewritten is what a read makes of a stored tarball URL, in these tests.
+func rewritten(_, upstream string) string { return url(fileFromURL(upstream)) }
+
 const leftPad = `{"_id":"left-pad","name":"left-pad","description":"pad <left> & é",
  "dist-tags":{"latest":"1.1.0","beta":"2.0.0-beta.1"},
  "versions":{
@@ -46,7 +49,7 @@ const leftPad = `{"_id":"left-pad","name":"left-pad","description":"pad <left> &
 
 func TestRewritePackument(t *testing.T) {
 	var out bytes.Buffer
-	if err := rewritePackument(strings.NewReader(leftPad), &out, url); err != nil {
+	if err := rewritePackument(strings.NewReader(leftPad), &out, rewritten); err != nil {
 		t.Fatal(err)
 	}
 	m := decode(t, out.Bytes())
@@ -80,7 +83,7 @@ const hostedDoc = `{"name":"left-pad","description":"internal fork",
 func TestWriteVersionDoc(t *testing.T) {
 	for _, want := range []string{"1.1.0", "latest"} {
 		var out bytes.Buffer
-		if err := writeVersionDoc(strings.NewReader(leftPad), want, url, &out); err != nil {
+		if err := writeVersionDoc(strings.NewReader(leftPad), want, rewritten, &out); err != nil {
 			t.Fatal(err)
 		}
 		m := decode(t, out.Bytes())
@@ -89,7 +92,7 @@ func TestWriteVersionDoc(t *testing.T) {
 		}
 	}
 	var out bytes.Buffer
-	if err := writeVersionDoc(strings.NewReader(leftPad), "3.0.0", url, &out); repo.StatusOf(err) != 404 || out.Len() != 0 {
+	if err := writeVersionDoc(strings.NewReader(leftPad), "3.0.0", rewritten, &out); repo.StatusOf(err) != 404 || out.Len() != 0 {
 		t.Fatalf("missing version: err=%v wrote=%q", err, out.String())
 	}
 }
@@ -123,7 +126,7 @@ func TestFileFromURL(t *testing.T) {
 
 func TestWriteVersionDocNonObjectVersions(t *testing.T) {
 	var out bytes.Buffer
-	err := writeVersionDoc(strings.NewReader(`{"versions":[]}`), "1.0.0", url, &out)
+	err := writeVersionDoc(strings.NewReader(`{"versions":[]}`), "1.0.0", rewritten, &out)
 	if repo.StatusOf(err) != 404 || out.Len() != 0 {
 		t.Fatalf("err=%v wrote=%q", err, out.String())
 	}

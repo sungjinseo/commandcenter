@@ -170,7 +170,7 @@ func (s *Sender) SendNow(ctx context.Context, cfg meta.SMTP, to []string, subjec
 	defer cancel()
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	rootCAs := s.rootCAs
-	if rootCAs == nil {
+	if rootCAs == nil && (cfg.TrustStore == nil || *cfg.TrustStore) {
 		rootCAs = truststore.Pool() // the SSL trust store; nil: the system roots
 	}
 	tlsConf := &tls.Config{ServerName: cfg.Host, RootCAs: rootCAs, MinVersion: tls.VersionTLS12}
@@ -227,6 +227,9 @@ func (s *Sender) SendNow(ctx context.Context, cfg meta.SMTP, to []string, subjec
 	w, err := c.Data()
 	if err != nil {
 		return fmt.Errorf("data: %w", err)
+	}
+	if cfg.SubjectPrefix != "" {
+		subject = cfg.SubjectPrefix + " " + subject
 	}
 	if _, err := w.Write(buildMessage(from, rcpts, subject, body, time.Now())); err != nil {
 		return fmt.Errorf("data: %w", err)

@@ -48,11 +48,14 @@ type smtpDTO struct {
 	From        string `json:"from"`
 	Enabled     bool   `json:"enabled"`
 	PasswordSet bool   `json:"passwordSet"`
+
+	SubjectPrefix string `json:"subjectPrefix"`
+	TrustStore    *bool  `json:"trustStore,omitempty"` // false: TLS verifies against the system roots alone
 }
 
 func smtpJSON(c meta.SMTP) smtpDTO {
 	return smtpDTO{Host: c.Host, Port: c.Port, Security: c.Security, Username: c.Username, From: c.From,
-		Enabled: c.Enabled, PasswordSet: c.Password != ""}
+		Enabled: c.Enabled, PasswordSet: c.Password != "", SubjectPrefix: c.SubjectPrefix, TrustStore: c.TrustStore}
 }
 
 type smtpRequest struct {
@@ -64,6 +67,9 @@ type smtpRequest struct {
 	ClearPassword bool   `json:"clearPassword"`
 	From          string `json:"from"`
 	Enabled       bool   `json:"enabled"`
+	// Absent keeps these: the form may not know them.
+	SubjectPrefix *string `json:"subjectPrefix"`
+	TrustStore    *bool   `json:"trustStore"`
 }
 
 func (u *UI) getSMTP(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +100,13 @@ func (u *UI) putSMTP(w http.ResponseWriter, r *http.Request) {
 	next := meta.SMTP{
 		Host: strings.TrimSpace(body.Host), Port: body.Port, Security: strings.TrimSpace(body.Security),
 		Username: body.Username, From: strings.TrimSpace(body.From), Enabled: body.Enabled,
-		Password: cur.Password,
+		Password: cur.Password, SubjectPrefix: cur.SubjectPrefix, TrustStore: cur.TrustStore,
+	}
+	if body.SubjectPrefix != nil {
+		next.SubjectPrefix = *body.SubjectPrefix
+	}
+	if body.TrustStore != nil {
+		next.TrustStore = body.TrustStore
 	}
 	switch {
 	case body.ClearPassword:
@@ -104,6 +116,9 @@ func (u *UI) putSMTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if next.Security == "" {
 		next.Security = meta.SMTPNone
+	}
+	if t := next.TrustStore; t != nil && *t == (next.Security != meta.SMTPNone) {
+		next.TrustStore = nil // what it reads as anyway; a later change of the TLS mode follows
 	}
 	// The stored password never follows the configuration to another server
 	// or onto an unencrypted connection: the admin must type it again.
@@ -144,6 +159,8 @@ func smtpChanged(a, b meta.SMTP) string {
 	add(a.Password != b.Password, "password")
 	add(a.From != b.From, "from")
 	add(a.Enabled != b.Enabled, "enabled")
+	add(a.SubjectPrefix != b.SubjectPrefix, "subjectPrefix")
+	add((a.TrustStore == nil || *a.TrustStore) != (b.TrustStore == nil || *b.TrustStore), "trustStore")
 	return strings.Join(keys, ", ")
 }
 
@@ -184,8 +201,8 @@ func (u *UI) testSMTP(w http.ResponseWriter, r *http.Request) {
 		u.fail(w, r, err)
 		return
 	}
-	if !set.SMTP.Enabled {
-		writeError(w, http.StatusBadRequest, "e-mail is disabled")
+	if set.SMTP.Host == "" { // a switched-off server can be tested, before it is switched on
+		writeError(w, http.StatusBadRequest, "no SMTP server is configured")
 		return
 	}
 	if !u.takeSMTPTest() {

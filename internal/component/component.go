@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -291,7 +292,10 @@ func DeriveGo(p string) (name, version string, ok bool) {
 	return "", "", false
 }
 
-var pypiExts = []string{".whl", ".tar.gz", ".tar.bz2", ".zip", ".egg"}
+// pypiExts are the extensions of distribution files, the old ones a proxy
+// serves from an index too (.exe and .msi of bdist_wininst and bdist_msi).
+var pypiExts = []string{".whl", ".tar.gz", ".tar.bz2", ".zip", ".egg", ".tgz", ".tbz", ".tar.xz", ".txz", ".tar.lz", ".tlz", ".tar.lzma",
+	".tar.z", ".tz", ".taz", ".tar", ".exe", ".msi", ".dmg", ".rpm", ".deb"}
 
 // pypiSplitExt strips a known distribution extension from file.
 func pypiSplitExt(file string) (base, ext string, ok bool) {
@@ -343,7 +347,10 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		if segs[0] != "packages" || (len(segs) != 3 && len(segs) != 4) {
 			return "", "", "", false
 		}
-		file, _ := strings.CutSuffix(segs[len(segs)-1], ".metadata") // the PEP 658 sidecar goes with its file
+		file, sidecar := strings.CutSuffix(segs[len(segs)-1], ".metadata") // the PEP 658 sidecar goes with its file
+		if !sidecar {
+			file, _ = strings.CutSuffix(file, ".asc") // and so does its signature
+		}
 		if _, _, known := pypiSplitExt(file); !known {
 			return "", "", "", false
 		}
@@ -361,8 +368,8 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 		return "", segs[1], v, true
 	case "raw": // every file is a component of its own, named by its path
 		return "", p, "", p != ""
-	case "helm":
-		name, version, ok = SplitHelm(p)
+	case "helm": // <name>-<version>.tgz and its provenance file, <name>-<version>.tgz.prov
+		name, version, ok = SplitHelm(strings.TrimSuffix(p, ".prov"))
 		return "", name, version, ok
 	case "yum":
 		name, version, ok = SplitRPM(p)
@@ -375,8 +382,8 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "composer":
 		name, version, ok = SplitComposer(p)
 		return "", name, version, ok
-	case "conda": // <subdir>/<name>-<version>-<build>.tar.bz2 or .conda: the subdir is the group
-		return SplitConda(p)
+	case "conda": // [<channel>/]<subdir>/<name>-<version>-<build>.tar.bz2 or .conda: the subdir is the group
+		return SplitConda(condaTail(p))
 	case "rubygems": // gems/<name>-<version>[-<platform>].gem, hosted and proxy alike
 		rest, cut := strings.CutPrefix(p, "gems/")
 		file, isGem := strings.CutSuffix(rest, ".gem")
@@ -388,16 +395,16 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 	case "gitlfs": // objects/<aa>/<bb>/<oid>: the object is a component named by its oid, without a version
 		name, ok = SplitLFS(p)
 		return "", name, "", ok
-	case "r": // <contrib dir>/<pkg>_<version>.tar.gz (.zip, .tgz): the contrib dir is the group
+	case "r": // <dir>/<pkg>_<version>.tar.gz (.zip, .tgz): the directory is the group
 		return SplitR(p)
 	case "conan": // v2/conans/<name>/<version>/<user>/<channel>/revisions/<rrev>/...: user/channel is the group
 		return SplitConan(p)
-	case "p2": // [.remote/<sha1>/]{features,plugins}/<id>_<version>.jar, binary/<id>_<version>: the directory is the group
+	case "p2": // [<child>/]{features,plugins}/<id>_<version>.jar, [<child>/]binary/<id>_<version>: the directory is the group
 		return SplitP2(p)
 	case "swift": // <scope>/<name>/<version>/<file>: every file of the version directory (archive, manifests, a proxy's release.json)
 		name, version, ok = SplitSwift(p)
 		return "", name, version, ok
-	case "cocoapods": // Specs/<a>/<b>/<c>/<Pod>/<version>/<file>: the podspec and the archives cached beside it
+	case "cocoapods": // pods/<Pod>/<version>/<file>, the archives; a podspec alone is no component
 		name, version, ok = SplitPod(p)
 		return "", name, version, ok
 	case "huggingface": // [datasets/|spaces/]<repo id>/resolve/<commit sha>/<file>: the kind is the group
@@ -410,21 +417,18 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 }
 
 // SplitP2 maps a p2 artifact path to its component: features/<id>_<version>.jar,
-// plugins/<id>_<version>.jar or binary/<id>_<version>, each possibly under
-// a proxy's .remote/<sha1>/ mirror of a composite child. The version
-// starts at the first "_" followed by a digit, as an id may hold "_"
-// (a.b_c_1.0.0.v20240901). The directory is the group.
+// plugins/<id>_<version>.jar or binary/<id>_<version>, at the root of the site
+// or of a composite child: the child's directory, a proxy's .remote/<sha1>/
+// mirror of one elsewhere. The version starts at the first "_" followed by a
+// digit, as an id may hold "_" (a.b_c_1.0.0.v20240901). The directory holding
+// the file is the group.
 func SplitP2(p string) (group, name, version string, ok bool) {
-	if rest, cut := strings.CutPrefix(p, ".remote/"); cut {
-		if _, rest, cut = strings.Cut(rest, "/"); !cut {
-			return "", "", "", false
-		}
-		p = rest
-	}
-	dir, file, cut := strings.Cut(p, "/")
-	if !cut || strings.Contains(file, "/") {
+	i := strings.LastIndexByte(p, '/')
+	if i < 0 {
 		return "", "", "", false
 	}
+	dir, file := p[strings.LastIndexByte(p[:i], '/')+1:i], p[i+1:]
+	var cut bool
 	switch dir {
 	case "features", "plugins":
 		if file, cut = strings.CutSuffix(file, ".jar"); !cut {
@@ -462,23 +466,32 @@ func SplitSwift(p string) (name, version string, ok bool) {
 	return segs[0] + "." + segs[1], segs[2], true
 }
 
-// SplitPod maps a path of a CocoaPods proxy's cache,
-// Specs/<a>/<b>/<c>/<Pod>/<version>/<file> (the trunk CDN's layout, the
-// shard letters being the first three of the md5 of the pod name), to its
-// component. The file is <Pod>.podspec.json or an archive fetched for the
-// podspec's source.http (<sha1 of its URL>.<ext>). The index files at the
-// root are not components.
+// SplitPod maps an archive in a CocoaPods proxy's cache to its component:
+// pods/<Pod>/<version>/<file>, or Specs/<a>/<b>/<c>/<Pod>/<version>/<file> for
+// one cached beside its podspec by an earlier version (the shard letters
+// being the first three of the md5 of the pod name). As in Nexus, only a
+// downloaded archive makes a component: the client reads the podspecs of
+// every version it considers, and they are cached metadata like the index
+// files at the root.
 func SplitPod(p string) (name, version string, ok bool) {
 	segs := strings.Split(p, "/")
-	if len(segs) != 7 || segs[0] != "Specs" || segs[4] == "" || segs[5] == "" || segs[6] == "" {
+	switch {
+	case len(segs) == 4 && segs[0] == "pods":
+		segs = segs[1:]
+	case len(segs) == 7 && segs[0] == "Specs":
+		for _, s := range segs[1:4] {
+			if len(s) != 1 || strings.Trim(s, "0123456789abcdef") != "" {
+				return "", "", false
+			}
+		}
+		segs = segs[4:]
+	default:
 		return "", "", false
 	}
-	for _, s := range segs[1:4] {
-		if len(s) != 1 || strings.Trim(s, "0123456789abcdef") != "" {
-			return "", "", false
-		}
+	if segs[0] == "" || segs[1] == "" || segs[2] == "" || segs[2] == segs[0]+".podspec.json" {
+		return "", "", false
 	}
-	return segs[4], segs[5], true
+	return segs[0], segs[1], true
 }
 
 // SplitHF maps a path of a Hugging Face proxy's cache,
@@ -545,39 +558,35 @@ func SplitLFS(p string) (oid string, ok bool) {
 	return oid, segs[1] == oid[:2] && segs[2] == oid[2:4]
 }
 
-// R repositories (CRAN layout). rContribRE is a contrib directory, the
-// unit an R client reads PACKAGES from: src/contrib for sources,
-// bin/windows/contrib/<R.x> and bin/macosx[/<build>]/contrib/<R.x> for
-// binaries. rArchiveRE is CRAN's src/contrib/Archive/<pkg>, old sources a
-// proxy passes through.
+// R repositories. A package's directory is what an R client reads PACKAGES
+// from: CRAN's src/contrib, bin/windows/contrib/<R.x>,
+// bin/macosx[/<build>]/contrib/<R.x> and src/contrib/Archive/<pkg>, the same
+// below a prefix (prod/src/contrib), or a layout of its own (a proxied
+// Posit __linux__/<distro>/latest/src/contrib, a hosted bin/linux/<distro>).
 var (
-	rContribRE = regexp.MustCompile(`^(src/contrib|bin/windows/contrib/[0-9]+\.[0-9]+|bin/macosx(/[a-z0-9_.-]+)?/contrib/[0-9]+\.[0-9]+)$`)
-	rArchiveRE = regexp.MustCompile(`^src/contrib/Archive/[A-Za-z][A-Za-z0-9.]*$`)
 	rNameRE    = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.]*[A-Za-z0-9]$`) // "Writing R Extensions" 1.1.1
 	rVersionRE = regexp.MustCompile(`^[0-9]+([.-][0-9]+)+$`)
 )
 
-// RContribDir reports whether dir is a contrib directory of an R
-// repository (one with its own PACKAGES files).
-func RContribDir(dir string) bool { return rContribRE.MatchString(dir) }
-
-// RExt is the archive extension of the packages in dir: .zip under
-// bin/windows, .tgz under bin/macosx, .tar.gz for sources.
+// RExt is the archive extension of the packages in dir: .zip under a
+// bin/windows directory, .tgz under a bin/macosx one, otherwise .tar.gz
+// (sources and Linux binaries). ponytail: the directory decides, because a
+// packages row (PackageComponent) has no room for the extension; a .zip or
+// .tgz in another directory is refused, which Nexus takes.
 func RExt(dir string) string {
-	switch {
-	case strings.HasPrefix(dir, "bin/windows/"):
+	switch d := "/" + dir + "/"; {
+	case strings.Contains(d, "/bin/windows/"):
 		return ".zip"
-	case strings.HasPrefix(dir, "bin/"):
+	case strings.Contains(d, "/bin/macosx/"):
 		return ".tgz"
 	}
 	return ".tar.gz"
 }
 
-// SplitR splits the path of an R package, <dir>/<pkg>_<version><ext>
-// where dir is a contrib directory (RContribDir) or an Archive directory
-// and ext the directory's (RExt), into its component: the directory is
-// the group, so a package built for several R versions is one component
-// per directory. Package names never hold "_". PACKAGES files are not
+// SplitR splits the path of an R package, <dir>/<pkg>_<version><ext> with
+// ext the directory's (RExt), into its component: the directory is the
+// group, so a package built for several R versions is one component per
+// directory. Package names never hold "_". PACKAGES files are not
 // components.
 func SplitR(p string) (dir, name, version string, ok bool) {
 	i := strings.LastIndexByte(p, '/')
@@ -585,9 +594,6 @@ func SplitR(p string) (dir, name, version string, ok bool) {
 		return "", "", "", false
 	}
 	dir, file := p[:i], p[i+1:]
-	if !rContribRE.MatchString(dir) && !rArchiveRE.MatchString(dir) {
-		return "", "", "", false
-	}
 	stem, cut := strings.CutSuffix(file, RExt(dir))
 	if !cut {
 		return "", "", "", false
@@ -629,6 +635,17 @@ func SplitConda(p string) (subdir, name, version string, ok bool) {
 	return subdir, stem[:j], stem[j+1:], true
 }
 
+// condaTail is the <subdir>/<file> of a cached path: a proxy whose remote
+// holds several channels (https://conda.anaconda.org/) has packages at
+// <channel>/<subdir>/<file>, any number of segments deep, and the channel
+// stays in the asset's path only. A hosted channel is the repository root.
+func condaTail(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i > 0 {
+		return p[strings.LastIndexByte(p[:i], '/')+1:]
+	}
+	return p
+}
+
 // SplitRPM splits an RPM path, <dir>/<name>-<version>-<release>.<arch>.rpm,
 // into the component the yum format stores: the name qualified by its
 // directory ("el9/foo", "foo" at the root) and version-release.arch
@@ -651,6 +668,17 @@ func SplitRPM(p string) (name, version string, ok bool) {
 		return "", "", false
 	}
 	return stem[:j], stem[j+1:], true
+}
+
+// YumComps reports whether p is a yum repository's package group file,
+// repodata/comps.xml or comps.xml.gz in any directory: the one file under
+// repodata/ somebody uploaded, not one the server derives.
+func YumComps(p string) bool {
+	switch path.Base(p) {
+	case "comps.xml", "comps.xml.gz":
+		return path.Base(path.Dir(p)) == "repodata"
+	}
+	return false
 }
 
 // SplitDeb splits the path of a Debian package, wherever it lies (the
@@ -681,19 +709,47 @@ var (
 // `<name>-<version>.tgz` file name, so no "/" and no leading ".".
 var helmNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
+// helmVersionRE is a chart version as the helm client reads one (checked
+// with helm 3.22 and 4.3, which parse it with Masterminds semver's
+// NewVersion): SemVer 2 with an optional "v", the minor and the patch
+// optional, and leading zeros allowed in the three numbers ("v1.13.2",
+// "1.2", "0.46.00"). The prerelease and the build metadata are SemVer's.
+var helmVersionRE = regexp.MustCompile(`^v?([0-9]+(?:\.[0-9]+){0,2})` +
+	`(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?` +
+	`(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
+
+// HelmVersion reports whether v is a chart version helm accepts
+// (helmVersionRE), of at most 256 bytes.
+func HelmVersion(v string) bool {
+	m := helmVersionRE.FindStringSubmatch(v)
+	if len(v) > 256 || m == nil {
+		return false
+	}
+	for _, n := range strings.Split(m[1], ".") {
+		if _, err := strconv.ParseUint(n, 10, 64); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // SplitHelm splits a chart file name, <name>-<version>.tgz, at the last "-"
 // whose suffix is a strict semver version: names may hold "-" ("ingress-nginx")
-// and so may prerelease versions ("1.0.0-rc.1"). "+" in the version may be
-// written "_", as helm package names the file.
+// and so may prerelease versions ("1.0.0-rc.1"). A file name without such a
+// "-" is split at the last one whose suffix is a version as helm reads it
+// (HelmVersion: "cert-manager-v1.13.2.tgz"). "+" in the version may be
+// written "_", as helm push names an OCI tag.
 func SplitHelm(file string) (name, version string, ok bool) {
 	stem, cut := strings.CutSuffix(file, ".tgz")
 	if !cut || strings.Contains(stem, "/") {
 		return "", "", false
 	}
-	for i := strings.LastIndexByte(stem, '-'); i > 0; i = strings.LastIndexByte(stem[:i], '-') {
-		v := strings.Replace(stem[i+1:], "_", "+", 1)
-		if semver.Valid(v) && helmNameRE.MatchString(stem[:i]) {
-			return stem[:i], v, true
+	for _, valid := range []func(string) bool{semver.Valid, HelmVersion} {
+		for i := strings.LastIndexByte(stem, '-'); i > 0; i = strings.LastIndexByte(stem[:i], '-') {
+			v := strings.Replace(stem[i+1:], "_", "+", 1)
+			if valid(v) && helmNameRE.MatchString(stem[:i]) {
+				return stem[:i], v, true
+			}
 		}
 	}
 	return "", "", false
@@ -731,7 +787,7 @@ func PackageComponent(format, name, version string) (group, cname, cversion, ass
 		return "", name, version, ""
 	case "rubygems": // the version holds the platform (1.0.0-java), as the file name does
 		return "", name, version, "gems/" + name + "-" + version + ".gem"
-	case "r": // the name is directory-qualified, <contrib dir>/<pkg>; the directory is the group
+	case "r": // the name is directory-qualified, <dir>/<pkg>; the directory is the group
 		if i := strings.LastIndexByte(name, '/'); i > 0 {
 			return name[:i], name[i+1:], version, name + "_" + version + RExt(name[:i])
 		}

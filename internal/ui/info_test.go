@@ -64,7 +64,7 @@ func TestStatusChecksHealthy(t *testing.T) {
 			t.Errorf("unhealthy: %v", m)
 		}
 	}
-	want := "Database,Cluster,Blob store,Memory,Remote fetch slots,Repositories"
+	want := "Database,Cluster,Blob store,Memory,Remote fetch slots,Repositories,Blob Stores Ready,Blob Stores Quota,Available CPUs,Scheduler"
 	if strings.Join(names, ",") != want {
 		t.Fatalf("names %v", names)
 	}

@@ -1,12 +1,14 @@
 package rubygems
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -23,29 +25,45 @@ type lister interface {
 // row is one stored version of a hosted gem.
 type row struct {
 	version, platform string // split from the row's version
-	attrs             gemAttrs
 	pkg               meta.Package
 }
 
+func newRow(p meta.Package) row {
+	r := row{pkg: p}
+	r.version, r.platform = splitRowVersion(p.Version)
+	return r
+}
+
+// attrs reads the row's attrs when they are needed, one row at a time: all of
+// a gem with 1500 versions, per request, took a 128 MiB server down at 32
+// clients at once. A row whose attrs cannot be read still lists with its name
+// and version.
+func (r row) attrs() gemAttrs {
+	var a gemAttrs
+	if json.Unmarshal([]byte(r.pkg.Attrs), &a) != nil || a.Name == "" {
+		a = gemAttrs{Name: r.pkg.Name, Version: r.version, Dependencies: []gemDep{}}
+		if r.platform != "ruby" {
+			a.Platform = r.platform
+		}
+	}
+	return a
+}
+
 // rows lists the versions of gem name in hosted repoName in the order the
-// compact index keeps them: by creation, then version. A row whose attrs
-// cannot be read still lists with its name and version.
+// compact index keeps them.
 func rows(ctx context.Context, db lister, repoName, name string) ([]row, error) {
 	pkgs, err := db.ListPackages(ctx, repoName, name)
 	if err != nil {
 		return nil, err
 	}
+	return sortRows(pkgs), nil
+}
+
+// sortRows is the compact index's order: by creation, then version.
+func sortRows(pkgs []meta.Package) []row {
 	out := make([]row, 0, len(pkgs))
 	for _, p := range pkgs {
-		r := row{pkg: p}
-		r.version, r.platform = splitRowVersion(p.Version)
-		if json.Unmarshal([]byte(p.Attrs), &r.attrs) != nil || r.attrs.Name == "" {
-			r.attrs = gemAttrs{Name: p.Name, Version: r.version, Dependencies: []gemDep{}}
-			if r.platform != "ruby" {
-				r.attrs.Platform = r.platform
-			}
-		}
-		out = append(out, r)
+		out = append(out, newRow(p))
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
@@ -57,7 +75,7 @@ func rows(ctx context.Context, db lister, repoName, name string) ([]row, error) 
 		}
 		return a.pkg.Version < b.pkg.Version
 	})
-	return out, nil
+	return out
 }
 
 // infoDoc is info/<gem>: "---" then one line per version,
@@ -67,26 +85,54 @@ func infoDoc(rs []row) []byte {
 	var b strings.Builder
 	b.WriteString("---\n")
 	for _, r := range rs {
-		b.WriteString(r.pkg.Version)
-		b.WriteByte(' ')
-		var deps []string
-		for _, d := range r.attrs.Dependencies {
-			if d.Type != "development" {
-				deps = append(deps, d.String())
-			}
-		}
-		b.WriteString(strings.Join(deps, ","))
-		b.WriteString("|checksum:")
-		b.WriteString(r.attrs.SHA256)
-		if r.attrs.RequiredRubyVersion != "" {
-			b.WriteString(",ruby:" + requirementKey(r.attrs.RequiredRubyVersion))
-		}
-		if r.attrs.RequiredRubygemsVersion != "" {
-			b.WriteString(",rubygems:" + requirementKey(r.attrs.RequiredRubygemsVersion))
-		}
-		b.WriteByte('\n')
+		writeInfoLine(&b, r)
 	}
 	return []byte(b.String())
+}
+
+func writeInfoLine(b *strings.Builder, r row) {
+	a := r.attrs()
+	b.WriteString(r.pkg.Version)
+	b.WriteByte(' ')
+	var deps []string
+	for _, d := range a.Dependencies {
+		if d.Type != "development" {
+			deps = append(deps, d.String())
+		}
+	}
+	b.WriteString(strings.Join(deps, ","))
+	b.WriteString("|checksum:")
+	b.WriteString(a.SHA256)
+	if a.RequiredRubyVersion != "" {
+		b.WriteString(",ruby:" + requirementKey(a.RequiredRubyVersion))
+	}
+	if a.RequiredRubygemsVersion != "" {
+		b.WriteString(",rubygems:" + requirementKey(a.RequiredRubygemsVersion))
+	}
+	b.WriteByte('\n')
+}
+
+// hostedInfo is infoDoc of gem name for a request, reading a batch of rows at a
+// time: Bundler asks for it on every install, and holding the rows of a gem
+// with 1500 versions came close to a 128 MiB server's limit at 64 clients. Nil
+// when the gem has no version.
+func hostedInfo(ctx context.Context, db *meta.DB, repoName, name string) ([]byte, error) {
+	pkgs, err := db.ListPackageVersions(ctx, repoName, name)
+	if err != nil || len(pkgs) == 0 {
+		return nil, err
+	}
+	rs := sortRows(pkgs)
+	versions := make([]string, 0, len(rs))
+	for _, r := range rs {
+		versions = append(versions, r.pkg.Version)
+	}
+	var b strings.Builder
+	b.WriteString("---\n")
+	err = db.EachPackage(ctx, repoName, name, versions, func(p meta.Package) error {
+		writeInfoLine(&b, newRow(p))
+		return nil
+	})
+	return []byte(b.String()), err
 }
 
 func md5hex(b []byte) string {
@@ -137,62 +183,112 @@ func namesDoc(names []string) []byte {
 	return []byte("---\n" + strings.Join(append(names, ""), "\n"))
 }
 
-// parseVersions reads a versions file into its lines after the header,
-// and the gems that have a version left once the "-" lines are applied.
-func parseVersions(body []byte) (lines []string, live map[string]bool) {
-	live = map[string]bool{}
-	have := map[string]map[string]bool{}
-	text := string(body)
-	if i := strings.Index(text, "---\n"); i >= 0 {
-		text = text[i+4:]
+// maxVersionsLine bounds one line of a member's versions file (a gem with
+// its every version; rubygems.org's longest is some 350 KiB).
+const maxVersionsLine = 16 << 20
+
+// mergeVersions appends a member's versions file to a group's (dst): its
+// lines after the header, except those of the gems in owned, which an
+// earlier member has. The first member's header becomes the group's, so the
+// merge does not change while the members' files do not. Unless the member
+// is the last one, the gems it has a version of (one left once its "-"
+// lines are applied) join owned and hide the later members' lines for them,
+// so the group's info/<gem> (the owner's) and its versions agree. The member
+// is read line by line. Only the versions of a gem with a removed version
+// are kept: a first pass finds those, which spares a rubygems.org-sized
+// member's 1.8 million versions (some 170 MiB) when it is not the last.
+func mergeVersions(dst *bytes.Buffer, member io.ReadSeeker, owned map[string]bool, first, last bool) error {
+	removals := map[string]bool{}
+	if !last {
+		err := scanVersions(member, nil, func(_, name, versions []byte) {
+			if versions[0] == '-' || bytes.Contains(versions, []byte(",-")) {
+				removals[string(name)] = true
+			}
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := member.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
 	}
-	for _, line := range strings.Split(text, "\n") {
-		name, rest, ok := strings.Cut(line, " ")
-		if !ok || name == "" {
-			continue
+	header := func(h []byte) {
+		if first {
+			dst.Write(h)
 		}
-		lines = append(lines, line)
-		versions, _, _ := strings.Cut(rest, " ")
-		set := have[name]
-		if set == nil {
-			set = map[string]bool{}
-			have[name] = set
+	}
+	has := map[string]bool{}             // gems without a removal
+	left := map[string]map[string]bool{} // the versions left of the others
+	err := scanVersions(member, header, func(line, name, versions []byte) {
+		if !owned[string(name)] {
+			dst.Write(line)
+			dst.WriteByte('\n')
 		}
-		for _, v := range strings.Split(versions, ",") {
-			if removed, cut := strings.CutPrefix(v, "-"); cut {
-				delete(set, removed)
-			} else if v != "" {
-				set[v] = true
+		switch {
+		case last:
+		case !removals[string(name)]:
+			has[string(name)] = true
+		default:
+			set := left[string(name)]
+			if set == nil {
+				set = map[string]bool{}
+				left[string(name)] = set
+			}
+			for _, v := range bytes.Split(versions, []byte(",")) {
+				if gone, cut := bytes.CutPrefix(v, []byte("-")); cut {
+					delete(set, string(gone))
+				} else if len(v) > 0 {
+					set[string(v)] = true
+				}
 			}
 		}
-		live[name] = len(set) > 0
+	})
+	for name := range has {
+		owned[name] = true
 	}
-	return lines, live
+	for name, set := range left {
+		if len(set) > 0 {
+			owned[name] = true
+		}
+	}
+	return err
 }
 
-// mergeVersions is a group's versions file: each member's lines in member
-// order, a gem that an earlier member has (a version left after its "-"
-// lines) hiding the later members' lines for it, so the group's info/<gem>
-// (the owner's) and its versions agree.
-func mergeVersions(members [][]byte, now time.Time) []byte {
-	var b bytes.Buffer
-	b.WriteString(versionsHeader(now))
-	owned := map[string]bool{}
-	for _, body := range members {
-		lines, live := parseVersions(body)
-		for _, line := range lines {
-			if name, _, _ := strings.Cut(line, " "); !owned[name] {
-				b.WriteString(line)
-				b.WriteByte('\n')
-			}
-		}
-		for name, ok := range live {
-			if ok {
-				owned[name] = true
-			}
+// scanVersions reads a versions file line by line: header, if given, gets what
+// comes before the lines (its header up to "---", or "---" when it has none),
+// fn each line with a gem and versions. A line's bytes are valid during the call.
+func scanVersions(r io.Reader, header func([]byte), fn func(line, name, versions []byte)) error {
+	br := bufio.NewReaderSize(r, 64<<10)
+	// The header ends at a "---" line, which is at the top when there is one.
+	head, _ := br.Peek(1024)
+	n := 0
+	if bytes.HasPrefix(head, []byte("---\n")) {
+		n = 4
+	} else if i := bytes.Index(head, []byte("\n---\n")); i >= 0 {
+		n = i + 5
+	}
+	if header != nil {
+		if n > 0 {
+			header(head[:n])
+		} else {
+			header([]byte("---\n"))
 		}
 	}
-	return b.Bytes()
+	br.Discard(n)
+	sc := bufio.NewScanner(br)
+	sc.Buffer(nil, maxVersionsLine)
+	for sc.Scan() {
+		line := sc.Bytes()
+		name, rest, ok := bytes.Cut(line, []byte(" "))
+		if !ok || len(name) == 0 {
+			continue
+		}
+		versions, _, _ := bytes.Cut(rest, []byte(" "))
+		if len(versions) > 0 {
+			fn(line, name, versions)
+		}
+	}
+	return sc.Err()
 }
 
 // parseNames reads a names file into its gems.
@@ -294,7 +390,7 @@ func dependenciesDoc(entries []any) ([]byte, error) { return marshalDump(entries
 
 func dependencyEntry(r row) hash {
 	var deps []any
-	for _, d := range r.attrs.Dependencies {
+	for _, d := range r.attrs().Dependencies {
 		if d.Type != "development" {
 			req := d.Requirement
 			if req == "" {

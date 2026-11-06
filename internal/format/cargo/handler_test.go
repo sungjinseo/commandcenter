@@ -52,6 +52,9 @@ func fakeIndex(hits *atomic.Int32, files string) http.HandlerFunc {
 		case "/ev/il/evil":
 			io.WriteString(w, `{"name":"other","vers":"1.0.0","deps":[],"cksum":"`+sum("x")+`","features":{},"yanked":false}`+"\n"+
 				`{"name":"../evil","vers":"1.0.0","deps":[],"cksum":"`+sum("x")+`","features":{},"yanked":false}`+"\n")
+		case "/si/gn/signin":
+			w.Header().Set("Content-Type", "text/html")
+			io.WriteString(w, "<html>Sign in</html>")
 		case "/crates/other/1.0.0/download":
 			io.WriteString(w, "x")
 		case "/crates/itoa/1.0.0/download":
@@ -169,6 +172,17 @@ func TestProxyIndexAndDownload(t *testing.T) {
 	var errBody struct{ Errors []struct{ Detail string } }
 	if w.Code != 404 || json.Unmarshal(w.Body.Bytes(), &errBody) != nil || len(errBody.Errors) != 1 {
 		t.Fatalf("unknown crate: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// A sign-in page answered with 200 is no index file: not found and not cached.
+func TestProxyDoesNotCacheWebPages(t *testing.T) {
+	e := newEnv(t)
+	if w := e.do("GET", "cargo-proxy", "si/gn/signin", nil); w.Code != 404 {
+		t.Fatalf("index: %d %s", w.Code, w.Body.String())
+	}
+	if _, err := e.h.Store.Get(context.Background(), "cargo-proxy", indexKey("si/gn/signin")); repo.StatusOf(err) != 404 {
+		t.Fatalf("cached: %v", err)
 	}
 }
 

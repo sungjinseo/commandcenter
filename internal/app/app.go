@@ -145,6 +145,7 @@ type Option func(*options)
 type options struct {
 	logs     *logring.Ring
 	logLevel *slog.LevelVar
+	audit    *slog.Logger
 	serve    bool
 }
 
@@ -159,6 +160,10 @@ func AsServer() Option { return func(o *options) { o.serve = true } }
 // WithLogLevel lets the UI's logging API change level, the root logger's
 // level, at run time.
 func WithLogLevel(level *slog.LevelVar) Option { return func(o *options) { o.logLevel = level } }
+
+// WithAuditLog writes one record per activity event to audit (events.Recorder.Audit):
+// a logger of its own, so that neither the log level nor the log ring touches them.
+func WithAuditLog(audit *slog.Logger) Option { return func(o *options) { o.audit = audit } }
 
 // WithLogRing serves the log viewer from ring, which the caller's logger feeds
 // (see logring.NewHandler).
@@ -191,7 +196,7 @@ func New(cfg *config.Config, log *slog.Logger, opts ...Option) (*App, error) {
 		db.Close()
 		return nil, err
 	}
-	a, err := build(cfg, log, blobs, db, o.logs, o.logLevel, node)
+	a, err := build(cfg, log, blobs, db, o, node)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -423,7 +428,7 @@ func openBlobStores(cfg *config.Config, db *meta.DB, log *slog.Logger) (stores m
 	return stores, unopened, nil
 }
 
-func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, db *meta.DB, logs *logring.Ring, logLevel *slog.LevelVar, node string) (*App, error) {
+func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, db *meta.DB, o options, node string) (*App, error) {
 	hasStore := func(name string) bool { return blobs[name] != nil } // before the map is shared
 	defs, err := loadRepositories(cfg, log, db, hasStore)
 	if err != nil {
@@ -439,6 +444,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	}
 	recorder := metrics.New(db)
 	store.Downloads = recorder.Download
+	store.Used = recorder.Used
 	fetcher := proxy.New(store, proxy.NewClient(), maxConcurrentFetches)
 	fetcher.Stats = recorder
 	resolver := &resolve.Resolver{Store: store, Fetcher: fetcher}
@@ -457,6 +463,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	goH, mavenH, rawH := golang.New(store, resolver), maven.New(store, resolver), raw.New(store, resolver)
 	goH.Auth, mavenH.Auth, rawH.Auth = authn, authn, authn // overwrites need Edit
 	npmH, pypiH := npm.New(store, resolver, authn, baseURL), pypi.New(store, fetcher, baseURL)
+	pypiH.Auth = authn // overwrites need Edit
 	cargoH := cargo.New(store, fetcher, authn, baseURL)
 	helmH := helm.New(store, fetcher, authn)
 	yumH := yum.New(store, resolver, authn)
@@ -467,7 +474,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	gemsH := rubygems.New(store, fetcher, authn)
 	gitlfsH := gitlfs.New(store, authn, baseURL)
 	rH := r.New(store, resolver, authn)
-	p2H := p2.New(store, fetcher, baseURL) // proxy and group only: its proxies use the generic deleter
+	p2H := p2.New(store, fetcher) // proxy and group only: its proxies use the generic deleter
 	swiftH := swift.New(store, fetcher, authn, baseURL)
 	podsH := cocoapods.New(store, fetcher, baseURL)
 	hfH := huggingface.New(store, fetcher, baseURL)
@@ -509,8 +516,9 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		}
 	}
 	taskSvc := &tasks.Service{DB: db, Deleters: deleters, Maven: mavenH, Metrics: recorder, Log: log, Store: store,
-		Rebuilders: map[string]repo.MetadataRebuilder{"apt": aptH, "yum": yumH, "helm": helmH, "conda": condaH},
+		Rebuilders: map[string]repo.MetadataRebuilder{"apt": aptH, "yum": yumH, "helm": helmH, "conda": condaH, "r": rH},
 		RunTimeout: time.Duration(cfg.TaskRunTimeoutHours) * time.Hour}
+	taskSvc.Rebuilders["npm"] = npmH
 	taskSvc.OwnerGone = authn.TokenOwnerGone // security.purge-api-keys
 	taskSvc.Docker = dockerH                 // docker.gc
 	if err := taskSvc.Seed(context.Background()); err != nil {
@@ -541,7 +549,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// Started only after the checks above can no longer fail, so an error return
 	// never leaves the writer running against a database New is about to close.
 	evts := events.New(db)
-	evts.Node = node
+	evts.Node, evts.Audit = node, o.audit
 	// Every event goes through the webhook dispatcher to the recorder; Serve
 	// starts sending the deliveries.
 	hooks := &webhook.Dispatcher{DB: db, Next: evts, Repos: registry, Log: log, Node: node}
@@ -650,11 +658,11 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// Crowd goes through the proxy settings and the trust store, and may
 	// reach the class of address its URL resolves to.
 	authn.CrowdHTTP = func(u *url.URL) *http.Client { return proxy.NewClientFor(u, nil) }
-	if logLevel != nil { // PUT /-/api/logging on another node
+	if o.logLevel != nil { // PUT /-/api/logging on another node
 		db.Subscribe("loglevel", func(arg string) {
 			var l slog.Level
 			if l.UnmarshalText([]byte(arg)) == nil {
-				logLevel.Set(l)
+				o.logLevel.Set(l)
 			}
 		})
 	}
@@ -694,9 +702,9 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Log:      log,
 		Events:   hooks,
 		Mail:     mailer,
-		Logs:     logs,
+		Logs:     o.logs,
 		Metrics:  recorder,
-		LogLevel: logLevel,
+		LogLevel: o.logLevel,
 
 		Config:     cfg,
 		DataDir:    cfg.DataDir,
@@ -736,13 +744,15 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// hand their requests to the repository endpoint.
 	nexus.ServeRepository = srv.ServeRepository
 	// Pull replication prefetches through the repository endpoint, as a
-	// client's HEAD: the server's checks and the format handler apply.
+	// HEAD that fills the cache: the server's checks and the format handler
+	// apply, and nothing is read back from the blob store or counted as a
+	// download.
 	taskSvc.Replication = &replication.Service{DB: db, Store: store, Fetcher: fetcher,
 		Prefetch: func(ctx context.Context, rp *repo.Repository, p, actor string) int {
 			if actor == "" {
 				actor = "system"
 			}
-			req, err := http.NewRequestWithContext(auth.WithPrincipal(ctx, auth.Principal{User: actor, Admin: true}), http.MethodHead,
+			req, err := http.NewRequestWithContext(proxy.FillOnHead(auth.WithPrincipal(ctx, auth.Principal{User: actor, Admin: true})), http.MethodHead,
 				(&url.URL{Path: "/repository/" + rp.Name + "/" + p}).String(), nil)
 			if err != nil {
 				return 0
@@ -1066,8 +1076,10 @@ var followTopics = []string{"access", "registry", "routing", "blobstores", "move
 // Store.Sync too (answerSync). (The log level, cleanup policy, flush and
 // task stop notifications have their own subscribers.)
 // usageEvery is how often the leader counts the changed repositories'
-// components and samples the month's usage (ui.UI.RefreshUsage).
-const usageEvery = time.Minute
+// components, samples the month's usage (ui.UI.RefreshUsage) and checks the
+// blob stores' soft quotas (ui.UI.CheckQuotas).
+// A var for tests.
+var usageEvery = time.Minute
 
 func (a *App) usageLoop(ctx context.Context) {
 	tick := time.NewTicker(usageEvery)
@@ -1084,6 +1096,7 @@ func (a *App) usageLoop(ctx context.Context) {
 		if err := a.UI.RefreshUsage(ctx, time.Now()); err != nil && ctx.Err() == nil {
 			a.log.Warn("could not refresh the usage counters", "err", logsafe.Err(err))
 		}
+		a.UI.CheckQuotas(ctx)
 	}
 }
 

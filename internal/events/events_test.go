@@ -1,8 +1,11 @@
 package events
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -197,4 +200,35 @@ func TestCloseGivesUpAfterDeadline(t *testing.T) {
 	}
 	close(bs.release)
 	<-r.done
+}
+
+// core-53: one JSON line per event, tagged, without a URL's secrets, even for
+// an event the queue drops; the table's window does not change.
+func TestAuditLines(t *testing.T) {
+	db := openDB(t)
+	r := New(db)
+	var buf bytes.Buffer
+	r.Audit = slog.New(slog.NewJSONHandler(&buf, nil))
+	r.Node = "node-1"
+	r.Emit("repo.update", "alice", "maven", "subject", "from https://u:secret@host/x?token=abc")
+	r.Close()
+	r.Emit("upload", "bob", "maven", "dropped/after/close", "")
+	var lines []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatalf("%v: %q", err, l)
+		}
+		lines = append(lines, m)
+	}
+	if len(lines) != 2 || lines[0]["audit"] != true || lines[0]["kind"] != "repo.update" || lines[0]["actor"] != "alice" || lines[0]["repo"] != "maven" ||
+		lines[0]["subject"] != "subject" || lines[0]["node"] != "node-1" || lines[1]["kind"] != "upload" {
+		t.Fatalf("lines: %v", lines)
+	}
+	if d := lines[0]["detail"].(string); strings.Contains(d, "secret") || strings.Contains(d, "abc") {
+		t.Fatalf("detail: %s", d)
+	}
+	if got, err := db.ListEvents(context.Background(), 10, 0, ""); err != nil || len(got) != 1 {
+		t.Fatalf("table: %v %v", got, err)
+	}
 }

@@ -250,7 +250,7 @@ func nexusFixture(t *testing.T, s3 *s3test.Server) *nexusConfig {
 			store("pool", "Group", "null") + `,` + store("member-a", "File", "null") + `,` + store("member-b", "File", "null") + `,` +
 			store("s3-keys", "S3", "null") + `,` + store("s3-role", "S3", `{"type":"spaceUsedQuota","limit":5368709120}`) + `,` +
 			store("azure", "Azure Cloud Storage", "null") + `]`,
-		nx + "/blobstores/group/pool": `{"softQuota":null,"members":["member-a","member-b"],"fillPolicy":"writeToFirst"}`,
+		nx + "/blobstores/group/pool": `{"softQuota":{"type":"spaceRemainingQuota","limit":1073741824},"members":["member-a","member-b"],"fillPolicy":"writeToFirst"}`,
 		nx + "/blobstores/s3/s3-keys": `{"name":"s3-keys","softQuota":null,"type":"S3","bucketConfiguration":{"bucket":{"region":"eu-west-1","name":"corp-artifacts","prefix":"nexus"},
 			"bucketSecurity":{"accessKeyId":"AKIAEXAMPLEKEYID","secretAccessKey":"` + placeholder + `"},"encryption":{"encryptionType":"s3ManagedEncryption"},
 			"advancedBucketConnection":{"endpoint":"","forcePathStyle":false,"maxConnectionPoolSize":50}}}`,
@@ -337,7 +337,7 @@ func nexusFixture(t *testing.T, s3 *s3test.Server) *nexusConfig {
 			 "userObjectClass":"inetOrgPerson","userIdAttribute":"uid","userRealNameAttribute":"cn","userEmailAddressAttribute":"mail","ldapGroupsAsRoles":false},
 			{"id":"a1","order":1,"name":"corp","protocol":"ldaps","useTrustStore":true,"host":"ldap.example.org","port":636,"searchBase":"dc=example,dc=org",
 			 "authScheme":"SIMPLE","authRealm":null,"authUsername":"cn=nexus,ou=services,dc=example,dc=org","connectionTimeoutSeconds":30,
-			 "connectionRetryDelaySeconds":300,"maxIncidentsCount":3,"userBaseDn":"ou=people","userSubtree":true,"userObjectClass":"inetOrgPerson",
+			 "connectionRetryDelaySeconds":300,"maxIncidentsCount":3,"userBaseDn":"ou=people","userSubtree":false,"userObjectClass":"inetOrgPerson",
 			 "userLdapFilter":"(employeeType=engineer)","userIdAttribute":"uid","userRealNameAttribute":"displayName","userEmailAddressAttribute":"mail",
 			 "userPasswordAttribute":"","ldapGroupsAsRoles":true,"groupType":"dynamic","userMemberOfAttribute":"memberOf"}]`,
 		nx + "/security/realms/active": `["NexusAuthenticatingRealm","LdapRealm","NpmToken","SamlRealm","DefaultRole","NexusAuthorizingRealm"]`,
@@ -537,6 +537,9 @@ func TestImportNexusConfig(t *testing.T) {
 	if s := cc.named(t, nx+"/blobstores", "name", "releases"); sub(s, "softQuota")["limit"] != 10737418240.0 {
 		t.Errorf("releases quota: %v", s)
 	}
+	if s := cc.named(t, nx+"/blobstores", "name", "pool"); sub(s, "softQuota")["limit"] != 1073741824.0 {
+		t.Errorf("group quota: %v", s)
+	}
 	role := cc.named(t, nx+"/security/roles", "id", "developers")
 	if p := list(role, "privileges"); !reflect.DeepEqual(p, []string{"team-a-deploy", "nx-repository-view-maven2-maven-releases-read", "nx-apikey-all"}) ||
 		!reflect.DeepEqual(list(role, "roles"), []string{"z-base"}) {
@@ -553,6 +556,7 @@ func TestImportNexusConfig(t *testing.T) {
 	ldap, _ := cc.get(t, native+"/realms/ldap").(obj)
 	if str(ldap, "url") != "ldaps://ldap.example.org:636" || str(ldap, "bindDN") != "" || str(ldap, "userBaseDN") != "ou=people,dc=example,dc=org" ||
 		str(ldap, "userFilter") != "(&(objectClass=inetOrgPerson)(uid={user})(employeeType=engineer))" || str(ldap, "nameAttr") != "displayName" ||
+		ldap["userOneLevel"] != true ||
 		!strings.Contains(fmt.Sprint(ldap["groupMappings"]), "developers") || strings.Contains(fmt.Sprint(ldap["groupMappings"]), "admin") {
 		t.Errorf("ldap: %v", ldap)
 	}
@@ -881,8 +885,8 @@ func TestImportNexusConfigBetweenCommandCenters(t *testing.T) {
 		"blobstore\tcloud":      "skipped (its secret access key is not readable from Nexus)",
 		"repository\traw-cloud": "skipped (its blob store cloud is missing on the target)",
 		"role\tdevelopers":      "created\twithout privileges that the target does not have: nx-repository-view-raw-raw-cloud-read",
+		"ldap\tldap":            "updated",
 		// What a Command Center does not answer in Nexus's shape.
-		"ldap\t*": "skipped (the source does not serve /service/rest/v1/security/ldap)",
 		"task\t*": "skipped (the source does not serve /service/extdirect)",
 		"http\t*": "skipped (the source does not serve /service/extdirect)",
 	} {
@@ -894,7 +898,7 @@ func TestImportNexusConfigBetweenCommandCenters(t *testing.T) {
 	for _, want := range []string{
 		"needs manual action: blobstore cloud: ", "needs manual action: repository maven-central: enter the password of its remote's user \"mirror\"",
 		"needs manual action: repository npm-proxy: enter the bearer token", "needs manual action: repository apt-hosted: enter its apt signing key",
-		"needs manual action: user alice: set a password", "needs manual action: realms: LdapRealm is on in Nexus",
+		"needs manual action: user alice: set a password",
 		"needs manual action: email: enter the password of the SMTP user \"mailer\"",
 		// Command Center's anonymous access has no user whose roles could be read.
 		"needs manual action: anonymous: ",
@@ -958,18 +962,20 @@ func TestImportNexusConfigBetweenCommandCenters(t *testing.T) {
 	if got, want := b.get(t, nx+"/email"), a.get(t, nx+"/email"); !reflect.DeepEqual(got, want) {
 		t.Errorf("e-mail:\n  source %v\n  target %v", want, got)
 	}
-	// The realms that are on, in order: the ldap realm waits for the LDAP
-	// server, which a Command Center source does not answer.
+	// The realms that are on, in order, and the LDAP server they need.
 	on := func(cc *ccServer) (ids []string) {
 		for _, r := range cc.get(t, native+"/realms").(obj)["realms"].([]any) {
-			if r.(obj)["enabled"] == true && r.(obj)["id"] != "ldap" {
+			if r.(obj)["enabled"] == true {
 				ids = append(ids, str(r.(obj), "id"))
 			}
 		}
 		return ids
 	}
-	if got, want := on(b), on(a); !reflect.DeepEqual(got, want) || len(want) != 2 {
+	if got, want := on(b), on(a); !reflect.DeepEqual(got, want) || len(want) != 3 {
 		t.Errorf("realms: source %v, target %v", want, got)
+	}
+	if got := b.get(t, native+"/realms/ldap").(obj); got["url"] != "ldap://ldap.example.org:389" || got["userBaseDN"] != "ou=people,dc=example,dc=org" || got["userFilter"] != "(uid={user})" {
+		t.Errorf("the LDAP server on the target: %v", got)
 	}
 
 	// The two instances as each exports its configuration (without

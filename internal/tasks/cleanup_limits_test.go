@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/config"
@@ -184,6 +185,205 @@ func TestPurgeUnused(t *testing.T) {
 		left = append(left, a.Path)
 	}
 	if got := strings.Join(left, ","); got != "org/example/lib/1.1/lib-1.1.jar,org/example/lib/1.2/lib-1.2.jar" {
+		t.Fatalf("left: %s", got)
+	}
+}
+
+// more gives the harness more repositories, created in order.
+func (h *harness) more(t *testing.T, defs ...config.Repository) {
+	t.Helper()
+	for _, d := range defs {
+		if d.Type == "proxy" {
+			d.Remote = "https://remote.example/" + d.Name + "/"
+		}
+		if err := h.reg.Create(context.Background(), d); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// paths lists what repoName holds.
+func (h *harness) paths(t *testing.T, repoName string) string {
+	t.Helper()
+	as, err := h.db.ListAssets(context.Background(), repoName, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	left := []string{}
+	for _, a := range as {
+		left = append(left, a.Path)
+	}
+	return strings.Join(left, " ")
+}
+
+// downloaded records a download of repoName/path, at days from t0.
+func (h *harness) downloaded(t *testing.T, repoName, path string, days int) {
+	t.Helper()
+	if err := h.db.FlushDownloads(context.Background(), []meta.DownloadDelta{{Repo: repoName, Path: path, N: 1, Last: t0.AddDate(0, 0, days)}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// repository.purge-unused also deletes a proxy's cached files without a
+// component that no one read and the proxy did not check in the last lastUsed
+// days, as Nexus deletes assets without a component (core-42, cocoapods-09,
+// golang-07, p2-10). What it must keep: a document that holds what its remote
+// dropped, one that decides a group's owner with a member after it, what a
+// blocked proxy cannot fetch back, and a proxy's own records.
+func TestPurgeUnusedFiles(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.storedRepos(t)
+	proxy := func(name, format string) config.Repository {
+		return config.Repository{Name: name, Format: format, Type: "proxy"}
+	}
+	blocked := proxy("npm-blocked", "npm")
+	blocked.Blocked = true
+	h.more(t, proxy("mvn-first", "maven"),
+		proxy("npm-solo", "npm"), proxy("npm-first", "npm"), proxy("npm-last", "npm"), proxy("npm-nested", "npm"), proxy("npm-outer", "npm"), blocked,
+		proxy("py", "pypi"), proxy("p2-site", "p2"), proxy("hf", "huggingface"), proxy("tf", "terraform"), proxy("go-px", "go"),
+		config.Repository{Name: "mvn-all", Format: "maven", Type: "group", Members: []string{"mvn-first", "mvn-proxy"}},
+		config.Repository{Name: "npm-all", Format: "npm", Type: "group", Members: []string{"npm-first", "npm-last"}},
+		config.Repository{Name: "npm-in", Format: "npm", Type: "group", Members: []string{"npm-nested"}},
+		config.Repository{Name: "npm-all2", Format: "npm", Type: "group", Members: []string{"npm-in", "npm-outer"}})
+
+	h.clock.Set(t0.AddDate(0, 0, -60))
+	seed := map[string][]string{
+		"mvn-proxy":   {"org/x/lib/1.0/lib-1.0.jar", "org/x/lib/maven-metadata.xml", "org/x/checked/maven-metadata.xml", "org/x/read/maven-metadata.xml", "org/x/invalid/maven-metadata.xml"},
+		"mvn-first":   {"org/y/maven-metadata.xml"}, // a member follows it, but Maven's groups merge
+		"npm-solo":    {"a/package.json", "b/-/b-1.0.0.tgz", "b/package.json", "c/-/c-1.0.0.tgz", "c/package.json", "@s/d/-/d-1.0.0.tgz", "@s/d/package.json"},
+		"npm-first":   {"e/-/e-1.0.0.tgz", "e/package.json"},
+		"npm-last":    {"f/package.json"},
+		"npm-nested":  {"g/package.json"},
+		"npm-outer":   {"h/package.json"},
+		"npm-blocked": {"i/package.json"},
+		"py":          {"packages/six/six-1.0.tar.gz", "pypi/six/json", "simple/six/index", "simple/gone/index"},
+		"p2-site":     {".remote/index.json", "content.jar", "plugins/x_1.0.0.jar"},
+		"hf":          {"api/models/o/m/tree/main~tree", "api/models/o/m/tree/main~tree~next"},
+		"tf":          {"v1/modules/o/m/p/1.0.0/download", "v1/modules/o/m/p/versions"},
+		"go-px":       {"example.com/m/@latest", "example.com/m/@v/list", "example.com/m/@v/v1.0.0.zip"},
+	}
+	for name, paths := range seed {
+		for _, p := range paths {
+			h.put(t, name, p, name+"/"+p)
+		}
+	}
+	h.clock.Set(t0)
+	h.put(t, "mvn-proxy", "org/x/new/maven-metadata.xml", "written yesterday, as far as this run is concerned")
+	if err := h.db.MarkChecked(ctx, "mvn-proxy", "org/x/checked/maven-metadata.xml", t0.AddDate(0, 0, -1)); err != nil {
+		t.Fatal(err)
+	}
+	// Invalidated: no check to go by, and written long ago.
+	if err := h.db.MarkChecked(ctx, "mvn-proxy", "org/x/invalid/maven-metadata.xml", time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	h.downloaded(t, "mvn-proxy", "org/x/read/maven-metadata.xml", -1)
+	h.downloaded(t, "npm-solo", "c/-/c-1.0.0.tgz", -60) // goes, and so does its document, in one run
+	h.downloaded(t, "npm-solo", "@s/d/-/d-1.0.0.tgz", -1)
+	h.downloaded(t, "npm-first", "e/-/e-1.0.0.tgz", -60)
+	h.downloaded(t, "py", "packages/six/six-1.0.tar.gz", -1)
+
+	tk := h.create(t, Def{Name: "p", Type: TypePurgeUnused, Schedule: "manual", Params: json.RawMessage(`{"lastUsed":7}`)})
+	h.s.ScanBudget = 3 // a run reads a part of each repository; the next ones go on from there
+	for range 4 {
+		if out, err := h.s.RunNow(tk.ID, "admin"); err != nil || out.Result != ResultOK {
+			t.Fatalf("run: %+v %v\n%s", out, err, h.get(t, tk.ID).LastLog)
+		}
+	}
+	for name, want := range map[string]string{
+		"mvn-proxy":   "org/x/checked/maven-metadata.xml org/x/lib/1.0/lib-1.0.jar org/x/new/maven-metadata.xml org/x/read/maven-metadata.xml",
+		"mvn-first":   "",
+		"npm-solo":    "@s/d/-/d-1.0.0.tgz @s/d/package.json b/-/b-1.0.0.tgz b/package.json",
+		"npm-first":   "e/package.json", // the component goes as ever
+		"npm-last":    "",               // no member follows it: nobody can stand in
+		"npm-nested":  "g/package.json", // the outer group's next member follows it
+		"npm-outer":   "",
+		"npm-blocked": "i/package.json",
+		"py":          "packages/six/six-1.0.tar.gz simple/six/index",
+		"p2-site":     ".remote/index.json plugins/x_1.0.0.jar",
+		"hf":          "api/models/o/m/tree/main~tree~next",
+		"tf":          "v1/modules/o/m/p/1.0.0/download",
+		"go-px":       "example.com/m/@v/v1.0.0.zip",
+	} {
+		if got := h.paths(t, name); got != want {
+			t.Errorf("%s holds %q, want %q", name, got, want)
+		}
+	}
+	log := h.get(t, tk.ID).LastLog
+	for _, want := range []string{"npm-first: keeps its cached files", "another member of group npm-all follows it", "npm-nested: keeps its cached files", "npm-blocked: keeps its cached files"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log without %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "npm-last: keeps") || strings.Contains(log, "mvn-first: keeps") {
+		t.Errorf("log:\n%s", log)
+	}
+}
+
+// A purge's files count against the run's limits: scanAssets bounds what a
+// run reads and maxComponents what it deletes, and the next run goes on. Each
+// batch is one transaction.
+func TestPurgeUnusedFilesLimits(t *testing.T) {
+	h := newHarness(t)
+	h.storedRepos(t)
+	saved := fileBatch
+	fileBatch = 2
+	t.Cleanup(func() { fileBatch = saved })
+	var commits [][]meta.Change
+	h.db.OnCommit = func(_ context.Context, _ time.Time, cs []meta.Change) { commits = append(commits, cs) }
+	h.clock.Set(t0.AddDate(0, 0, -60))
+	for i := range 10 {
+		h.put(t, "mvn-proxy", fmt.Sprintf("org/x/l%d/maven-metadata.xml", i), "m")
+	}
+	h.clock.Set(t0)
+	count := func() int {
+		as, _ := h.db.ListAssets(context.Background(), "mvn-proxy", "")
+		return len(as)
+	}
+	limited := h.create(t, Def{Name: "lim", Type: TypePurgeUnused, Schedule: "manual", Params: json.RawMessage(`{"lastUsed":7,"maxComponents":3}`)})
+	commits = nil
+	out, err := h.s.RunNow(limited.ID, "admin")
+	if err != nil || out.Removed != 0 || count() != 7 {
+		t.Fatalf("limited run: %+v %v, %d left\n%s", out, err, count(), h.get(t, limited.ID).LastLog)
+	}
+	if log := h.get(t, limited.ID).LastLog; !strings.Contains(log, "stopped at the limit of 3") || !strings.Contains(log, "3 of the assets are cached files") {
+		t.Fatalf("log:\n%s", log)
+	}
+	if len(commits) != 2 || len(commits[0]) != 2 || len(commits[1]) != 1 || commits[0][0].Op != meta.ChangeDelete {
+		t.Fatalf("commits: %+v", commits)
+	}
+	// The limited run did not move its cursor: this one, with a scan of 4, reads what is left from the start.
+	scan := h.create(t, Def{Name: "scan", Type: TypePurgeUnused, Schedule: "manual", Params: json.RawMessage(`{"lastUsed":7,"scanAssets":4}`)})
+	h.s.ScanBudget = 4
+	if out, err := h.s.RunNow(scan.ID, "admin"); err != nil || count() != 3 {
+		t.Fatalf("scan: %+v %v, %d left\n%s", out, err, count(), h.get(t, scan.ID).LastLog)
+	}
+	if out, err := h.s.RunNow(scan.ID, "admin"); err != nil || count() != 0 {
+		t.Fatalf("scan: %+v %v, %d left\n%s", out, err, count(), h.get(t, scan.ID).LastLog)
+	}
+}
+
+// A file read or fetched after a scan chose it stays (the check is in the delete).
+func TestDeleteFilesKeepsWhatWasUsedSince(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.storedRepos(t)
+	h.clock.Set(t0.AddDate(0, 0, -60))
+	for _, p := range []string{"a/maven-metadata.xml", "b/maven-metadata.xml", "c/maven-metadata.xml", "d/maven-metadata.xml"} {
+		h.put(t, "mvn-proxy", p, p)
+	}
+	h.clock.Set(t0)
+	h.downloaded(t, "mvn-proxy", "a/maven-metadata.xml", 0)
+	if err := h.db.MarkChecked(ctx, "mvn-proxy", "b/maven-metadata.xml", t0); err != nil {
+		t.Fatal(err)
+	}
+	h.put(t, "mvn-proxy", "c/maven-metadata.xml", "fetched again")
+	before := t0.AddDate(0, 0, -7)
+	res, err := h.s.Deleters.DeleteFiles(ctx, h.reg.Get("mvn-proxy"), []string{"a/maven-metadata.xml", "b/maven-metadata.xml", "c/maven-metadata.xml", "d/maven-metadata.xml", "none"}, before, "admin")
+	if err != nil || res.Assets != 1 || res.Bytes != int64(len("d/maven-metadata.xml")) {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if got := h.paths(t, "mvn-proxy"); got != "a/maven-metadata.xml b/maven-metadata.xml c/maven-metadata.xml" {
 		t.Fatalf("left: %s", got)
 	}
 }

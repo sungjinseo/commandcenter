@@ -47,10 +47,11 @@ const (
 	ResultUnwillingToPerform  = 53
 	maxEntries                = 2 // the search size limit: two is enough to detect ambiguity
 	defaultTimeout            = 5 * time.Second
+	scopeSingleLevel          = 1
 	scopeWholeSubtree         = 2
 	derefNever                = 0
 	searchTimeLimitSeconds    = 10
-	maxMessagesPerSearchReply = 64 // entries + references + done; a server may not stream forever
+	maxMessagesPerSearchReply = 64 // references + done, beyond the entries the size limit allows; a server may not stream forever
 )
 
 // ErrInvalidCredentials is a bind refused with invalidCredentials (49).
@@ -303,6 +304,10 @@ func (c *Conn) Bind(dn, password string) error {
 	if password == "" {
 		return ErrInvalidCredentials
 	}
+	return c.bind(dn, password)
+}
+
+func (c *Conn) bind(dn, password string) error {
 	id, err := c.send(ber.TLV(opBindRequest,
 		ber.Int(ber.TagInteger, 3), ber.String(ber.TagOctetString, dn), ber.String(authSimple, password)))
 	if err != nil {
@@ -321,6 +326,7 @@ func (c *Conn) Bind(dn, password string) error {
 // SearchRequest is a whole-subtree search.
 type SearchRequest struct {
 	BaseDN     string
+	OneLevel   bool   // the direct children of BaseDN, not its whole subtree
 	Filter     string // RFC 4515; compiled with CompileFilter
 	Attributes []string
 	SizeLimit  int
@@ -341,9 +347,13 @@ func (c *Conn) Search(req SearchRequest) ([]Entry, error) {
 			attrs = append(attrs, ber.String(ber.TagOctetString, a))
 		}
 	}
+	scope := int64(scopeWholeSubtree)
+	if req.OneLevel {
+		scope = scopeSingleLevel
+	}
 	id, err := c.send(ber.TLV(opSearchRequest,
 		ber.String(ber.TagOctetString, req.BaseDN),
-		ber.Int(ber.TagEnumerated, scopeWholeSubtree),
+		ber.Int(ber.TagEnumerated, scope),
 		ber.Int(ber.TagEnumerated, derefNever),
 		ber.Int(ber.TagInteger, int64(req.SizeLimit)),
 		ber.Int(ber.TagInteger, searchTimeLimitSeconds),
@@ -354,10 +364,14 @@ func (c *Conn) Search(req SearchRequest) ([]Entry, error) {
 		return nil, err
 	}
 	var out []Entry
-	for i := 0; i < maxMessagesPerSearchReply; i++ {
+	read := 0
+	for i := 0; i < req.SizeLimit+maxMessagesPerSearchReply; i++ {
 		tag, content, err := c.recv(id)
 		if err != nil {
 			return nil, err
+		}
+		if read += len(content); read > maxSearchBytes {
+			return nil, fmt.Errorf("ldap: search result over %d bytes", maxSearchBytes)
 		}
 		switch tag {
 		case opSearchEntry:
@@ -385,6 +399,7 @@ const (
 	maxAttrsPerEntry = 64
 	maxValuesPerAttr = 1024
 	maxMessageBytes  = 1 << 20 // one LDAPMessage
+	maxSearchBytes   = 4 << 20 // the messages of one search
 )
 
 // parseEntry decodes a SearchResultEntry, keeping only the attributes in

@@ -182,6 +182,8 @@ export const SEARCH_FORMATS = { apt: "Apt", cargo: "Cargo", cocoapods: "Cocoapod
 export const OSV_FORMATS = ["npm", "pypi", "maven", "go", "cargo", "nuget", "rubygems", "composer", "conan", "r"];
 // NO_REPLICATION: proxy formats without pull replication (the server's config.ReplicationFormats).
 export const NO_REPLICATION = ["docker", "p2", "cocoapods", "huggingface"];
+// MERGE_FORMATS: group formats with a mergeMembers setting (the server's config.ValidateDefinition).
+export const MERGE_FORMATS = ["npm", "pypi", "r", "conda", "yum"];
 // Severities from worst; "none" and "unknown" are the OSV extremes.
 export const SEVERITIES = ["critical", "high", "medium", "low"];
 const SEV = { critical: ["sev.critical", "red"], high: ["sev.high", "red"], medium: ["sev.medium", "amber"], low: ["sev.low", "blue"], none: ["sev.none", ""], unknown: ["sev.unknown", ""] };

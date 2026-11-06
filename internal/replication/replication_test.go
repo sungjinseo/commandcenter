@@ -59,7 +59,7 @@ func TestList(t *testing.T) {
 	if !ok || base != ts.URL+"/nx" || src != "src" {
 		t.Fatalf("source: %q %q %v", base, src, ok)
 	}
-	s := &Service{Fetcher: &proxy.Fetcher{Client: ts.Client()}}
+	s := &Service{Fetcher: &proxy.Fetcher{Client: ts.Client(), Now: time.Now}}
 	var got []Asset
 	if err := s.list(context.Background(), rp, base, src, func(a Asset) { got = append(got, a) }); err != nil {
 		t.Fatal(err)

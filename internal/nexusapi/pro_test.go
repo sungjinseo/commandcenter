@@ -96,18 +96,23 @@ func TestCleanupPoliciesCompat(t *testing.T) {
 
 	e.want("DELETE", path+"/mvn-keep", "admin", "", 204)
 	e.want("DELETE", path+"/mvn-keep", "admin", "", 404)
-	var events struct {
-		Events []struct{ Kind, Subject, Actor string }
-	}
-	e.get("/-/api/events?limit=10", "admin", &events)
-	var kinds []string
-	for _, ev := range events.Events {
-		if strings.HasPrefix(ev.Kind, "policy.") && ev.Actor == "admin" {
-			kinds = append(kinds, ev.Kind)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) { // events are written in the background
+		var events struct {
+			Events []struct{ Kind, Subject, Actor string }
 		}
-	}
-	if strings.Join(kinds, ",") != "policy.delete,policy.create,policy.update,policy.update,policy.create" { // the second create: tmp-only
-		t.Fatalf("events: %v", kinds)
+		e.get("/-/api/events?limit=10", "admin", &events)
+		var kinds []string
+		for _, ev := range events.Events {
+			if strings.HasPrefix(ev.Kind, "policy.") && ev.Actor == "admin" {
+				kinds = append(kinds, ev.Kind)
+			}
+		}
+		if strings.Join(kinds, ",") == "policy.delete,policy.create,policy.update,policy.update,policy.create" { // the second create: tmp-only
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("events: %v", kinds)
+		}
 	}
 }
 
@@ -196,6 +201,17 @@ func TestTasksCompat(t *testing.T) {
 	e.want("POST", v1+"/tasks", "ci", body, 403)
 	e.want("DELETE", v1+"/tasks/"+id, "ci", "", 403)
 
+	// A disabled task reads WAITING and does not run through this API.
+	e.get(v1+"/tasks/"+id, "admin", &item)
+	if item["currentState"] != "WAITING" {
+		t.Fatalf("disabled: %v", item)
+	}
+	e.want("POST", v1+"/tasks/"+id+"/run", "ci", "", 403)
+	if b := e.want("POST", v1+"/tasks/"+id+"/run", "admin", "", 405); !strings.Contains(string(b), "disabled") {
+		t.Fatalf("run of a disabled task: %s", b)
+	}
+	e.want("POST", v1+"/tasks/missing/run", "admin", "", 404)
+	e.want("PUT", v1+"/tasks/"+id, "admin", `{"enabled":true}`, 204)
 	e.want("POST", v1+"/tasks/"+id+"/run", "admin", "", 204)
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
 		e.get(v1+"/tasks/"+id, "admin", &item)
@@ -300,6 +316,8 @@ func TestTasksCompatSchedulesAndTypes(t *testing.T) {
 			"repository.apt.rebuild.metadata", "repository.rebuild-metadata", "map[format:apt resetProxyMetadata:true]"},
 		{`{"type":"repository.apt.rebuild.metadata","name":"a2","frequency":{"schedule":"manual"},"properties":{"repositoryName":"apt-proxy","resetProxyMetadata":"true"}}`,
 			"repository.apt.rebuild.metadata", "repository.rebuild-metadata", "map[format:apt repo:apt-proxy resetProxyMetadata:true]"},
+		{`{"type":"repository.npm.reindex","name":"n","frequency":{"schedule":"manual"},"properties":{"repositoryName":"*"}}`,
+			"repository.npm.reindex", "repository.rebuild-metadata", "map[format:npm]"},
 		{`{"type":"blobstore.metrics.reconcile","name":"r","frequency":{"schedule":"manual"},"properties":{"blobstoreName":"(All Blob Stores)"}}`,
 			"blobstore.metrics.reconcile", "blobstore.recalculate-size", "map[]"},
 		{`{"type":"blobstore.compact","name":"c","frequency":{"schedule":"manual"},"properties":{"blobstoreName":"(All Blob Stores)","blobsOlderThan":"0"}}`,
@@ -371,8 +389,16 @@ func TestRepositoryPolicyNames(t *testing.T) {
 	}
 	e.want("PUT", v1+"/repositories/maven/hosted/maven-releases", "admin", strings.Replace(body, `["weekly","keep"]`, `[]`, 1), 204)
 	e.get(v1+"/repositories/maven/hosted/maven-releases", "admin", &got)
-	if names := fmt.Sprint(got["cleanup"].(map[string]any)["policyNames"]); names != "[]" {
-		t.Fatalf("cleared: %s", names)
+	if got["cleanup"] != nil {
+		t.Fatalf("cleared: %v", got["cleanup"])
+	}
+	// A PUT replaces: a body without cleanup takes the policies away too
+	// (the Terraform provider leaves the block out to remove them).
+	e.want("PUT", v1+"/repositories/maven/hosted/maven-releases", "admin", body, 204)
+	e.want("PUT", v1+"/repositories/maven/hosted/maven-releases", "admin", strings.Replace(body, `"cleanup":{"policyNames":["weekly","keep"]},`, ``, 1), 204)
+	e.get(v1+"/repositories/maven/hosted/maven-releases", "admin", &got)
+	if got["cleanup"] != nil {
+		t.Fatalf("a PUT without cleanup keeps %v", got["cleanup"])
 	}
 }
 

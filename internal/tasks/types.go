@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"commandcenter/internal/cleanup"
 	"commandcenter/internal/format/maven"
@@ -36,7 +37,7 @@ var types = map[string]typeDef{
 	TypeCompact: {name: "Compact blob store", params: compactParams, run: runCompact, fields: blobStoreFields},
 	TypeCleanup: {name: "Cleanup repositories", params: cleanupParamsOf, run: runCleanup, fields: cleanupFields},
 	TypeRebuild: {name: "Rebuild repository metadata", params: rebuildParamsOf, run: runRebuild, fields: []ParamSpec{
-		{Name: "repo", Type: "repository", Help: "a Maven hosted or proxy, or an apt, yum, helm or conda hosted repository; empty: every one"},
+		{Name: "repo", Type: "repository", Help: "a Maven hosted or proxy, or an apt, yum, helm, conda or npm hosted repository; empty: every one"},
 		{Name: "format", Type: "format", Help: "with an empty repo: only repositories of this format"},
 		{Name: "resetProxyMetadata", Type: "bool", Help: "apt proxies too: drop their cached metadata, so it is fetched again (after a change of the remote)"},
 		{Name: "groupId", Type: "string", Help: "Maven hosted only: rebuild this groupId (its plugins, and with cascadeRebuild its GAs)"},
@@ -229,6 +230,7 @@ type cleanupRun struct {
 	log                  *RunLog
 	limit, chunk, budget int // components per run; assets per scan, and per repository and policy
 	comps, assets, bytes int64
+	files                int // cached files without a component deleted (purge-unused), limited like components
 	failures, cleaned    int
 	limited, flushed     bool // flushed: the other nodes' download counts were asked for
 }
@@ -346,7 +348,7 @@ func (r *cleanupRun) clean(ctx context.Context, rp *repo.Repository, policy clea
 		log.Errorf("%s: reading the scan cursor: %v", name, err)
 		return nil
 	}
-	var rc, ra, rb int64
+	var rc, ra, rb, rfiles int64
 	var rf, kept, candidates, scanned int
 	stopped := "" // why deleting in this repository stopped early
 	complete := true
@@ -414,6 +416,17 @@ func (r *cleanupRun) clean(ctx context.Context, rp *repo.Repository, policy clea
 			ra += int64(res.Assets)
 			rb += res.Bytes
 		}
+		if complete && len(ev.Files) > 0 {
+			res, done, err := r.deleteFiles(ctx, rp, ev.Files, policy.LastDownloadedDays)
+			complete = done
+			rfiles += int64(res.Assets)
+			ra += int64(res.Assets)
+			rb += res.Bytes
+			if err != nil {
+				r.assets, r.bytes = r.assets+ra, r.bytes+rb
+				return err
+			}
+		}
 		if complete && ev.Next != from {
 			if err := s.DB.SetSetting(context.WithoutCancel(ctx), key, ev.Next); err != nil {
 				log.Warnf("%s: could not store the scan cursor: %v", name, err)
@@ -436,6 +449,9 @@ func (r *cleanupRun) clean(ctx context.Context, rp *repo.Repository, policy clea
 	r.failures += rf
 	r.assets, r.bytes = r.assets+ra, r.bytes+rb
 	msg := fmt.Sprintf("%s: policy %q: deleted %d of %d candidate components (%d assets, %d bytes)", name, policy.Name, rc, candidates, ra, rb)
+	if rfiles > 0 {
+		msg += fmt.Sprintf("; %d of the assets are cached files without a component", rfiles)
+	}
 	if kept > 0 {
 		msg += fmt.Sprintf("; kept %d changed since evaluation", kept)
 	}
@@ -467,8 +483,11 @@ func (r *cleanupRun) clean(ctx context.Context, rp *repo.Repository, policy clea
 // purgeParams are repository.purge-unused's (Nexus's "Delete unused
 // components", core-42): proxy repositories (empty: every one) whose
 // components no one downloaded in the last LastUsed days are deleted;
-// components never downloaded stay. It is a cleanup run with that one
-// criterion, and the run limits of cleanupParams.
+// components never downloaded stay. The cached files without a component that
+// no one read and the proxy did not check in that time go too (cleanup/files.go),
+// unless nothing can fetch them back or they decide a group's owner
+// (purgeFiles). It is a cleanup run with that one criterion, and the run
+// limits of cleanupParams: a run also deletes at most maxComponents such files.
 type purgeUnusedParams struct {
 	Repos         []string `json:"repos"`
 	LastUsed      int      `json:"lastUsed"`
@@ -478,7 +497,7 @@ type purgeUnusedParams struct {
 
 var purgeUnusedFields = append([]ParamSpec{
 	{Name: "repos", Type: "repositories", Help: "proxy repositories; empty: every proxy repository"},
-	{Name: "lastUsed", Type: "int", Required: true, Help: "delete the components no one downloaded in the last that many days (never downloaded ones stay)"},
+	{Name: "lastUsed", Type: "int", Required: true, Help: "delete the components no one downloaded in the last that many days (never downloaded ones stay), and the cached files without a component no one read or the proxy checked in that time"},
 }, cleanupFields[1:]...)
 
 func purgeUnusedParamsOf(s *Service, raw json.RawMessage, check bool) (string, []string) {
@@ -524,7 +543,7 @@ func runPurgeUnused(ctx context.Context, s *Service, t meta.Task, actor string, 
 		if err := ctx.Err(); err != nil {
 			return r.summary(), err
 		}
-		if r.comps >= int64(r.limit) {
+		if r.comps >= int64(r.limit) || r.files >= r.limit {
 			r.limited = true
 			break
 		}
@@ -534,19 +553,117 @@ func runPurgeUnused(ctx context.Context, s *Service, t meta.Task, actor string, 
 			continue
 		}
 		policy := cleanup.Policy{Name: fmt.Sprintf("lastUsed-%d", p.LastUsed), Format: rp.Format,
-			Criteria: cleanup.Criteria{LastDownloadedDays: p.LastUsed, ReleaseType: "any"}, DownloadedOnly: true}
+			Criteria: cleanup.Criteria{LastDownloadedDays: p.LastUsed, ReleaseType: "any"}, DownloadedOnly: true, Files: purgeFiles(s, rp, log)}
 		if err := r.clean(ctx, rp, policy, false, 0, cursorKey(t.ID, rp.Name)); err != nil {
 			return r.summary(), err
 		}
 	}
 	if r.limited {
-		log.Warnf("stopped at the limit of %d components per run; the next run continues", r.limit)
+		log.Warnf("stopped at the limit of %d components and of as many files per run; the next run continues", r.limit)
 	}
 	sum := r.summary()
+	if r.files > 0 {
+		sum.msg += fmt.Sprintf("; %d of the assets are cached files without a component", r.files)
+	}
 	if r.failures > 0 {
 		return sum, fmt.Errorf("%d purge steps failed (see the log)", r.failures)
 	}
 	return sum, nil
+}
+
+// purgeFiles reports whether a purge may delete proxy rp's cached files without
+// a component. Not while it is blocked: nothing fetches them back. Not where
+// they decide a group's owner and a member follows it (cleanup.OwnerRule): if
+// the remote lacks a package too, the package would move to that member at the
+// next request. The last member's documents can go: nobody stands in for it.
+// ponytail: such a proxy keeps every such file, not only the documents that
+// decide; a per-format list of them if its disk use shows up.
+func purgeFiles(s *Service, rp *repo.Repository, log *RunLog) bool {
+	if rp.Blocked {
+		log.Infof("%s: keeps its cached files without a component: it is blocked, so nothing can fetch them back", rp.Name)
+		return false
+	}
+	if cleanup.OwnerRule(rp.Format) {
+		if g := aheadInGroup(s.Repos.Snapshot().Sorted, rp); g != nil {
+			log.Infof("%s: keeps its cached files without a component: another member of group %s follows it, and they keep that member from standing in", rp.Name, g.Name)
+			return false
+		}
+	}
+	return true
+}
+
+// fileBatch is how many cached files one transaction deletes (DeleteFiles); a
+// variable so tests can lower it.
+var fileBatch = 500
+
+// deleteFiles deletes the cached files a scan of proxy rp selected, in
+// batches, but a document whose files are cached (cleanup.FilesOf: those the
+// same scan just deleted are gone by now). It reports whether it got through
+// them: false at the run's limit or on a failure, which leave the rest to the
+// next run. The only error it returns is ctx's.
+func (r *cleanupRun) deleteFiles(ctx context.Context, rp *repo.Repository, files []meta.ScanAsset, days int) (cleanup.Result, bool, error) {
+	var res cleanup.Result
+	before := r.s.now().Add(-time.Duration(days) * 24 * time.Hour)
+	paths := make([]string, 0, len(files))
+	done := true
+	for _, f := range files {
+		if len(paths) >= r.limit-r.files {
+			done, r.limited = false, true
+			break
+		}
+		if prefix, ok := cleanup.FilesOf(rp.Format, f.Path); ok {
+			listed := false
+			if err := r.s.DB.WalkAssetPaths(ctx, rp.Name, prefix, func(string) { listed = true }); err != nil {
+				r.failures++
+				r.log.Errorf("%s: reading the files of %s: %v", rp.Name, f.Path, err)
+				return res, false, ctx.Err()
+			}
+			if listed {
+				continue
+			}
+		}
+		paths = append(paths, f.Path)
+	}
+	for batch := range slices.Chunk(paths, fileBatch) {
+		n, err := r.s.Deleters.DeleteFiles(ctx, rp, batch, before, r.actor)
+		if err != nil {
+			if ctx.Err() == nil {
+				r.failures++
+				r.log.Errorf("%s: deleting cached files without a component: %v", rp.Name, err)
+			}
+			return res, false, ctx.Err()
+		}
+		res.Assets += n.Assets
+		res.Bytes += n.Bytes
+		r.files += n.Assets
+	}
+	return res, done, nil
+}
+
+// aheadInGroup returns a group in which rp comes before another member,
+// nested groups counted in place; nil when there is none.
+func aheadInGroup(all []*repo.Repository, rp *repo.Repository) *repo.Repository {
+	var leaves func(g *repo.Repository, out []string) []string
+	leaves = func(g *repo.Repository, out []string) []string {
+		if g == nil {
+			return out
+		}
+		if g.Type != "group" {
+			return append(out, g.Name)
+		}
+		for _, m := range g.MemberRepos {
+			out = leaves(m, out)
+		}
+		return out
+	}
+	for _, g := range all {
+		if g.Type == "group" {
+			if ls := leaves(g, nil); slices.Contains(ls[:max(len(ls)-1, 0)], rp.Name) {
+				return g
+			}
+		}
+	}
+	return nil
 }
 
 // evaluate is the one cleanup evaluation: what a cleanup run deletes and

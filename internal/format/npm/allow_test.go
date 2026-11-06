@@ -23,13 +23,14 @@ func TestMethodNotAllowedListsTrueMethods(t *testing.T) {
 	}{
 		{"GET", "npm-hosted", "-/package/left-pad/dist-tags/latest", "PUT, DELETE"},
 		{"POST", "npm-hosted", "-/package/left-pad/dist-tags/latest", "PUT, DELETE"},
-		{"POST", "npm-hosted", "left-pad", "GET, HEAD, PUT"},
-		{"DELETE", "npm-hosted", "left-pad", "GET, HEAD, PUT"},
-		{"PUT", "npm-hosted", "left-pad/-/left-pad-1.0.1.tgz", "GET, HEAD"},
+		{"POST", "npm-hosted", "left-pad", "GET, HEAD, PUT, DELETE"},
+		{"PUT", "npm-hosted", "left-pad/-/left-pad-1.0.1.tgz", "GET, HEAD, DELETE"},
+		{"DELETE", "npm-proxy", "left-pad", "GET, HEAD"},
+		{"DELETE", "npm-proxy", "left-pad/-/left-pad-1.0.1.tgz", "GET, HEAD"},
 		{"PUT", "npm-hosted", "left-pad/1.0.1", "GET, HEAD"},
 		{"PUT", "npm-hosted", "-/package/left-pad/dist-tags", "GET, HEAD"},
 		{"PUT", "npm-proxy", "left-pad", "GET, HEAD"},
-		{"POST", "npm-all", "left-pad", "GET, HEAD, PUT"},
+		{"POST", "npm-all", "left-pad", "GET, HEAD, PUT, DELETE"},
 		{"GET", "npm-hosted", "-/user/org.couchdb.user:ci", "PUT"},
 		{"GET", "npm-hosted", "-/user/token/abc", "DELETE"},
 	} {

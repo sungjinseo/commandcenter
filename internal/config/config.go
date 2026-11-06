@@ -233,10 +233,11 @@ type Repository struct {
 	Members     []string `yaml:"members" json:"members,omitempty"`
 	WriteMember string   `yaml:"writeMember" json:"writeMember,omitempty"`
 	// MergeMembers makes an npm or PyPI group answer a package from every
-	// member that has it, merged, as Nexus does. Off (the default), the
-	// first member that has the package answers alone, so a public package
-	// cannot stand in for or add versions to an internal one of the same
-	// name (dependency confusion).
+	// member that has it, merged, as Nexus does, and a yum group list the
+	// packages of every member at a path. Off (the default), the first
+	// member that has the package (yum: the path) answers alone, so a public
+	// package cannot stand in for or add versions to an internal one of the
+	// same name (dependency confusion).
 	MergeMembers bool `yaml:"mergeMembers,omitempty" json:"mergeMembers,omitempty"`
 
 	// hosted
@@ -302,7 +303,10 @@ type Repository struct {
 	// contradicts what its path and declared type promise (repo.CheckContent):
 	// a .jar that is not a zip, a text/* upload that sniffs as binary. Nexus's
 	// "strict content type validation"; raw and maven check it (the other
-	// formats parse every upload as a package anyway).
+	// formats parse every upload as a package anyway). A proxy with it does
+	// not cache a remote file whose first bytes contradict its name (404, as
+	// for a web page in place of an artifact). A group stores nothing; it
+	// keeps the value the Nexus API wrote.
 	StrictContentTypeValidation bool `yaml:"strictContentTypeValidation,omitempty" json:"strictContentTypeValidation,omitempty"`
 	// ContentDisposition (raw and gitlfs; maven hosted and proxy) is the
 	// Content-Disposition of downloads: "inline" (the default, "") or
@@ -323,6 +327,37 @@ type Repository struct {
 	// vulnerability settings' choice of the repositories repository.evaluate
 	// monitors: "enabled", "disabled", or "" to follow them.
 	Evaluation string `yaml:"evaluation,omitempty" json:"evaluation,omitempty"`
+	// Nexus keeps what a Nexus client wrote for the settings of a Nexus
+	// repository that change nothing here (NexusKept), so that it reads them
+	// back as written; the Nexus API sets it.
+	Nexus NexusKept `yaml:"nexus,omitempty" json:"nexus,omitzero"`
+}
+
+// NexusKept are the repository settings of the Nexus API that are kept for
+// its clients and change nothing (as a connection's enableCircularRedirects
+// and useTrustStore): the Terraform provider plans a change for every value
+// that does not read back as it wrote it.
+type NexusKept struct {
+	// ProprietaryComponents (hosted) is component.proprietaryComponents,
+	// the namespace protection of Nexus Firewall, which is not here.
+	ProprietaryComponents bool `yaml:"proprietaryComponents,omitempty" json:"proprietaryComponents,omitempty"`
+	// PathEnabled (docker) is docker.pathEnabled: every docker repository
+	// is served by its path, /v2/<repository>/, whatever it says.
+	PathEnabled bool `yaml:"pathEnabled,omitempty" json:"pathEnabled,omitempty"`
+	// IndexType (docker proxy) is dockerProxy.indexType, "HUB" or
+	// "REGISTRY" ("": by the remote's host): there is no docker search.
+	IndexType string `yaml:"indexType,omitempty" json:"indexType,omitempty"`
+	// QueryCacheItemMaxAge (nuget proxy) is nugetProxy.queryCacheItemMaxAge
+	// in seconds (nil: Nexus's 3600): queries follow metadataMaxAge.
+	QueryCacheItemMaxAge *int `yaml:"queryCacheItemMaxAge,omitempty" json:"queryCacheItemMaxAge,omitempty"`
+	// DeployPolicy (yum hosted) is yum.deployPolicy "PERMISSIVE" at depth
+	// 0, where it allows what "STRICT" does ("": STRICT).
+	DeployPolicy string `yaml:"deployPolicy,omitempty" json:"deployPolicy,omitempty"`
+	// Preemptive (proxy) is httpClient.authentication.preemptive: the
+	// remote's credentials go with every request to it either way.
+	Preemptive bool `yaml:"preemptive,omitempty" json:"preemptive,omitempty"`
+	// BlobStore (group) is storage.blobStoreName: a group stores nothing.
+	BlobStore string `yaml:"blobStore,omitempty" json:"blobStore,omitempty"`
 }
 
 // AutoBlocks reports whether a proxy auto-blocks; unset means yes.
@@ -716,8 +751,8 @@ func ValidateDefinition(r Repository) error {
 	if r.Distribution != "" && (r.Format != "apt" || r.Type == "group") {
 		errs = append(errs, fmt.Errorf("repository %q: distribution is only valid for apt hosted and proxy repositories", r.Name))
 	}
-	if r.MergeMembers && (r.Type != "group" || r.Format != "npm" && r.Format != "pypi") {
-		errs = append(errs, fmt.Errorf("repository %q: mergeMembers is only valid for npm and pypi groups", r.Name))
+	if r.MergeMembers && (r.Type != "group" || !slices.Contains([]string{"npm", "pypi", "r", "conda", "yum"}, r.Format)) {
+		errs = append(errs, fmt.Errorf("repository %q: mergeMembers is only valid for npm, pypi, r, conda and yum groups", r.Name))
 	}
 	if (r.Flat || r.EnforceDistribution) && (r.Format != "apt" || r.Type != "proxy") {
 		errs = append(errs, fmt.Errorf("repository %q: flat and enforceDistribution are only valid for apt proxy repositories", r.Name))
@@ -730,8 +765,10 @@ func ValidateDefinition(r Repository) error {
 			errs = append(errs, fmt.Errorf("repository %q: %s %q: use letters, digits, '.', '_', '+' and '-'", r.Name, f.name, f.v))
 		}
 	}
-	if r.StrictContentTypeValidation && r.Type != "hosted" {
-		errs = append(errs, fmt.Errorf("repository %q: strictContentTypeValidation is only valid for hosted repositories", r.Name))
+	if k := r.Nexus; k.IndexType != "" && k.IndexType != "HUB" && k.IndexType != "REGISTRY" ||
+		k.DeployPolicy != "" && k.DeployPolicy != "STRICT" && k.DeployPolicy != "PERMISSIVE" ||
+		k.QueryCacheItemMaxAge != nil && *k.QueryCacheItemMaxAge < 0 {
+		errs = append(errs, fmt.Errorf("repository %q: nexus: indexType is HUB or REGISTRY, deployPolicy STRICT or PERMISSIVE, queryCacheItemMaxAge not negative", r.Name))
 	}
 	if r.ContentDisposition != "" {
 		switch {
