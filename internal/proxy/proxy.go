@@ -342,7 +342,7 @@ func remoteMiss(status int) bool {
 
 func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target, a meta.Asset, cached bool) (Result, error) {
 	// The timeout covers queueing for a semaphore slot as well as the transfer.
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 	defer cancel()
 	select {
 	case f.sem <- struct{}{}:
@@ -385,11 +385,7 @@ func (f *Fetcher) fetchRemote(ctx context.Context, rp *repo.Repository, t Target
 	}
 	var body io.Reader
 	if status == http.StatusOK {
-		idle := bodyIdle
-		if c := rp.Connection; c != nil && c.Timeout > 0 {
-			idle = time.Duration(c.Timeout) * time.Second
-		}
-		body = newStallReader(resp.Body, idle, cancel)
+		body = newStallReader(resp.Body, idleFor(rp), cancel)
 		if rp.StrictContentTypeValidation {
 			// Strict content type validation of a proxy (Nexus): a file whose
 			// first bytes are not what its name promises (a sign-in page for
@@ -558,6 +554,17 @@ func (f *Fetcher) headRemote(ctx context.Context, rp *repo.Repository, t Target)
 // bodyIdle is how long a read of a remote body may wait for data before its
 // fetch is cancelled; a var for tests.
 var bodyIdle = 60 * time.Second
+
+// fetchTimeout bounds a remote request, queueing for its slot included.
+const fetchTimeout = 30 * time.Minute
+
+// idleFor is bodyIdle, or rp's connection timeout when it has one.
+func idleFor(rp *repo.Repository) time.Duration {
+	if c := rp.Connection; c != nil && c.Timeout > 0 {
+		return time.Duration(c.Timeout) * time.Second
+	}
+	return bodyIdle
+}
 
 // stallReader cancels its fetch when a read waits bodyIdle for the remote,
 // so a stalled remote gives up its fetch slot long before the fetch timeout.

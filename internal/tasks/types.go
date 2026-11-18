@@ -670,7 +670,11 @@ func aheadInGroup(all []*repo.Repository, rp *repo.Repository) *repo.Repository 
 // what PreviewCleanup lists, one scan of at most budget assets (0: the
 // default) of rp from from.
 func (s *Service) evaluate(ctx context.Context, rp *repo.Repository, p cleanup.Policy, from string, budget int) (cleanup.Evaluation, error) {
-	return (&cleanup.Evaluator{DB: s.DB, Now: s.now}).EvaluateFrom(ctx, rp, p, budget, from)
+	e := &cleanup.Evaluator{DB: s.DB, Now: s.now}
+	if s.Metrics != nil { // a download after the run wrote the pending counts keeps its component
+		e.Pending = s.Metrics.PendingDownload
+	}
+	return e.EvaluateFrom(ctx, rp, p, budget, from)
 }
 
 // PreviewCleanup calls visit with every component policy p would delete

@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -205,8 +206,11 @@ func (r *Registry) SetBlobStore(ctx context.Context, name, store string, check f
 // and asset rows, its blobs into dst's store when the stores differ, under
 // the format's locks, and updates dst's derived metadata. A file or version
 // that exists in dst is a 409 *Error unless overwrite (writePolicy allow and
-// the caller may edit), when it is replaced. It returns the asset rows of
-// src it copied; nothing is changed in src.
+// the caller may edit), when it is replaced. The copy is published at the
+// move: its rows, files and the times its format's documents give (npm's
+// time, Helm's created, PyPI's upload_time, NuGet's published, yum's <time
+// file>) carry the time of the move, not src's, as a client's age gate reads
+// them. It returns the asset rows of src it copied; nothing is changed in src.
 type ComponentImporter interface {
 	ImportComponent(ctx context.Context, src, dst *Repository, c component.Component, overwrite bool) ([]meta.Asset, error)
 }
@@ -265,10 +269,12 @@ func (s *Store) copyBlob(a meta.Asset, dst string) error {
 }
 
 // PutImported writes assets, rows of another repository, into dst in tx,
-// with their times and digests. An asset dst has already is a conflict
-// (Exists) unless overwrite.
-func PutImported(ctx context.Context, tx *meta.Tx, dst string, assets []meta.Asset, overwrite bool) error {
+// with their digests and now as their times. An asset dst has already is a
+// conflict (Exists) unless overwrite.
+func PutImported(ctx context.Context, tx *meta.Tx, dst string, assets []meta.Asset, overwrite bool, now time.Time) error {
+	now = now.UTC().Truncate(time.Millisecond)
 	for _, a := range assets {
+		a.CreatedAt, a.LastModified, a.CheckedAt = now, now, now
 		switch _, err := tx.GetAsset(ctx, dst, a.Path); {
 		case err == nil && !overwrite:
 			return Exists(a.Path, dst)
@@ -283,12 +289,28 @@ func PutImported(ctx context.Context, tx *meta.Tx, dst string, assets []meta.Ass
 	return nil
 }
 
+// Restamp returns attrs, a JSON object, with key set to v: for an importer
+// whose format keeps a version's publish time in its attrs.
+func Restamp(attrs, key string, v any) (string, error) {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(attrs), &m); err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	m[key] = b
+	out, err := json.Marshal(m)
+	return string(out), err
+}
+
 // InsertImported inserts rows, package rows of another repository, into
-// dst in tx. A version dst has already is a conflict (Exists) unless
-// overwrite, when its attrs are replaced.
-func InsertImported(ctx context.Context, tx *meta.Tx, dst string, rows []meta.Package, overwrite bool) error {
+// dst in tx, created now. A version dst has already is a conflict (Exists)
+// unless overwrite, when its attrs are replaced.
+func InsertImported(ctx context.Context, tx *meta.Tx, dst string, rows []meta.Package, overwrite bool, now time.Time) error {
 	for _, p := range rows {
-		p.Repo = dst
+		p.Repo, p.CreatedAt = dst, now.UTC()
 		switch err := tx.InsertPackage(ctx, p); {
 		case errors.Is(err, meta.ErrExists) && !overwrite:
 			return Exists(p.Name+" "+p.Version, dst)

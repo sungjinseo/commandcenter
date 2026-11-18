@@ -51,14 +51,15 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		return nil, err
 	}
 	assets := []meta.Asset{tarball}
+	now := h.Store.Now() // the copy is published at the move (repo.ComponentImporter)
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, assets); err != nil {
 		return nil, err
 	}
 	return assets, h.Store.Tx(ctx, dst, func(tx *meta.Tx) error {
-		if err := repo.InsertImported(ctx, tx, dst.Name, []meta.Package{*row}, false); err != nil {
+		if err := repo.InsertImported(ctx, tx, dst.Name, []meta.Package{*row}, false, now); err != nil {
 			return err
 		}
-		if err := repo.PutImported(ctx, tx, dst.Name, assets, false); err != nil {
+		if err := repo.PutImported(ctx, tx, dst.Name, assets, false, now); err != nil {
 			return err
 		}
 		tags, err := tx.ListDistTags(ctx, dst.Name, name)

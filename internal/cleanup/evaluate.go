@@ -36,6 +36,8 @@ type Candidate struct {
 type Evaluator struct {
 	DB  *meta.DB
 	Now func() time.Time // nil means time.Now
+	// Pending, if set, goes into each candidate's Evaluated (CheckUnchanged).
+	Pending func(repo, path string) time.Time
 }
 
 type compKey struct{ group, name, version string }
@@ -216,7 +218,7 @@ scan:
 		res.Candidates = append(res.Candidates, Candidate{
 			Component: component.Component{Repo: rp.Name, Format: rp.Format, Group: k.group, Name: k.name, Version: k.version,
 				LastUpdated: c.written, Assets: c.assets,
-				Evaluated: &component.Evaluated{Paths: paths, MaxCreated: c.newest, MaxModified: c.modified, LastDownloaded: c.lastDl}},
+				Evaluated: &component.Evaluated{Paths: paths, MaxCreated: c.newest, MaxModified: c.modified, LastDownloaded: c.lastDl, Pending: e.Pending}},
 			Created: c.oldest, LastDownloaded: c.lastDl, Bytes: c.bytes, Reason: reason,
 		})
 		res.Bytes += c.bytes

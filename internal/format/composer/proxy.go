@@ -9,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"commandcenter/internal/blob"
+	"commandcenter/internal/logsafe"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
@@ -157,8 +159,12 @@ func (h *Handler) proxyRoot(ctx context.Context, rp *repo.Repository) (doc, erro
 		}
 		out[k] = v
 	}
-	if up.advisoryURL != "" && h.routeAllowed(rp, advisoriesPath) {
+	switch {
+	case up.advisoryURL == "" || !h.routeAllowed(rp, advisoriesPath):
+	case advisoryAllowed(rp, up.advisoryURL):
 		out["security-advisories"] = advisoryConfig(base)
+	default:
+		slog.Warn("security advisories API not offered: not on the remote's host or its parent domain", "repo", rp.Name, "url", logsafe.Path(up.advisoryURL))
 	}
 	body, err := json.Marshal(out)
 	return doc{body: body, res: proxy.Result{Stale: res.Stale}}, err

@@ -280,6 +280,10 @@ func (e *env) upstream(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/denied/"):
 		w.WriteHeader(http.StatusForbidden)
 		return
+	case strings.HasPrefix(r.URL.Path, "/html/"):
+		w.Header().Set("Content-Type", "text/html")
+		io.WriteString(w, "<html>Sign in</html>")
+		return
 	}
 	switch r.URL.Path {
 	case "/el9/repodata/repomd.xml":

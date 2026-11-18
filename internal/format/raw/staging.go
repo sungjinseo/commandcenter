@@ -29,10 +29,11 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		return nil, err
 	}
 	assets := []meta.Asset{a}
+	now := h.Store.Now() // the copy is published at the move (repo.ComponentImporter)
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, assets); err != nil {
 		return nil, err
 	}
 	return assets, h.Store.Tx(ctx, dst, func(tx *meta.Tx) error {
-		return repo.PutImported(ctx, tx, dst.Name, assets, overwrite)
+		return repo.PutImported(ctx, tx, dst.Name, assets, overwrite, now)
 	})
 }

@@ -21,7 +21,8 @@ var ErrChanged = component.ErrChanged
 //   - a current asset is not one the evaluation saw (a SNAPSHOT build, a
 //     wheel or a sidecar added since);
 //   - an asset was created or replaced after the newest one evaluated;
-//   - an asset was downloaded after the newest download evaluated.
+//   - an asset was downloaded after the newest download evaluated, written
+//     or still pending on this node (Evaluated.Pending).
 //
 // Assets the evaluation saw that are gone now are not a change. Without an
 // evaluation (a delete that does not come from a policy) nothing is checked.
@@ -36,7 +37,7 @@ func CheckUnchanged(c component.Component, current []meta.Asset) error {
 			return fmt.Errorf("%s: %s was added after the evaluation: %w", c.Label(), a.Path, ErrChanged)
 		case a.CreatedAt.After(ev.MaxCreated), a.LastModified.After(ev.MaxModified):
 			return fmt.Errorf("%s: %s was stored after the evaluation: %w", c.Label(), a.Path, ErrChanged)
-		case a.LastDownloaded.After(ev.LastDownloaded):
+		case a.LastDownloaded.After(ev.LastDownloaded), ev.Pending != nil && ev.Pending(a.Repo, a.Path).After(ev.LastDownloaded):
 			return fmt.Errorf("%s: %s was downloaded after the evaluation: %w", c.Label(), a.Path, ErrChanged)
 		}
 	}

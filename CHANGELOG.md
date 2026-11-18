@@ -467,6 +467,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   listings, Docker manifests and tag lists, the PyPI JSON API, Go `.info` and `@latest`, Cargo's `config.json`.
 - `repository.purge-unused`: a tarball or file fetched after a run chose its package document, and before the delete,
   now keeps the document.
+- yum merge: a relative `xml:base` is joined to `href` (it was stripped, so the location pointed at the
+  wrong file) and checked like any href.
+- yum merge: a member document with an entity reference other than XML's five and character references, or
+  with mismatched or unclosed tags, fails the merge, naming the member, instead of producing an index dnf
+  rejects.
+- yum: a sign-in or error page, any answer without a `<repomd>` root, or a 4xx other than 404/410 for a
+  proxy's `repodata/repomd.xml` is a failure, not a miss: a merged group no longer serves a partial index,
+  and a direct read answers 502 (or the cached copy, marked stale).
+- Cleanup: a download counted on the node running cleanup after it wrote the pending counts now keeps the
+  component (`lastDownloadedDays`).
+
+### Security
+
+- Composer proxy: the security advisories API named in a remote's `packages.json` is now only called on the
+  remote's host or its parent domain over https (or over http on an http remote's own host), redirects
+  included. Other targets are not offered and are logged. Through an HTTP forward proxy, which resolves host
+  names the egress policy cannot check, a public upstream could make the server POST to an internal host.
+- Composer advisories and npm audit: remote requests take a fetch slot, stop after 60 seconds without data,
+  and are size-bounded; the Composer answer is copied one token at a time. 64 concurrent advisory requests
+  against a slow 15 MiB answer took a 128 MiB server down; they now peak at 42 MiB.
+- npm audit: an answer without Content-Length that runs past 16 MiB now aborts the connection instead of
+  ending as a truncated 200.
+- Staging move: a moved version is published at the time of the move (npm `time`, Helm `created`, PyPI
+  `upload_time`, NuGet `published`, yum `<time file>`, file times). Add on staging plus move rights could
+  wait out a client's age gate (yarn 4 `npmMinimalAgeGate`) and promote a version that looked old.
+- yum `mergeMembers`: packages left out as duplicates count toward the 500 000-package limit, and a member
+  document is read to at most 8 GiB decompressed. A few MiB of compressed `primary.xml` repeating one
+  package grew memory without bound.
+- import-nexus: a download is held to the asset's `fileSize` and stops after 60 seconds without data, so a
+  broken or malicious source cannot keep a read-only target repository open.
 
 ### Upgrade notes
 - Yum: packages uploaded earlier have no weak dependencies in repodata until `repository.rebuild-metadata`
@@ -572,6 +602,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   next member for that long (with `"-1"` until the proxy's settings are saved with another value). During a rolling
   upgrade older nodes keep writing such records and skipping offline members.
 - Documents an older build cached wrongly stay until `metadataMaxAge`.
+- A promoted (staged) version now reads as new: yarn 4 clients wait a day unless it is listed in
+  `npmPreapprovedPackages`, and `componentAgeDays` counts from the move.
+- A Composer proxy whose upstream names an advisories API on another domain stops offering it; look for
+  `security advisories API not offered` in the log.
+- yum: a direct proxy read of `repomd.xml` answered with 403 or HTML is now 502 instead of 404, and a group
+  without `mergeMembers` no longer falls through to the next member on such an answer.
+- A yum merge takes about 16% longer.
 
 ## [0.4.0] - 2026-11-05
 

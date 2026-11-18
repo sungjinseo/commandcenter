@@ -188,7 +188,7 @@ func (h *Handler) advisoryAsks(ctx context.Context, rp *repo.Repository, names [
 		if err != nil {
 			return nil, memberFailure(rp, m, err)
 		}
-		if up.advisoryURL != "" && h.routeAllowed(m, advisoriesPath) {
+		if up.advisoryURL != "" && h.routeAllowed(m, advisoriesPath) && advisoryAllowed(m, up.advisoryURL) {
 			asks = append(asks, advisoryAsk{m, up.advisoryURL, mine})
 		}
 	}
@@ -248,6 +248,13 @@ func (h *Handler) advisoryOwner(ctx context.Context, rp *repo.Repository, leaves
 	return nil, nil
 }
 
+// advisoryAllowed reports whether rp's upstream may be asked at api, the
+// advisories API its packages.json names (proxy.APIAllowed).
+func advisoryAllowed(rp *repo.Repository, api string) bool {
+	u, err := url.Parse(api)
+	return err == nil && proxy.APIAllowed(rp, u)
+}
+
 // routeAllowed reports whether rp's routing rule lets path go to its remote.
 func (h *Handler) routeAllowed(rp *repo.Repository, path string) bool {
 	return h.Fetcher.RouteAllowed == nil || h.Fetcher.RouteAllowed(rp, "/"+path)
@@ -258,7 +265,7 @@ func (h *Handler) routeAllowed(rp *repo.Repository, path string) bool {
 func (h *Handler) writeUpstreamAdvisories(ctx context.Context, w io.Writer, a advisoryAsk, written *int) error {
 	form := url.Values{"packages[]": a.names}.Encode()
 	header := http.Header{"Content-Type": {"application/x-www-form-urlencoded"}, "Accept": {ctJSON}}
-	resp, err := h.Fetcher.Post(ctx, a.rp, a.url, header, form)
+	resp, err := h.Fetcher.Post(ctx, a.rp, a.url, header, form, maxDoc)
 	if err != nil {
 		return err
 	}
@@ -278,29 +285,37 @@ func (h *Handler) writeUpstreamAdvisories(ctx context.Context, w io.Writer, a ad
 
 // copyAdvisories copies the entries of an upstream's {"advisories": {...}} to w.
 // An answer without that key is an error, not an empty list. PHP writes an
-// empty object as an array.
+// empty object as an array. It goes a token at a time, each within
+// maxAdvisoryToken bytes and maxAdvisoryDepth levels deep: a decoder holds a
+// whole value, and a few answers of one 16 MiB list each took a 128 MiB
+// server down.
 func copyAdvisories(w io.Writer, src io.Reader, written *int) error {
-	dec := json.NewDecoder(src)
-	if open, err := dec.Token(); err != nil {
+	br := &budgetReader{r: src}
+	dec := json.NewDecoder(br)
+	dec.UseNumber()
+	next := func() (json.Token, error) {
+		br.left = maxAdvisoryToken
+		return dec.Token()
+	}
+	if open, err := next(); err != nil {
 		return err
 	} else if open != json.Delim('{') {
 		return fmt.Errorf("the answer is %v, not an object", open)
 	}
 	found := false
 	for dec.More() {
-		key, err := dec.Token()
+		key, err := next()
 		if err != nil {
 			return err
 		}
 		if key != "advisories" {
-			var skip json.RawMessage
-			if err := dec.Decode(&skip); err != nil {
+			if err := copyValue(io.Discard, dec, next, 0); err != nil {
 				return err
 			}
 			continue
 		}
 		found = true
-		open, err := dec.Token()
+		open, err := next()
 		if err != nil {
 			return err
 		}
@@ -309,18 +324,13 @@ func copyAdvisories(w io.Writer, src io.Reader, written *int) error {
 		}
 		for dec.More() {
 			if open == json.Delim('[') {
-				var skip json.RawMessage
-				if err := dec.Decode(&skip); err != nil {
+				if err := copyValue(io.Discard, dec, next, 0); err != nil {
 					return err
 				}
 				continue
 			}
-			name, err := dec.Token()
+			name, err := next()
 			if err != nil {
-				return err
-			}
-			var list json.RawMessage
-			if err := dec.Decode(&list); err != nil {
 				return err
 			}
 			if *written++; *written > 1 {
@@ -330,19 +340,89 @@ func copyAdvisories(w io.Writer, src io.Reader, written *int) error {
 			if err != nil {
 				return err
 			}
-			if _, err := fmt.Fprintf(w, "%s:%s", k, list); err != nil {
+			w.Write(k)
+			io.WriteString(w, ":")
+			if err := copyValue(w, dec, next, 0); err != nil {
 				return err
 			}
 		}
-		if _, err := dec.Token(); err != nil {
+		if _, err := next(); err != nil {
 			return err
 		}
 	}
-	if _, err := dec.Token(); err != nil {
+	if _, err := next(); err != nil {
 		return err
 	}
 	if !found {
 		return errors.New("no advisories key")
 	}
 	return nil
+}
+
+const (
+	// maxAdvisoryToken bounds one token (a string, a number) of an advisories
+	// answer; Packagist's longest are titles of a few hundred bytes.
+	maxAdvisoryToken = 64 << 10
+	// maxAdvisoryDepth bounds the nesting of an advisories answer.
+	maxAdvisoryDepth = 32
+)
+
+// copyValue copies the next value of dec to w a token at a time.
+func copyValue(w io.Writer, dec *json.Decoder, next func() (json.Token, error), depth int) error {
+	t, err := next()
+	if err != nil {
+		return err
+	}
+	d, ok := t.(json.Delim)
+	if !ok {
+		b, err := json.Marshal(t)
+		if err == nil {
+			_, err = w.Write(b)
+		}
+		return err
+	}
+	if depth >= maxAdvisoryDepth {
+		return fmt.Errorf("nested deeper than %d", maxAdvisoryDepth)
+	}
+	io.WriteString(w, d.String())
+	for i := 0; dec.More(); i++ {
+		if i > 0 {
+			io.WriteString(w, ",")
+		}
+		if d == '{' {
+			k, err := next()
+			if err != nil {
+				return err
+			}
+			b, _ := json.Marshal(k)
+			w.Write(b)
+			io.WriteString(w, ":")
+		}
+		if err := copyValue(w, dec, next, depth+1); err != nil {
+			return err
+		}
+	}
+	if t, err = next(); err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, t.(json.Delim).String())
+	return err
+}
+
+// budgetReader reads at most left bytes; next sets left before each token.
+type budgetReader struct {
+	r    io.Reader
+	left int64
+}
+
+func (b *budgetReader) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		return 0, fmt.Errorf("a token over %d bytes", maxAdvisoryToken)
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.r.Read(p)
+	b.left -= int64(n)
+	return n, err
 }

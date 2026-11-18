@@ -750,12 +750,20 @@ func (im *importer) published(times ...string) string {
 	return ""
 }
 
-// fetch downloads u to a temporary file, checks it against the sha256 Nexus
-// reports (when it does) and returns the file rewound, with its size. The
-// caller removes it with discard. A file, not a pipe: the checksum is
-// verified before anything reaches the target, and the npm document needs
-// the tarball twice.
-func fetch(ctx context.Context, c *http.Client, auth, u, wantSHA256 string) (*os.File, int64, error) {
+// fetch downloads u, asset a, to a temporary file, checks it against the
+// fileSize and sha256 Nexus reports (when it does) and returns the file
+// rewound, with its size. The caller removes it with discard. A file, not a
+// pipe: the checksum is verified before anything reaches the target, and the
+// npm document needs the tarball twice. An answer that waits fetchIdle for
+// data fails, as one longer than its fileSize does: a source that answers
+// forever must not keep a repository the target has read-only open for its
+// copy.
+func fetch(ctx context.Context, c *http.Client, auth, u string, a nexusAsset) (*os.File, int64, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var stalled atomic.Bool
+	idle := time.AfterFunc(fetchIdle, func() { stalled.Store(true); cancel() })
+	defer idle.Stop()
 	resp, err := open(ctx, c, auth, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, 0, err
@@ -766,8 +774,20 @@ func fetch(ctx context.Context, c *http.Client, auth, u, wantSHA256 string) (*os
 		return nil, 0, err
 	}
 	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, h), resp.Body)
-	if err == nil && wantSHA256 != "" && !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), wantSHA256) {
+	body := io.Reader(readFunc(func(p []byte) (int, error) {
+		idle.Reset(fetchIdle)
+		return resp.Body.Read(p)
+	}))
+	if a.FileSize > 0 {
+		body = io.LimitReader(body, a.FileSize+1)
+	}
+	n, err := io.Copy(io.MultiWriter(f, h), body)
+	switch {
+	case err != nil && stalled.Load():
+		err = fmt.Errorf("the source sent nothing for %v: %w", fetchIdle, err)
+	case err == nil && a.FileSize > 0 && n != a.FileSize:
+		err = fmt.Errorf("downloaded %d bytes, not the %d Nexus reports", n, a.FileSize)
+	case err == nil && a.Checksum.SHA256 != "" && !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), a.Checksum.SHA256):
 		err = errors.New("downloaded content does not match the sha256 Nexus reports")
 	}
 	if err == nil {
@@ -779,6 +799,14 @@ func fetch(ctx context.Context, c *http.Client, auth, u, wantSHA256 string) (*os
 	}
 	return f, n, nil
 }
+
+// fetchIdle is how long a download from the source may wait for data; a var
+// for tests.
+var fetchIdle = time.Minute
+
+type readFunc func([]byte) (int, error)
+
+func (f readFunc) Read(p []byte) (int, error) { return f(p) }
 
 func discard(f *os.File) {
 	f.Close()
@@ -808,7 +836,7 @@ func (im *importer) copyTo(ctx context.Context, m repoMap, a nexusAsset, probe, 
 		r.bytes += a.FileSize
 		return nil
 	}
-	f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, a), a.Checksum.SHA256)
+	f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, a), a)
 	if err != nil {
 		return err
 	}
@@ -1101,7 +1129,7 @@ func (im *importer) copyPypiFile(ctx context.Context, m repoMap, c nexusComponen
 	var signature []byte
 	var left error
 	if signed {
-		f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, sig), sig.Checksum.SHA256)
+		f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, sig), sig)
 		if err != nil { // not without it: a later run could not add it
 			return fmt.Errorf("its signature: %w", err)
 		}
@@ -1114,7 +1142,7 @@ func (im *importer) copyPypiFile(ctx context.Context, m repoMap, c nexusComponen
 			signature, left = nil, fmt.Errorf("left out %s.asc: not an ASCII-armored signature", file)
 		}
 	}
-	f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, a), a.Checksum.SHA256)
+	f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, a), a)
 	if err != nil {
 		return err
 	}
@@ -1273,7 +1301,7 @@ func (im *importer) copyNpm(ctx context.Context, m repoMap, name string, c nexus
 		r.bytes += tgz.FileSize
 		return nil
 	}
-	f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, *tgz), tgz.Checksum.SHA256)
+	f, size, err := fetch(ctx, im.src, im.fromAuth, im.download(m, *tgz), *tgz)
 	if err != nil {
 		return err
 	}

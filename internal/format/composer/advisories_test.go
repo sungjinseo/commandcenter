@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -512,5 +513,56 @@ func TestAdvisoryURLOfUpstream(t *testing.T) {
 	decode(t, e.do("GET", "meta", "packages.json", nil), &root)
 	if root["security-advisories"] != nil {
 		t.Fatalf("offered without an API: %v", root)
+	}
+}
+
+// TestAdvisoryURLElsewhere: an API off the remote's host and its parent domain
+// is not offered, and so never asked: a public upstream must not have the
+// server POST to an internal name a forward proxy would resolve.
+func TestAdvisoryURLElsewhere(t *testing.T) {
+	e := newEnv(t)
+	e.docs = map[string]string{"/evil/packages.json": `{"packages":[],"metadata-url":"/p2/%package%.json","security-advisories":{"api-url":"http://internal-admin.corp/reset"}}`}
+	e.repos = repo.Build(&config.Config{Repositories: []config.Repository{
+		{Name: "evil", Format: "composer", Type: "proxy", Remote: e.up + "/evil/", MetadataMaxAge: config.Duration(time.Hour)},
+	}})
+	var root map[string]any
+	decode(t, e.do("GET", "evil", "packages.json", nil), &root)
+	if root["security-advisories"] != nil {
+		t.Fatalf("offered an API elsewhere: %v", root)
+	}
+	// a client that kept an older packages.json is answered with nothing
+	if got := advised(t, e.post("evil", "monolog/monolog")); len(got) != 0 {
+		t.Fatalf("advised: %v", got)
+	}
+}
+
+// TestCopyAdvisoriesBounded: an answer is copied a token at a time; a token or
+// a nesting no advisory has fails it instead of being held whole.
+func TestCopyAdvisoriesBounded(t *testing.T) {
+	var many []string
+	for i := range 20000 {
+		many = append(many, fmt.Sprintf(`{"advisoryId":"PKSA-%d","affectedVersions":">=1.0,<2.0","n":1.5e3,"x":null,"y":true}`, i))
+	}
+	big := `{"other":{"a":[1,2]},"advisories":{"a/b":[` + strings.Join(many, ",") + `],"c/d":[]}}`
+	var out strings.Builder
+	written := 0
+	if err := copyAdvisories(&out, strings.NewReader(big), &written); err != nil {
+		t.Fatal(err)
+	}
+	var got, want map[string]any
+	json.Unmarshal([]byte("{"+out.String()+"}"), &got)
+	json.Unmarshal([]byte(big), &want)
+	if written != 2 || !reflect.DeepEqual(got, want["advisories"]) {
+		t.Fatalf("copied %d: %.200s", written, out.String())
+	}
+	for name, bad := range map[string]string{
+		"long string": `{"advisories":{"a/b":[{"title":"` + strings.Repeat("x", 1<<20) + `"}]}}`,
+		"whitespace":  `{"advisories":{"a/b":[` + strings.Repeat(" ", 1<<20) + `]}}`,
+		"deep":        `{"advisories":{"a/b":` + strings.Repeat("[", 10000) + strings.Repeat("]", 10000) + `}}`,
+		"deep other":  `{"x":` + strings.Repeat("[", 10000) + strings.Repeat("]", 10000) + `,"advisories":{}}`,
+	} {
+		if err := copyAdvisories(io.Discard, strings.NewReader(bad), new(int)); err == nil {
+			t.Errorf("%s: copied", name)
+		}
 	}
 }

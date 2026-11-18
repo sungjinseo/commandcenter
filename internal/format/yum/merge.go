@@ -63,11 +63,20 @@ const (
 	maxRepomd    = 4 << 20
 	maxTag       = 64 << 10
 	maxHead      = 4 << 20 // a package up to its <format>
-	// ponytail: a merge remembers up to 100 bytes per package; at this many it
-	// is refused rather than risk the memory limit. Spill to a file if groups
-	// of millions of packages appear.
-	maxMergePackages = 500_000
 )
+
+// ponytail: a merge remembers up to 100 bytes per package, kept or left out;
+// at this many it is refused rather than risk the memory limit. Spill to a
+// file if groups of millions of packages appear. A var for tests.
+var maxMergePackages = 500_000
+
+// maxOpenDoc bounds a member's document, decompressed: a small file of
+// gigabytes of blanks would keep a merge going until mergeTimeout. A real
+// filelists.xml is under a GiB. A var for tests.
+var maxOpenDoc int64 = 8 << 30
+
+// maxDepth bounds the elements open in a package.
+const maxDepth = 64
 
 // mergeWait is how long a request waits for a merge when it can answer with
 // the previous merged copy instead; a var for tests.
@@ -115,7 +124,7 @@ type mergeMember struct {
 func (h *Handler) membersAt(ctx context.Context, rp *repo.Repository, dir string) (members []mergeMember, stale bool, err error) {
 	key := dir + repomdFile
 	for _, m := range resolve.Leaves(rp) {
-		res, err := h.Resolver.LookupTarget(ctx, m, proxy.Target{Key: key, Remote: key, NotHTML: true, DeniedIsFailure: true}, proxy.Metadata)
+		res, err := h.Resolver.LookupTarget(ctx, m, repomdTarget(key), proxy.Metadata)
 		switch {
 		case err == nil:
 			members = append(members, mergeMember{m, res.Asset})
@@ -125,6 +134,19 @@ func (h *Handler) membersAt(ctx context.Context, rp *repo.Repository, dir string
 		}
 	}
 	return members, stale, nil
+}
+
+// repomdTarget is a proxy's read of the repomd.xml at key, the same for every
+// read (Target.DeniedIsFailure): a refusal, or an answer that is no repomd.xml
+// (a sign-in page), fails it rather than being a miss, which would leave a
+// member out of a merged index.
+func repomdTarget(key string) proxy.Target {
+	return proxy.Target{Key: key, Remote: key, DeniedIsFailure: true, Check: func(_ context.Context, body io.ReadSeeker, sums blob.Sums) (blob.Sums, error) {
+		if err := checkRoot(body, false, "repomd"); err != nil {
+			return sums, repo.Errorf(http.StatusBadGateway, "the remote's %s is no repomd.xml: %v", key, err)
+		}
+		return sums, nil
+	}}
 }
 
 // mergeFingerprint names the members and what they said, in order: a merged
@@ -431,12 +453,16 @@ func (h *Handler) scanMember(ctx context.Context, dir string, in *mergeInput, i 
 	defer done()
 	conflicts := 0
 	err = scanPrimary(r, func(n int, p *primaryHead) error {
+		if st.packages+st.duplicates >= maxMergePackages {
+			return fmt.Errorf("more than %d packages", maxMergePackages)
+		}
 		if p.Name == "" || p.Arch == "" || p.Version.Ver == "" || p.Checksum == "" || p.Location.Href == "" {
 			return fmt.Errorf("package %d (%q) lacks a name, arch, version, checksum or location", n, p.Name)
 		}
-		file, ok := groupPath(dir, p.Location.Href)
+		href, _ := joinBase(p.Location.Base, p.Location.Href)
+		file, ok := groupPath(dir, href)
 		if !ok {
-			return fmt.Errorf("package %s is at %q, which the group cannot answer", p.Name, p.Location.Href)
+			return fmt.Errorf("package %s is at %q, which the group cannot answer", p.Name, href)
 		}
 		pkg := mergeKey("package", p.Name, p.Arch, cmp.Or(p.Version.Epoch, "0"), p.Version.Ver, p.Version.Rel)
 		place := mergeKey("file", file)
@@ -453,9 +479,6 @@ func (h *Handler) scanMember(ctx context.Context, dir string, in *mergeInput, i 
 		}
 		seen[pkg], seen[place] = i, i
 		st.packages++
-		if n >= maxMergePackages || st.packages > maxMergePackages {
-			return fmt.Errorf("more than %d packages", maxMergePackages)
-		}
 		return nil
 	})
 	if conflicts > 0 {
@@ -546,7 +569,25 @@ func (h *Handler) openDoc(ctx context.Context, a meta.Asset) (r io.Reader, done 
 		f.Close()
 		return nil, nil, fmt.Errorf("%s: %w", a.Path, err)
 	}
-	return r, func() { f.Close() }, nil
+	return &docLimit{r, maxOpenDoc}, func() { f.Close() }, nil
+}
+
+// docLimit fails a read past left bytes.
+type docLimit struct {
+	r    io.Reader
+	left int64
+}
+
+func (d *docLimit) Read(p []byte) (int, error) {
+	if d.left <= 0 {
+		return 0, fmt.Errorf("more than %d bytes decompressed", maxOpenDoc)
+	}
+	if int64(len(p)) > d.left {
+		p = p[:d.left]
+	}
+	n, err := d.r.Read(p)
+	d.left -= int64(n)
+	return n, err
 }
 
 // decompressed reads r according to its first bytes. A window larger than the
@@ -682,6 +723,7 @@ type primaryHead struct {
 	Checksum string `xml:"checksum"`
 	Location struct {
 		Href string `xml:"href,attr"`
+		Base string `xml:"http://www.w3.org/XML/1998/namespace base,attr"`
 	} `xml:"location"`
 }
 
@@ -737,7 +779,8 @@ func scanPrimary(r io.Reader, visit func(n int, p *primaryHead) error) error {
 }
 
 // copyPackages copies the packages of a document of type typ to w, but those
-// skip refuses, as the member wrote them. A <location> has its xml:base
+// skip refuses, as the member wrote them, checked as strict (docScanner). A
+// <location> has a relative xml:base joined to its href and an absolute one
 // removed (based counts those), since the group, not that base, serves the
 // file; one the group cannot answer is an error.
 func copyPackages(r io.Reader, w io.Writer, typ, dir string, skip func(n int, start []byte) (bool, error)) (based int, err error) {
@@ -745,6 +788,7 @@ func copyPackages(r io.Reader, w io.Writer, typ, dir string, skip func(n int, st
 	if err != nil {
 		return 0, err
 	}
+	s.strict = true
 	for n := 0; ; n++ {
 		start, ok, err := s.next()
 		if !ok {
@@ -792,27 +836,30 @@ func copyPackages(r io.Reader, w io.Writer, typ, dir string, skip func(n int, st
 	}
 }
 
-// groupLocation checks a <location> tag and returns it without xml:base.
+// groupLocation checks a <location> tag and returns it without xml:base, a
+// relative one joined to its href; stripped says it had an absolute one.
 func groupLocation(dir string, tag []byte) (out []byte, stripped bool, err error) {
 	attrs, err := tagAttrs(tag)
 	if err != nil {
 		return nil, false, err
 	}
-	href := ""
+	href, base, based := "", "", false
 	for _, a := range attrs {
 		switch {
 		case a.Name.Local == "href":
 			href = a.Value
 		case a.Name.Space == "xml" && a.Name.Local == "base":
-			stripped = true
+			base, based = a.Value, true
 		}
 	}
+	href, relative := joinBase(base, href)
 	if _, ok := groupPath(dir, href); !ok {
 		return nil, false, fmt.Errorf("a package at %q, which the group cannot answer", href)
 	}
-	if !stripped {
+	if !based {
 		return tag, false, nil
 	}
+	stripped = !relative
 	var w xw
 	w.WriteString("<location")
 	w.attr("href", href)
@@ -821,7 +868,17 @@ func groupLocation(dir string, tag []byte) (out []byte, stripped bool, err error
 	} else {
 		w.WriteString(">")
 	}
-	return []byte(w.String()), true, nil
+	return []byte(w.String()), stripped, nil
+}
+
+// joinBase is href under xml:base base as librepo joins them (one "/"
+// between), relative being true, when base is relative; an absolute base, a
+// URL or a path, is not the group's and is left out.
+func joinBase(base, href string) (joined string, relative bool) {
+	if base == "" || strings.HasPrefix(base, "/") || strings.Contains(base, "://") {
+		return href, base == ""
+	}
+	return strings.TrimSuffix(base, "/") + "/" + href, true
 }
 
 // tagAttrs parses the attributes of a start tag.
@@ -841,10 +898,20 @@ func tagAttrs(tag []byte) ([]xml.Attr, error) {
 // what is between them, without parsing or holding it. XML has no other "<"
 // than in comments, CDATA and processing instructions, which it skips over
 // whole. Tags end at the first ">" outside quotes.
+//
+// A strict scanner also reads every tag it passes, as a merged document is
+// read without the member's DTD: an element must end where it is open, and an
+// entity reference must be one of XML's five or a character reference. A
+// member's document that the checks in between let through (the rest of a
+// package after its <format> is not parsed) would otherwise make dnf refuse
+// the whole merged index.
 type docScanner struct {
-	br  *bufio.Reader
-	buf []byte
-	end string // the root's end tag, "" when its start tag closes it too
+	br     *bufio.Reader
+	buf    []byte
+	end    string // the root's end tag, "" when its start tag closes it too
+	strict bool
+	names  []byte // strict: the names of the open elements, one after another
+	opens  []int  // strict: where each starts in names
 }
 
 // newDocScanner reads a document of type typ up to and through its root's
@@ -896,19 +963,39 @@ func (s *docScanner) next() (start []byte, ok bool, err error) {
 // ("/name" for an end tag) and says which. That tag's "<" is read and not
 // copied; tag reads the rest. The end of the document is an error.
 func (s *docScanner) copyTo(w io.Writer, stop ...string) (string, error) {
+	inTag := false // strict: the chunk starts with the rest of a tag passed over
 	for {
 		chunk, err := s.br.ReadSlice('<')
-		if errors.Is(err, bufio.ErrBufferFull) {
-			if _, err := w.Write(chunk); err != nil {
-				return "", err
-			}
-			continue
-		}
-		if err != nil {
+		full := errors.Is(err, bufio.ErrBufferFull)
+		if err != nil && !full {
 			return "", unexpectedEnd(err)
 		}
-		if _, err := w.Write(chunk[:len(chunk)-1]); err != nil {
+		text := chunk
+		if !full {
+			text = chunk[:len(chunk)-1]
+		}
+		if _, err := w.Write(text); err != nil {
 			return "", err
+		}
+		if s.strict {
+			if inTag {
+				n, err := s.tagEnd(text)
+				if err != nil {
+					return "", err
+				}
+				text, inTag = text[n:], false
+			}
+			if full {
+				err = s.checkCut(text)
+			} else {
+				err = checkRefs(text)
+			}
+			if err != nil {
+				return "", err
+			}
+		}
+		if full {
+			continue
 		}
 		head, _ := s.br.Peek(16) // past any name in stop
 		end := ""
@@ -919,12 +1006,15 @@ func (s *docScanner) copyTo(w io.Writer, stop ...string) (string, error) {
 			end = "]]>"
 		case bytes.HasPrefix(head, []byte("?")):
 			end = "?>"
+		case s.strict && bytes.HasPrefix(head, []byte("!")):
+			return "", fmt.Errorf("a declaration in the document: <%.20s", head)
 		default:
 			for _, name := range stop {
 				if isTagName(head, name) {
 					return name, nil
 				}
 			}
+			inTag = s.strict
 		}
 		if _, err := w.Write(lessThan); err != nil {
 			return "", err
@@ -937,7 +1027,41 @@ func (s *docScanner) copyTo(w io.Writer, stop ...string) (string, error) {
 	}
 }
 
-var lessThan = []byte{'<'}
+// tagEnd checks the rest of a tag at the start of p, which copyTo read up to
+// the next "<", as checkTag does, and returns its length.
+func (s *docScanner) tagEnd(p []byte) (int, error) {
+	// Most tags have no attributes (filelists' <file> by the million), or
+	// quote with " alone: the first ">" after an even number of them ends it.
+	for i, b := range p {
+		if b == '>' {
+			return i + 1, s.checkTag(p[:i+1], false)
+		}
+		if b == '"' || b == '\'' || b == '&' {
+			break
+		}
+	}
+	if i := bytes.IndexByte(p, '>'); i >= 0 && bytes.IndexByte(p[:i], '\'') < 0 && bytes.Count(p[:i], doubleQuote)%2 == 0 {
+		return i + 1, s.checkTag(p[:i+1], bytes.IndexByte(p[:i], '&') >= 0)
+	}
+	var quote byte
+	amp := false
+	for i, b := range p {
+		switch {
+		case quote != 0:
+			if b == quote {
+				quote = 0
+			}
+		case b == '"' || b == '\'':
+			quote = b
+		case b == '>':
+			return i + 1, s.checkTag(p[:i+1], amp)
+		}
+		amp = amp || b == '&'
+	}
+	return 0, fmt.Errorf("a tag with a \"<\" in it, or of more than %d bytes: <%.100q", mergeBuf, p)
+}
+
+var lessThan, doubleQuote = []byte{'<'}, []byte{'"'}
 
 // isTagName reports whether what follows a "<" is the tag name.
 func isTagName(head []byte, name string) bool {
@@ -980,24 +1104,126 @@ func (s *docScanner) through(w io.Writer, end string) error {
 func (s *docScanner) tag() ([]byte, error) {
 	s.buf = append(s.buf[:0], '<')
 	var quote byte
+	odd := false // a "<" or "&" in it, for checkTag
 	for len(s.buf) < maxTag {
-		b, err := s.br.ReadByte()
-		if err != nil {
+		chunk, err := s.br.ReadSlice('>')
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
 			return nil, unexpectedEnd(err)
 		}
-		s.buf = append(s.buf, b)
-		switch {
-		case quote != 0:
-			if b == quote {
-				quote = 0
+		s.buf = append(s.buf, chunk...)
+		for _, b := range chunk {
+			switch {
+			case quote != 0:
+				if b == quote {
+					quote = 0
+				}
+			case b == '"' || b == '\'':
+				quote = b
 			}
-		case b == '"' || b == '\'':
-			quote = b
-		case b == '>':
+			odd = odd || b == '<' || b == '&'
+		}
+		if err == nil && quote == 0 && len(s.buf) <= maxTag {
+			if s.strict {
+				return s.buf, s.checkTag(s.buf[1:], odd)
+			}
 			return s.buf, nil
 		}
 	}
 	return nil, fmt.Errorf("a tag of more than %d bytes", maxTag)
+}
+
+// checkTag checks a tag of a strict scanner, without its "<", odd if it has a
+// "<" or "&", and opens or ends its element.
+func (s *docScanner) checkTag(tag []byte, odd bool) error {
+	if odd && bytes.IndexByte(tag, '<') >= 0 {
+		return fmt.Errorf("a \"<\" in the tag <%.100q", tag)
+	}
+	if odd {
+		if err := checkRefs(tag); err != nil {
+			return err
+		}
+	}
+	name, end := bytes.CutPrefix(tag, []byte("/"))
+	for i, b := range name {
+		if b == ' ' || b == '\t' || b == '\r' || b == '\n' || b == '/' || b == '>' {
+			name = name[:i]
+			break
+		}
+	}
+	last := len(s.opens) - 1
+	switch {
+	case len(name) == 0:
+		return fmt.Errorf("a tag without a name: <%.100q", tag)
+	case end && (last < 0 || !bytes.Equal(s.names[s.opens[last]:], name)):
+		return fmt.Errorf("</%s> ends no element open there", name)
+	case end:
+		s.names, s.opens = s.names[:s.opens[last]], s.opens[:last]
+	case bytes.HasSuffix(tag, []byte("/>")):
+	case last+1 >= maxDepth:
+		return fmt.Errorf("elements nested more than %d deep", maxDepth)
+	default:
+		s.opens = append(s.opens, len(s.names))
+		s.names = append(s.names, name...)
+	}
+	return nil
+}
+
+// checkCut is checkRefs for text that goes on past p: a reference cut at its
+// end is completed from what follows. p is the reader's buffer, which the
+// look ahead fills anew.
+func (s *docScanner) checkCut(p []byte) error {
+	i := bytes.LastIndexByte(p, '&')
+	if i < 0 || bytes.IndexByte(p[i:], ';') >= 0 || len(p)-i > 12 {
+		return checkRefs(p)
+	}
+	if err := checkRefs(p[:i]); err != nil {
+		return err
+	}
+	ref := append([]byte(nil), p[i:]...)
+	next, _ := s.br.Peek(12)
+	ref = append(ref, next...)
+	if j := bytes.IndexByte(ref, ';'); j >= 0 {
+		ref = ref[:j+1]
+	}
+	return checkRefs(ref)
+}
+
+// checkRefs refuses an entity reference in p other than XML's five and a
+// character reference of a character XML allows: nothing declares another in
+// a merged document.
+func checkRefs(p []byte) error {
+	for {
+		i := bytes.IndexByte(p, '&')
+		if i < 0 {
+			return nil
+		}
+		p = p[i+1:]
+		j := bytes.IndexByte(p, ';')
+		if j < 0 || !validRef(p[:j]) {
+			return fmt.Errorf("the reference &%.20s, not one a merged document can carry", p[:max(j, 0)])
+		}
+		p = p[j+1:]
+	}
+}
+
+func validRef(ref []byte) bool {
+	switch string(ref) {
+	case "lt", "gt", "amp", "apos", "quot":
+		return true
+	}
+	num, ok := bytes.CutPrefix(ref, []byte("#"))
+	if !ok {
+		return false
+	}
+	base := 10
+	if hex, ok := bytes.CutPrefix(num, []byte("x")); ok {
+		num, base = hex, 16
+	}
+	if len(num) == 0 || len(num) > 8 {
+		return false
+	}
+	c, err := strconv.ParseUint(string(num), base, 32)
+	return err == nil && (c == 0x9 || c == 0xA || c == 0xD || c >= 0x20 && c <= 0xD7FF || c >= 0xE000 && c <= 0xFFFD || c >= 0x10000 && c <= 0x10FFFF)
 }
 
 func unexpectedEnd(err error) error {

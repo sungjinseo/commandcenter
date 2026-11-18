@@ -220,6 +220,14 @@ func (r *Recorder) drop(n int64) {
 // when the 2xx headers are sent, so a transfer the client aborts still counts.
 func (r *Recorder) Download(repo, path string) { r.addDownload(repo, path, 1) }
 
+// PendingDownload returns the newest download of repo/path not yet written
+// (zero if none). ponytail: not those of a flush under way.
+func (r *Recorder) PendingDownload(repo, path string) time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.dl[dlKey{repo, path}].last
+}
+
 // Used moves the last download of repo/path without counting one
 // (repo.Store.Used).
 func (r *Recorder) Used(repo, path string) { r.addDownload(repo, path, 0) }

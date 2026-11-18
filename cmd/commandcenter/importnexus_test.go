@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
@@ -465,4 +466,39 @@ func tarGz(names []string, files map[string]string) []byte {
 	tw.Close()
 	gz.Close()
 	return buf.Bytes()
+}
+
+// TestFetchBounded: a source's answer is held to the fileSize Nexus states,
+// and one that stalls fails after fetchIdle, so that no file keeps a
+// repository the target has read-only open for its copy.
+func TestFetchBounded(t *testing.T) {
+	defer func(d time.Duration) { fetchIdle = d }(fetchIdle)
+	fetchIdle = 200 * time.Millisecond
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush() // no Content-Length
+		io.WriteString(w, "0123456789")
+		if r.URL.Path == "/stall" {
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}
+	}))
+	defer src.Close()
+	ctx := context.Background()
+	for _, c := range []struct {
+		path string
+		size int64
+		ok   bool
+	}{{"/f", 10, true}, {"/f", 0, true}, {"/f", 4, false}, {"/f", 20, false}, {"/stall", 0, false}, {"/stall", 100, false}} {
+		var a nexusAsset
+		a.FileSize = c.size
+		t0 := time.Now()
+		f, n, err := fetch(ctx, src.Client(), "", src.URL+c.path, a)
+		if f != nil {
+			discard(f)
+		}
+		if (err == nil) != c.ok || time.Since(t0) > 5*time.Second || c.ok && n != 10 {
+			t.Errorf("%s of %d bytes: %d %v after %v", c.path, c.size, n, err, time.Since(t0))
+		}
+	}
 }

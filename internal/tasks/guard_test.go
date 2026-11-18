@@ -110,6 +110,28 @@ func TestCleanupFlushesPendingDownloads(t *testing.T) {
 	}
 }
 
+// A download recorded on this node after the run wrote the pending counts,
+// still in the recorder when the deleter checks, keeps the component.
+func TestCleanupKeepsComponentDownloadedPending(t *testing.T) {
+	h := newHarness(t)
+	h.oldLibs(t, "1.0")
+	if err := cleanup.UpdatePolicy(context.Background(), h.db, cleanup.Policy{Name: "old", Format: "maven",
+		Criteria: cleanup.Criteria{LastDownloadedDays: 30}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := metrics.New(h.db)
+	rec.Now = h.clock.Now
+	h.s.Metrics = rec
+	h.wrapMaven(func(component.Component) { rec.Download("mvn", "org/example/lib/1.0/lib-1.0.jar") })
+	tk := h.create(t, Def{Name: "c", Type: TypeCleanup, Schedule: "manual", Params: json.RawMessage(`{"repos":["mvn"]}`)})
+	if out, err := h.s.RunNow(tk.ID, "admin"); err != nil || out.Result != ResultOK || out.Removed != 0 {
+		t.Fatalf("outcome: %+v %v", out, err)
+	}
+	if got := h.mvnPaths(t, "org/example/lib/"); got != "org/example/lib/1.0/lib-1.0.jar" {
+		t.Fatalf("assets left: %s", got)
+	}
+}
+
 // Unassigning the policy during a run stops deleting in that repository.
 func TestCleanupStopsWhenPolicyUnassigned(t *testing.T) {
 	h := newHarness(t)

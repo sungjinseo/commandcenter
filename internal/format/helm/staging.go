@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
@@ -51,14 +52,20 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	case !errors.Is(err, meta.ErrNotFound):
 		return nil, err
 	}
+	now := h.Store.Now() // the copy is published at the move (repo.ComponentImporter)
+	for i := range row {
+		if row[i].Attrs, err = repo.Restamp(row[i].Attrs, "created", now.UTC().Format(time.RFC3339Nano)); err != nil { // index.yaml's created
+			return nil, err
+		}
+	}
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, assets); err != nil {
 		return nil, err
 	}
 	return assets, h.Store.Tx(ctx, dst, func(tx *meta.Tx) error {
-		if err := repo.InsertImported(ctx, tx, dst.Name, row, overwrite); err != nil {
+		if err := repo.InsertImported(ctx, tx, dst.Name, row, overwrite, now); err != nil {
 			return err
 		}
-		if err := repo.PutImported(ctx, tx, dst.Name, assets, overwrite); err != nil {
+		if err := repo.PutImported(ctx, tx, dst.Name, assets, overwrite, now); err != nil {
 			return err
 		}
 		if len(assets) == 1 { // no provenance file came: that of a version it replaced must not stay

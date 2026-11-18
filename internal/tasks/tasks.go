@@ -159,9 +159,11 @@ type Mailer interface {
 	SendAsync(cfg meta.SMTP, to []string, subject, body string)
 }
 
-// Flusher writes pending download counts (metrics.Recorder).
+// Flusher writes pending download counts and tells the newest pending
+// download of a file (metrics.Recorder).
 type Flusher interface {
 	Flush(ctx context.Context) error
+	PendingDownload(repo, path string) time.Time
 }
 
 // ErrStopped is the cause of a run stopped with StopRun.

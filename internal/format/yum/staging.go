@@ -50,14 +50,20 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		return nil, err
 	}
 	assets := []meta.Asset{rpm}
+	now := h.Store.Now() // the copy is published at the move (repo.ComponentImporter)
+	for i := range row {
+		if row[i].Attrs, err = repo.Restamp(row[i].Attrs, "uploaded", now.Unix()); err != nil { // <time file>
+			return nil, err
+		}
+	}
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, assets); err != nil {
 		return nil, err
 	}
 	return assets, h.Store.Tx(ctx, dst, func(tx *meta.Tx) error {
-		if err := repo.InsertImported(ctx, tx, dst.Name, row, overwrite); err != nil {
+		if err := repo.InsertImported(ctx, tx, dst.Name, row, overwrite, now); err != nil {
 			return err
 		}
-		if err := repo.PutImported(ctx, tx, dst.Name, assets, overwrite); err != nil {
+		if err := repo.PutImported(ctx, tx, dst.Name, assets, overwrite, now); err != nil {
 			return err
 		}
 		return h.rebuild(ctx, tx, dst, dir)

@@ -766,3 +766,75 @@ func TestChangeBlobStoreResumes(t *testing.T) {
 		t.Fatal("the move did not finish")
 	}
 }
+
+// TestStagingMoveIsNew: a moved version reads as published at the move, in
+// what a client's age gate reads (npm's time, Helm's created, PyPI's
+// upload_time, NuGet's published, yum's <time file>) and in its files'
+// times: whoever may add to staging and move from it could otherwise wait out
+// a gate there and promote a version that looks old.
+func TestStagingMoveIsNew(t *testing.T) {
+	e := newStagingEnv(t)
+	const past, pastUnix = "2020-01-02T03:04:05Z", "1577934245"
+	stated := []string{"X-Command-Center-Publish-Time", past}
+	moveAndRead := func(src, dst, query string, read ...string) {
+		t.Helper()
+		for _, p := range read {
+			if b := e.want(200, "GET", strings.ReplaceAll(p, "%s", src), "admin", ""); !strings.Contains(b, "2020-01-02") && !strings.Contains(b, pastUnix) {
+				t.Fatalf("%s before the move has no stated time: %s", src, b)
+			}
+		}
+		e.json(200, "POST", "/service/rest/v1/staging/move/"+dst+"?repository="+src+"&"+query, "ci", "")
+		for _, p := range read {
+			if b := e.want(200, "GET", strings.ReplaceAll(p, "%s", dst), "admin", ""); strings.Contains(b, "2020-01-02") || strings.Contains(b, pastUnix) {
+				t.Errorf("%s after the move keeps the stated time: %s", dst, b)
+			}
+		}
+	}
+
+	e.want(201, "PUT", "/repository/npm-staging/demo", "admin", npmPublish("demo", "1.0.0"), stated...)
+	moveAndRead("npm-staging", "npm-releases", "name=demo", "/repository/%s/demo")
+
+	e.want(201, "PUT", "/repository/raw-a/docs/a.txt", "admin", "alpha", stated...)
+	e.want(201, "POST", "/-/api/repositories", "admin", `{"name":"raw-c","format":"raw","type":"hosted"}`)
+	moveAndRead("raw-a", "raw-c", "name=docs/a.txt", "/service/rest/v1/assets?repository=%s")
+
+	md := "Metadata-Version: 2.1\nName: demo-pkg\nVersion: 1.0.0\n"
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for _, kv := range [][2]string{{":action", "file_upload"}, {"protocol_version", "1"}, {"name", "demo-pkg"}, {"version", "1.0.0"}, {"filetype", "bdist_wheel"}} {
+		mw.WriteField(kv[0], kv[1])
+	}
+	fw, _ := mw.CreateFormFile("content", "demo_pkg-1.0.0-py3-none-any.whl")
+	fw.Write(zipOf("demo_pkg-1.0.0.dist-info/METADATA", md))
+	mw.Close()
+	e.want(200, "POST", "/repository/pypi-a/", "admin", buf.Bytes(), append([]string{"Content-Type", mw.FormDataContentType()}, stated...)...)
+	moveAndRead("pypi-a", "pypi-b", "name=demo-pkg", "/repository/%s/pypi/demo-pkg/json")
+
+	nuspec := `<?xml version="1.0"?><package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd"><metadata>` +
+		`<id>Demo.Pkg</id><version>1.0.0</version><authors>QA</authors><description>demo</description></metadata></package>`
+	buf.Reset()
+	mw = multipart.NewWriter(&buf)
+	fw, _ = mw.CreateFormFile("package", "package.nupkg")
+	fw.Write(zipOf("[Content_Types].xml", "<Types/>", "Demo.Pkg.nuspec", nuspec, "lib/net6.0/Demo.Pkg.dll", "MZ"))
+	mw.Close()
+	e.want(201, "PUT", "/repository/nuget-a/api/v2/package", "admin", buf.Bytes(), append([]string{"Content-Type", mw.FormDataContentType()}, stated...)...)
+	moveAndRead("nuget-a", "nuget-b", "name=demo.pkg", "/repository/%s/registration/demo.pkg/index.json")
+
+	chart := tgz("demo/Chart.yaml", "apiVersion: v2\nname: demo\nversion: 1.0.0\n", "demo/values.yaml", "a: 1\n")
+	e.want(201, "PUT", "/repository/helm-a/demo-1.0.0.tgz", "admin", chart, stated...)
+	moveAndRead("helm-a", "helm-b", "name=demo", "/repository/%s/index.yaml")
+
+	e.want(201, "PUT", "/repository/yum-a/demo-1.0-1.x86_64.rpm", "admin", rpm("demo", "1.0", "1", "x86_64"), stated...)
+	primary := func(repoName string) string {
+		repomd := e.want(200, "GET", "/repository/"+repoName+"/repodata/repomd.xml", "ci", "")
+		m := regexp.MustCompile(`href="(repodata/[^"]*primary[^"]*)"`).FindStringSubmatch(repomd)
+		return gunzip(t, e.want(200, "GET", "/repository/"+repoName+"/"+m[1], "ci", ""))
+	}
+	if p := primary("yum-a"); !strings.Contains(p, `file="`+pastUnix+`"`) {
+		t.Fatalf("yum-a primary: %s", p)
+	}
+	e.json(200, "POST", "/service/rest/v1/staging/move/yum-b?repository=yum-a&name=demo", "ci", "")
+	if p := primary("yum-b"); strings.Contains(p, pastUnix) {
+		t.Errorf("yum-b primary keeps the stated time: %s", p)
+	}
+}

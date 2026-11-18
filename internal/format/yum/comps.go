@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path"
@@ -53,7 +54,7 @@ func (h *Handler) uploadComps(w http.ResponseWriter, r *http.Request, rp *repo.R
 	if gz {
 		ct = ctGzip
 	}
-	if err := checkComps(f, gz); err != nil {
+	if err := checkRoot(f, gz, "comps"); err != nil {
 		return repo.Errorf(http.StatusBadRequest, "%s is no package group file: %v", p, err)
 	}
 	unlock, err := h.Store.Lock(ctx, "yum\x00"+rp.Name)
@@ -83,8 +84,8 @@ func (h *Handler) uploadComps(w http.ResponseWriter, r *http.Request, rp *repo.R
 	return nil
 }
 
-// checkComps reads r up to its first element, which must be <comps>.
-func checkComps(r io.Reader, gz bool) error {
+// checkRoot reads r up to its first element, which must be <root>.
+func checkRoot(r io.Reader, gz bool, root string) error {
 	if gz {
 		var err error
 		if r, err = gzip.NewReader(r); err != nil {
@@ -98,8 +99,8 @@ func checkComps(r io.Reader, gz bool) error {
 			return err
 		}
 		if se, ok := t.(xml.StartElement); ok {
-			if se.Name.Local != "comps" {
-				return errors.New("its root element is not <comps>")
+			if se.Name.Local != root {
+				return fmt.Errorf("its root element is not <%s>", root)
 			}
 			return nil
 		}

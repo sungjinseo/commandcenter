@@ -80,9 +80,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		}
 		var res proxy.Result
 		var err error
-		if rp.Type == "group" && rp.MergeMembers && isRepodata(p) {
+		switch {
+		case rp.Type == "group" && rp.MergeMembers && isRepodata(p):
 			res, err = h.mergedFile(r.Context(), rp, p)
-		} else {
+		case p == repomdFile || strings.HasSuffix(p, "/"+repomdFile):
+			res, err = h.Resolver.LookupTarget(r.Context(), rp, repomdTarget(p), kind)
+		default:
 			res, err = h.Resolver.LookupTarget(r.Context(), rp, proxy.Target{Key: p, Remote: p, NotHTML: true}, kind)
 		}
 		if err != nil {

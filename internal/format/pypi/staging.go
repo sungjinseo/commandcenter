@@ -52,6 +52,7 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	if len(rows) == 0 {
 		return nil, repo.Errorf(http.StatusNotFound, "%s %s not found in repository %q", project, c.Version, src.Name)
 	}
+	now := h.Store.Now() // the copy is published at the move (repo.ComponentImporter)
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, assets); err != nil {
 		return nil, err
 	}
@@ -65,9 +66,9 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 				return repo.Exists(p.Version, dst.Name)
 			}
 		}
-		if err := repo.InsertImported(ctx, tx, dst.Name, rows, false); err != nil {
+		if err := repo.InsertImported(ctx, tx, dst.Name, rows, false, now); err != nil {
 			return err
 		}
-		return repo.PutImported(ctx, tx, dst.Name, assets, false)
+		return repo.PutImported(ctx, tx, dst.Name, assets, false, now)
 	})
 }

@@ -363,7 +363,12 @@ func TestMergeReads(t *testing.T) {
 			[]string{"a&gt;1-1-1.noarch.rpm"}},
 		"xml:base":              {doc(pkg("a", "x", `<location xml:base="https://mirror.example/pub" href="Packages/a-1-1.noarch.rpm"/>`)), []string{"Packages/a-1-1.noarch.rpm"}},
 		"inside the repository": {doc(pkg("a", "x", `<location href="b/../pool/a-1-1.noarch.rpm"/>`)), []string{"b/../pool/a-1-1.noarch.rpm"}},
-		"gzip of gzips":         {string(append(gzipped(doc(pkg("a", "x", `<location href="a-1-1.noarch.rpm"/>`))[:200]), gzipped(doc(pkg("a", "x", `<location href="a-1-1.noarch.rpm"/>`))[200:])...)), []string{"a-1-1.noarch.rpm"}},
+		"a relative xml:base":   {doc(pkg("a", "x", `<location xml:base="packages/" href="a-1-1.noarch.rpm"/>`)), []string{"packages/a-1-1.noarch.rpm"}},
+		"a relative xml:base without a slash": {doc(pkg("a", "x", `<location xml:base="packages" href="a-1-1.noarch.rpm"></location>`)),
+			[]string{"packages/a-1-1.noarch.rpm"}},
+		"references": {doc(strings.Replace(pkg("a", "&lt;&gt;&amp;&apos;&quot;&#65;&#x41;&#x1F600;", `<location href="a-1-1.noarch.rpm"/>`), "<format>",
+			`<format><!-- &bogus; </b> --><![CDATA[&bogus; </b>]]><rpm:entry name="a&amp;b" flags='&#62;'/><x><y/>&#10;</x>`, 1)), []string{"a-1-1.noarch.rpm"}},
+		"gzip of gzips": {string(append(gzipped(doc(pkg("a", "x", `<location href="a-1-1.noarch.rpm"/>`))[:200]), gzipped(doc(pkg("a", "x", `<location href="a-1-1.noarch.rpm"/>`))[200:])...)), []string{"a-1-1.noarch.rpm"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
@@ -413,31 +418,45 @@ func TestMergeRefuses(t *testing.T) {
 		return `<package type="rpm"><name>a</name><arch>noarch</arch><version epoch="0" ver="1" rel="1"/><checksum>aa</checksum>` + location + `</package>`
 	}
 	doc := func(body string) []byte {
-		return []byte(`<metadata xmlns="http://linux.duke.edu/metadata/common">` + body + `</metadata>`)
+		return []byte(`<metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:rpm="http://linux.duke.edu/metadata/rpm">` + body + `</metadata>`)
+	}
+	tail := func(format string) string { // what is after <format>, which is not parsed for the head
+		return pkg(`<location href="a.rpm"/><format>` + format + `</format>`)
 	}
 	bigWindow, err := base64.StdEncoding.DecodeString("/Td6WFoAAATm1rRGAgAhARwAAAAQz1jM4AHtAStdAB4Py4cR2M5mkQ+DHsr9ezPUf+m32igxdiVmIE0qCW1q9ylwODDnzB1WFyLJTqZ9oa333bBqpp2Bla6LTLQcY3rY+z7IhSZgjywiWlBOQXXWA3D4i9YP35FNPsYeAfjU+PLvrU3fh9ofDfX2f4tXu6YGfzEtuxYtc9BwwhFUF2gSPjJIB94wIHr98argeXGFylDiiJJJTu3ul1SBmlxl3vE6tlChOA8MBiNmO4T7uMb5zf7FHpXsKM/Xe5cQ17y752TY8Y5u/SkLP7ialch44Gqgki/fPa/+Zr4e1rKQL2pVDrzzk5Gufwm7fsSbYD/zhdw0EnPZcDIQdLBs1EhHRsX0pOJXQGZJpxmTcpVQIecR3GQhSNOAPbwoyLM7PwGgF+5aBH6BhQslFo6AAAAga0Ae+hktggABxwLuAwAA4yGegbHEZ/sCAAAAAARZWg==") // xz -9
 	if err != nil {
 		t.Fatal(err)
 	}
 	cases := map[string][]byte{
-		"corrupt zstd":             {0x28, 0xb5, 0x2f, 0xfd, 1, 2, 3, 4, 5, 6},
-		"corrupt xz":               {0xfd, '7', 'z', 'X', 'Z', 0, 1, 2, 3, 4},
-		"a window too large":       bigWindow,
-		"not a document":           []byte("hello"),
-		"truncated gzip":           good[:len(good)/2],
-		"corrupt gzip":             corrupt,
-		"truncated document":       doc(pkg(`<location href="a.rpm"/>`))[:90],
-		"an absolute url":          doc(pkg(`<location href="https://elsewhere.example/a.rpm"/>`)),
-		"an absolute path":         doc(pkg(`<location href="/a.rpm"/>`)),
-		"above the repository":     doc(pkg(`<location href="../../a.rpm"/>`)),
-		"an escaped url":           doc(pkg(`<location href="https:&#47;&#47;elsewhere.example/a.rpm"/>`)),
-		"no location":              doc(pkg(``)),
-		"no checksum":              doc(`<package><name>a</name><arch>noarch</arch><version ver="1"/><location href="a.rpm"/></package>`),
-		"a later location":         doc(`<package><name>a</name><arch>noarch</arch><version ver="1"/><checksum>aa</checksum><location href="a.rpm"/><format/><location href="https://elsewhere.example/a.rpm"/></package>`),
-		"a package in one":         doc(`<package><name>a</name><package>` + pkg(`<location href="a.rpm"/>`) + `</package></package>`),
-		"another namespace":        []byte(`<metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:suse="http://novell.com/package/metadata/suse/common">` + pkg(`<location href="a.rpm"/>`) + `</metadata>`),
-		"a package head too large": doc(`<package><name>a</name><description>` + strings.Repeat("x", maxHead) + `</description></package>`),
-		"a tag too large":          doc(`<package x="` + strings.Repeat("x", maxTag) + `"></package>`),
+		"corrupt zstd":              {0x28, 0xb5, 0x2f, 0xfd, 1, 2, 3, 4, 5, 6},
+		"corrupt xz":                {0xfd, '7', 'z', 'X', 'Z', 0, 1, 2, 3, 4},
+		"a window too large":        bigWindow,
+		"not a document":            []byte("hello"),
+		"truncated gzip":            good[:len(good)/2],
+		"corrupt gzip":              corrupt,
+		"truncated document":        doc(pkg(`<location href="a.rpm"/>`))[:90],
+		"an absolute url":           doc(pkg(`<location href="https://elsewhere.example/a.rpm"/>`)),
+		"an absolute path":          doc(pkg(`<location href="/a.rpm"/>`)),
+		"above the repository":      doc(pkg(`<location href="../../a.rpm"/>`)),
+		"an escaped url":            doc(pkg(`<location href="https:&#47;&#47;elsewhere.example/a.rpm"/>`)),
+		"no location":               doc(pkg(``)),
+		"no checksum":               doc(`<package><name>a</name><arch>noarch</arch><version ver="1"/><location href="a.rpm"/></package>`),
+		"a later location":          doc(`<package><name>a</name><arch>noarch</arch><version ver="1"/><checksum>aa</checksum><location href="a.rpm"/><format/><location href="https://elsewhere.example/a.rpm"/></package>`),
+		"a package in one":          doc(`<package><name>a</name><package>` + pkg(`<location href="a.rpm"/>`) + `</package></package>`),
+		"another namespace":         []byte(`<metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:suse="http://novell.com/package/metadata/suse/common">` + pkg(`<location href="a.rpm"/>`) + `</metadata>`),
+		"a package head too large":  doc(`<package><name>a</name><description>` + strings.Repeat("x", maxHead) + `</description></package>`),
+		"a tag too large":           doc(`<package x="` + strings.Repeat("x", maxTag) + `"></package>`),
+		"a base above":              doc(pkg(`<location xml:base="../../" href="a.rpm"/>`)),
+		"a base to a url":           doc(pkg(`<location xml:base="sub/" href="https://elsewhere.example/a.rpm"/>`)),
+		"an entity of its dtd":      []byte(`<!DOCTYPE metadata [<!ENTITY lic "MIT">]>` + string(doc(tail(`<rpm:license>&lic;</rpm:license>`)))),
+		"an entity in an attribute": doc(tail(`<rpm:entry name="&lic;"/>`)),
+		"an unended reference":      doc(tail(`a &amp b`)),
+		"a reference to no char":    doc(tail(`&#0;`)),
+		"mismatched tags":           doc(tail(`<a></b>`)),
+		"an unclosed tag":           doc(tail(`<a>`)),
+		"an end tag too many":       doc(tail(`</a>`)),
+		"a doctype in a package":    doc(tail(`<!DOCTYPE x>`)),
+		"a less-than in a value":    doc(tail(`<a b="<"/>`)),
 	}
 	e := newEnv(t)
 	i := 0
@@ -533,13 +552,24 @@ func TestMergeFallsBack(t *testing.T) {
 // refusing, there is no complete index to give.
 func TestMergeMemberFails(t *testing.T) {
 	e := newEnv(t)
-	for _, dir := range []string{"fail/", "denied/"} {
+	for _, dir := range []string{"fail/", "denied/", "html/"} {
 		if w := e.do("PUT", "yum-deep", dir+"x-1-1.noarch.rpm", nvra("x", "1", "1", "noarch")); w.Code != 201 {
 			t.Fatalf("PUT: %d %s", w.Code, w.Body)
 		}
 		if w := e.do("GET", "yum-merged-deep", dir+repomdFile, nil); w.Code != 502 {
-			t.Fatalf("GET: %d %s", w.Code, w.Body)
+			t.Fatalf("GET %s: %d %s", dir, w.Code, w.Body)
 		}
+	}
+	// a sign-in page read through the proxy first records no miss for the group to take
+	if w := e.do("PUT", "yum-deep", "html2/x-1-1.noarch.rpm", nvra("x", "1", "1", "noarch")); w.Code != 201 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body)
+	}
+	e.files.Store("/html2/"+repomdFile, []byte("<!DOCTYPE html><html>Sign in</html>"))
+	if w := e.do("GET", "yum-proxy", "html2/"+repomdFile, nil); w.Code != 502 {
+		t.Fatalf("direct: %d %s", w.Code, w.Body)
+	}
+	if w := e.do("GET", "yum-merged-deep", "html2/"+repomdFile, nil); w.Code != 502 {
+		t.Fatalf("GET after a direct read: %d %s", w.Code, w.Body)
 	}
 	// offline it is not a member at all, as in any group
 	offline := false
@@ -767,5 +797,39 @@ func TestMergeManyPackages(t *testing.T) {
 	t.Logf("%d packages, peak heap growth %.1f MiB", packages, float64(peak)/(1<<20))
 	if peak > 40<<20 {
 		t.Fatalf("the heap grew by %.1f MiB", float64(peak)/(1<<20))
+	}
+}
+
+// A member's packages count toward the limit whether they are kept or left
+// out: a primary.xml of one package over and over, which compresses to
+// nothing, must not grow what the merge remembers without bound.
+func TestMergeCountsDuplicates(t *testing.T) {
+	defer func(n int) { maxMergePackages = n }(maxMergePackages)
+	maxMergePackages = 10
+	e := newEnv(t)
+	if w := e.do("PUT", "yum-hosted", "x-1-1.noarch.rpm", nvra("x", "1", "1", "noarch")); w.Code != 201 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body)
+	}
+	one := `<package type="rpm"><name>x</name><arch>noarch</arch><version epoch="0" ver="1" rel="1"/><checksum type="sha256" pkgid="YES">aa</checksum><location href="x-1-1.noarch.rpm"/></package>`
+	e.publishPrimary("", gzipped(`<metadata xmlns="http://linux.duke.edu/metadata/common">`+strings.Repeat(one, 50)+`</metadata>`))
+	if w := e.do("GET", "yum-merged", repomdFile, nil); w.Code != 502 {
+		t.Fatalf("GET: %d %s", w.Code, w.Body)
+	}
+}
+
+// A member's document is read to maxOpenDoc decompressed at most: a small
+// file of gigabytes of blanks does not keep a merge going.
+func TestMergeBoundsDocuments(t *testing.T) {
+	defer func(n int64) { maxOpenDoc = n }(maxOpenDoc)
+	maxOpenDoc = 1 << 20
+	e := newEnv(t)
+	if w := e.do("PUT", "yum-hosted", "x-1-1.noarch.rpm", nvra("x", "1", "1", "noarch")); w.Code != 201 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body)
+	}
+	pkg := `<package type="rpm"><name>a</name><arch>noarch</arch><version epoch="0" ver="1" rel="1"/><checksum type="sha256" pkgid="YES">aa</checksum><location href="a-1-1.noarch.rpm"/><format>` +
+		strings.Repeat(" ", 2<<20) + `</format></package>`
+	e.publishPrimary("", gzipped(`<metadata xmlns="http://linux.duke.edu/metadata/common">`+pkg+`</metadata>`))
+	if w := e.do("GET", "yum-merged", repomdFile, nil); w.Code != 502 {
+		t.Fatalf("GET: %d %s", w.Code, w.Body)
 	}
 }

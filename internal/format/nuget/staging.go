@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
@@ -51,13 +52,19 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 	if len(row) == 0 || len(assets) == 0 {
 		return nil, repo.Errorf(http.StatusNotFound, "%s %s not found in repository %q", id, ver, src.Name)
 	}
+	now := h.Store.Now() // the copy is published at the move (repo.ComponentImporter)
+	for i := range row {
+		if row[i].Attrs, err = repo.Restamp(row[i].Attrs, "published", now.UTC().Format(time.RFC3339)); err != nil { // the published of its registration
+			return nil, err
+		}
+	}
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, assets); err != nil {
 		return nil, err
 	}
 	return assets, h.Store.Tx(ctx, dst, func(tx *meta.Tx) error {
-		if err := repo.InsertImported(ctx, tx, dst.Name, row, overwrite); err != nil {
+		if err := repo.InsertImported(ctx, tx, dst.Name, row, overwrite, now); err != nil {
 			return err
 		}
-		return repo.PutImported(ctx, tx, dst.Name, assets, overwrite)
+		return repo.PutImported(ctx, tx, dst.Name, assets, overwrite, now)
 	})
 }

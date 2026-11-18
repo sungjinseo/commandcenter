@@ -28,11 +28,13 @@ type Component struct {
 
 // Evaluated is what cleanup evaluation saw of a component: the paths of its
 // assets, their newest creation and modification times and their newest
-// download (zero if never downloaded).
+// download (zero if never downloaded). Pending, if set, gives the newest
+// download of an asset this node has counted and not yet written.
 type Evaluated struct {
 	Paths                   map[string]bool
 	MaxCreated, MaxModified time.Time
 	LastDownloaded          time.Time
+	Pending                 func(repo, path string) time.Time
 }
 
 // ErrChanged is returned by a deleter that skipped a component because it

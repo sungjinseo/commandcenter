@@ -52,11 +52,12 @@ func (h *Handler) ImportComponent(ctx context.Context, src, dst *repo.Repository
 		return nil, err
 	}
 	defer unlock()
+	now := h.Store.Now() // the copy is published at the move (repo.ComponentImporter)
 	if err := h.Store.CopyBlobs(src.Name, dst.Name, files); err != nil {
 		return nil, err
 	}
 	if err := h.Store.Tx(ctx, dst, func(tx *meta.Tx) error {
-		return repo.PutImported(ctx, tx, dst.Name, files, overwrite)
+		return repo.PutImported(ctx, tx, dst.Name, files, overwrite, now)
 	}); err != nil {
 		return nil, err
 	}
