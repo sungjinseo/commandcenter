@@ -52,9 +52,9 @@ gobuild() { # gobuild OUT PACKAGE: a static linux binary in $work
   if [ -n "${HA_GOCACHE:-}" ]; then
     docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp -e GOCACHE=/cache/build -e GOMODCACHE=/cache/mod \
       -e GOFLAGS=-buildvcs=false -e GOPROXY=off -e CGO_ENABLED=0 -v "$HA_GOCACHE:/cache" -v "$root:/src:ro" -v "$work:/out" \
-      -w /src "${HA_GO_IMAGE:-golang:1.27.3}" go build -o "/out/$1" "$2"
+      -w /src "${HA_GO_IMAGE:-golang:1.27.3}" go build -buildvcs=false -o "/out/$1" "$2"
   else
-    CGO_ENABLED=0 GOOS=linux go build -o "$work/$1" "$2"
+    CGO_ENABLED=0 GOOS=linux go build -buildvcs=false -o "$work/$1" "$2"
   fi
 }
 echo "== build"
