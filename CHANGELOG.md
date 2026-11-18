@@ -202,6 +202,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `import-nexus -config` carries Nexus's LDAP static groups along with `ldapGroupsAsRoles`.
 - `test/smoke/import-content-smoke.sh`: every format copied between two servers, then installed from
   the target with its real client.
+- An S3-compatible API on a listener of its own (`s3: {listen: ":9000", region: us-east-1}`; off by default),
+  tested with aws cli, boto3, rclone, s3cmd, restic and Terraform's S3 backend (`use_lockfile`). A bucket is a
+  hosted raw repository and an object is the raw file at the same path, so privileges, writePolicy, content
+  selectors, blob stores, quotas and cleanup apply unchanged, and files move freely between S3 and
+  `/repository/`. AWS Signature Version 4 (header and presigned URLs, aws-chunked bodies with chunk signatures
+  and trailing checksums); Signature Version 2 is refused. Object reads and writes with conditions and ranges,
+  copies, batch deletes, listings (V1 and V2), and multipart uploads whose parts may reach any node. Content
+  type, `x-amz-meta-*` and the standard stored headers survive a round trip. CreateBucket and DeleteBucket are
+  refused: buckets are made in the web UI. Written from AWS's documentation; no schema change.
+- S3 access keys: `GET/POST /-/api/s3keys` and `DELETE /-/api/s3keys/{id}`. Users make their own keys and
+  administrators can make keys for others; the secret is shown once and stored sealed (and resealed by key
+  rotation); at most 10 per user; a disabled user's keys stop working at once and a deleted user's keys go
+  with it.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
@@ -477,6 +490,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and a direct read answers 502 (or the cached copy, marked stale).
 - Cleanup: a download counted on the node running cleanup after it wrote the pending counts now keeps the
   component (`lastDownloadedDays`).
+- The main port fixes each connection's kernel receive buffer at the size the connection limit assumes: the
+  kernel's autotuning let 60 concurrent 16 MiB uploads hold 95 MB of socket memory and get a 128 MiB server
+  killed. Downloads keep the kernel's send autotuning.
 
 ### Security
 

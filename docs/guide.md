@@ -2633,6 +2633,135 @@ curl -fsS -X PUT -H "$H" --data-binary @terraform-registry-manifest.json        
 
 **정리.** 모듈 컴포넌트는 `<네임스페이스>/<이름>/<프로바이더>@<버전>`, 프로바이더는 `<네임스페이스>/<타입>@<버전>`입니다. 삭제는 웹 UI·API의 컴포넌트 삭제와 Cleanup 정책(`format: terraform`)으로 하고, 역할 권한 대상으로 `format:terraform`을 쓸 수 있습니다. 컴포넌트 메타데이터 탭은 모듈 README의 첫 문단, 프로바이더의 프로토콜과 플랫폼을 보여 줍니다(hosted만).
 
+## S3 호환 API
+
+Command Center는 AWS S3와 호환되는 API를 별도 포트로 제공합니다. aws cli, boto3, rclone, s3cmd, restic, Terraform S3 backend 같은 S3 클라이언트를 그대로 쓸 수 있습니다. 기본으로는 꺼져 있습니다.
+
+### 켜기
+
+설정 파일에 다음을 넣고 서버를 다시 시작합니다.
+
+```yaml
+s3:
+  listen: ":9000"      # 비우면 꺼짐
+  region: us-east-1    # 클라이언트가 서명하는 리전(기본 us-east-1)
+```
+
+- S3 API는 같은 프로세스·DB·blob store를 쓰고, 고가용성 구성에서도 모든 노드가 같은 포트로 응답합니다. 상태 확인과 기본 포트(`listen`)는 그대로입니다.
+- 주소는 경로 방식(`http://호스트:9000/버킷/키`)만 지원합니다. 가상 호스트 방식(`버킷.호스트`)은 지원하지 않으므로 클라이언트에서 path style을 켜야 합니다.
+- 연결 수 상한(메모리 한도에 맞춘 값)의 4분의 1을 S3 포트가 씁니다. 그보다 많은 연결은 차례를 기다립니다.
+- TLS가 필요하면 리버스 프록시를 앞에 두되 `Host` 헤더를 바꾸지 마세요. 서명이 Host를 포함하므로 바뀌면 `SignatureDoesNotMatch`가 됩니다.
+
+### 버킷과 객체
+
+- 버킷은 **raw hosted 저장소**이고, 객체는 그 저장소의 **같은 경로에 있는 raw 파일**입니다. S3로 올린 파일은 `/repository/<저장소>/<키>`로 받을 수 있고, 그 반대도 됩니다. Browse·검색·정리 정책·blob store·쿼터·writePolicy가 모두 그대로 적용됩니다. 그룹·프록시 저장소와 다른 포맷의 저장소는 버킷이 아닙니다.
+- 버킷 목록(ListBuckets)에는 호출한 사용자가 browse할 수 있는 raw hosted 저장소가 나옵니다.
+- 버킷을 만들거나 지우는 요청(CreateBucket, DeleteBucket)은 관리자라도 `AccessDenied`로 거절합니다. 저장소 구성 변경은 비밀번호나 세션으로 로그인해야 하는데 S3 키는 토큰과 같은 취급이고, 버킷 삭제는 저장소 내용 전체를 지우기 때문입니다. 버킷은 웹 UI의 저장소 화면에서 raw hosted 저장소로 만드세요. 이미 있고 쓸 수 있는 버킷을 만들려고 하면 `BucketAlreadyOwnedByYou`를 돌려줍니다.
+- raw 경로로 쓸 수 없는 키(`//`, `.`, `..`, `\`, 제어 문자, `?`, `#`, `;`가 들어 있거나 `/`로 끝나는 키)와 1024바이트를 넘는 키는 `InvalidArgument`·`KeyTooLongError`로 거절합니다.
+- Content-Type은 파일의 콘텐츠 형식으로 저장됩니다. 보내지 않으면 확장자로 정합니다. `x-amz-meta-*` 사용자 메타데이터(소문자로 저장, 합계 2KB)와 Cache-Control, Content-Disposition, Content-Encoding, Content-Language, Expires도 저장해 다시 돌려줍니다. 이 정보는 내보내기·가져오기와 스테이징 이동에도 따라갑니다. 같은 경로를 `/repository/`로 다시 올리면 새 파일이 되어 메타데이터가 없어집니다.
+- ETag는 일반 업로드면 내용의 MD5이고, 멀티파트 업로드면 `파트 MD5들의 MD5-파트 수`입니다. `/repository/`의 ETag는 Nexus와 같은 `"{SHA1{...}}"` 형식이라 두 값은 다릅니다. Nexus 클라이언트와 S3 클라이언트가 각자 다른 형식을 기대하기 때문입니다.
+
+### 액세스 키
+
+- S3 클라이언트는 **S3 액세스 키**(액세스 키 ID와 비밀 키)로 AWS Signature Version 4 서명을 합니다. 키는 `POST /-/api/s3keys`(비밀번호·세션 로그인과 `X-Command-Center-UI: 1` 헤더 필요)로 만듭니다.
+- 비밀 키는 만들 때 한 번만 보이며, 저장된 비밀값 암호화 키로 암호화해 저장합니다. 목록은 `GET /-/api/s3keys`, 폐기는 `DELETE /-/api/s3keys/{id}`입니다. 관리자는 모든 키를 보고 폐기할 수 있으며, `{"user": "alice"}`나 `{"user": "ldap:alice"}`처럼 다른 사용자의 키도 만들 수 있습니다.
+- 한 사용자는 키를 10개까지 가질 수 있습니다. 사용자를 비활성화하면 그 사용자의 키는 곧바로 쓸 수 없게 되고, 사용자를 삭제하면 키도 함께 삭제됩니다.
+- 권한은 키를 만든 사용자의 저장소 권한과 같습니다. 읽기(GET·HEAD), browse(목록), 추가(새 키와 멀티파트 파트), 편집(덮어쓰기), 삭제(삭제)가 필요하며, 컨텐츠 셀렉터 권한은 키(경로)마다 적용됩니다. 서명하지 않은 요청은 익명으로 처리되어 저장소의 익명 읽기 설정을 따릅니다.
+- 서명은 AWS Signature Version 4만 받습니다. 헤더 서명과 미리 서명된 URL(최대 7일)을 모두 받고, Signature Version 2는 거절합니다. 서버와 클라이언트의 시계 차이가 15분을 넘으면 `RequestTimeTooSkewed`가 됩니다. 서명 리전은 `s3.region`과 같아야 합니다.
+
+### 지원하는 작업
+
+- 버킷: ListBuckets, HeadBucket, GetBucketLocation, GetBucketVersioning(항상 "사용 안 함"), ListObjectsV2·ListObjects(prefix, delimiter, continuation, max-keys, start-after, marker, encoding-type=url), ListMultipartUploads(최대 1000개).
+- 객체: GetObject·HeadObject(Range, If-Match·If-None-Match·If-Modified-Since·If-Unmodified-Since, response-* 덮어쓰기), PutObject(Content-MD5 확인, `If-None-Match: *`와 `If-Match` 조건부 쓰기), CopyObject(같은 버킷·다른 버킷, COPY·REPLACE 메타데이터 지시자), DeleteObject, DeleteObjects(quiet).
+- 멀티파트: CreateMultipartUpload, UploadPart, UploadPartCopy, CompleteMultipartUpload, AbortMultipartUpload, ListParts.
+- 본문 형식: 서명된 SHA-256, UNSIGNED-PAYLOAD, aws-chunked(청크 서명·서명된 트레일러), STREAMING-UNSIGNED-PAYLOAD-TRAILER. `x-amz-checksum-crc32`, `crc32c`, `crc64nvme`, `sha1`, `sha256` 체크섬(헤더나 트레일러)은 업로드할 때 검사합니다. 체크섬은 저장하지 않으므로 GetObject가 체크섬을 돌려주지는 않습니다.
+- 그 밖의 작업(ACL, 태그, 정책, 수명 주기, 버전 관리, 객체 잠금, 암호화 설정, 브라우저 폼 업로드 등)은 `NotImplemented`로 응답합니다.
+
+### 멀티파트 업로드
+
+- 업로드 중인 파트는 저장소 blob store의 `tmp/`(Docker 업로드 세션과 같은 곳, 모든 노드가 공유)에 있습니다. 따라서 파트를 서로 다른 노드로 보내도 됩니다. DB에는 완료할 때 한 번만 기록됩니다.
+- 마지막 파트를 뺀 모든 파트는 5MiB 이상이어야 합니다. `maxUploadMiB`는 파트 하나와 완성된 객체 전체 크기의 상한입니다.
+- 24시간 동안 쓰이지 않은 파트 파일은 임시 파일 정리(store를 열 때, compact 작업, `blobstore.delete-temp-files` 작업)에서 지워집니다. 업로드는 첫 파트를 쓴 뒤 24시간 안에 완료하세요.
+- 큰 객체의 CompleteMultipartUpload와 CopyObject는 S3처럼 곧바로 200을 보내고, 끝날 때까지 공백을 보내 연결을 유지합니다. 오류는 그 응답 본문의 Error 문서로 전달되며, SDK가 이를 오류로 처리합니다.
+
+### 클라이언트 설정 예
+
+다음 예에서 서버는 `http://cc.example:9000`, 버킷은 `s3-data`입니다. 검증한 클라이언트는 aws-cli 2.41, boto3 1.44, s3cmd 2.4, rclone 1.76, restic 0.19, Terraform 1.17입니다(`test/smoke/s3-smoke.sh`). mc(MinIO Client)는 MinIO 프로젝트가 보관 처리되어 검증하지 못했습니다.
+
+aws cli:
+
+```sh
+export AWS_ACCESS_KEY_ID=<액세스 키 ID> AWS_SECRET_ACCESS_KEY=<비밀 키> AWS_DEFAULT_REGION=us-east-1
+export AWS_ENDPOINT_URL=http://cc.example:9000
+aws s3 cp ./build.tar.gz s3://s3-data/builds/
+aws s3 ls s3://s3-data/builds/
+aws s3 presign s3://s3-data/builds/build.tar.gz --expires-in 3600
+```
+
+boto3:
+
+```python
+import boto3
+from botocore.config import Config
+s3 = boto3.client("s3", endpoint_url="http://cc.example:9000", region_name="us-east-1",
+                  aws_access_key_id="<액세스 키 ID>", aws_secret_access_key="<비밀 키>",
+                  config=Config(s3={"addressing_style": "path"}, signature_version="s3v4"))
+s3.upload_file("build.tar.gz", "s3-data", "builds/build.tar.gz")
+```
+
+미리 서명된 URL을 만들 때는 `signature_version="s3v4"`가 꼭 필요합니다. 없으면 boto3가 Signature Version 2로 서명하고, 서버는 이를 거절합니다.
+
+rclone(`rclone.conf`):
+
+```ini
+[cc]
+type = s3
+provider = Other
+endpoint = http://cc.example:9000
+region = us-east-1
+access_key_id = <액세스 키 ID>
+secret_access_key = <비밀 키>
+```
+
+```sh
+rclone copy ./site cc:s3-data/site
+```
+
+restic:
+
+```sh
+export AWS_ACCESS_KEY_ID=<액세스 키 ID> AWS_SECRET_ACCESS_KEY=<비밀 키>
+restic -r s3:http://cc.example:9000/s3-data/restic init
+```
+
+Terraform S3 backend(상태 잠금은 `use_lockfile`):
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket                      = "s3-data"
+    key                         = "prod/terraform.tfstate"
+    region                      = "us-east-1"
+    endpoints                   = { s3 = "http://cc.example:9000" }
+    use_path_style              = true
+    use_lockfile                = true
+    skip_credentials_validation = true
+    skip_requesting_account_id  = true
+    skip_metadata_api_check     = true
+    skip_region_validation      = true
+  }
+}
+```
+
+잠금 파일(`<key>.tflock`)은 `If-None-Match: *` 조건부 쓰기로 만들어지므로, 다른 apply가 잠금을 가지고 있으면 "Error acquiring the state lock"으로 멈춥니다. 상태를 덮어쓰려면 버킷의 writePolicy가 `allow`이고 키 사용자에게 편집 권한이 있어야 합니다.
+
+### 운영
+
+- 요청 로그에는 `"api":"s3"`가 붙고, 요청 수와 바이트는 저장소별 통계에 함께 집계됩니다.
+- 연결마다 커널 수신 버퍼를 고정 크기로 씁니다(S3 포트는 송신 버퍼도). 커널이 버퍼를 키우면 동시 업로드가 많을 때 컨테이너 메모리를 넘기 때문입니다. 128MiB 컨테이너에서 S3 1GiB 업로드 16개를 동시에 처리해도 RSS 44MiB였고, 기본 포트로 16MiB 업로드 60개를 동시에 보내도 종료되지 않았습니다.
+- 복구 모드에서는 쓰기와 삭제를 `ServiceUnavailable`로 거절합니다. 오프라인 저장소와 이 노드에서 열리지 않은 blob store의 저장소도 같은 오류로 응답합니다.
+- 아직 없는 것: 가상 호스트 방식, 버전 관리·ACL·태그·정책, 저장된 체크섬, 잘못된 서명에 대한 로그인 시도 제한.
+
 ## 운영
 
 | 작업 | 명령 |
@@ -3119,6 +3248,7 @@ test/smoke/huggingface-smoke.sh # huggingface_hub, transformers
 test/smoke/terraform-smoke.sh # terraform, tofu
 test/smoke/import-config-smoke.sh # import-nexus -config: 두 서버의 설정이 같아지는지
 test/smoke/import-content-smoke.sh # import-nexus: 포맷마다 두 서버 사이에 복사한 뒤 실제 클라이언트로 설치
+test/smoke/s3-smoke.sh        # S3 호환 API: aws cli, boto3, s3cmd, rclone, restic, Terraform S3 backend
 test/smoke/purge-smoke.sh     # repository.purge-unused: npm, pip, go, 공개 레지스트리
 test/compat/jenkins.sh        # 실제 도구: Jenkins, Gradle, sbt, nexus3-cli
 test/compat/gradle.sh

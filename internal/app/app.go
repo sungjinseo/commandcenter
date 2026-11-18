@@ -54,6 +54,7 @@ import (
 	"commandcenter/internal/replication"
 	"commandcenter/internal/repo"
 	"commandcenter/internal/resolve"
+	"commandcenter/internal/s3api"
 	"commandcenter/internal/server"
 	"commandcenter/internal/sysinfo"
 	"commandcenter/internal/tasks"
@@ -70,6 +71,7 @@ type App struct {
 	Auth     *auth.Authenticator
 	Registry *repo.Registry
 	Handler  http.Handler
+	S3       http.Handler      // the S3-compatible API (s3api.Handler), served on Config.S3.Listen; nil while that is empty
 	Metrics  *metrics.Recorder // download and request counters; flushed by Serve
 	Mail     *mail.Sender      // failure and test e-mail; Close drains its queue
 	Events   *events.Recorder  // activity events; written by a goroutine that Close stops
@@ -740,6 +742,10 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		return terraform.RootDiscovery(registry.Snapshot().Sorted, authn.Snapshot().Settings().TerraformDefaultRepository, baseURL())
 	}
 	a.Handler = srv.Handler()
+	if cfg.S3.Listen != "" {
+		a.S3 = &s3api.Handler{Registry: registry, Store: store, Auth: authn, Region: cfg.S3.Region, Log: log,
+			ReadOnly: srv.ReadOnly, Unavailable: srv.Unavailable, Requests: recorder.Request, Seen: recorder.Seen}
+	}
 	// The component upload API and single-file deletes (DELETE /v1/assets/{id})
 	// hand their requests to the repository endpoint.
 	nexus.ServeRepository = srv.ServeRepository
@@ -1018,12 +1024,32 @@ func (a *App) Serve(ctx context.Context) error {
 	if conns < maxConns {
 		a.log.Info("connections limited by the container's memory limit", "connections", conns)
 	}
-	ln = server.LimitConns(srv, ln, conns)
-	errc := make(chan error, 1)
+	// The S3 API's listener takes a quarter of the connection budget.
+	s3conns := 0
+	if a.S3 != nil {
+		s3conns = conns / 4
+		conns -= s3conns
+	}
+	ln = server.LimitConns(srv, sockBufListener{ln, false}, conns)
+	errc := make(chan error, 2)
 	go func() {
 		a.log.Info("listening", "addr", a.Config.Listen)
 		errc <- srv.Serve(ln)
 	}()
+	var s3srv *http.Server
+	if a.S3 != nil {
+		s3ln, err := net.Listen("tcp", a.Config.S3.Listen)
+		if err != nil {
+			srv.Close()
+			return err
+		}
+		s3srv = newHTTPServer(a.S3)
+		s3ln = server.LimitConns(s3srv, sockBufListener{s3ln, true}, s3conns)
+		go func() {
+			a.log.Info("listening", "addr", a.Config.S3.Listen, "api", "s3")
+			errc <- s3srv.Serve(s3ln)
+		}()
+	}
 	select {
 	case err := <-errc:
 		return err
@@ -1037,6 +1063,14 @@ func (a *App) Serve(ctx context.Context) error {
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+	if s3srv != nil {
+		if err := s3srv.Shutdown(sctx); err != nil {
+			s3srv.Close()
+		}
+		if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	}
 	if err := srv.Shutdown(sctx); err != nil {
 		srv.Close()
 		return err
@@ -1045,6 +1079,31 @@ func (a *App) Serve(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// sockBufListener fixes each accepted connection's kernel buffers at
+// socketCost: S3 clients upload many parts at once, and the kernel's
+// autotuning grows the receive buffer of a connection read at disk speed
+// towards net.ipv4.tcp_rmem's maximum (6 MiB), which the container is
+// charged for (measured: 60 part uploads held 113 MiB of socket memory and
+// got a 128 MiB container killed; on the main port 60 uploads of 16 MiB
+// held 95 MB). The main port fixes only the receive side: its downloads keep
+// the kernel's send autotuning, which a slow client does not grow the same way
+// and which a fixed buffer would cap on long links.
+type sockBufListener struct {
+	net.Listener
+	write bool // fix the send buffer too
+}
+
+func (l sockBufListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if tc, ok := c.(*net.TCPConn); ok {
+		tc.SetReadBuffer(socketCost / 2) // the kernel doubles it
+		if l.write {
+			tc.SetWriteBuffer(socketCost / 2)
+		}
+	}
+	return c, err
 }
 
 // newHTTPServer is the HTTP server Serve runs h on.

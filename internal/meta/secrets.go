@@ -18,8 +18,8 @@ import (
 // The stored secrets are the SMTP password, the LDAP bind password, the
 // OIDC client secret, a proxy's remoteAuth password and bearer token, an S3 blob store's
 // secret key, an Azure blob store's account key, SAS token or client secret, a webhook's signing secret, the Crowd application password, the
-// SAML service provider key and the key that signs the Docker and Conan
-// tokens (TokenKey).
+// SAML service provider key, the key that signs the Docker and Conan
+// tokens (TokenKey) and the secrets of the S3 access keys (s3api.go).
 // They must be sent as they are, so they cannot be hashed. With a key (SetSecretKey) they are sealed
 // with AES-256-GCM on write and opened on read, so a copy of the database or
 // of a backup does not give them away (QA N-29). A sealed value is sealedPrefix
@@ -440,6 +440,10 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 		}
 		k, err := rewriteAzureSecrets(ctx, tx.q, rewrite)
 		if err != nil {
+			return err
+		}
+		n += k
+		if k, err = rewriteS3KeySecrets(ctx, tx.q, rewrite); err != nil {
 			return err
 		}
 		n += k

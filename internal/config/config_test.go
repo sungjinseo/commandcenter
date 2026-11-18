@@ -433,6 +433,20 @@ func TestTaskRunTimeoutHours(t *testing.T) {
 	}
 }
 
+func TestS3(t *testing.T) {
+	if c, err := Parse([]byte("{}\n")); err != nil || c.S3.Listen != "" || c.S3.Region != "us-east-1" {
+		t.Fatalf("default = %+v err=%v", c.S3, err)
+	}
+	if c, err := Parse([]byte("s3: {listen: \":9000\", region: eu-west-1}\n")); err != nil || c.S3.Listen != ":9000" || c.S3.Region != "eu-west-1" {
+		t.Fatalf("set: %+v %v", c.S3, err)
+	}
+	for _, bad := range []string{"s3: {region: \"EU West\"}", "s3: {listen: \":8081\"}", "s3: {port: 9000}"} {
+		if _, err := Parse([]byte(bad + "\n")); err == nil {
+			t.Fatalf("%s accepted", bad)
+		}
+	}
+}
+
 func TestMetricsFlushSeconds(t *testing.T) {
 	c, err := Parse([]byte("{}"))
 	if err != nil || c.MetricsFlushSeconds != 30 {

@@ -157,7 +157,8 @@ roles = ?, updated_at = ?, last_name = ? WHERE id = ?`, u.Name, u.Email, u.Passw
 }
 
 // DeleteUser removes the user and, in the same transaction, its API tokens
-// (Decision 1) and user token. ErrNotFound if there is no such user.
+// (Decision 1), user token and S3 access keys. ErrNotFound if there is no
+// such user.
 func (d *DB) DeleteUser(ctx context.Context, id string) error {
 	return d.Tx(ctx, func(tx *Tx) error {
 		res, err := tx.q.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
@@ -170,8 +171,10 @@ func (d *DB) DeleteUser(ctx context.Context, id string) error {
 		if _, err = tx.q.ExecContext(ctx, `DELETE FROM tokens WHERE "user" = ?`, id); err != nil {
 			return err
 		}
-		_, err = tx.q.ExecContext(ctx, `DELETE FROM user_tokens WHERE owner = ?`, id)
-		return err
+		if _, err = tx.q.ExecContext(ctx, `DELETE FROM user_tokens WHERE owner = ?`, id); err != nil {
+			return err
+		}
+		return deleteS3KeysOf(ctx, tx.q, id)
 	})
 }
 

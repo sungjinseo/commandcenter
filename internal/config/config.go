@@ -146,6 +146,10 @@ type Config struct {
 	// and write under (or COMMANDCENTER_EXPORT_ROOT); empty disables them.
 	ExportRoot string `yaml:"exportRoot"`
 
+	// S3 serves the S3-compatible API (internal/s3api) on a listener of its
+	// own; off while S3.Listen is empty.
+	S3 S3 `yaml:"s3"`
+
 	// Present names the top-level keys the file sets, so the app can warn
 	// about keys that the database has superseded.
 	Present map[string]bool `yaml:"-"`
@@ -166,6 +170,13 @@ type Config struct {
 	// maxUploadMiB keys. It does not fail Parse either: after the first
 	// import the database holds the values and the keys are ignored.
 	SettingsErr error `yaml:"-"`
+}
+
+// S3 is the S3-compatible API's listener ("host:port") and the region
+// clients sign their requests for (default us-east-1).
+type S3 struct {
+	Listen string `yaml:"listen"`
+	Region string `yaml:"region"`
 }
 
 type User struct {
@@ -539,6 +550,9 @@ func (c *Config) applyDefaults() {
 	if c.MemoryLimitMiB == 0 {
 		c.MemoryLimitMiB = 80
 	}
+	if c.S3.Region == "" {
+		c.S3.Region = "us-east-1"
+	}
 	for i := range c.Repositories {
 		ApplyRepositoryDefaults(&c.Repositories[i])
 	}
@@ -632,6 +646,12 @@ func (c *Config) validate() error {
 	if c.TaskRunTimeoutHours < 0 || c.TaskRunTimeoutHours > 720 {
 		add("taskRunTimeoutHours must be between 1 and 720 (0: the default, 6)")
 	}
+	if !s3RegionRE.MatchString(c.S3.Region) {
+		add("s3.region must be a region name such as us-east-1")
+	}
+	if c.S3.Listen != "" && c.S3.Listen == c.Listen {
+		add("s3.listen must differ from listen")
+	}
 	// baseURL and maxUploadMiB are import-only (plan 12): a problem is
 	// reported in SettingsErr and only matters before the first import.
 	var serrs []error
@@ -660,6 +680,8 @@ func (c *Config) validate() error {
 	c.AccessErr = ValidateAccess(c.Users, c.Roles)
 	return errors.Join(errs...)
 }
+
+var s3RegionRE = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 
 // ValidateBaseURL checks a baseURL: an absolute http(s) URL without user
 // info, query or fragment. Clients get it as the prefix of every npm, PyPI
