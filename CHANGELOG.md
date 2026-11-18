@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Helm chart: `s3.enabled`, `s3.port` and `s3.region` turn on the S3-compatible API and publish its port on the
+  pod and the Service; `s3.httpRoute` adds an HTTPRoute of its own on a host name of its own.
+
 ## [0.5.0] - 2026-11-18
 
 ### Added

@@ -55,6 +55,10 @@ template:
         ports:
           - name: http
             containerPort: 8081
+          {{- if .Values.s3.enabled }}
+          - name: s3
+            containerPort: {{ .Values.s3.port }}
+          {{- end }}
         env:
           {{- with .Values.goMemLimit }}
           - name: GOMEMLIMIT

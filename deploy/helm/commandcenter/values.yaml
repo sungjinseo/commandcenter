@@ -191,6 +191,20 @@ httpRoute:
   hostnames: []
   #  - repo.example.com
 
+# The S3-compatible API (guide: "S3 호환 API"): a listener of its own on s3.port, published by
+# the Service on the same port. Buckets are hosted raw repositories; keys are made in the web UI.
+s3:
+  enabled: false
+  port: 9000
+  region: us-east-1
+  # An HTTPRoute of its own, on httpRoute.parentRefs. It needs a host name of its own: S3
+  # clients address buckets by path from the root and sign the Host header, so the Gateway
+  # must pass Host through unchanged.
+  httpRoute:
+    enabled: false
+    hostnames: []
+    #  - s3.repo.example.com
+
 serviceAccount:
   create: true
   name: ""

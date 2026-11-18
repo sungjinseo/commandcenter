@@ -648,6 +648,40 @@
           }
         }
       }
+    },
+    "s3": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The S3-compatible API on a listener of its own.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "region": {
+          "type": "string",
+          "minLength": 1
+        },
+        "httpRoute": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "hostnames": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

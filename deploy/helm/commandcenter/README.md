@@ -122,6 +122,8 @@ kubectl -n registry exec commandcenter-postgresql-0 -- pg_dump -U commandcenter 
 | `proxy.http`, `https`, `noProxy` | `""` | Forward proxy for proxy repositories |
 | `ingress.*` | disabled | Body limit of at least `maxUploadMiB` (1024 MiB) and long timeouts |
 | `httpRoute.*` | disabled | Gateway API route instead of an Ingress: `parentRefs` (required) and `hostnames` |
+| `s3.enabled`, `port`, `region` | `false`, `9000`, `us-east-1` | S3-compatible API on its own port, also on the Service |
+| `s3.httpRoute.enabled`, `hostnames` | disabled | Its own HTTPRoute on `httpRoute.parentRefs`; needs a host name of its own |
 
 `baseURL`, `anonymousRead`, the users (`adminPasswordHash`), `roles`, `maxUploadMiB` and
 `repositories` are imported into the database on the first start. After that the web UI owns them:

@@ -207,6 +207,7 @@ Kubernetes에는 Helm 차트로 설치합니다. 차트는 기본으로 서버 P
 
 - 본문 수신 타임아웃과 클라이언트 IP당 연결 수("TLS와 리버스 프록시"의 "프록시에서 제한할 것")는 ingress-nginx ConfigMap의 `client-body-timeout`(기본 60초)과 어노테이션 `nginx.ingress.kubernetes.io/limit-connections`로 겁니다. 연결 수 제한은 컨트롤러가 실제 클라이언트 주소를 볼 때만 쓰세요. 로드밸런서의 주소로 보이면 모든 클라이언트가 한 주소로 묶여 제한됩니다.
 - Gateway API(HTTPRoute)를 쓰면 `ingress.enabled: false`로 두고 `httpRoute.enabled: true`, `httpRoute.parentRefs`(붙을 Gateway, 예: `[{name: traefik-gateway, namespace: traefik}]`), `httpRoute.hostnames`를 정합니다. 차트가 Service의 8081 포트로 가는 HTTPRoute를 만듭니다. 본문 크기와 타임아웃은 Gateway 구현에서 정합니다. 예를 들어 Traefik v3는 요청 전체를 읽는 시간(entryPoint의 `transport.respondingTimeouts.readTimeout`)이 기본 60초라서 그보다 오래 걸리는 업로드가 끊기므로 늘려야 합니다.
+- S3 호환 API("S3 호환 API")를 쓰려면 `s3.enabled: true`(포트 `s3.port`, 기본 9000, `s3.region`)로 켭니다. 파드와 Service에 그 포트가 열립니다. Gateway로 내보내려면 `s3.httpRoute.enabled: true`와 S3 전용 호스트 이름 `s3.httpRoute.hostnames`(예: `[s3.repo.example.com]`)를 정합니다. S3 클라이언트는 버킷을 루트부터 경로로 찾고 `Host` 헤더를 서명하므로 기본 주소와 호스트 이름을 나눠야 하고, Gateway는 `Host`를 바꾸지 않아야 합니다. 이 경로는 `httpRoute.parentRefs`의 Gateway에 붙습니다.
 
 ### 설치 확인(helm test)
 

@@ -115,6 +115,8 @@ jobs:
           extraEnv: [{name: TZ, value: Asia/Seoul}]
           persistence: {storageClass: "-", annotations: {example.com/backup: "true"}}
           service: {annotations: {example.com/owner: platform}}
+          s3: {enabled: true, port: 9000, region: eu-west-1, httpRoute: {enabled: true, hostnames: [s3.repo.example.com]}}
+          httpRoute: {enabled: true, parentRefs: [{name: traefik-gateway, namespace: traefik}], hostnames: [repo.example.com]}
           ingress:
             enabled: true
             className: nginx

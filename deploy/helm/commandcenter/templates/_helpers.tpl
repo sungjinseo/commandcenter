@@ -148,6 +148,7 @@ first and the chart's keys go on top: listen and dataDir must match the pod's po
 {{- $_ := set $c "users" (list (dict "name" "admin" "passwordHash" $hash "roles" (list "admin"))) -}}
 {{- end }}
 {{- with .Values.config.repositories }}{{ $_ := set $c "repositories" . }}{{ end -}}
+{{- if .Values.s3.enabled }}{{ $_ := set $c "s3" (dict "listen" (printf ":%v" .Values.s3.port) "region" .Values.s3.region) }}{{ end -}}
 {{- toYaml $c }}
 {{- end }}
 
