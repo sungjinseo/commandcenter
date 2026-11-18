@@ -371,6 +371,15 @@ func (h *Handler) firstRepodata(ctx context.Context, rp *repo.Repository, p, sub
 		// served: the member's document as it is, as resolve.Merged does.
 		return *only, nil
 	}
+	// One merge at a time, as resolve.Merged does.
+	unlock, err := h.Store.Lock(ctx, "conda\x00"+rp.Name+"\x00"+p)
+	if err != nil {
+		return meta.Asset{}, err
+	}
+	defer unlock()
+	if stored, err := h.Store.Get(ctx, rp.Name, p); err == nil && stored.RemoteETag == fp {
+		return stored, nil
+	}
 	pr, pw := io.Pipe()
 	done := make(chan struct{})
 	go func() {

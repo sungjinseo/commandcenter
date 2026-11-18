@@ -306,6 +306,34 @@ WHERE repo = ? AND name = ? AND version IN (`+marks+`)`, args...)
 	return out, rows.Err()
 }
 
+// AssetsIn returns the assets of repo at paths, by path; a path without one
+// is left out. It is for a batch of paths: a query takes them all.
+func (d *DB) AssetsIn(ctx context.Context, repo string, paths []string) (map[string]Asset, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(paths)+1)
+	args = append(args, repo)
+	for _, p := range paths {
+		args = append(args, p)
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(paths)), ",")
+	rows, err := d.sql.QueryContext(ctx, `SELECT `+assetSelect+` FROM assets WHERE repo = ? AND path IN (`+marks+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]Asset, len(paths))
+	for rows.Next() {
+		a, err := scanAsset(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[a.Path] = a
+	}
+	return out, rows.Err()
+}
+
 func (t *Tx) SetDistTag(ctx context.Context, repo, name, tag, version string) error {
 	var prev string
 	err := writeRow(ctx, t.q, `WITH prev AS (SELECT version FROM dist_tags WHERE repo = ? AND name = ? AND tag = ?)

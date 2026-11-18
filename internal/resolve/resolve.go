@@ -209,6 +209,18 @@ func (r *Resolver) MergedTargetSalted(ctx context.Context, rp *repo.Repository, 
 		// member's older time when a member drops out (plan 13 Decision 7).
 		return results[0].Asset, nil
 	}
+	// One merge at a time on every node: the readers that come while a
+	// member's document changed would each merge it, and 64 of them merging
+	// a conda channel took a 128 MiB server down. They wait and take the
+	// copy the first one stored.
+	unlock, err := r.Store.Lock(ctx, rp.Format+"\x00merged\x00"+rp.Name+"\x00"+t.Key)
+	if err != nil {
+		return meta.Asset{}, err
+	}
+	defer unlock()
+	if stored, err := r.Store.Get(ctx, rp.Name, t.Key); err == nil && stored.RemoteETag == fp {
+		return stored, nil
+	}
 
 	members := make([]io.ReadSeeker, 0, len(results))
 	var files []blob.File

@@ -64,36 +64,48 @@ type row struct {
 	attrs attrs
 }
 
-// rows lists the versions of id in hosted rp, in the database's order. A
-// row whose attrs cannot be read still lists with its id and version.
-func (h *Handler) rows(ctx context.Context, rp *repo.Repository, id string) ([]row, error) {
-	pkgs, err := h.Store.DB.ListPackages(ctx, rp.Name, id)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]row, 0, len(pkgs))
-	for _, p := range pkgs {
+// eachRow calls fn with the rows of the given versions of id in hosted rp,
+// a batch at a time (meta.DB.EachPackage): a package's rows with their
+// signatures are megabytes, and 16 clients listing one of 1500 versions
+// took a 128 MiB server down. A row whose attrs cannot be read still comes
+// with its id and version.
+func (h *Handler) eachRow(ctx context.Context, rp *repo.Repository, id string, versions []string, fn func(row) error) error {
+	return h.Store.DB.EachPackage(ctx, rp.Name, id, versions, func(p meta.Package) error {
 		r := row{pkg: p}
 		if json.Unmarshal([]byte(p.Attrs), &r.attrs) != nil || r.attrs.ID == "" {
 			r.attrs = attrs{ID: p.Name}
 		}
-		out = append(out, r)
+		return fn(r)
+	})
+}
+
+// versions lists the versions of id in hosted rp, in the database's order.
+func (h *Handler) versions(ctx context.Context, rp *repo.Repository, id string) ([]string, error) {
+	pkgs, err := h.Store.DB.ListPackageVersions(ctx, rp.Name, id)
+	versions := make([]string, len(pkgs))
+	for i, p := range pkgs {
+		versions[i] = p.Version
 	}
-	return out, nil
+	return versions, err
 }
 
 // row finds rt's version in hosted rp.
 func (h *Handler) row(ctx context.Context, rp *repo.Repository, rt Route) (row, error) {
-	rows, err := h.rows(ctx, rp, ID(rt.Scope, rt.Name))
-	if err != nil {
+	id := ID(rt.Scope, rt.Name)
+	var out row
+	found := false
+	err := h.eachRow(ctx, rp, id, []string{rt.Version}, func(r row) error {
+		out, found = r, true
+		return nil
+	})
+	if err != nil || found {
+		return out, err
+	}
+	st, err := h.Store.DB.PackageStamp(ctx, rp.Name, id)
+	switch {
+	case err != nil:
 		return row{}, err
-	}
-	for _, r := range rows {
-		if r.pkg.Version == rt.Version {
-			return r, nil
-		}
-	}
-	if len(rows) == 0 {
+	case st.Count == 0:
 		return row{}, notFoundPackage(rt)
 	}
 	return row{}, notFoundRelease(rt)
@@ -374,12 +386,11 @@ func (h *Handler) hostedIdentifiers(ctx context.Context, rp *repo.Repository, u 
 	want := normalizeURL(u)
 	var ids []string
 	for _, name := range names {
-		rows, err := h.rows(ctx, rp, name)
+		versions, err := h.versions(ctx, rp, name)
 		if err != nil {
 			return nil, err
 		}
-	rows:
-		for _, r := range rows {
+		err = h.eachRow(ctx, rp, name, versions, func(r row) error {
 			var m struct {
 				URLs []string `json:"repositoryURLs"`
 			}
@@ -387,13 +398,20 @@ func (h *Handler) hostedIdentifiers(ctx context.Context, rp *repo.Repository, u 
 			for _, ru := range m.URLs {
 				if normalizeURL(ru) == want {
 					ids = append(ids, r.attrs.ID)
-					break rows
+					return errFound
 				}
 			}
+			return nil
+		})
+		if err != nil && !errors.Is(err, errFound) {
+			return nil, err
 		}
 	}
 	return ids, nil
 }
+
+// errFound ends a walk of rows at the one sought.
+var errFound = errors.New("found")
 
 func normalizeURL(u string) string {
 	u = strings.ToLower(strings.TrimSpace(u))

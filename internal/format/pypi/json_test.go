@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -243,9 +245,10 @@ func peakMem(fn func()) (float64, time.Duration) {
 	return float64(max) / (1 << 20), elapsed
 }
 
-// rewriteJSON of the largest upstream document accepted (maxJSONDoc) fits
-// the server's memory budget (128 MiB; it needs ~9x the document, which is
-// why the cap is what it is). Review PYPI-2.
+// rewriteJSON of the largest upstream document accepted (maxJSONDoc) holds a
+// file at a time: decoding the document whole needed ~9x its size, and 16
+// clients reading botocore's (3.9 MB) took a 128 MiB server down. Review
+// PYPI-2.
 func TestProxyJSONMemory(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteString(`{"info":{"name":"big","version":"1.0"},"releases":{`)
@@ -266,15 +269,22 @@ func TestProxyJSONMemory(t *testing.T) {
 	}
 	sb.WriteString(`},"urls":[]}`)
 	raw := []byte(sb.String())
+	sb = strings.Builder{}
+	defer debug.SetGCPercent(debug.SetGCPercent(5)) // garbage aside
 	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	base := float64(ms.HeapInuse+ms.StackInuse) / (1 << 20)
 	var err error
-	peak, el := peakMem(func() { _, err = rewriteJSON(raw, func(f string) string { return "http://x/" + f }) })
-	t.Logf("doc %d MiB, %d releases: peak %.0f MiB, %v, err=%v", len(raw)>>20, n, peak, el, err)
+	peak, el := peakMem(func() {
+		err = rewriteJSON(bytes.NewReader(raw), io.Discard, func(f string) string { return "http://x/" + f })
+	})
+	t.Logf("doc %d MiB, %d releases: peak %.0f MiB over %.0f, %v, err=%v", len(raw)>>20, n, peak-base, base, el, err)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if peak > 100 {
-		t.Fatalf("rewriting a %d MiB upstream JSON needed %.0f MiB (container: 128 MiB)", len(raw)>>20, peak)
+	if peak-base > 4 {
+		t.Fatalf("rewriting a %d MiB upstream JSON needed %.0f MiB", len(raw)>>20, peak-base)
 	}
 }
 
@@ -384,21 +394,26 @@ func TestCompareVersion(t *testing.T) {
 
 func TestRewriteJSON(t *testing.T) {
 	in := `{"info":{"name":"x"},"releases":{"1":[{"filename":"x-1.tar.gz","url":"https://u/x-1.tar.gz","size":3}]},"urls":[{"filename":"x-1.tar.gz","url":"https://u/x-1.tar.gz"}],"extra":[1,2]}`
-	out, err := rewriteJSON([]byte(in), func(f string) string { return "/p/" + f })
-	if err != nil {
+	var out bytes.Buffer
+	if err := rewriteJSON(strings.NewReader(in), &out, func(f string) string { return "/p/" + f }); err != nil {
 		t.Fatal(err)
 	}
 	var d map[string]any
-	json.Unmarshal(out, &d)
+	if err := json.Unmarshal(out.Bytes(), &d); err != nil {
+		t.Fatalf("%v: %s", err, out.Bytes())
+	}
 	rel := d["releases"].(map[string]any)["1"].([]any)[0].(map[string]any)
 	if rel["url"] != "/p/x-1.tar.gz" || rel["size"] != float64(3) || d["urls"].([]any)[0].(map[string]any)["url"] != "/p/x-1.tar.gz" || d["extra"] == nil {
-		t.Fatalf("%s", out)
+		t.Fatalf("%s", out.Bytes())
 	}
-	if _, err := rewriteJSON([]byte(`[]`), nil); err == nil {
-		t.Fatal("array accepted")
+	for _, bad := range []string{`[]`, `null`, `{"urls":[{"url":"x"}]}`, `{"releases":[]}`, `{"info":{}}{}`, `{"info":{}`} {
+		if err := rewriteJSON(strings.NewReader(bad), io.Discard, nil); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
 	}
-	if _, err := rewriteJSON([]byte(`{"urls":[{"url":"x"}]}`), nil); err == nil {
-		t.Fatal("file without filename accepted")
+	out.Reset()
+	if err := rewriteJSON(strings.NewReader(`{"releases":{"1":null},"urls":null}`), &out, nil); err != nil || out.String() != `{"releases":{"1":null},"urls":null}` {
+		t.Fatalf("nulls: %v %s", err, out.Bytes())
 	}
 }
 

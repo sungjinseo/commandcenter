@@ -134,13 +134,12 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 		if err != nil {
 			return err
 		}
-		doc, res, err := h.jsonDoc(r.Context(), rp, owner, rt.Name, rt.Version)
+		write, res, err := h.jsonDoc(r.Context(), rp, owner, rt.Name, rt.Version)
 		if err != nil {
 			return err
 		}
 		proxy.SetStaleHeader(w, res)
-		repo.ServeText(w, r, string(doc), "application/json", res.Asset.LastModified)
-		return nil
+		return repo.ServeStream(w, r, "application/json", res.Asset.LastModified, write)
 	case KindMetadata:
 		res, err := h.metadata(r.Context(), rp, rt.Name, rt.File)
 		if err != nil {

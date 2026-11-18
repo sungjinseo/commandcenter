@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"commandcenter/internal/auth"
+	"commandcenter/internal/cleanup"
 	"commandcenter/internal/component"
 	"commandcenter/internal/meta"
 	"commandcenter/internal/repo"
@@ -54,23 +55,36 @@ func (u *UI) requireMetrics(w http.ResponseWriter, r *http.Request) bool {
 // them: from the package rows in the package formats' hosted and group
 // repositories, from the asset paths otherwise.
 func (u *UI) countComponents(ctx context.Context, rp *repo.Repository) (int64, error) {
-	// ponytail: one key per component of the repository in memory (~100
-	// bytes; 50k components counted in ~70 ms); count in SQL if repositories
-	// grow past millions.
+	// The components of one package (rows by name), or of one run of paths
+	// with the same cleanup.UnitPrefix, which holds all of a component's
+	// files, are held at a time: a set of every component of a repository of
+	// a million took the server past 128 MiB, from the dashboard and from the
+	// leader's usage refresh every minute.
+	var counted int64
 	seen := map[[3]string]bool{}
-	if packageFormats[rp.Format] && rp.Type != "proxy" {
-		err := u.DB.WalkPackageVersions(ctx, rp.Name, func(name, version string) {
-			g, n, v, _ := component.PackageComponent(rp.Format, name, version)
-			seen[[3]string{g, n, v}] = true
-		})
-		return int64(len(seen)), err
-	}
-	err := u.DB.WalkAssetPaths(ctx, rp.Name, "", func(p string) {
-		if g, n, v, ok := component.DeriveAsset(rp.Format, p); ok {
-			seen[[3]string{g, n, v}] = true
+	unit := ""
+	add := func(prefix string, k [3]string) {
+		if prefix != unit {
+			counted += int64(len(seen))
+			clear(seen)
+			unit = prefix
 		}
-	})
-	return int64(len(seen)), err
+		seen[k] = true
+	}
+	var err error
+	if packageFormats[rp.Format] && rp.Type != "proxy" {
+		err = u.DB.WalkPackageVersions(ctx, rp.Name, func(name, version string) {
+			g, n, v, _ := component.PackageComponent(rp.Format, name, version)
+			add(name, [3]string{g, n, v})
+		})
+	} else {
+		err = u.DB.WalkAssetPaths(ctx, rp.Name, "", func(p string) {
+			if g, n, v, ok := component.DeriveAsset(rp.Format, p); ok {
+				add(cleanup.UnitPrefix(rp.Format, p), [3]string{g, n, v})
+			}
+		})
+	}
+	return counted + int64(len(seen)), err
 }
 
 // refreshCounts counts again the components of the repositories whose

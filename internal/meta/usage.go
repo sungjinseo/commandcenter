@@ -458,9 +458,9 @@ ORDER BY malicious DESC, sev_rank DESC, vulns DESC, name, grp, version LIMIT ? O
 }
 
 // WalkPackageVersions calls fn with the name and version of each package
-// row of repo, holding one row at a time.
+// row of repo by name, holding one row at a time.
 func (d *DB) WalkPackageVersions(ctx context.Context, repo string, fn func(name, version string)) error {
-	rows, err := d.sql.QueryContext(ctx, `SELECT name, version FROM packages WHERE repo = ?`, repo)
+	rows, err := d.sql.QueryContext(ctx, `SELECT name, version FROM packages WHERE repo = ? ORDER BY name`, repo)
 	if err != nil {
 		return err
 	}

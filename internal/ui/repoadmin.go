@@ -453,7 +453,8 @@ func (u *UI) createRepo(w http.ResponseWriter, r *http.Request) {
 		u.writeRepoError(w, r, err)
 		return
 	}
-	u.repoCache.reset() // a name may be re-used; do not show the old counts (QA L-8)
+	u.repoCache.reset()  // a name may be re-used; do not show the old counts (QA L-8)
+	u.storeCache.reset() // nor its store's
 	u.emit(r, "repo.create", def.Name, def.Name, def.Format+"/"+def.Type)
 	writeJSON(w, http.StatusCreated, repoConfigJSON(def))
 }
@@ -528,6 +529,7 @@ func (u *UI) deleteRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.repoCache.reset()
+	u.storeCache.reset()
 	u.emit(r, "repo.delete", name, name, detail)
 	w.WriteHeader(http.StatusNoContent)
 }

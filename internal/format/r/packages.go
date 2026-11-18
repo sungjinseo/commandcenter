@@ -2,7 +2,6 @@ package r
 
 import (
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"encoding/binary"
 	"fmt"
@@ -71,15 +70,15 @@ func (s stanza) write(w io.StringWriter) error {
 }
 
 // render writes the stanzas as DCF, a blank line between them.
-func render(ss []stanza) string {
-	var b strings.Builder
+func render(w io.Writer, ss []stanza) error {
+	bw := bufio.NewWriter(w)
 	for i, s := range ss {
 		if i > 0 {
-			b.WriteByte('\n')
+			bw.WriteByte('\n')
 		}
-		s.write(&b)
+		s.write(bw)
 	}
-	return b.String()
+	return bw.Flush()
 }
 
 // eachStanza calls fn with every record of a PACKAGES file (at most maxDoc):
@@ -129,16 +128,6 @@ func parsePackages(r io.Reader) ([]stanza, error) {
 	return out, err
 }
 
-// gzipBytes compresses b without a name or mtime, so the same input gives
-// the same bytes.
-func gzipBytes(b []byte) []byte {
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	gz.Write(b)
-	gz.Close()
-	return buf.Bytes()
-}
-
 // columns are the matrix columns of PACKAGES.rds: the standard fields,
 // Built for a binary directory, then any other field the stanzas have
 // (a member's File or Path), in order of appearance.
@@ -183,12 +172,12 @@ const (
 	minVersion = 2<<16 | 3<<8 // R 2.3.0, the oldest reader of format 2
 )
 
-type rdsWriter struct{ bytes.Buffer }
+type rdsWriter struct{ *bufio.Writer }
 
-func (w *rdsWriter) int(v int32) { binary.Write(&w.Buffer, binary.BigEndian, v) }
+func (w rdsWriter) int(v int32) { binary.Write(w.Writer, binary.BigEndian, v) }
 
 // char writes a CHARSXP; "" is NA_character_.
-func (w *rdsWriter) char(s string) {
+func (w rdsWriter) char(s string) {
 	switch {
 	case s == "":
 		w.int(sxpChar)
@@ -205,7 +194,7 @@ func (w *rdsWriter) char(s string) {
 	w.WriteString(s)
 }
 
-func (w *rdsWriter) symbol(name string) {
+func (w rdsWriter) symbol(name string) {
 	w.int(sxpSym)
 	w.char(name)
 }
@@ -219,10 +208,10 @@ func isASCII(s string) bool {
 	return true
 }
 
-// writeRDS is PACKAGES.rds of the stanzas with the columns cols, gzipped
-// as saveRDS compresses.
-func writeRDS(cols []string, ss []stanza) []byte {
-	var w rdsWriter
+// writeRDS writes PACKAGES.rds of the stanzas with the columns cols, before
+// the gzip saveRDS compresses it with.
+func writeRDS(out io.Writer, cols []string, ss []stanza) error {
+	w := rdsWriter{bufio.NewWriter(out)}
 	w.WriteString("X\n")
 	w.int(2)
 	w.int(rVersion)
@@ -251,7 +240,7 @@ func writeRDS(cols []string, ss []stanza) []byte {
 		w.char(c)
 	}
 	w.int(sxpNil)
-	return gzipBytes(w.Bytes())
+	return w.Flush()
 }
 
 // versionLess orders R package versions: dot- or dash-separated integers

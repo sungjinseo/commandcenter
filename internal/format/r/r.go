@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"bytes"
 	"cmp"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -268,6 +269,17 @@ func (h *Handler) merged(ctx context.Context, rp *repo.Repository, dir, route st
 	if a, err := h.Store.Get(ctx, rp.Name, key); err == nil && a.RemoteETag == fp {
 		return a, nil
 	}
+	// One build at a time, as resolve.Merged does: 16 R clients that came
+	// after the CRAN proxy's index changed took a 128 MiB server down, each
+	// building PACKAGES.rds from the 7.5 MB merge.
+	unlock, err := h.Store.Lock(ctx, "r\x00"+rp.Name+"\x00"+key)
+	if err != nil {
+		return meta.Asset{}, err
+	}
+	defer unlock()
+	if a, err := h.Store.Get(ctx, rp.Name, key); err == nil && a.RemoteETag == fp {
+		return a, nil
+	}
 	pr, pw := io.Pipe()
 	done := make(chan struct{})
 	go func() {
@@ -288,13 +300,36 @@ func serveEmpty(w http.ResponseWriter, r *http.Request, file, dir string) error 
 
 // index renders one of a directory's index files from its stanzas.
 func index(file, dir string, ss []stanza) (body []byte, contentType string) {
+	var b bytes.Buffer
+	writeIndex(&b, file, dir, ss)
+	return b.Bytes(), indexType(file)
+}
+
+func indexType(file string) string {
 	switch file {
 	case "PACKAGES.gz":
-		return gzipBytes([]byte(render(ss))), ctGzip
+		return ctGzip
 	case "PACKAGES.rds":
-		return writeRDS(columns(dir, ss), ss), ctRDS
+		return ctRDS
 	}
-	return []byte(render(ss)), ctText
+	return ctText
+}
+
+// writeIndex writes one of a directory's index files from its stanzas, the
+// gzipped ones compressed as gzip.NewWriter does, without a name or mtime,
+// so the same stanzas give the same bytes.
+func writeIndex(w io.Writer, file, dir string, ss []stanza) error {
+	if file == "PACKAGES" {
+		return render(w, ss)
+	}
+	gz := gzip.NewWriter(w)
+	var err error
+	if file == "PACKAGES.rds" {
+		err = writeRDS(gz, columns(dir, ss), ss)
+	} else {
+		err = render(gz, ss)
+	}
+	return cmp.Or(err, gz.Close())
 }
 
 // derived is the group's <dir>/<file> made from its merged PACKAGES,
@@ -307,6 +342,14 @@ func (h *Handler) derived(ctx context.Context, rp *repo.Repository, dir, file st
 	if a, err := h.Store.Get(ctx, rp.Name, key); err == nil && a.RemoteETag == fp {
 		return a, nil
 	}
+	unlock, err := h.Store.Lock(ctx, "r\x00"+rp.Name+"\x00"+key) // as merged does
+	if err != nil {
+		return meta.Asset{}, err
+	}
+	defer unlock()
+	if a, err := h.Store.Get(ctx, rp.Name, key); err == nil && a.RemoteETag == fp {
+		return a, nil
+	}
 	f, err := h.Store.Open(merged)
 	if err != nil {
 		return meta.Asset{}, err
@@ -316,8 +359,17 @@ func (h *Handler) derived(ctx context.Context, rp *repo.Repository, dir, file st
 	if err != nil {
 		return meta.Asset{}, fmt.Errorf("merged %s of %q: %w", key, rp.Name, err)
 	}
-	b, ct := index(file, dir, ss)
-	return h.Store.Put(ctx, rp.Name, key, ct, bytes.NewReader(b), func(a *meta.Asset) { a.RemoteETag = fp })
+	// Written as it is stored: the file itself is megabytes for CRAN.
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pw.CloseWithError(writeIndex(pw, file, dir, ss))
+	}()
+	a, err := h.Store.Put(ctx, rp.Name, key, indexType(file), pr, func(a *meta.Asset) { a.RemoteETag = fp })
+	pr.Close() // unblocks the writer if Put stopped early
+	<-done
+	return a, err
 }
 
 // upload takes a package into hosted rp: `PUT <dir>/<pkg>_<version>.tar.gz`

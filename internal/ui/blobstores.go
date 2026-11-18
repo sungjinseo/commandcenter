@@ -148,13 +148,24 @@ type s3JSON struct {
 
 // blobStoreView builds the DTO for one stored row: usage scoped to the store's
 // repositories (repo.ReposForStore, the rule routing and GC use) and the
-// filesystem totals of its blob tree.
+// filesystem totals of its blob tree. The usage is the metrics' (storeTotals:
+// every store's, counted at most once per statsTTL): counting the distinct
+// blobs of 3 million assets takes PostgreSQL seconds, and the dashboard and
+// status pages ask for every store each time.
 func (u *UI) blobStoreView(ctx context.Context, bs meta.BlobStore) (blobStoreJSON, error) {
 	repos := repo.ReposForStore(u.Repos.Snapshot(), bs.Name)
-	count, bytes, err := u.DB.BlobStatsInRepos(ctx, repos)
+	totals, err := u.storeTotals(ctx)
 	if err != nil {
 		return blobStoreJSON{}, err
 	}
+	t, ok := totals[bs.Name]
+	if !ok { // a store made since they were counted
+		t.blobs, t.bytes, err = u.DB.BlobStatsInRepos(ctx, repos)
+		if err != nil {
+			return blobStoreJSON{}, err
+		}
+	}
+	count, bytes := t.blobs, t.bytes
 	root := repo.StoreRoot(u.DataDir, bs)
 	out := blobStoreJSON{
 		Name: bs.Name, Type: bs.Type, Path: root,

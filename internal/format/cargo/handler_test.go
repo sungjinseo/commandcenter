@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -349,4 +351,69 @@ func TestGroupFailsClosedOnMemberError(t *testing.T) {
 			t.Errorf("fall-through %s: %d", p, w.Code)
 		}
 	}
+}
+
+// TestHostedManyVersions: a hosted crate's index file holds a batch of rows
+// at a time and has every line in publish order. Holding every row per request took
+// a 128 MiB server down at 64 clients on a crate of 1500 versions.
+func TestHostedManyVersions(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	const n = 300
+	pad := strings.Repeat("x", 8<<10)
+	err := e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
+		for i := range n {
+			v := fmt.Sprintf("1.%d.0", i)
+			line := `{"name":"many","vers":"` + v + `","deps":[],"cksum":"` + strings.Repeat("0", 64) + `","features":{"x":["` + pad + `"]},"yanked":false}`
+			if err := tx.InsertPackage(ctx, meta.Package{Repo: "cargo-hosted", Format: "cargo", Name: "many", Version: v, Attrs: line, CreatedAt: time.UnixMilli(int64(1700000000000 + i))}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := liveDuring(t, func(w http.ResponseWriter) {
+		e.h.Serve(w, httptest.NewRequest("GET", "/repository/cargo-hosted/x", nil), e.repos["cargo-hosted"], "ma/ny/many")
+	}, n*(8<<10)/2)
+	lines := strings.Split(strings.TrimSpace(w.Body.String()), "\n")
+	if len(lines) != n {
+		t.Fatalf("%d lines", len(lines))
+	}
+	for i, l := range lines {
+		if !strings.Contains(l, fmt.Sprintf(`"vers":"1.%d.0"`, i)) {
+			t.Fatalf("line %d: %.60s", i, l)
+		}
+	}
+}
+
+// liveDuring runs serve and fails t when more than limit bytes of heap, the
+// body aside, are live at one of its writes.
+func liveDuring(t *testing.T, serve func(http.ResponseWriter), limit int64) *httptest.ResponseRecorder {
+	t.Helper()
+	lw := &liveHeap{ResponseRecorder: httptest.NewRecorder()}
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	serve(lw)
+	if live := int64(lw.max) - int64(ms.HeapAlloc); live > limit {
+		t.Errorf("%d KiB live while writing a body of %d KiB", live>>10, lw.Body.Len()>>10)
+	}
+	return lw.ResponseRecorder
+}
+
+// liveHeap records the most heap live at a write of the response, less the
+// body written before it.
+type liveHeap struct {
+	*httptest.ResponseRecorder
+	max uint64
+}
+
+func (l *liveHeap) Write(p []byte) (int, error) {
+	runtime.GC()
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	l.max = max(l.max, ms.HeapAlloc-uint64(l.Body.Cap()))
+	return l.ResponseRecorder.Write(p)
 }

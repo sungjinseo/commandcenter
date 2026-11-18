@@ -107,12 +107,35 @@ func (t *tokenWriter) RawValue(b []byte) {
 	}
 }
 
+// str writes s as a JSON string. One that needs no escape (printable ASCII
+// without the characters json.Marshal escapes, as most of a packument is) is
+// written as it is: marshalling every string tripled what a read of a
+// packument allocates, and 64 clients reading an 18 MB one took a 128 MiB
+// server down while the host was busy.
 func (t *tokenWriter) str(s string) {
+	if plainString(s) {
+		t.raw(`"`)
+		t.raw(s)
+		t.raw(`"`)
+		return
+	}
 	b, err := json.Marshal(s)
 	if err != nil && t.err == nil {
 		t.err = err
 	}
-	t.raw(string(b))
+	if t.err == nil {
+		_, t.err = t.w.Write(b)
+	}
+}
+
+// plainString reports whether json.Marshal writes s between quotes as it is.
+func plainString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c >= 0x7f || c == '"' || c == '\\' || c == '<' || c == '>' || c == '&' {
+			return false
+		}
+	}
+	return true
 }
 
 func (t *tokenWriter) Flush() error {

@@ -41,7 +41,8 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
 메모리 사용량(`test/e2e.sh`로 측정):
 
 - 포맷별 스모크 테스트(`docker stats`): Maven 22 MiB, npm 8.4 MiB, PyPI 21 MiB, Go 11 MiB, Cargo 9.9 MiB, UI 7.1 MiB
-- 부하 테스트(`test/load/load.sh`): 128 MiB 컨테이너에서 100 MiB 파일 50개 동시 다운로드, 5개 동시 업로드, 적대적 업로드를 처리하는 동안 최대 RSS 53 MiB 이하
+- 부하 테스트(`test/load/load.sh`): 128 MiB 컨테이너에서 100 MiB 파일 50개 동시 다운로드, 5개 동시 업로드, 적대적 업로드를 처리하는 동안 최대 RSS 46 MiB
+- 동시 읽기(`test/load/readers.sh`): 128 MiB 컨테이너(`GOMEMLIMIT=80MiB`)에서 클라이언트 16개와 64개가 공개 레지스트리에서 가장 큰 크기의 문서(botocore 크기의 PyPI JSON 3.9 MB, npm packument 18 MB, Helm index.yaml 15 MB, CRAN PACKAGES 7.5 MB, conda repodata 20 MB 등)와 버전 1500개인 hosted 패키지의 문서를 동시에 읽어도 종료되지 않습니다. 힙 최고 84 MiB입니다.
 
 ## 빠른 시작
 
@@ -431,7 +432,7 @@ nginx는 기본적으로 요청 본문을 끝까지 받은 다음 서버로 넘�
 
 ### 리소스
 
-- **메모리**: 기본 구성은 컨테이너 한도 128 MiB에 `GOMEMLIMIT=80MiB`이며, 이 구성의 측정값은 "소개"의 메모리 사용량에 있습니다. `docker stats`의 값에는 큰 파일을 읽고 쓸 때의 커널 파일 캐시가 들어가 한도에 가까워 보일 수 있지만, 커널이 회수하는 메모리입니다. 한도를 올릴 때는 `GOMEMLIMIT`도 함께 올리되 한도보다 충분히 낮게 두세요("메모리 설정" 참고). 프록시의 큰 메타데이터(Composer 패키지 메타데이터, NuGet registration·검색, RubyGems `versions`)와 버전이 많은 hosted 패키지의 메타데이터는 요청마다 메모리에 다 올리지 않습니다. 128 MiB 한도에서 클라이언트 64개가 동시에 버전 1500개인 hosted 패키지의 문서를 받거나 Packagist의 가장 큰 메타데이터를 받아도 메모리 부족으로 종료되지 않는 것을 확인했습니다. 다만 rubygems.org proxy를 둔 group이 여럿이면 group마다 병합 파일(약 24 MiB)을 메모리에 두므로 한도를 함께 올리세요.
+- **메모리**: 기본 구성은 컨테이너 한도 128 MiB에 `GOMEMLIMIT=80MiB`이며, 이 구성의 측정값은 "소개"의 메모리 사용량에 있습니다. `docker stats`의 값에는 큰 파일을 읽고 쓸 때의 커널 파일 캐시가 들어가 한도에 가까워 보일 수 있지만, 커널이 회수하는 메모리입니다. 한도를 올릴 때는 `GOMEMLIMIT`도 함께 올리되 한도보다 충분히 낮게 두세요("메모리 설정" 참고). 프록시의 큰 메타데이터(Composer 패키지 메타데이터, NuGet registration·검색, RubyGems `versions`, PyPI JSON API, npm packument)와 버전이 많은 hosted 패키지의 메타데이터(NuGet, RubyGems, Composer, PyPI, Swift, Cargo)는 요청마다 메모리에 다 올리지 않습니다. group이 합치는 문서(Maven `maven-metadata.xml`, conda repodata, R `PACKAGES`와 `PACKAGES.gz`·`PACKAGES.rds`)는 모든 노드를 통틀어 한 번에 하나의 요청만 만들고, 기다린 요청은 그 결과를 받습니다. 128 MiB 한도에서 클라이언트 64개가 동시에 이런 문서를 받아도 메모리 부족으로 종료되지 않는 것을 확인했습니다(`test/load/readers.sh`). 다만 rubygems.org proxy를 둔 group이 여럿이면 group마다 병합 파일(약 24 MiB)을 메모리에 두므로 한도를 함께 올리세요.
 - **CPU**: 대부분 업로드 해시 계산(sha256, sha1, md5, sha512)과 bcrypt 비밀번호 확인에 씁니다. CPU 한도를 낮게 걸면 로그인과 큰 업로드가 느려집니다.
 - **디스크**: 같은 blob store 안에서는 같은 내용을 한 번만 저장하므로(hosted와 proxy가 같은 파일을 공유) 필요한 용량은 hosted 패키지와 proxy 캐시를 합친 크기입니다. 디스크가 차면 업로드가 실패합니다.
 
@@ -696,7 +697,7 @@ Nexus와 다른 점:
 - Docker 컴포넌트는 Nexus처럼 `name`이 이미지, `version`이 태그이며, 삭제는 그 태그가 가리키는 매니페스트(다이제스트)를 지웁니다. raw 컴포넌트는 `name`이 `/`로 시작하는 경로, `group`이 디렉터리(`/docs`, 최상위는 `/`), `version`은 `null`입니다. 검색의 `group`·`name`은 `/`가 있든 없든 받습니다. npm의 `group`은 `@` 없는 스코프입니다.
 - `search/assets/download`는 자산이 둘 이상이면 Nexus처럼 `400`으로 거절하며, `sort`를 주면 정렬 뒤 첫 번째로 보냅니다(`sort=version&direction=desc`가 최신). `sort=version`의 기본 방향은 desc입니다. `repository`가 group이면 멤버의 파일을 group URL로 보냅니다.
 - group으로 나열·검색한 항목의 `repository`와 `id`는 Nexus와 달리 멤버의 것이라 `GET`·`DELETE /components/{id}`에 그대로 쓸 수 있습니다.
-- 컴포넌트 목록과 검색은 요청마다 저장소의 자산 경로를 모두 읽어 파생하므로 자산이 수십만 개인 저장소에서는 한 페이지에 수 초가 걸릴 수 있습니다. 전체 목록에 `continuationToken`으로 이어 받습니다.
+- 컴포넌트 목록과 검색은 요청마다 저장소의 자산 경로를 모두 읽어 파생하므로 자산 100만 개마다 한 페이지에 약 1초가 걸립니다(자산 300만 개인 저장소에서 약 3초). 전체 목록에 `continuationToken`으로 이어 받습니다.
 - 스크립트 API(`/v1/script`)는 없습니다(임의 코드 실행). 그 경로는 목록이 `[]`, 생성이 `410`, 이름을 지정한 요청이 `404`이며 메시지에 이유가 들어 있습니다(위 표 참고). 모르는 경로는 JSON `404`입니다.
 
 구성 API도 지원합니다. `GET /service/rest/v1/configuration`(헤더 `X-Nexus-Migration-Protocol-Version: 1` 필요)은 구성 문서를 비밀값 없이 JSON으로 내보냅니다. `PUT /service/rest/v1/configuration`은 Nexus처럼 기존 설정을 덮어쓰지 않고 없는 객체만 만듭니다. Nexus는 문서 모양을 공개하지 않으므로 문서는 Command Center의 구성 문서입니다("구성 코드화" 참고).
@@ -1603,7 +1604,7 @@ blob(파일 내용)은 **blob store** 디렉터리에 sha256 이름으로 저장
 - **이름 붙은 store**: Blob Store 화면(`POST /-/api/blobstores`)에서 만듭니다. 경로를 비우면 `<dataDir>/blobstores/<이름>`이고, 절대 경로를 주면 그곳을 씁니다. 상대 경로는 400입니다(이전 버전은 상대 경로를 말없이 무시하고 기본 위치에 만들었습니다). 경로가 데이터 디렉터리 밖이면 응답과 `GET /-/api/blobstores`의 `warning`, Blob Store 상세 화면에 경고가 나옵니다. 그런 경로는 영구 볼륨으로 따로 마운트하고 따로 백업해야 합니다("저장 공간과 인스턴스", "백업과 복원" 참고). `<경로>/blobs/sha256`이 **없거나 비어 있어야** 하고(이미 blob이 있으면 거부, 다른 파일이 있는 디렉터리는 괜찮습니다), 쓸 수 있어야 하며, 다른 store의 blob 디렉터리와 겹치거나 심볼릭 링크로 같은 곳을 가리키면 거부됩니다. 기존 store의 경로를 확인할 수 없으면(끊어진 심볼릭 링크 등) 겹치지 않는다고 확신할 수 없으므로 그 store 이름을 알려 주며 거부합니다. 이름 규칙은 저장소와 같습니다.
 - **저장소는 만들 때 store를 고릅니다**(`blobStore`, 생략하면 `default`). 저장소를 만든 뒤에는 편집으로 바꿀 수 없고 `repository.change-blobstore` 작업으로 옮깁니다("저장소의 blob store 바꾸기" 참고). group 저장소에는 store가 없습니다(blob store 그룹과는 다릅니다).
 - store마다 **중복 제거와 GC가 독립**입니다. 같은 파일을 서로 다른 store의 저장소에 올리면 각각 저장되고, GC는 자기 store의 저장소가 참조하지 않는 blob만 지웁니다. 단 **default store의 GC는 어느 저장소든 참조하는 blob은 지우지 않습니다.** 이름 붙은 store를 모르는 이전 버전으로 돌린 적이 있으면 그 저장소들의 파일이 default store에 쓰였을 수 있고, 그것이 유일한 사본일 수 있기 때문입니다("업그레이드"의 다운그레이드 안내 참고). 그래서 같은 파일이 default store의 저장소에서 지워진 뒤에도, 이름 붙은 store의 저장소가 참조하는 동안은 default store의 사본이 남습니다. 존재하지 않는 store를 가리키는 저장소가 있으면(설정 가져오기 등) 조용히 default로 가지 않고 오류로 응답하며, GC는 그 저장소가 모든 store를 참조 중인 것으로 보고 지우지 않습니다.
-- **사용량**: Blob Store 화면과 `GET /-/api/blobstores`가 store별 blob 수·용량(그 store의 저장소가 참조하는 것), 저장소 수, 파일시스템 전체/남은 용량(리눅스)을 보여 줍니다.
+- **사용량**: Blob Store 화면과 `GET /-/api/blobstores`가 store별 blob 수·용량(그 store의 저장소가 참조하는 것), 저장소 수, 파일시스템 전체/남은 용량(리눅스)을 보여 줍니다. blob 수·용량은 메트릭과 같이 모든 store를 함께 30초에 한 번 셉니다. 그래서 업로드가 최대 30초 늦게 반영되며, 저장소를 만들거나 지우면 바로 다시 셉니다. asset 300만 개의 서로 다른 blob을 세는 데 PostgreSQL 기본 설정에서 약 4초가 걸리기 때문입니다.
 - **소프트 쿼터**: store마다 `quota`를 둘 수 있습니다(그룹도 됩니다). `{"type": "spaceUsedBytes", "limitBytes": N}`은 그 store의 저장소가 쓰는 용량이 N바이트를 넘으면, `{"type": "spaceRemainingBytes", "limitBytes": N}`은 store 파일시스템의 남은 용량이 N바이트보다 적으면 위반입니다(S3·Azure·google store는 남은 용량을 알 수 없으므로 `spaceRemainingBytes`가 위반되지 않습니다). 만들 때(`POST /-/api/blobstores`의 `quota`) 정하거나 `PUT /-/api/blobstores/<이름>`에 `{"quota": {...}}`(없애려면 `{"quota": null}`)를 보내 바꿉니다. 파일 store는 이 PUT으로 쿼터만 바꿀 수 있고, S3 store는 연결 설정도 바꿀 수 있으며(아래), 그룹은 같은 요청에 `members`·`fillPolicy`를 함께 보낼 수 있으며 멤버를 바꿔도 쿼터는 유지됩니다. 소프트 쿼터이므로 넘어도 업로드는 계속 받습니다. 상태 검사(시스템 상태 화면, `GET /-/api/status/checks`, `GET /service/rest/v1/status/check`, Prometheus의 `commandcenter_health_check`)가 쿼터가 있는 store마다 `Blob store quota: <이름>` 항목을 평가해 위반이면 실패로 표시하고(`soft quota exceeded: …`), `GET /-/api/blobstores`는 `quota`와 `quotaViolated`를 보여 줍니다. 위반이 시작되거나 풀릴 때마다 활동 이벤트 `blobstore.quota`(행위자 `system`)가 한 번씩 남습니다. 이 판단은 메모리에만 두므로 서버를 다시 시작한 뒤 처음 위반을 발견하면 다시 남습니다. 리더 노드가 1분마다 평가해, 위반이면 경고 로그를 남기고 위반이 시작되거나 풀릴 때 이벤트를 남기므로 상태 검사를 읽는 모니터링이 없어도 됩니다. 상태 검사에는 모든 store를 합친 `Blob Stores Quota` 항목도 있습니다. Nexus 호환 API에서는 `softQuota`(`type`: `spaceUsedQuota` 또는 `spaceRemainingQuota`, `limit`: 바이트)와 `GET /service/rest/v1/blobstores/<이름>/quota-status`로 다룹니다.
 - **열리지 않는 store**: 시작할 때 default가 아닌 store가 열리지 않으면(빠진 마운트, 권한, S3 자격 증명 등) 서버는 시작하고 오류 로그를 남깁니다. 그 store의 저장소는 그 노드에서 503(`Retry-After: 30`)으로 답하고 다른 저장소는 평소대로입니다. 상태 검사의 `Blob store`가 실패하며 store와 원인을 보여 주고, `GET /-/api/blobstores`의 `unavailable`, Nexus `GET /service/rest/v1/blobstores`의 `"unavailable": true`로도 보입니다. 몇 초마다 다시 열어 보므로 원인이 풀리면 재시작 없이 씁니다. 노드마다 따로 판단하며, default store가 열리지 않으면 이전처럼 시작하지 않습니다.
 - **삭제**: 저장소가 쓰고 있는 store, 그룹의 멤버, 저장소가 옮겨 오거나 떠나는 중인 store는 409입니다. 삭제해도 **디렉터리와 파일은 디스크에 남습니다**(관리자가 직접 정리하세요).
@@ -2831,7 +2832,7 @@ scrape_configs:
 `GET /-/api/dashboard/repositories`는 저장소마다 포맷과 종류, 컴포넌트 수와 asset 수, `bytes`(asset 크기의 합)와 `uniqueBytes`(같은 blob을 한 번만 센 크기), 마지막 업로드·다운로드 시각, 최근 24시간·30일 요청 수, 평가 상태(감시 여부, 마지막 평가, 심각도별 취약 컴포넌트 수)를 돌려줍니다. `sort`(`name`, `format`, `type`, `components`, `assets`, `bytes`, `uniqueBytes`, `lastUpload`, `lastDownload`, `requests24h`, `requests30d`, `vulnerable`), `order`(`asc`·`desc`), `limit`(기본 50, 최대 500), `offset`과 필터 `format`, `type`, `q`(이름에 포함, 대소문자 무시), `vulnerable=true`를 받습니다.
 
 - asset 수, 크기, 마지막 업로드 시각은 asset을 쓸 때마다 데이터베이스 트리거가 같은 트랜잭션에서 갱신합니다. 그래서 큰 저장소에서도 테이블을 훑지 않고 정확하며, 어느 노드가 쓰든(이전 버전 노드 포함) 같습니다. 다운로드와 요청 수는 다른 메트릭처럼 `metricsFlushSeconds`(기본 30초)마다 기록됩니다.
-- 컴포넌트 수는 asset이 바뀐 저장소만 다시 셉니다(대시보드 요청 때 최대 2초, 리더 노드에서 1분마다). 아직 다시 세지 못한 저장소는 `componentsCurrent: false`로 표시됩니다. asset 5만 개인 저장소를 세는 데 약 50 ms가 걸립니다.
+- 컴포넌트 수는 asset이 바뀐 저장소만 다시 셉니다(대시보드 요청 때 최대 2초, 리더 노드에서 1분마다). 아직 다시 세지 못한 저장소는 `componentsCurrent: false`로 표시됩니다. asset 5만 개인 저장소를 세는 데 약 50 ms, 컴포넌트 100만 개(asset 300만 개)인 저장소는 약 2.4초가 걸립니다. 패키지 하나나 같은 경로 단위의 컴포넌트만 메모리에 두므로 저장소가 커져도 메모리는 늘지 않습니다.
 
 `GET /-/api/metrics/monthly?from=YYYY-MM&to=YYYY-MM`(기본 최근 12개월, 최대 36개월)는 UTC 달력 월마다 요청 수, 오류(5xx·429), 송신(`egressBytes`)·수신 바이트, 다운로드 수, 업로드 수와 크기(hosted 저장소에 저장된 파일), 저장 용량(`storageBytes`는 마지막 샘플, `peakStorageBytes`는 가장 큰 샘플), asset·컴포넌트 수(최고값 포함), 서로 다른 사용자 수와 클라이언트 주소 수를 돌려줍니다.
 
@@ -2913,7 +2914,7 @@ OPERATIONS → 예약 작업(Tasks)에서 만들고 편집하고 지웁니다. �
 | `maven.purge-snapshots` | Nexus의 "Maven - Delete SNAPSHOT"(`repository.maven.remove-snapshots`). `scope`가 `build`(새 작업의 기본값)이면 SNAPSHOT 버전마다 최신 빌드 `minimumRetained`개를 남기고, 나머지 중 `snapshotRetentionDays`보다 오래된(0이면 나이 무관) 빌드를 지움. `minimumRetained`가 -1이면 이 기준으로는 지우지 않음. `removeIfReleased`면 정식 `X`가 어느 Maven 저장소(hosted·proxy)에든 있을 때 `gracePeriodDays`보다 오래된 `X-SNAPSHOT` 빌드를 남길 개수와 무관하게 지움. `lastDownloadedDays`를 주면 그 기간 동안 내려받지 않은(한 번도 없으면 저장된 지 그만큼 지난) 빌드만 나이 기준으로 지움. 저장소에는 Maven hosted·proxy, group(멤버 전체), `*`(모든 Maven 저장소)를 줄 수 있고 RELEASE 정책이거나 읽기 전용인 저장소는 건너뜀. `scope`가 `version`이면 0.3 이전 동작: Maven hosted 저장소 하나에서 GA마다 최신 `minimumRetained`개 SNAPSHOT 버전을 남기고 나머지를 버전째 지우며, `removeIfReleased`는 같은 저장소의 정식 버전만 보고 유예 기간을 정식 버전부터 셈(업그레이드는 기존 작업에 `scope: version`을 붙여 이전 동작을 유지). 삭제는 빌드마다 컴포넌트 삭제 경로를 지나므로 `maven-metadata.xml`이 바로잡히고 빌드마다 `delete` 활동이 남으며, 평가 뒤 바뀐 빌드는 건너뜀. `writePolicy: deny` 저장소를 직접 주면 만들 때 400, 실행 때 Failed | `repository`(필수), `scope`(`build`/`version`), `minimumRetained`(기본 1), `snapshotRetentionDays`(기본 30), `lastDownloadedDays`(기본 0), `removeIfReleased`, `gracePeriodDays`, `preview`(지울 것을 로그에만 남김) `repository`에는 쉼표로 여러 저장소를 적을 수 있습니다. 그중 RELEASE·읽기 전용 저장소는 건너뜁니다(`scope` version은 하나만 받습니다). |
 | `maven.purge-unused-snapshots` | Nexus의 "Maven - Delete unused SNAPSHOT"(`repository.maven.purge-unused-snapshots`). `lastUsed`일 동안 내려받지 않은(한 번도 없으면 저장된 지 그만큼 지난) SNAPSHOT 빌드를 나이·개수와 관계없이 지움 | `repository`(필수: Maven hosted, group(hosted 멤버), `*`. RELEASE 정책 제외), `lastUsed`(1 이상, 기본 1), `preview` |
 | `docker.gc` | Nexus의 "Docker - Delete unused manifests and images"(`repository.docker.gc`). Docker hosted 저장소에서 어떤 태그도, 태그가 가리키는 인덱스도 닿지 않는 매니페스트를 `deployOffset`시간 동안 저장되지도 내려받지도 않았을 때 지우고, 이어서 어떤 매니페스트도 쓰지 않는 레이어를 지웁니다(레이어는 진행 중인 push를 위해 최소 24시간 남깁니다). 디스크 공간은 그 뒤 `blobstore.compact`가 돌려줍니다. digest로 받는 이미지는 받을 때마다 사용 시각이 갱신되므로 지워지지 않습니다. proxy의 캐시는 대상이 아닙니다 | `repository`(비우거나 `*`면 모든 Docker hosted 저장소), `deployOffset`(시간, 기본 24), `preview`(지우지 않고 로그만) |
-| `blobstore.recalculate-size` | blob store의 blob 수를 세어 에셋이 참조하는 수·바이트와 비교해 로그에 남김. 화면의 용량은 에셋 행에서 실시간으로 계산하므로 저장할 값은 없고, 다음 compaction이 지울 blob 수를 미리 봄 | `blobStore`(선택) |
+| `blobstore.recalculate-size` | blob store의 blob 수를 세어 에셋이 참조하는 수·바이트와 비교해 로그에 남김. 화면의 용량은 에셋 행에서 계산하므로(30초 캐시) 저장할 값은 없고, 다음 compaction이 지울 blob 수를 미리 봄 | `blobStore`(선택) |
 | `blobstore.delete-temp-files` | 각 store `tmp/`의 1시간 넘은 임시 파일(`up-*`)과 24시간 넘게 쓰지 않은 Docker 업로드 세션(`ses-*`)을 지움(compact가 시작할 때 하는 정리와 같음). S3 store의 multipart 잔여물은 다루지 않음 | `blobStore`(선택), `olderThanDays`(최근 N일 안에 바뀐 임시 파일은 남김. 0이면 1시간·24시간 기준) |
 | `blobstore.group-remove-member` | 그룹 멤버를 읽기 전용으로 바꾸고 그 멤버에만 있는 blob을 다른 쓰기 가능한 멤버로 복사(SHA-256 확인)한 뒤 그룹에서 뺌. 그동안 읽기는 계속되고, 실패하면 멤버는 읽기 전용으로 남아 다시 실행하면 이어 감("Blob store 그룹과 S3 장애 조치" 참고) | `group`, `member`(필수. 다른 쓰기 가능한 멤버가 있어야 함) |
 | `repository.change-blobstore` | 저장소의 blob을 다른 blob store로 옮기고 설정을 바꿈("저장소의 blob store 바꾸기" 참고). 보통 `POST /-/api/repositories/<이름>/blobstore`가 만들고 실행함 | `repo`, `target`(필수) |
@@ -3257,6 +3258,8 @@ test/compat/nexus3-cli.sh
 test/compat/terraform.sh      # Terraform provider datadrivers/nexus: apply, 빈 plan, 변경, import, destroy
 
 test/load/load.sh             # 128 MiB 컨테이너 메모리 부하 테스트
+test/load/readers.sh          # 128 MiB 컨테이너에 동시 읽기 16·64개: 포맷마다 가장 큰 문서(약 15분)
+test/load/large.sh            # asset 300만 개 DB에서 화면·REST 목록의 응답 시간과 cleanup 한 번(약 5분)
 test/load/flood.sh            # 128 MiB 컨테이너에 거절되는 업로드를 쏟아부어도 죽지 않는지 확인
 ```
 

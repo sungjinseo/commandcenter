@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -200,5 +201,39 @@ func TestRepoStatsCacheResetOnCreateAndDelete(t *testing.T) {
 	wantStatus(t, e.get(t, "/-/api/repositories", "admin"), http.StatusOK)
 	if calls.Load() != 3 {
 		t.Fatalf("after delete calls = %d, want 3", calls.Load())
+	}
+}
+
+// TestBlobStoreUsageCached: the blob store views count usage as the metrics
+// do, at most once per statsTTL for every store; counting the distinct blobs
+// of 3 million assets took 3.3 s a store and a request.
+func TestBlobStoreUsageCached(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	withBlobStore(t, e)
+	now := time.Now()
+	e.ui.now = func() time.Time { return now }
+	count := func() any {
+		t.Helper()
+		r := e.admin(t, "GET", "/-/api/blobstores", "")
+		wantStatus(t, r, http.StatusOK)
+		var body struct{ Blobstores []map[string]any }
+		if err := json.Unmarshal([]byte(r.body), &body); err != nil || len(body.Blobstores) != 1 {
+			t.Fatalf("%v: %s", err, r.body)
+		}
+		return body.Blobstores[0]["blobCount"]
+	}
+	before := count()
+	put := func(p string) {
+		if err := e.db.PutAsset(context.Background(), meta.Asset{Repo: "maven-releases", Path: p, BlobSHA256: strings.Repeat("c", 63) + p[len(p)-1:], Size: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("org/x/1")
+	if got := count(); got != before {
+		t.Fatalf("counted again within the TTL: %v, was %v", got, before)
+	}
+	now = now.Add(statsTTL + time.Second)
+	if got := count(); got != before.(float64)+1 {
+		t.Fatalf("after the TTL: %v, was %v", got, before)
 	}
 }

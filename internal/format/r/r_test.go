@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -383,7 +384,7 @@ func TestIndexFiles(t *testing.T) {
 	want := "Package: bar\nVersion: 0.2\nDepends: R (>= 3.5.0), foo\nLicense: GPL-3\nMD5sum: " + sums(barB).MD5 + "\nNeedsCompilation: no\n" +
 		"\n" +
 		"Package: foo\nVersion: 1.0.0\nDepends: R (>= 4.1)\nImports: jsonlite (>= 1.8),\n        httr\nLinkingTo: Rcpp\nSuggests: testthat (>= 3.0.0)\nLicense: MIT + file LICENSE\nMD5sum: " + sums(src).MD5 + "\nNeedsCompilation: yes\n"
-	if got := render(ss); got != want {
+	if got := renderString(ss); got != want {
 		t.Fatalf("PACKAGES:\n%s\nwant:\n%s", got, want)
 	}
 	if got := gunzip(t, gzipBytes([]byte(want))); got != want {
@@ -399,7 +400,7 @@ func TestIndexFiles(t *testing.T) {
 	}
 	// PACKAGES.rds: a character matrix, the standard columns, NA where a
 	// stanza has no field, read back by the test reader
-	rds := writeRDS(columns("src/contrib", ss), ss)
+	rds := rdsBytes(columns("src/contrib", ss), ss)
 	cols, rows := readRDS(t, rds)
 	if strings.Join(cols, ",") != strings.Join(stdFields, ",") {
 		t.Fatalf("columns: %v", cols)
@@ -429,20 +430,20 @@ func TestIndexFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws := stanzaOf(win)
-	if !strings.HasSuffix(render([]stanza{ws}), "NeedsCompilation: yes\nBuilt: R 4.4.1; x86_64-w64-mingw32; 2026-10-01 10:00:00 UTC; windows\n") {
-		t.Fatalf("Built: %s", render([]stanza{ws}))
+	if !strings.HasSuffix(renderString([]stanza{ws}), "NeedsCompilation: yes\nBuilt: R 4.4.1; x86_64-w64-mingw32; 2026-10-01 10:00:00 UTC; windows\n") {
+		t.Fatalf("Built: %s", renderString([]stanza{ws}))
 	}
 	ws = append(ws, [2]string{"File", "foo_1.0.0_custom.zip"})
-	cols, rows = readRDS(t, writeRDS(columns("bin/windows/contrib/4.4", []stanza{ws}), []stanza{ws}))
+	cols, rows = readRDS(t, rdsBytes(columns("bin/windows/contrib/4.4", []stanza{ws}), []stanza{ws}))
 	if len(cols) != 17 || cols[15] != "Built" || cols[16] != "File" || rows[0][15] != ws.get("Built") || rows[0][16] != "foo_1.0.0_custom.zip" {
 		t.Fatalf("binary columns: %v %q", cols, rows)
 	}
-	cols, rows = readRDS(t, writeRDS(columns("src/contrib", nil), nil))
+	cols, rows = readRDS(t, rdsBytes(columns("src/contrib", nil), nil))
 	if len(cols) != 15 || len(rows) != 0 {
 		t.Fatalf("empty: %v %v", cols, rows)
 	}
 	// a UTF-8 cell carries the UTF-8 flag (the reader checks)
-	readRDS(t, writeRDS([]string{"Title"}, []stanza{{{"Title", "Bär"}}}))
+	readRDS(t, rdsBytes([]string{"Title"}, []stanza{{{"Title", "Bär"}}}))
 }
 
 // merge runs mergePackages over index and source documents stored in r-hosted.
@@ -1162,4 +1163,59 @@ func TestCleanupAndDelete(t *testing.T) {
 	if len(pkgs) != 1 || json.Unmarshal([]byte(pkgs[0].Attrs), &rw) != nil || rw.field("Title") != "Foo Does Things" || rw.Dir != "bin/windows/contrib/4.4" {
 		t.Fatalf("attrs: %+v", pkgs)
 	}
+}
+
+// TestGroupIndexWaitsForLock: a group's merged PACKAGES and what is derived
+// from it are built by one request at a time on every node; the others wait
+// and take its copy (16 R clients each building PACKAGES.rds of a CRAN-sized
+// merge took a 128 MiB server down).
+func TestGroupIndexWaitsForLock(t *testing.T) {
+	e := newEnv(t)
+	for i, key := range []string{"src/contrib/PACKAGES", "src/contrib/PACKAGES.rds"} {
+		v := "0." + strconv.Itoa(i)
+		if w := e.do("PUT", "r-hosted", "src/contrib/dup_"+v+".tar.gz", tarGz("dup", "Package: dup\nVersion: "+v+"\nNeedsCompilation: no\n", "")); w.Code != 201 {
+			t.Fatalf("PUT: %d %s", w.Code, w.Body)
+		}
+		if i == 1 {
+			e.get(t, "r-all", "src/contrib/PACKAGES", 200) // the merge is current: only the derived file is left to build
+		}
+		unlock, err := e.h.Store.Lock(context.Background(), "r\x00r-all\x00"+key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan int)
+		go func() { done <- e.do("GET", "r-all", "src/contrib/PACKAGES.rds", nil).Code }()
+		select {
+		case code := <-done:
+			t.Fatalf("%s: built while another request held the lock: %d", key, code)
+		case <-time.After(300 * time.Millisecond):
+		}
+		unlock()
+		if code := <-done; code != 200 {
+			t.Fatalf("%s: after the lock: %d", key, code)
+		}
+	}
+}
+
+// gzipBytes, renderString and rdsBytes are what the server writes, as bytes.
+func gzipBytes(b []byte) []byte {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	gz.Write(b)
+	gz.Close()
+	return buf.Bytes()
+}
+
+func renderString(ss []stanza) string {
+	var b strings.Builder
+	render(&b, ss)
+	return b.String()
+}
+
+func rdsBytes(cols []string, ss []stanza) []byte {
+	var b bytes.Buffer
+	gz := gzip.NewWriter(&b)
+	writeRDS(gz, cols, ss)
+	gz.Close()
+	return b.Bytes()
 }

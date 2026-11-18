@@ -936,3 +936,28 @@ func TestGroupFirstMember(t *testing.T) {
 		t.Fatalf("failing last member: %d %s", w.Code, w.Body)
 	}
 }
+
+// TestGroupMergeWaitsForLock: a group's repodata is built by one request at a
+// time on every node; the others wait and take its copy (64 clients each
+// merging a channel took a 128 MiB server down).
+func TestGroupMergeWaitsForLock(t *testing.T) {
+	e := newEnv(t)
+	if w := e.do("PUT", "conda-hosted", "linux-64/dup-0.1-0.conda", condaFile("dup-0.1-0")); w.Code != 201 {
+		t.Fatalf("PUT: %d %s", w.Code, w.Body)
+	}
+	unlock, err := e.h.Store.Lock(context.Background(), "conda\x00conda-all\x00linux-64/repodata.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int)
+	go func() { done <- e.do("GET", "conda-all", "linux-64/repodata.json", nil).Code }()
+	select {
+	case code := <-done:
+		t.Fatalf("built while another request held the lock: %d", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	unlock()
+	if code := <-done; code != 200 {
+		t.Fatalf("after the lock: %d", code)
+	}
+}

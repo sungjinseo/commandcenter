@@ -8,12 +8,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -668,5 +670,52 @@ func TestParseDependencies(t *testing.T) {
 		if ValidVersion(v) {
 			t.Errorf("%s valid", v)
 		}
+	}
+}
+
+// TestHostedManyVersions: the release list and a release of a package with
+// many versions do not read every row's metadata and signature (the
+// identifiers lookup reads them a batch at a time). Holding them took a 128 MiB server down at 16
+// clients on a package of 1500 versions.
+func TestHostedManyVersions(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	const n = 300
+	for i := range n {
+		v := fmt.Sprintf("1.%d.0", i)
+		a, _ := json.Marshal(attrs{ID: "mona.Many", Checksum: strings.Repeat("0", 64), PublishedAt: "2026-01-01T00:00:00Z",
+			Signing:  &signing{SignatureBase64Encoded: strings.Repeat("A", 8<<10), SignatureFormat: "cms-1.0.0"},
+			Metadata: json.RawMessage(`{"repositoryURLs":["https://github.com/mona/many"]}`), Dependencies: []Dependency{}})
+		err := e.h.Store.DB.Tx(ctx, func(tx *meta.Tx) error {
+			return tx.InsertPackage(ctx, meta.Package{Repo: "swift-hosted", Format: "swift", Name: "mona.many", Version: v, Attrs: string(a), CreatedAt: e.now})
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{"mona/Many", "mona/Many/1.5.0"} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		w := e.do("GET", "swift-hosted", path, nil)
+		runtime.ReadMemStats(&after)
+		if got := after.TotalAlloc - before.TotalAlloc; w.Code != 200 || got > n*(8<<10)/2 && !raceEnabled {
+			t.Errorf("%s: %d, allocated %d KiB; the signatures are %d KiB", path, w.Code, got>>10, n*8)
+		}
+	}
+	var list struct{ Releases map[string]any }
+	decode(t, e.do("GET", "swift-hosted", "mona/Many", nil), &list)
+	if len(list.Releases) != n {
+		t.Fatalf("releases: %d", len(list.Releases))
+	}
+	var rel struct{ ID, Version string }
+	decode(t, e.do("GET", "swift-hosted", "mona/Many/1.299.0", nil), &rel)
+	if rel.ID != "mona.Many" || rel.Version != "1.299.0" {
+		t.Fatalf("release: %+v", rel)
+	}
+	var ids struct{ Identifiers []string }
+	decode(t, e.do("GET", "swift-hosted", "identifiers?url=https://github.com/mona/many", nil), &ids)
+	if len(ids.Identifiers) != 1 || ids.Identifiers[0] != "mona.Many" {
+		t.Fatalf("identifiers: %+v", ids)
 	}
 }

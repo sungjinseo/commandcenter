@@ -260,18 +260,16 @@ func sortVersions(versions []string) {
 func (h *Handler) list(ctx context.Context, serving, rp *repo.Repository, rt Route) (doc, []string, error) {
 	switch rp.Type {
 	case "hosted":
-		rows, err := h.rows(ctx, rp, ID(rt.Scope, rt.Name))
+		versions, err := h.versions(ctx, rp, ID(rt.Scope, rt.Name))
 		if err != nil {
 			return doc{}, nil, err
 		}
-		if len(rows) == 0 {
+		if len(versions) == 0 {
 			return doc{}, nil, notFoundPackage(rt)
 		}
 		releases := map[string]any{}
-		versions := make([]string, 0, len(rows))
-		for _, r := range rows {
-			versions = append(versions, r.pkg.Version)
-			releases[r.pkg.Version] = map[string]string{"url": h.releaseURL(serving, rt, r.pkg.Version)}
+		for _, v := range versions {
+			releases[v] = map[string]string{"url": h.releaseURL(serving, rt, v)}
 		}
 		sortVersions(versions)
 		return jsonDoc(map[string]any{"releases": releases}, proxy.Result{}), versions, nil
@@ -444,9 +442,8 @@ func (h *Handler) has(ctx context.Context, rp *repo.Repository, rt Route) (bool,
 	var err error
 	switch rp.Type {
 	case "hosted":
-		var rows []row
-		rows, err = h.rows(ctx, rp, ID(rt.Scope, rt.Name))
-		return len(rows) > 0, err
+		st, err := h.Store.DB.PackageStamp(ctx, rp.Name, ID(rt.Scope, rt.Name))
+		return st.Count > 0, err
 	case "proxy":
 		_, _, err = h.proxyList(ctx, rp, rp, rt)
 	case "group":

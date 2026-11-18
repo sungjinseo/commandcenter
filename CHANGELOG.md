@@ -352,6 +352,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   searches still answer from the online members. Maven, Go, raw and p2 groups still skip an offline member.
 - `repository.purge-unused` keeps the cached files of R, conda, yum and APT proxies another group member follows, as it
   does for the other formats whose first member answers: deleting them could hand the name or path to that member.
+- Blob store usage in `GET /-/api/blobstores` and `/-/api/blobstores/{name}` (the Blob Store and status
+  screens) is the count the Prometheus metrics use, made at most once every 30 s for all stores, so it may lag
+  uploads by that much; creating or deleting a repository counts again. Counting the distinct blobs of 3
+  million assets takes PostgreSQL about 4 s with default settings, and each view took 3.3 to 6.3 s.
+- PyPI JSON API: keys come in document order (they were alphabetical), the answer is chunked (no
+  Content-Length), and a proxied document found broken after its first 32 KiB cuts the connection instead of
+  answering 502.
+- `test/load/readers.sh` (concurrent readers per format) and `test/load/large.sh` (a 3 million asset
+  database) added.
 
 ### Fixed
 - Cleanup `releaseType: prerelease` (and the search parameter `prerelease`) took nearly every conda, R, yum, apt and
@@ -493,6 +502,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The main port fixes each connection's kernel receive buffer at the size the connection limit assumes: the
   kernel's autotuning let 60 concurrent 16 MiB uploads hold 95 MB of socket memory and get a 128 MiB server
   killed. Downloads keep the kernel's send autotuning.
+- A few concurrent readers could still kill a server in the default 128 MiB container (`test/load/readers.sh`):
+  16 clients on a PyPI proxy's JSON API document of botocore's size (3.9 MB), 16 on the JSON API document of a
+  hosted PyPI project or the release list or a release of a Swift package with 1500 versions, 16 on an R group's
+  `PACKAGES.rds` or `PACKAGES.gz` after the CRAN proxy's index changed, 64 on a hosted crate of 1500 versions,
+  64 on a conda group with `mergeMembers` after its proxy's repodata changed, and 64 on an 18 MB npm packument
+  through a proxy on a busy host. These documents are now written as they are read, a batch of rows at a time,
+  and a group's merged documents (Maven metadata and archetype catalog, conda repodata, R `PACKAGES` and the
+  files derived from it) are built by one request at a time on every node while the others wait for its copy.
+- The repository dashboard, and the leader's usage refresh every minute, held every component of a repository
+  in memory to count them: a repository of a million components (3 million assets) took a 128 MiB server down.
+  They now hold one package or one unit of paths at a time (17 MiB at 3 million assets, 2.4 s).
 
 ### Security
 
@@ -625,6 +645,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - yum: a direct proxy read of `repomd.xml` answered with 403 or HTML is now 502 instead of 404, and a group
   without `mergeMembers` no longer falls through to the next member on such an answer.
 - A yum merge takes about 16% longer.
+- Blob store usage and the quota health checks lag up to 30 s behind uploads.
 
 ## [0.4.0] - 2026-11-05
 

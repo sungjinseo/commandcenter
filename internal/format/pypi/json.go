@@ -2,12 +2,15 @@ package pypi
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -18,9 +21,9 @@ import (
 
 const (
 	metadataType = "text/plain; charset=utf-8" // the PEP 658 sidecar
-	// maxJSONDoc caps an upstream /pypi/<project>/json document: rewriteJSON
-	// needs ~9x its size in memory (the server's budget is 128 MiB), and
-	// pypi.org's largest documents are single-digit MiB.
+	// maxJSONDoc caps an upstream /pypi/<project>/json document, which bounds
+	// what rewriteJSON holds of it (one value); pypi.org's largest documents
+	// are single-digit MiB.
 	maxJSONDoc = 8 << 20
 )
 
@@ -195,68 +198,60 @@ func (h *Handler) jsonFileURL(rp *repo.Repository, project, file string) string 
 	return h.fileURL(rp, project, file)
 }
 
-// jsonDoc builds the /pypi/<project>/json (version "") or
+// jsonDoc returns what writes the /pypi/<project>/json (version "") or
 // /pypi/<project>/<version>/json document of project, answered by owner
-// (see owner) with file URLs of serving. modTime is the document's time when
-// known (a proxy's cached copy).
-func (h *Handler) jsonDoc(ctx context.Context, serving, owner *repo.Repository, project, version string) (doc []byte, res proxy.Result, err error) {
+// (see owner) with file URLs of serving. res.Asset.LastModified is the
+// document's time when known (a proxy's cached copy).
+func (h *Handler) jsonDoc(ctx context.Context, serving, owner *repo.Repository, project, version string) (write func(io.Writer) error, res proxy.Result, err error) {
 	switch owner.Type {
 	case "hosted":
-		doc, err = h.hostedJSON(ctx, serving, owner, project, version)
-		return doc, proxy.Result{}, err
+		write, err := h.hostedJSON(ctx, serving, owner, project, version)
+		return write, proxy.Result{}, err
 	case "proxy":
 		return h.proxyJSON(ctx, serving, owner, project, version)
 	}
 	return nil, proxy.Result{}, repo.Errorf(http.StatusInternalServerError, "unknown repository type %q", owner.Type)
 }
 
-// hostedJSON builds the document from the package rows, the assets and the
-// core metadata of one file (a wheel when there is one) of the release:
-// the one asked for, else the newest (PEP 440) release, final releases
-// before pre-releases as warehouse does.
-func (h *Handler) hostedJSON(ctx context.Context, serving, owner *repo.Repository, project, version string) ([]byte, error) {
-	pkgs, err := h.Store.DB.ListPackages(ctx, owner.Name, project)
+// hostedJSON returns what writes the document from the package rows, the
+// assets and the core metadata of one file (a wheel when there is one) of
+// the release: the one asked for, else the newest (PEP 440) release, final
+// releases before pre-releases as warehouse does. The rows are read a batch
+// at a time, once for the releases' files and again as they are written:
+// 16 clients reading the document of 1500 releases of three files each took
+// a 128 MiB server down when each request held it whole.
+func (h *Handler) hostedJSON(ctx context.Context, serving, owner *repo.Repository, project, version string) (func(io.Writer) error, error) {
+	pkgs, err := h.Store.DB.ListPackageVersions(ctx, owner.Name, project)
 	if err != nil {
 		return nil, err
 	}
 	if len(pkgs) == 0 {
 		return nil, repo.ErrNotFound
 	}
-	assets, err := h.Store.DB.ListAssets(ctx, owner.Name, "packages/"+project+"/")
+	names := make([]string, len(pkgs))
+	for i, p := range pkgs {
+		names[i] = p.Version // a file name
+	}
+	files := map[string][]string{} // a release's file names, in row order
+	err = h.Store.DB.EachPackage(ctx, owner.Name, project, names, func(p meta.Package) error {
+		a, err := rowAttrs(project, p)
+		files[a.Version] = append(files[a.Version], p.Version)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
-	byPath := make(map[string]meta.Asset, len(assets))
-	for _, a := range assets {
-		byPath[a.Path] = a
+	versions := make([]string, 0, len(files))
+	for v := range files {
+		versions = append(versions, v)
 	}
-	releases := map[string][]map[string]any{}
-	files := map[string][]fileAttrs{}
-	for _, p := range pkgs {
-		var a fileAttrs
-		if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
-			return nil, err
-		}
-		if a.Version == "" { // a row without a version: the file name's
-			a.Version, _ = fileVersion(project, a.Filename)
-		}
-		asset := byPath[fileKey(project, a.Filename)]
-		if asset.CreatedAt.IsZero() {
-			asset.CreatedAt = p.CreatedAt
-		}
-		releases[a.Version] = append(releases[a.Version], fileDoc(h.jsonFileURL(serving, project, a.Filename), a, asset))
-		files[a.Version] = append(files[a.Version], a)
-	}
+	sort.Strings(versions)
 	asked := version
 	if asked == "" {
-		versions := make([]string, 0, len(releases))
-		for v := range releases {
-			versions = append(versions, v)
-		}
 		version = latestVersion(versions)
-	} else if _, ok := releases[asked]; !ok { // the client's spelling may differ from the stored one
+	} else if _, ok := files[asked]; !ok { // the client's spelling may differ from the stored one
 		version = ""
-		for v := range releases {
+		for _, v := range versions {
 			if canonicalVersion(v) == canonicalVersion(asked) {
 				version = v
 			}
@@ -267,12 +262,20 @@ func (h *Handler) hostedJSON(ctx context.Context, serving, owner *repo.Repositor
 	}
 	chosen := files[version][0]
 	for _, f := range files[version] {
-		if strings.HasSuffix(strings.ToLower(f.Filename), ".whl") {
+		if strings.HasSuffix(strings.ToLower(f), ".whl") {
 			chosen = f
 			break
 		}
 	}
-	raw, err := h.coreMetadata(ctx, owner, project, chosen.Filename)
+	var attrs fileAttrs
+	err = h.Store.DB.EachPackage(ctx, owner.Name, project, []string{chosen}, func(p meta.Package) (err error) {
+		attrs, err = rowAttrs(project, p)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	raw, err := h.coreMetadata(ctx, owner, project, attrs.Filename)
 	if err != nil && repo.StatusOf(err) != http.StatusNotFound { // no readable metadata: the files, without info fields
 		return nil, err
 	}
@@ -281,12 +284,109 @@ func (h *Handler) hostedJSON(ctx context.Context, serving, owner *repo.Repositor
 		inf["name"] = project
 	}
 	inf["version"] = version
-	inf["requires_python"] = nullable(chosen.RequiresPython)
-	doc := map[string]any{"info": inf, "urls": releases[version], "vulnerabilities": []any{}, "last_serial": 0}
-	if asked == "" {
-		doc["releases"] = releases
+	inf["requires_python"] = nullable(attrs.RequiresPython)
+	infJSON, err := json.Marshal(inf)
+	if err != nil {
+		return nil, err
 	}
-	return json.Marshal(doc)
+	return func(w io.Writer) error {
+		// The keys in the order json.Marshal gives a map's.
+		fmt.Fprintf(w, `{"info":%s,"last_serial":0`, infJSON)
+		if asked == "" {
+			// Every release's files in one walk, so a batch holds the files
+			// of many releases.
+			var all []string
+			for _, v := range versions {
+				all = append(all, files[v]...)
+			}
+			io.WriteString(w, `,"releases":{`)
+			cur := ""
+			err := h.eachFile(ctx, serving, owner, project, all, func(v string, entry []byte) error {
+				if v != cur {
+					if cur != "" {
+						io.WriteString(w, "],")
+					}
+					k, _ := json.Marshal(v)
+					w.Write(append(k, ':', '['))
+					cur = v
+				} else {
+					io.WriteString(w, ",")
+				}
+				_, err := w.Write(entry)
+				return err
+			})
+			if err != nil {
+				return err
+			}
+			if cur != "" {
+				io.WriteString(w, "]")
+			}
+			io.WriteString(w, "}")
+		}
+		io.WriteString(w, `,"urls":[`)
+		sep := ""
+		err := h.eachFile(ctx, serving, owner, project, files[version], func(_ string, entry []byte) error {
+			io.WriteString(w, sep)
+			sep = ","
+			_, err := w.Write(entry)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(w, `],"vulnerabilities":[]}`)
+		return err
+	}, nil
+}
+
+// rowAttrs reads a hosted row's attrs; a row without a version has its file
+// name's.
+func rowAttrs(project string, p meta.Package) (fileAttrs, error) {
+	var a fileAttrs
+	if err := json.Unmarshal([]byte(p.Attrs), &a); err != nil {
+		return a, err
+	}
+	if a.Version == "" {
+		a.Version, _ = fileVersion(project, a.Filename)
+	}
+	return a, nil
+}
+
+// eachFile calls fn with the version and the JSON API entry of each of the
+// named files of hosted rp, in that order, reading their rows and assets a
+// batch at a time.
+func (h *Handler) eachFile(ctx context.Context, serving, rp *repo.Repository, project string, names []string, fn func(version string, entry []byte) error) error {
+	for len(names) > 0 {
+		batch := names[:min(len(names), 64)]
+		names = names[len(batch):]
+		paths := make([]string, len(batch))
+		for i, name := range batch {
+			paths[i] = fileKey(project, name)
+		}
+		assets, err := h.Store.DB.AssetsIn(ctx, rp.Name, paths)
+		if err != nil {
+			return err
+		}
+		err = h.Store.DB.EachPackage(ctx, rp.Name, project, batch, func(p meta.Package) error {
+			a, err := rowAttrs(project, p)
+			if err != nil {
+				return err
+			}
+			asset := assets[fileKey(project, a.Filename)]
+			if asset.CreatedAt.IsZero() {
+				asset.CreatedAt = p.CreatedAt
+			}
+			b, err := json.Marshal(fileDoc(h.jsonFileURL(serving, project, a.Filename), a, asset))
+			if err != nil {
+				return err
+			}
+			return fn(a.Version, b)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // compareVersion orders two normalized PEP 440 versions (normalizeVersion)
@@ -403,7 +503,7 @@ func latestVersion(versions []string) string {
 
 // proxyJSON serves the upstream document from the metadata cache with its
 // file URLs rewritten to serving's.
-func (h *Handler) proxyJSON(ctx context.Context, serving, owner *repo.Repository, project, version string) ([]byte, proxy.Result, error) {
+func (h *Handler) proxyJSON(ctx context.Context, serving, owner *repo.Repository, project, version string) (func(io.Writer) error, proxy.Result, error) {
 	remote := "pypi/" + project + "/json"
 	if version != "" {
 		remote = "pypi/" + project + "/" + version + "/json"
@@ -413,74 +513,142 @@ func (h *Handler) proxyJSON(ctx context.Context, serving, owner *repo.Repository
 	if err != nil {
 		return nil, res, err
 	}
-	f, err := h.Store.Open(res.Asset)
-	if err != nil {
-		return nil, res, err
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, maxJSONDoc+1))
-	if err != nil {
-		return nil, res, err
-	}
-	if len(raw) > maxJSONDoc {
+	if res.Asset.Size > maxJSONDoc {
 		return nil, res, repo.Errorf(http.StatusBadGateway, "upstream document for %q is over %d MiB", project, maxJSONDoc>>20)
 	}
-	doc, err := rewriteJSON(raw, func(file string) string { return h.jsonFileURL(serving, project, file) })
-	if err != nil {
-		return nil, res, repo.Errorf(http.StatusBadGateway, "upstream document for %q is not a PyPI JSON document: %v", project, err)
+	write := func(w io.Writer) error {
+		f, err := h.Store.Open(res.Asset)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		err = rewriteJSON(f, w, func(file string) string { return h.jsonFileURL(serving, project, file) })
+		if _, ok := err.(writeError); err != nil && !ok {
+			err = repo.Errorf(http.StatusBadGateway, "upstream document for %q is not a PyPI JSON document: %v", project, err)
+		}
+		return err
 	}
-	return doc, res, nil
+	return write, res, nil
 }
 
-// rewriteJSON replaces the "url" of every file in "urls" and "releases" with
-// fileURL(filename); everything else is kept as is.
-func rewriteJSON(raw []byte, fileURL func(string) string) ([]byte, error) {
-	var top map[string]json.RawMessage
-	err := json.Unmarshal(raw, &top)
-	if err != nil {
-		return nil, err
+// writeError is a failed write to the client, not a fault of the document.
+type writeError struct{ error }
+
+// rewriteJSON copies the document r to w with the "url" of every file in
+// "urls" and "releases" replaced by fileURL(filename); everything else is
+// kept as is. It holds one file at a time (another top-level value whole):
+// 16 clients reading a document of botocore's size (3.9 MB) at once took a
+// 128 MiB server down when each request held it decoded.
+func rewriteJSON(r io.Reader, w io.Writer, fileURL func(string) string) error {
+	dec := json.NewDecoder(r)
+	put := func(b []byte) error {
+		if _, err := w.Write(b); err != nil {
+			return writeError{err}
+		}
+		return nil
 	}
-	rewrite := func(files []map[string]json.RawMessage) error {
-		for _, f := range files {
+	putKey := func(first bool, k string) error {
+		b, _ := json.Marshal(k)
+		if !first {
+			b = append([]byte{','}, b...)
+		}
+		return put(append(b, ':'))
+	}
+	// open reads the opening delimiter of an object or array, or a null,
+	// which it copies and reports with false.
+	open := func(d json.Delim) (bool, error) {
+		tok, err := dec.Token()
+		switch {
+		case err != nil:
+			return false, err
+		case tok == nil:
+			return false, put([]byte("null"))
+		case tok != d:
+			return false, fmt.Errorf("%v where %v was expected", tok, d)
+		}
+		return true, put([]byte{byte(d)})
+	}
+	closeWith := func(d json.Delim) error {
+		if _, err := dec.Token(); err != nil {
+			return err
+		}
+		return put([]byte{byte(d)})
+	}
+	files := func() error {
+		if ok, err := open('['); !ok || err != nil {
+			return err
+		}
+		for first := true; dec.More(); first = false {
+			var f map[string]json.RawMessage
+			if err := dec.Decode(&f); err != nil {
+				return err
+			}
 			var name string
 			if err := json.Unmarshal(f["filename"], &name); err != nil {
 				return err
 			}
-			u, err := json.Marshal(fileURL(name))
+			f["url"], _ = json.Marshal(fileURL(name))
+			b, err := json.Marshal(f)
 			if err != nil {
 				return err
 			}
-			f["url"] = u
-		}
-		return nil
-	}
-	if r, ok := top["urls"]; ok {
-		var files []map[string]json.RawMessage
-		if err := json.Unmarshal(r, &files); err != nil {
-			return nil, err
-		}
-		if err := rewrite(files); err != nil {
-			return nil, err
-		}
-		if top["urls"], err = json.Marshal(files); err != nil {
-			return nil, err
-		}
-	}
-	if r, ok := top["releases"]; ok {
-		var releases map[string][]map[string]json.RawMessage
-		if err := json.Unmarshal(r, &releases); err != nil {
-			return nil, err
-		}
-		for _, files := range releases {
-			if err := rewrite(files); err != nil {
-				return nil, err
+			if !first {
+				b = append([]byte{','}, b...)
+			}
+			if err := put(b); err != nil {
+				return err
 			}
 		}
-		if top["releases"], err = json.Marshal(releases); err != nil {
-			return nil, err
+		return closeWith(']')
+	}
+	if ok, err := open('{'); !ok || err != nil {
+		return cmp.Or(err, errors.New("null"))
+	}
+	for first := true; dec.More(); first = false {
+		tok, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		key, _ := tok.(string)
+		if err := putKey(first, key); err != nil {
+			return err
+		}
+		switch key {
+		case "urls":
+			err = files()
+		case "releases":
+			var ok bool
+			if ok, err = open('{'); !ok || err != nil {
+				break
+			}
+			for first := true; dec.More() && err == nil; first = false {
+				if tok, err = dec.Token(); err == nil {
+					v, _ := tok.(string)
+					if err = putKey(first, v); err == nil {
+						err = files()
+					}
+				}
+			}
+			if err == nil {
+				err = closeWith('}')
+			}
+		default:
+			var raw json.RawMessage
+			if err = dec.Decode(&raw); err == nil {
+				err = put(raw)
+			}
+		}
+		if err != nil {
+			return err
 		}
 	}
-	return json.Marshal(top)
+	if err := closeWith('}'); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("data after the document")
+	}
+	return nil
 }
 
 // coreMetadata returns the core metadata document of a stored file of rp

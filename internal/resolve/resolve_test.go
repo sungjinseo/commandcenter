@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -363,5 +365,37 @@ func TestMergedSaltReMergesOnlySaltedCallers(t *testing.T) {
 	}
 	if _, err := r.MergedTargetSalted(ctx, repos["g"], target, "text/plain", "v2;", merge); err != nil || calls != 2 {
 		t.Fatalf("salted copy must be reused: calls=%d err=%v", calls, err)
+	}
+}
+
+// TestMergedOnceForConcurrentReaders: the readers that come together after a
+// member's document changed wait for one merge and take its copy, instead of
+// each merging (64 merges of a conda channel took a 128 MiB server down).
+func TestMergedOnceForConcurrentReaders(t *testing.T) {
+	r, repos := setup(t, remoteServing("R"))
+	put(t, r, "h1", "shared", "1")
+	var calls atomic.Int32
+	merge := func(_ context.Context, in []io.ReadSeeker, w io.Writer) error {
+		calls.Add(1)
+		time.Sleep(50 * time.Millisecond) // a merge takes a while
+		_, err := io.WriteString(w, "merged")
+		return err
+	}
+	if _, err := r.Merged(ctx, repos["g"], "shared", "text/plain", merge); err != nil { // fetches the proxy's copy
+		t.Fatal(err)
+	}
+	put(t, r, "h2", "shared", "2")
+	calls.Store(0)
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if a, err := r.Merged(ctx, repos["g"], "shared", "text/plain", merge); err != nil || content(t, r, a) != "merged" {
+				t.Errorf("%v %q", err, content(t, r, a))
+			}
+		})
+	}
+	wg.Wait()
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d merges, want 1", n)
 	}
 }

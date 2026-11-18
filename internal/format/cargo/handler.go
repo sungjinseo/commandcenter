@@ -17,6 +17,7 @@ import (
 	"commandcenter/internal/auth"
 	"commandcenter/internal/blob"
 	"commandcenter/internal/logsafe"
+	"commandcenter/internal/meta"
 	"commandcenter/internal/proxy"
 	"commandcenter/internal/repo"
 )
@@ -245,16 +246,19 @@ func (h *Handler) index(w http.ResponseWriter, r *http.Request, rp *repo.Reposit
 // walk calls fn for each line of name's index in src.
 func (h *Handler) walk(ctx context.Context, src indexSource, name string, fn func(line []byte) error) error {
 	if src.rp.Type == "hosted" {
-		pkgs, err := h.Store.DB.ListPackages(ctx, src.rp.Name, name)
+		// A batch of rows at a time: 1500 versions of aws-sdk-s3's lines are
+		// 3 MiB a request, which 64 clients made more than a 128 MiB server.
+		pkgs, err := h.Store.DB.ListPackageVersions(ctx, src.rp.Name, name)
 		if err != nil {
 			return err
 		}
-		for _, p := range pkgs {
-			if err := fn([]byte(p.Attrs)); err != nil {
-				return err
-			}
+		versions := make([]string, len(pkgs))
+		for i, p := range pkgs {
+			versions[i] = p.Version
 		}
-		return nil
+		return h.Store.DB.EachPackage(ctx, src.rp.Name, name, versions, func(p meta.Package) error {
+			return fn([]byte(p.Attrs))
+		})
 	}
 	f, err := h.Store.Open(src.res.Asset)
 	if err != nil {

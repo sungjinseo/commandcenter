@@ -53,7 +53,7 @@ type compAgg struct {
 	lastDl        time.Time // max last_downloaded
 	lastUsed      time.Time // max over assets of last_downloaded, or created if never downloaded
 	unknownCreate bool      // an asset has no creation time
-	unit          string    // a path prefix every asset of the component has (unitPrefix)
+	unit          string    // a path prefix every asset of the component has (UnitPrefix)
 	home          string    // a path prefix every asset of every version of the component has (namePrefix)
 	rank          int       // with Retain: the version's place, newest first (1-based); 0 when not ranked
 	ranked        int       // with Retain: how many versions were ranked
@@ -186,7 +186,7 @@ scan:
 		// start, so scans advance.
 		res.Next = next
 		if g, n, _, ok := component.DeriveAsset(rp.Format, next); ok {
-			res.Next = unitPrefix(rp.Format, next)
+			res.Next = UnitPrefix(rp.Format, next)
 			if p.Retain > 0 {
 				res.Next = namePrefix(rp.Format, next, g, n)
 			}
@@ -245,7 +245,7 @@ func addAsset(comps map[compKey]*compAgg, format string, a meta.ScanAsset) bool 
 	k := compKey{group, name, version}
 	c := comps[k]
 	if c == nil {
-		c = &compAgg{unit: unitPrefix(format, a.Path), home: namePrefix(format, a.Path, group, name), oldest: a.Created}
+		c = &compAgg{unit: UnitPrefix(format, a.Path), home: namePrefix(format, a.Path, group, name), oldest: a.Created}
 		comps[k] = c
 	}
 	c.assets = append(c.assets, component.Asset{Path: a.Path, Size: a.Size})
@@ -297,12 +297,12 @@ func assetWritten(a meta.ScanAsset) time.Time {
 	return a.Created
 }
 
-// unitPrefix returns a path prefix that every asset of the component of p
+// UnitPrefix returns a path prefix that every asset of the component of p
 // has: the version directory for Maven, the version's file stem
 // (module/@v/version.) for Go, the file itself for npm and Cargo (one file
 // per version), and the project directory for PyPI, where the files of one
 // version are not contiguous in path order.
-func unitPrefix(format, p string) string {
+func UnitPrefix(format, p string) string {
 	switch format {
 	case "maven":
 		if i := strings.LastIndex(p, "/"); i >= 0 {
