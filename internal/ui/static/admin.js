@@ -13,7 +13,7 @@ import { t, locale } from "./i18n.js";
 import { confirmDelete, viewRepos } from "./browse.js";
 import { viewRepoForm, DEFAULT_RECIPE } from "./repoform.js";
 import { viewTasks, viewPolicies, trendCard, logsCard, viewRoutingRules, viewSelectors, viewWebhooks, viewStaging } from "./ops.js";
-import { viewUsers, viewRoles, viewRealms, viewRealmConfig, viewPrivileges, viewUserTokens } from "./access.js";
+import { viewUsers, viewRoles, viewRealms, viewRealmConfig, viewPrivileges, viewUserTokens, viewS3Keys } from "./access.js";
 import { viewBlobStores, viewGeneral, viewVulnerability, viewQuarantine } from "./settings.js";
 import { field, fields, sel, textIn, button, formState, errList, checks, RPLAN, REXEC } from "./ops.js";
 import { showRecovery, rerender } from "./shell.js";
@@ -1345,6 +1345,7 @@ export function showSettings(view, key, p0, p1, criteria) {
       return Promise.all([viewUserTokens(view, true, settings), viewGeneral(settings, "usertoken")]);
     }
     case "admin/security/apitokens": return viewTokens(view, true);
+    case "admin/security/s3keys": return viewS3Keys(view, true);
     case "admin/firewall/settings": return viewVulnerability(view);
     case "admin/firewall/quarantine": return viewQuarantine(view);
     case "admin/support/logs": return viewLogs(view, criteria);

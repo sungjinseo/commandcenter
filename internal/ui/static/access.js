@@ -8,14 +8,15 @@
 //   #admin/security/roles[:create|:<id>]
 //   #admin/security/realms
 //   #admin/security/ldap|oidc|atlassiancrowd|saml|rutauth
+//   #user/s3keys, #admin/security/s3keys
 //   #user/account
 import {
   state, h, put, api, enc, encSeg, alive, filterBar, row, pageHead, loading, card, kv, tbl, handleError, needLogin, icon,
-  loadRepos, FORMATS, FORMAT_NAMES, fmtDate, fmtNum, copyLine, copyButton, markBusy, can, needAdmin,
+  loadRepos, FORMATS, FORMAT_NAMES, fmtDate, fmtNum, copyLine, copyButton, markBusy, can, needAdmin, s3Endpoint,
 } from "./util.js";
 import { t } from "./i18n.js";
 import { confirmDelete } from "./browse.js";
-import { modal } from "./shell.js";
+import { modal, GUIDE_URL } from "./shell.js";
 import { field, fields, sel, textIn, button, formState, errList } from "./ops.js";
 
 let uidN = 0;
@@ -1378,6 +1379,159 @@ export async function viewUserTokens(view, admin, extra) {
     h("div", { class: "two" }, card(t("ut.mine"), t("ut.mineSub"), mine), h("div", { class: "notice" }, icon("info", "hint-ico"), t("ut.about"))),
     list, extra);
   await Promise.all([loadMine(), admin ? loadAll() : null]);
+}
+
+// ---- S3 access keys: an access key id and secret that S3 clients sign with
+//   #user/s3keys             the caller's own keys, and "create" for them
+//   #admin/security/s3keys   every user's keys grouped by user, and "create" for another user
+
+const S3_MAX_KEYS = 10; // meta.maxS3Keys: the server answers 409 beyond it
+
+// s3Off says the server's S3 API is off (GET /-/api/me has no s3) and links
+// to the guide section that turns it on.
+function s3Off() {
+  const a = h("a", { target: "_blank", rel: "noopener noreferrer" }, t("s3k.guide"));
+  a.setAttribute("href", GUIDE_URL + "#s3-호환-api"); // a fixed off-site URL (h() keeps links same-origin)
+  return notice([t("s3k.off"), " ", a], "amber");
+}
+
+export async function viewS3Keys(view, admin) {
+  if (state.me.anonymous) return needLogin(view, t("nav.s3Keys"));
+  const isLive = alive();
+  const me = state.me;
+  const endpoint = s3Endpoint();
+  const list = h("div", null, loading());
+  const msg = h("div", { class: "notice amber", role: "alert", hidden: true });
+  const fail = (e) => {
+    if (e.status !== 400 && e.status !== 409) { handleError(e); return; }
+    put(msg, e.status === 409 ? t("s3k.limit", { n: S3_MAX_KEYS }) : e.message);
+    msg.hidden = false;
+  };
+
+  // showKey shows a new key once, in a dialog, with ready-to-copy client settings.
+  const showKey = (x) => {
+    const unBusy = markBusy("s3key"); // the secret on screen is in-progress work for a language change
+    const region = me.s3.region, bucket = "<" + t("s3k.bucketPh") + ">";
+    const aws = "export AWS_ACCESS_KEY_ID=" + x.accessKeyId + " AWS_SECRET_ACCESS_KEY=" + x.secretAccessKey + " AWS_DEFAULT_REGION=" + region +
+      "\nexport AWS_ENDPOINT_URL=" + endpoint + "\naws s3 ls s3://" + bucket + "/\naws s3 cp ./<file> s3://" + bucket + "/<path>/";
+    const rclone = "[commandcenter]\ntype = s3\nprovider = Other\nendpoint = " + endpoint + "\nregion = " + region +
+      "\naccess_key_id = " + x.accessKeyId + "\nsecret_access_key = " + x.secretAccessKey;
+    const snippet = (title, text) => {
+      const pre = h("pre", { class: "code" }, text);
+      return h("div", { class: "snippet" }, h("div", { class: "snippet-head" }, h("span", null, title), copyButton(text, pre, t("s3k.copySnippet", { name: title }))), pre);
+    };
+    const codeField = (label, text) => h("div", { class: "field" }, h("span", { class: "flabel" }, label), copyLine(text, label));
+    const done = button(t("tok.hide"), "primary");
+    const m = modal(t("s3k.showTitle"), [
+      h("div", { class: "token-box", role: "status" }, h("strong", null, t("s3k.secretOnce")), h("p", { class: "sub" }, t("s3k.showText", { user: x.user }))),
+      fields(codeField(t("s3k.id"), x.accessKeyId), codeField(t("s3k.secret"), x.secretAccessKey)),
+      snippet("aws cli", aws), snippet("rclone.conf", rclone),
+      h("p", { class: "tiny muted" }, t("s3k.endpointNote", { endpoint })),
+    ], [done], { cls: "modal-wide", onClose: unBusy });
+    done.addEventListener("click", m.close);
+  };
+
+  const load = async () => {
+    const d = await api("s3keys");
+    if (!isLive()) return;
+    // An admin gets every key; the user page keeps the caller's (owner keys: "ldap:<id>" for an LDAP user).
+    const keys = (d.s3Keys || []).filter((x) => admin || x.user === me.owner);
+    const revoke = (x) => {
+      const b = button(t("tok.revoke"), "small danger");
+      b.addEventListener("click", async () => {
+        const text = x.user === me.owner ? t("s3k.revokeText", { id: x.accessKeyId }) : t("s3k.revokeOther", { id: x.accessKeyId, user: x.user });
+        if (!(await confirmDelete(text, t("s3k.revokeTitle"), t("tok.revoke")))) return;
+        b.disabled = true;
+        try {
+          await api("s3keys/" + encSeg(x.accessKeyId), { method: "DELETE" });
+        } catch (e) { b.disabled = false; handleError(e); return; }
+        if (!isLive()) return;
+        msg.hidden = true;
+        try { await load(); } catch (e) { handleError(e); }
+      });
+      return b;
+    };
+    const keyRow = (x) => row([
+      [h("code", null, x.accessKeyId)],
+      [fmtDate(x.created), "nowrap"],
+      [x.lastUsed ? fmtDate(x.lastUsed) : badge(t("tok.never")), "nowrap"],
+      [revoke(x), "act"],
+    ], x.user + " " + x.accessKeyId);
+    const head = [t("s3k.id"), t("tok.created"), t("tok.lastUsed"), actHead()];
+    if (!admin) {
+      const rows = keys.map(keyRow);
+      const f = filterBar(rows, t("s3k.filter"), "s3k.count");
+      let create = null;
+      if (endpoint) {
+        create = button(t("s3k.create"), "small primary");
+        create.addEventListener("click", async () => {
+          create.disabled = true;
+          msg.hidden = true;
+          try {
+            const x = await api("s3keys", { method: "POST" });
+            if (!isLive()) return;
+            showKey(x);
+            await load();
+          } catch (e) { create.disabled = false; fail(e); }
+        });
+      }
+      const c = card(t("s3k.mine"), t("s3k.mineSub", { n: S3_MAX_KEYS }), null, create);
+      c.append(f.bar, tbl(head, rows, t("s3k.none")), f.none);
+      put(list, c);
+      return;
+    }
+    // Grouped by user: a heading row per user, hidden when the filter hides all its keys.
+    const groups = new Map();
+    for (const x of [...keys].sort((a, b) => (a.user < b.user ? -1 : a.user > b.user ? 1 : 0))) {
+      if (!groups.has(x.user)) groups.set(x.user, []);
+      groups.get(x.user).push(x);
+    }
+    const all = [], body = [], heads = [];
+    for (const ks of groups.values()) {
+      const x = ks[0], rows = ks.map(keyRow);
+      const g = h("tr", { class: "grp" }, h("th", { colspan: head.length, scope: "colgroup" },
+        h("strong", null, x.userId), " ", badge(realmName(x.source), x.source === "local" ? null : "purple"),
+        x.source !== "local" ? h("span", { class: "tiny muted mono" }, " " + x.user) : null,
+        h("span", { class: "tiny muted" }, " · " + t("s3k.count", { n: fmtNum(ks.length) }))));
+      heads.push([g, rows]);
+      all.push(...rows);
+      body.push(g, ...rows);
+    }
+    const f = filterBar(all, t("s3k.filterAdmin"), "s3k.count");
+    f.bar.querySelector("input").addEventListener("input", () => {
+      for (const [g, rows] of heads) g.hidden = rows.every((r) => r.hidden);
+    });
+    const c = card(t("s3k.all"), t("s3k.allSub"), null);
+    c.append(f.bar, tbl(head, body, t("s3k.none")), f.none);
+    put(list, c);
+  };
+
+  let createFor = null;
+  if (admin && endpoint) {
+    const userIn = h("input", { type: "text", autocomplete: "off", spellcheck: "false", placeholder: "alice, ldap:alice" });
+    const go = h("button", { type: "submit", class: "btn primary" }, icon("key"), t("s3k.create"));
+    const form = h("form", { novalidate: true }, field(t("tok.user"), userIn, t("s3k.userHelp"), { req: true }), h("div", { class: "savebar" }, go));
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const u = userIn.value.trim();
+      if (!u) { userIn.focus(); return; }
+      go.disabled = true;
+      msg.hidden = true;
+      try {
+        const x = await api("s3keys", { method: "POST", body: { user: u } });
+        if (!isLive()) return;
+        userIn.value = "";
+        showKey(x);
+        await load();
+      } catch (e) { fail(e); } finally { go.disabled = false; }
+    });
+    createFor = card(t("s3k.createFor"), t("s3k.createForSub", { n: S3_MAX_KEYS }), form);
+  }
+
+  put(view, pageHead(t("nav.s3Keys"), sub(admin ? t("s3k.subAdmin") : t("s3k.sub", { user: me.user })), null, eyebrow()),
+    endpoint ? h("div", { class: "notice" }, icon("info", "hint-ico"), t("s3k.about", { endpoint, region: me.s3.region })) : s3Off(),
+    msg, h("div", { class: "stack" }, list, createFor));
+  await load();
 }
 
 // ---- account ---------------------------------------------------------------------

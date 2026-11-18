@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -118,6 +119,12 @@ func (u *UI) me(w http.ResponseWriter, r *http.Request) {
 		// whether it administers some repositories.
 		out["permissions"] = u.Auth.AppActions(p)
 		out["repositoryAdmin"] = u.Auth.AdminsSomeRepo(p)
+		// The S3 API's port and region while it is on: the S3 key screens
+		// and a raw hosted repository's page show the address with them.
+		if u.Config != nil && u.Config.S3.Listen != "" {
+			_, port, _ := net.SplitHostPort(u.Config.S3.Listen)
+			out["s3"] = map[string]any{"port": port, "region": u.Config.S3.Region}
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

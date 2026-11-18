@@ -218,7 +218,7 @@ function menuButton(label, ico, onclick) {
 // ---- topbar -----------------------------------------------------------------
 
 const SEARCH_HASH = "#browse/search";
-const GUIDE_URL = "https://github.com/sungjinseo/commandcenter/blob/main/docs/guide.md";
+export const GUIDE_URL = "https://github.com/sungjinseo/commandcenter/blob/main/docs/guide.md";
 
 // openAbout shows the product name, version and host.
 function openAbout() {
@@ -349,6 +349,7 @@ const USER = () => [[null, [
   ["#user/account", t("nav.account"), "user"],
   ["#user/usertoken", t("nav.userToken"), "key"],
   ["#user/apitokens", t("nav.tokens"), "token"],
+  ["#user/s3keys", t("nav.s3Keys"), "key"],
 ]]];
 const ADMIN = () => [
   [t("nav.g.repository"), [
@@ -374,6 +375,7 @@ const ADMIN = () => [
     ["#admin/security/rutauth", t("nav.rutauth"), "realms"],
     ["#admin/security/usertoken", t("nav.userTokens"), "key"],
     ["#admin/security/apitokens", t("nav.tokens"), "token"],
+    ["#admin/security/s3keys", t("nav.s3Keys"), "key"],
   ]],
   [t("nav.g.firewall"), [
     ["#admin/firewall/settings", t("nav.vulnerability"), "shield"],

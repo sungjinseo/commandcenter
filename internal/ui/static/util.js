@@ -274,6 +274,9 @@ export function osvLink(id) {
   a.setAttribute("href", "https://osv.dev/vulnerability/" + encodeURIComponent(id));
   return a;
 }
+// s3Endpoint is the S3 API's address as this browser reaches the server: the
+// page's host with the port GET /-/api/me gives while the API is on ("" while off).
+export const s3Endpoint = () => (state.me.s3 ? "http://" + location.hostname + ":" + state.me.s3.port : "");
 export const adminRepoLink = (repo) => "#admin/repository/repositories" + (repo ? ":" + enc(repo) : "");
 export const searchLink = (kind, params) => {
   const q = params ? new URLSearchParams(params).toString() : "";

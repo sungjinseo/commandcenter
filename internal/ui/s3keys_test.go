@@ -47,3 +47,20 @@ func TestS3KeyAPI(t *testing.T) {
 		t.Fatalf("events: %s", ev)
 	}
 }
+
+// TestMeS3 checks that GET /-/api/me tells a signed-in caller the S3 API's
+// port and region while it is on, which the S3 key screens show.
+func TestMeS3(t *testing.T) {
+	e := newEnv(t, "http://repo.example")
+	if m := e.get(t, "/-/api/me", "ci").json(t); m["s3"] != nil {
+		t.Fatalf("s3 while off: %v", m["s3"])
+	}
+	e.ui.Config.S3.Listen, e.ui.Config.S3.Region = ":9000", "eu-west-1"
+	if m := e.get(t, "/-/api/me", "").json(t); m["s3"] != nil {
+		t.Fatalf("s3 for an anonymous caller: %v", m["s3"])
+	}
+	s3, _ := e.get(t, "/-/api/me", "ci").json(t)["s3"].(map[string]any)
+	if s3["port"] != "9000" || s3["region"] != "eu-west-1" {
+		t.Fatalf("s3: %v", s3)
+	}
+}

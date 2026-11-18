@@ -215,6 +215,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   administrators can make keys for others; the secret is shown once and stored sealed (and resealed by key
   rotation); at most 10 per user; a disabled user's keys stop working at once and a deleted user's keys go
   with it.
+- Web UI screens for S3 access keys. Under the user menu, users create and revoke keys; a new key's secret is
+  shown once with ready-to-copy aws cli and rclone settings. Under Security, administrators see every user's
+  keys grouped by user, revoke them and create keys for another user. With the S3 API off, both screens say so
+  and link to the guide. A hosted raw repository's page notes that it is also an S3 bucket.
+- `GET /-/api/me` reports the S3 API's `port` and `region` (`s3`) to signed-in callers while the API is on.
 
 ### Changed
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such

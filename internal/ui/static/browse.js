@@ -2,7 +2,7 @@
 // asset detail views (search reuses the detail views). Plan 10 Decision 8
 // gives the layout; the tree, deletion and history rules are plan 8's.
 import {
-  state, h, put, api, APIError, apiRepo, enc, encPath, browseLink, searchLink, adminRepoLink, fmtBytes, fmtNum, fmtDate, alive,
+  state, h, put, api, APIError, apiRepo, enc, encPath, browseLink, searchLink, adminRepoLink, s3Endpoint, fmtBytes, fmtNum, fmtDate, alive,
   fmtBadge, typeBadge, fmtTile, nameCell, onlineBadge, FORMATS, FORMAT_NAMES, canUpload, uploadLink, repoBase, copyButton, copyLine,
   pageHead, loading, truncNote, card, kv, tbl, handleError, showError, icon, repoFlags, OSV_FORMATS, MERGE_FORMATS, sevBadge, osvLink,
 } from "./util.js";
@@ -771,7 +771,10 @@ function setupSnippets(r) {
 function setupCard(r) {
   const list = setupSnippets(r);
   if (!list.length) return null;
-  return card(t("setup.title"), t("setup.sub"), [r.format === "terraform" ? h("div", { class: "notice" }, t("setup.tfNote")) : null, list.map(([title, text]) => {
+  // A raw hosted repository is also an S3 bucket while the S3 API is on.
+  const s3 = r.format === "raw" && r.type === "hosted" && s3Endpoint();
+  return card(t("setup.title"), t("setup.sub"), [r.format === "terraform" ? h("div", { class: "notice" }, t("setup.tfNote")) : null,
+    s3 ? h("div", { class: "notice" }, t("setup.s3Bucket", { bucket: r.name, endpoint: s3 }), " ", h("a", { href: "#user/s3keys" }, t("nav.s3Keys"))) : null, list.map(([title, text]) => {
     const pre = h("pre", { class: "code" }, text);
     return h("div", { class: "snippet" }, h("div", { class: "codebar" }, h("span", null, title), copyButton(text, pre, t("setup.copy", { name: title }))), pre);
   })]);
