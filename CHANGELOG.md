@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-18
+
 ### Added
 - `commandcenter import-nexus -config` makes a Nexus Repository 3 server's configuration on Command Center before it
   copies content (`-config-only`: the configuration alone): blob stores, cleanup policies, routing rules, content
@@ -2179,7 +2181,8 @@ blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
   8 MB zips grew the heap by about 126 MiB. At most two uploads (`.mod`, `.zip` or `.info`) are now
   checked at once; the others wait with their body already stored.
 
-[Unreleased]: https://github.com/sungjinseo/commandcenter/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sungjinseo/commandcenter/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/sungjinseo/commandcenter/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sungjinseo/commandcenter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sungjinseo/commandcenter/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sungjinseo/commandcenter/compare/v0.1.1...v0.2.0
