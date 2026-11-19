@@ -8,10 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-19
+
 ### Added
 
 - Helm chart: `s3.enabled`, `s3.port` and `s3.region` turn on the S3-compatible API and publish its port on the
   pod and the Service; `s3.httpRoute` adds an HTTPRoute of its own on a host name of its own.
+
+### Security
+
+- Built with Go 1.27.4: Go 1.27.3's `net/http` had an HTTP/1 server crash (GO-2026-6859, a race on the headers of
+  a `MaxBytesReader` body), reachable by any client of the server.
+
+### Upgrade notes
+
+- 0.5.0 was tagged but never published: its release stopped at the vulnerability check above, so no image,
+  chart or binary of 0.5.0 exists. Upgrade from 0.4.0 straight to 0.5.1; everything listed under 0.5.0 applies.
 
 ## [0.5.0] - 2026-11-18
 
@@ -2186,7 +2198,8 @@ blob stores, SQLite or PostgreSQL, a Helm chart for Kubernetes, and the web UI.
   8 MB zips grew the heap by about 126 MiB. At most two uploads (`.mod`, `.zip` or `.info`) are now
   checked at once; the others wait with their body already stored.
 
-[Unreleased]: https://github.com/sungjinseo/commandcenter/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/sungjinseo/commandcenter/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/sungjinseo/commandcenter/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/sungjinseo/commandcenter/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/sungjinseo/commandcenter/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sungjinseo/commandcenter/compare/v0.2.0...v0.3.0

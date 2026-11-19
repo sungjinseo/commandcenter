@@ -71,7 +71,7 @@ fill() {
   npm_in npm-all express
   npm_in npm-first left-pad
   client python:3.12-slim "pip download -q --no-cache-dir --disable-pip-version-check -d /tmp/d --index-url \$R/pypi-proxy/simple/ --trusted-host commandcenter requests"
-  client golang:1.27.3 "mkdir /tmp/m && cd /tmp/m && go mod init x 2>/dev/null && GOPROXY=\$R/go-proxy GOSUMDB=off GOFLAGS=-mod=mod go get rsc.io/quote"
+  client golang:1.27.4 "mkdir /tmp/m && cd /tmp/m && go mod init x 2>/dev/null && GOPROXY=\$R/go-proxy GOSUMDB=off GOFLAGS=-mod=mod go get rsc.io/quote"
 }
 sql() { docker exec "$name-pg" psql -U postgres -d cc -At -c "$1"; }
 has() { [ "$(sql "SELECT count(*) FROM assets WHERE repo = '$1' AND path LIKE '$2'")" != 0 ]; }
