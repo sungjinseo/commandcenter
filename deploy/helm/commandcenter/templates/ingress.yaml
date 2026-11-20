@@ -32,4 +32,18 @@ spec:
                   name: http
           {{- end }}
     {{- end }}
+    {{- if and .Values.s3.enabled .Values.s3.host }}
+    {{- range $h := (ternary (list .Values.s3.host (printf "*.%s" .Values.s3.host)) (list .Values.s3.host) .Values.s3.virtualHost) }}
+    - host: {{ $h | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "commandcenter.fullname" $ }}
+                port:
+                  name: http
+    {{- end }}
+    {{- end }}
 {{- end }}

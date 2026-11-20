@@ -16,3 +16,8 @@ spec:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+    {{- if and .Values.s3.enabled .Values.s3.port }}
+    - name: s3
+      port: {{ .Values.s3.port }}
+      targetPort: s3
+    {{- end }}
