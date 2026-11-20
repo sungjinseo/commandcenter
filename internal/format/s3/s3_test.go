@@ -32,6 +32,7 @@ import (
 type env struct {
 	t     *testing.T
 	ts    *httptest.Server
+	port  *httptest.Server // the S3 port: S3Handler
 	h     *Handler
 	db    *meta.DB
 	bs    *blob.Store
@@ -89,6 +90,8 @@ func newEnv(t *testing.T) *env {
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	e.ts = httptest.NewServer(srv.Handler())
 	t.Cleanup(e.ts.Close)
+	e.port = httptest.NewServer(srv.S3Handler())
+	t.Cleanup(e.port.Close)
 	e.h = h
 	for _, u := range []string{"ci", "reader", "admin"} {
 		k, secret, err := authn.CreateS3Key(ctx, u, "test", time.Time{})
@@ -511,5 +514,21 @@ func TestMultipart(t *testing.T) {
 	e.clock = e.clock.Add(UploadMaxAge + time.Hour)
 	if n, err := e.h.SweepUploads(context.Background(), UploadMaxAge); err != nil || n != 1 {
 		t.Fatalf("sweep: %d %v", n, err)
+	}
+}
+
+func TestS3Port(t *testing.T) {
+	e := newEnv(t)
+	r, _ := http.NewRequest("GET", e.port.URL+"/", nil)
+	k := e.keys["ci"]
+	sigv4.Sign(r, k[0], k[1], "us-east-1", e.clock, sigv4.UnsignedPayload)
+	res := e.send(r)
+	if res.status != 200 || !strings.Contains(res.body, "<Name>bkt</Name>") {
+		t.Fatalf("list buckets on the S3 port: %d %s", res.status, res.body)
+	}
+	// The web UI and /repository/ are not there.
+	r, _ = http.NewRequest("GET", e.port.URL+"/repository/bkt/", nil)
+	if res := e.send(r); !strings.Contains(res.body, "<Error>") {
+		t.Fatalf("/repository/ on the S3 port: %d %s", res.status, res.body)
 	}
 }

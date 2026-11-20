@@ -170,7 +170,10 @@ func (d *DB) DeleteUser(ctx context.Context, id string) error {
 		if _, err = tx.q.ExecContext(ctx, `DELETE FROM tokens WHERE "user" = ?`, id); err != nil {
 			return err
 		}
-		_, err = tx.q.ExecContext(ctx, `DELETE FROM user_tokens WHERE owner = ?`, id)
+		if _, err = tx.q.ExecContext(ctx, `DELETE FROM user_tokens WHERE owner = ?`, id); err != nil {
+			return err
+		}
+		_, err = tx.q.ExecContext(ctx, `DELETE FROM s3_keys WHERE owner = ?`, id)
 		return err
 	})
 }
