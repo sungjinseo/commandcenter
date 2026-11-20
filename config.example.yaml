@@ -13,6 +13,11 @@ memoryLimitMiB: 80
 # 프로세스 환경의 AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY(, AWS_SESSION_TOKEN)를 씁니다.
 # maxUploadMiB: 1024               # 업로드 본문 최대 크기(MiB). 기본 1024, 1..1048576. 초과하면 413
 # exportRoot: /var/lib/commandcenter-exports   # 저장소 내보내기·가져오기 작업이 읽고 쓰는 디렉터리(절대 경로, 또는 COMMANDCENTER_EXPORT_ROOT. 둘 다는 안 됨). 비우면 두 작업을 쓸 수 없음
+# s3:                                # S3 API(aws cli, mc, boto3 등)로 s3 포맷 저장소를 bucket처럼 씀. host와 listen 둘 다 비우면 꺼짐
+#   host: s3.cc.example.com          # 이 Host로 온 요청은 S3 API(path-style: /<bucket>/<key>)
+#   virtualHost: false               # <bucket>.<host>도 받음(와일드카드 DNS와 인증서 필요)
+#   listen: ":9000"                  # 전용 포트: 이 포트의 모든 요청이 S3 API
+#   region: us-east-1                # 클라이언트가 서명하는 region
 # taskRunTimeoutHours: 6           # 예약 작업 한 번의 최대 실행 시간(시간, 1-720). 모든 노드에 같은 값
 anonymousRead: true                # 익명 다운로드 허용 (저장소별 anonymousRead로 덮어쓰기 가능)
 

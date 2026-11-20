@@ -61,7 +61,7 @@ func CompareVersions(format, a, b string) int {
 // HasVersionOrder reports whether CompareVersions orders format's versions.
 func HasVersionOrder(format string) bool {
 	switch format {
-	case "docker", "raw", "gitlfs":
+	case "docker", "raw", "gitlfs", "s3":
 		return false
 	}
 	return true

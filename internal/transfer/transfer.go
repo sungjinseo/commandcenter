@@ -269,7 +269,7 @@ func rowName(format, p string) (string, bool) {
 			return p[:i], true
 		}
 		return "", false
-	case "maven", "raw", "go", "gitlfs":
+	case "maven", "raw", "go", "gitlfs", "s3":
 		return "", false
 	}
 	g, n, v, ok := component.DeriveAsset(format, p)
