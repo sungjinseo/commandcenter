@@ -173,6 +173,7 @@ type Authenticator struct {
 	cache map[string]time.Time // user + "\x00" + sha256(hash, password) -> expiry
 	fails map[string]failRec   // sign-in throttle (throttle.go)
 	gates map[string]*failGate // names being checked (throttle.go)
+	s3    s3Keys                 // S3 access keys read (s3key.go)
 
 	// OnSettings, if set, is called with the settings of every new snapshot
 	// whose settings differ from the previous one's (the outbound HTTP
