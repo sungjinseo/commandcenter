@@ -510,7 +510,9 @@ func (d *DB) rewriteSecrets(ctx context.Context, fn func(string) (string, error)
 			}
 			n++
 		}
-		return nil
+		k, err = rewriteS3KeySecrets(ctx, tx.q, rewrite)
+		n += k
+		return err
 	})
 	return n, err
 }

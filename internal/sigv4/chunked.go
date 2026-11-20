@@ -6,7 +6,6 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"hash"
@@ -283,7 +282,7 @@ func NewChecksum(header string) hash.Hash {
 	case "crc32c":
 		return crc32.New(crc32.MakeTable(crc32.Castagnoli))
 	case "crc64nvme":
-		return &crc64h{tab: crc64nvme}
+		return crc64.New(crc64nvme)
 	case "sha1":
 		return sha1.New()
 	case "sha256":
@@ -291,19 +290,6 @@ func NewChecksum(header string) hash.Hash {
 	}
 	return nil
 }
-
-// crc64h is crc64 with the NVME table (crc64.New only takes ISO and ECMA
-// sums in big-endian; this is the same, kept explicit).
-type crc64h struct {
-	tab *crc64.Table
-	crc uint64
-}
-
-func (h *crc64h) Write(p []byte) (int, error) { h.crc = crc64.Update(h.crc, h.tab, p); return len(p), nil }
-func (h *crc64h) Sum(b []byte) []byte         { return binary.BigEndian.AppendUint64(b, h.crc) }
-func (h *crc64h) Reset()                      { h.crc = 0 }
-func (h *crc64h) Size() int                   { return 8 }
-func (h *crc64h) BlockSize() int              { return 1 }
 
 // EncodeChunked encodes body as aws-chunked for tests and tools: signed
 // with the seed signature of q (q.PayloadHash a Streaming* value), with a
