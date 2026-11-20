@@ -66,6 +66,7 @@ func (u *UI) apiRoutes(mux *http.ServeMux) {
 	u.securityRoutes(mux)
 	u.opsRoutes(mux)
 	u.userTokenRoutes(mux)
+	u.s3KeyRoutes(mux)
 	u.crowdRealmRoutes(mux)
 	u.stagingRoutes(mux)
 	u.transferRoutes(mux)

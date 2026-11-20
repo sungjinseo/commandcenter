@@ -7,7 +7,7 @@ import {
 import { initShell, renderChrome, openLogin, refreshMe, screenTitle } from "./shell.js";
 import { t } from "./i18n.js";
 import { viewTokens, showSettings } from "./admin.js";
-import { viewAccount, viewUserTokens } from "./access.js";
+import { viewAccount, viewUserTokens, viewS3Keys } from "./access.js";
 import { viewWelcome } from "./dash.js";
 import { viewRepos, viewTree } from "./browse.js";
 import { viewSearch, viewComponent } from "./search.js";
@@ -182,7 +182,7 @@ export function parse(hash) {
     if (params.length > max) return { notFound: true };
     return { key: head, params };
   }
-  if ((head === "user/account" || head === "user/usertoken" || head === "user/apitokens") && !params.length) return { key: head, params };
+  if ((head === "user/account" || head === "user/usertoken" || head === "user/s3keys" || head === "user/apitokens") && !params.length) return { key: head, params };
   return { notFound: true };
 }
 
@@ -215,6 +215,7 @@ async function show(view, r) {
     case "browse/search": return viewSearch(view, "generic", r.criteria);
     case "user/account": return viewAccount(view);
     case "user/usertoken": return viewUserTokens(view, false);
+    case "user/s3keys": return viewS3Keys(view);
     case "user/apitokens": return viewTokens(view, false);
   }
   if (r.key.startsWith("browse/search/")) return viewSearch(view, r.key.slice("browse/search/".length), r.criteria);

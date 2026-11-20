@@ -708,6 +708,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Version:  Version,
 		Node:     node,
 		Started:  time.Now(),
+		S3:       cfg.S3,
 		Tasks:    a.Tasks,
 		Log:      log,
 		Events:   hooks,

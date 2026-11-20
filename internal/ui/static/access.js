@@ -1380,6 +1380,90 @@ export async function viewUserTokens(view, admin, extra) {
   await Promise.all([loadMine(), admin ? loadAll() : null]);
 }
 
+// ---- S3 access keys: what S3 clients (aws cli, mc, boto3) sign requests with
+//   #user/s3keys   the caller's keys; a new key's secret is shown once
+
+export async function viewS3Keys(view) {
+  if (state.me.anonymous) return needLogin(view, t("nav.s3Keys"));
+  const isLive = alive();
+  const shown = h("div");
+  let unBusy = null;
+  const hideShown = () => { put(shown); if (unBusy) { unBusy(); unBusy = null; } };
+  const codeField = (label, text) => h("div", { class: "field" }, h("span", { class: "flabel" }, label), copyLine(text, label));
+  const showSecret = (x) => {
+    if (!unBusy) unBusy = markBusy("s3keys");
+    const hide = button(t("tok.hide"), "small");
+    hide.addEventListener("click", hideShown);
+    const ep = x.endpoint || "https://<s3-host>";
+    const snippet = ["aws configure set aws_access_key_id " + x.accessKeyId,
+      "aws configure set aws_secret_access_key " + x.secretAccessKey,
+      "aws configure set region " + (x.region || "us-east-1"),
+      "aws --endpoint-url " + ep + " s3 ls", "",
+      "mc alias set cc " + ep + " " + x.accessKeyId + " " + x.secretAccessKey,
+      "mc ls cc"].join("\n");
+    const pre = h("pre", { class: "code" }, snippet);
+    put(shown, h("div", { class: "token-box", role: "status" },
+      h("strong", null, t("s3k.showTitle")),
+      h("p", { class: "sub" }, t("s3k.showText")),
+      fields(codeField(t("s3k.id"), x.accessKeyId), codeField(t("s3k.secret"), x.secretAccessKey)),
+      h("div", { class: "snippet-head" }, h("span", null, t("s3k.clients")), copyButton(snippet, pre, t("s3k.copy"))), pre,
+      h("div", { class: "actions end" }, hide)));
+  };
+  const list = h("div", null, loading());
+  const name = textIn("", { placeholder: t("s3k.namePh"), maxlength: 100 });
+  const expires = h("input", { type: "date" });
+  const create = button(t("s3k.create"), "primary");
+  const load = async () => {
+    const d = await api("s3keys");
+    if (!isLive()) return;
+    const keys = d.s3Keys || [];
+    create.disabled = keys.length >= d.max;
+    const rows = keys.map((x) => {
+      const rm = button(t("common.delete"), "small danger");
+      rm.addEventListener("click", async () => {
+        if (!(await confirmDelete(t("s3k.delText", { id: x.accessKeyId }), t("s3k.delTitle")))) return;
+        rm.disabled = true;
+        try {
+          await api("s3keys/" + encSeg(x.accessKeyId), { method: "DELETE" });
+          if (isLive()) await load();
+        } catch (e) { rm.disabled = false; handleError(e); }
+      });
+      return row([
+        [h("code", null, x.accessKeyId), "name"],
+        [x.name || "—"],
+        [fmtDate(x.created), "nowrap"],
+        [x.expires ? h("span", null, fmtDate(x.expires), x.expired ? [" ", badge(t("ut.expired"), "red")] : null) : t("ut.never"), "nowrap"],
+        [x.lastUsed ? fmtDate(x.lastUsed) : t("tok.never"), "nowrap"],
+        [rm, "act"],
+      ], x.accessKeyId + " " + x.name);
+    });
+    put(list,
+      !d.enabled ? notice(t("s3k.off"), "amber") : kv(t("s3k.endpoint"), h("code", null, d.endpoint)),
+      tbl([t("s3k.id"), t("s3k.name"), t("tok.created"), t("ut.expires"), t("tok.lastUsed"), actHead()], rows, t("s3k.none")),
+      h("p", { class: "tiny muted" }, t("s3k.max", { n: d.max })));
+  };
+  create.addEventListener("click", async () => {
+    create.disabled = true;
+    try {
+      const body = { name: name.value.trim() };
+      if (expires.value) body.expires = expires.value;
+      const x = await api("s3keys", { method: "POST", body });
+      if (!isLive()) return;
+      name.value = ""; expires.value = "";
+      showSecret(x);
+      await load();
+    } catch (e) { create.disabled = false; handleError(e); }
+  });
+  put(view, pageHead(t("nav.s3Keys"), sub(t("s3k.sub", { user: state.me.user })), null, eyebrow()),
+    shown,
+    h("div", { class: "two" },
+      card(t("s3k.newTitle"), t("s3k.newSub"), [fields(field(t("s3k.name"), name), field(t("s3k.expires"), expires, t("s3k.expiresHelp"))),
+        h("div", { class: "actions" }, create)]),
+      h("div", { class: "notice" }, icon("info", "hint-ico"), t("s3k.about"))),
+    card(t("s3k.mine"), null, list));
+  await load();
+}
+
 // ---- account ---------------------------------------------------------------------
 
 export async function viewAccount(view) {
@@ -1422,7 +1506,8 @@ export async function viewAccount(view) {
     pwCard = card(t("acct.pwTitle"), t("acct.pwSub"), form);
   }
   put(view, pageHead(t("nav.account"), sub(me.user), acts(h("a", { class: "btn", href: "#user/apitokens" }, icon("token"), t("nav.tokens")),
-    h("a", { class: "btn", href: "#user/usertoken" }, icon("key"), t("nav.userToken"))), eyebrow()),
+    h("a", { class: "btn", href: "#user/usertoken" }, icon("key"), t("nav.userToken")),
+    h("a", { class: "btn", href: "#user/s3keys" }, icon("key"), t("nav.s3Keys"))), eyebrow()),
     h("div", { class: "two" },
       card(t("users.info"), t("users.infoSub"), [
         kv(t("users.id"), me.user),

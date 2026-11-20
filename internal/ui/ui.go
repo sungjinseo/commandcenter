@@ -51,6 +51,7 @@ type UI struct {
 	Log     *slog.Logger
 	Events  repo.EventSink // activity events; nil records none
 	Logs    *logring.Ring  // recent log records for the log viewer; nil serves none
+	S3      config.S3      // where the S3 API answers, for the S3 key screen's client examples
 	Mail    Mailer         // synchronous sender for the SMTP test; nil serves 501
 
 	Metrics  *metrics.Recorder // process-lifetime request counters for /-/metrics/prometheus; nil exports none
