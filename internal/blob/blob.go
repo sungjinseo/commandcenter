@@ -259,6 +259,14 @@ func (s *Store) SessionPath(id string) string {
 	return filepath.Join(s.root, "tmp", sessionPrefix+id)
 }
 
+// UploadDir is the directory an S3 multipart upload (format/s3) keeps its
+// parts in until it completes: <root>/tmp/mpu-<id>. id is the caller's to
+// validate. SweepTmp leaves such directories alone; their owner removes
+// them.
+func (s *Store) UploadDir(id string) string {
+	return filepath.Join(s.root, "tmp", "mpu-"+id)
+}
+
 func (d dir) path(sha string) string {
 	return filepath.Join(d.root, "blobs", "sha256", sha[:2], sha[2:4], sha)
 }

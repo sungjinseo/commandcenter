@@ -610,6 +610,9 @@ func ApplyRepositoryDefaults(r *Repository) {
 		r.AutoBlock = &yes
 	}
 	if r.Type == "hosted" {
+		if r.WritePolicy == "" && r.Format == "s3" {
+			r.WritePolicy = "allow" // S3 objects are replaced by a PUT of the same key
+		}
 		if r.WritePolicy == "" {
 			r.WritePolicy = "allow_once"
 		}

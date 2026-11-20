@@ -176,7 +176,8 @@ func (a *Authenticator) S3Check(ctx context.Context, id string, verify func(secr
 		return a.lookup(ctx, k.Owner)
 	})
 	if err != nil {
-		if verr != nil && errors.Is(err, ErrBadCredentials) {
+		var th *ThrottledError
+		if verr != nil && !errors.As(err, &th) && errors.Is(err, ErrBadCredentials) {
 			return Principal{}, verr
 		}
 		return Principal{}, err

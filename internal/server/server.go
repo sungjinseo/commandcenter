@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -56,6 +57,17 @@ type Server struct {
 		http.Handler
 		repo.ErrorWriter
 		TokenOwner(r *http.Request) string
+	}
+
+	// S3 serves the S3 API (format/s3) for the requests Match takes (the S3
+	// host) and every request of S3Handler (the S3 port). They skip the
+	// Basic/token authentication and the cross-origin check: the handler
+	// checks their SigV4 signatures itself. BucketOf names the bucket for
+	// the request metrics.
+	S3 interface {
+		http.Handler
+		Match(r *http.Request) bool
+		BucketOf(r *http.Request) string
 	}
 
 	// TerraformDiscovery, if set, answers GET /.well-known/terraform.json,
@@ -311,6 +323,7 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 		rec := &statusRecorder{ResponseWriter: w}
 		var p auth.Principal
 		var owner string // p's, or the owner of a registry token
+		s3 := s.S3 != nil && (r.Context().Value(s3Port{}) != nil || s.S3.Match(r))
 		// Deferred so the request is logged even when a handler panics
 		// (http.ErrAbortHandler mid-stream); the panic still propagates.
 		defer func() {
@@ -325,6 +338,9 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 				name, ok := strings.CutPrefix(r.URL.Path, "/repository/")
 				if !ok {
 					name, ok = strings.CutPrefix(r.URL.Path, "/v2/")
+				}
+				if s3 {
+					name, ok = s.S3.BucketOf(r), true
 				}
 				if ok {
 					name, _, _ = strings.Cut(name, "/")
@@ -359,6 +375,12 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			// No GET or HEAD handler reads a body, and net/http drains it
 			// without a deadline once a long response starts: drain it now.
 			r.Body.Close()
+		}
+		if s3 {
+			// Signed requests: the S3 handler authenticates them and answers
+			// in S3's form. A browser never sends a SigV4 signature on its own.
+			s.S3.ServeHTTP(rec, r)
+			return
 		}
 		// A browser replays Basic credentials it cached after our challenge
 		// on a cross-site form post too: refuse such writes, on every route,
@@ -405,6 +427,18 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 			}
 			next.ServeHTTP(rec, r.WithContext(auth.WithPrincipal(r.Context(), p)))
 		}
+	})
+}
+
+// s3Port marks the requests of S3Handler.
+type s3Port struct{}
+
+// S3Handler serves every request as an S3 API request, for the S3
+// listener (s3.listen), with Handler's logging and body limits.
+func (s *Server) S3Handler() http.Handler {
+	h := s.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), s3Port{}, true)))
 	})
 }
 
