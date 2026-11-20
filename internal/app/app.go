@@ -40,8 +40,8 @@ import (
 	"commandcenter/internal/format/pypi"
 	"commandcenter/internal/format/r"
 	"commandcenter/internal/format/raw"
-	s3api "commandcenter/internal/format/s3"
 	"commandcenter/internal/format/rubygems"
+	s3api "commandcenter/internal/format/s3"
 	"commandcenter/internal/format/swift"
 	"commandcenter/internal/format/terraform"
 	"commandcenter/internal/format/yum"
@@ -75,10 +75,10 @@ type App struct {
 	// S3 is the S3 API's handler, whose stale multipart uploads Serve sweeps.
 	S3Handler http.Handler
 	S3        *s3api.Handler
-	Metrics  *metrics.Recorder // download and request counters; flushed by Serve
-	Mail     *mail.Sender      // failure and test e-mail; Close drains its queue
-	Events   *events.Recorder  // activity events; written by a goroutine that Close stops
-	Deleters *cleanup.Registry // per-format component deleters used by cleanup
+	Metrics   *metrics.Recorder // download and request counters; flushed by Serve
+	Mail      *mail.Sender      // failure and test e-mail; Close drains its queue
+	Events    *events.Recorder  // activity events; written by a goroutine that Close stops
+	Deleters  *cleanup.Registry // per-format component deleters used by cleanup
 	// DockerKey signs the Docker registry's and Conan's bearer tokens: the
 	// key every node shares (meta.DB.TokenKey).
 	DockerKey []byte
