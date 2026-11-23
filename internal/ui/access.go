@@ -53,7 +53,7 @@ const (
 
 var (
 	userIDRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*$`)
-	accessFormats = []string{"maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm", "yum", "nuget", "apt", "composer", "conda", "rubygems", "gitlfs", "r", "conan", "p2", "swift", "cocoapods", "huggingface", "terraform"}
+	accessFormats = []string{"maven", "npm", "pypi", "go", "cargo", "docker", "raw", "helm", "yum", "nuget", "apt", "composer", "conda", "rubygems", "gitlfs", "r", "conan", "p2", "swift", "cocoapods", "huggingface", "terraform", "s3"}
 )
 
 // errAdminOnly refuses a delegated caller a change of what makes someone an

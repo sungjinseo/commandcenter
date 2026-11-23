@@ -417,6 +417,7 @@ func TestSchemaCompat(t *testing.T) {
 			"(no negative caching, as before): expand-only, an older build ignores the new columns and keys (failure mails only, queued runs wait for a newer leader), " +
 			"reads 0s and -1 as no negative caching and never matches a nexus webhook's event names; also component_tags rows of Maven SNAPSHOT builds copied from their X-SNAPSHOT components and the scope of existing maven.purge-snapshots tasks, once; also roles.name, roles.roles (nested roles), roles.nexus and users.last_name: an older build ignores nested roles and the new privilege targets, so beside this one a user can only have less access"},
 		{9, 7, "task_runs: expand-only, a new table an older build never reads, so 0.3.0 (schema 7) still runs beside it"},
+		{10, 7, "s3_keys, s3_object_meta and s3_uploads: expand-only, new tables an older build never reads; the first s3 repository raises compat to 10"},
 	}
 	for i, d := range decisions {
 		// Expand-only keeps the previous decision's compat (or version-1).

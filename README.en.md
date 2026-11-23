@@ -4,7 +4,7 @@
 
 <p align="center">
   A small, solid open-source artifact registry.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace · Terraform in one binary, running as a single Kubernetes pod.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace · Terraform · S3 in one binary, running as a single Kubernetes pod.
 </p>
 
 <p align="center">
@@ -62,6 +62,7 @@ Everything an in-house package repository needs, in one binary, with no editions
 | CocoaPods | ❌ | ✅ | ❌ | pod install (CDN, Linux without Xcode integration) |
 | HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers |
 | Terraform | ✅ | ✅ | ✅ | terraform, tofu |
+| S3 | ✅ | ❌ | ❌ | aws cli, mc (S3 API, SigV4) |
 
 Every format is tested end to end with the real clients in this table (`test/e2e.sh`). Windows and macOS clients, Visual Studio and Xcode integration were not run.
 

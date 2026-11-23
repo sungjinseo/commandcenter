@@ -348,6 +348,7 @@ const BROWSE = () => [[null, [
 const USER = () => [[null, [
   ["#user/account", t("nav.account"), "user"],
   ["#user/usertoken", t("nav.userToken"), "key"],
+  ["#user/s3keys", t("nav.s3Keys"), "key"],
   ["#user/apitokens", t("nav.tokens"), "token"],
 ]]];
 const ADMIN = () => [

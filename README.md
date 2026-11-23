@@ -4,7 +4,7 @@
 
 <p align="center">
   작고 단단한 오픈소스 아티팩트 레지스트리.<br>
-  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace · Terraform을 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
+  Maven · npm · PyPI · Go · Cargo · Docker · raw · Helm · Yum · NuGet · APT · RubyGems · Composer · Conda · Conan · R · Git LFS · p2 · Swift · CocoaPods · HuggingFace · Terraform · S3를 한 바이너리에 담아 Kubernetes 파드 하나로 돌립니다.
 </p>
 
 <p align="center">
@@ -62,6 +62,7 @@
 | CocoaPods | ❌ | ✅ | ❌ | pod install (CDN, Linux, Xcode 연결 제외) |
 | HuggingFace | ❌ | ✅ | ❌ | huggingface_hub, transformers |
 | Terraform | ✅ | ✅ | ✅ | terraform, tofu |
+| S3 | ✅ | ❌ | ❌ | aws cli, mc (S3 API, SigV4) |
 
 모든 포맷을 표에 적은 실제 클라이언트로 E2E 시험합니다(`test/e2e.sh`). Windows와 macOS의 클라이언트, Visual Studio, Xcode 연결은 시험하지 않았습니다.
 

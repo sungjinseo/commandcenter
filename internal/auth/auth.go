@@ -173,6 +173,7 @@ type Authenticator struct {
 	cache map[string]time.Time // user + "\x00" + sha256(hash, password) -> expiry
 	fails map[string]failRec   // sign-in throttle (throttle.go)
 	gates map[string]*failGate // names being checked (throttle.go)
+	s3    s3Keys               // S3 access keys read (s3key.go)
 
 	// OnSettings, if set, is called with the settings of every new snapshot
 	// whose settings differ from the previous one's (the outbound HTTP
@@ -955,7 +956,7 @@ type TokenRevoker interface {
 	DeleteUserTokens(ctx context.Context, owners ...string) (int64, error)
 }
 
-// RevokeUserTokens deletes every API token of user id: the stored user's and
+// RevokeUserTokens deletes every API token and S3 access key of user id: the stored user's and
 // those of the LDAP and OIDC users with that id ("ldap:<id>", "oidc:<id>"), as OnUserChanged ends
 // both users' sessions. It returns how many it deleted (QA N-16).
 func (a *Authenticator) RevokeUserTokens(ctx context.Context, id string) (int64, error) {
@@ -963,7 +964,11 @@ func (a *Authenticator) RevokeUserTokens(ctx context.Context, id string) (int64,
 	if !ok {
 		return 0, errors.New("auth: the token store cannot revoke tokens")
 	}
-	return rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id, crowdOwnerPrefix+id, rutOwnerPrefix+id, samlOwnerPrefix+id)
+	n, err := rv.DeleteUserTokens(ctx, id, ldapOwnerPrefix+id, oidcOwnerPrefix+id, crowdOwnerPrefix+id, rutOwnerPrefix+id, samlOwnerPrefix+id)
+	a.s3.mu.Lock()
+	a.s3.m = nil // the S3 keys went too: forget the ones read
+	a.s3.mu.Unlock()
+	return n, err
 }
 
 // RevokeToken deletes token when p owns it (npm logout). A token that does not

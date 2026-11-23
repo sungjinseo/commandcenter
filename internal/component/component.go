@@ -366,7 +366,7 @@ func DeriveAsset(format, p string) (group, name, version string, ok bool) {
 			return "", "", "", false
 		}
 		return "", segs[1], v, true
-	case "raw": // every file is a component of its own, named by its path
+	case "raw", "s3": // every file is a component of its own, named by its path
 		return "", p, "", p != ""
 	case "helm": // <name>-<version>.tgz and its provenance file, <name>-<version>.tgz.prov
 		name, version, ok = SplitHelm(strings.TrimSuffix(p, ".prov"))

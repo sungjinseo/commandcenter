@@ -18,12 +18,12 @@ const tk = (base, k) => t(base + "." + k);
 const createLink = (recipe) => adminRepoLink("create") + (recipe ? ":" + encodeURIComponent(recipe) : "");
 
 // Recipe names: "maven2" is our "maven" format.
-const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"], ["rubygems", "rubygems"], ["conda", "conda"], ["composer", "composer"], ["conan", "conan"], ["r", "r"], ["gitlfs", "gitlfs"], ["p2", "p2"], ["swift", "swift"], ["cocoapods", "cocoapods"], ["huggingface", "huggingface"], ["terraform", "terraform"]];
+const RECIPE_FORMATS = [["maven2", "maven"], ["npm", "npm"], ["pypi", "pypi"], ["go", "go"], ["cargo", "cargo"], ["docker", "docker"], ["raw", "raw"], ["helm", "helm"], ["nuget", "nuget"], ["apt", "apt"], ["yum", "yum"], ["rubygems", "rubygems"], ["conda", "conda"], ["composer", "composer"], ["conan", "conan"], ["r", "r"], ["gitlfs", "gitlfs"], ["p2", "p2"], ["swift", "swift"], ["cocoapods", "cocoapods"], ["huggingface", "huggingface"], ["terraform", "terraform"], ["s3", "s3"]];
 const TYPES = ["hosted", "proxy", "group"];
 // Formats the server stores only as some types (the others are refused with
 // 400): [types, the notice shown on the create form].
 const TYPE_LIMITS = { gitlfs: [["hosted"], "rf.hostedOnly"], p2: [["proxy", "group"], "rf.noHosted"],
-  cocoapods: [["proxy"], "rf.proxyOnly"], huggingface: [["proxy"], "rf.proxyOnly"] };
+  cocoapods: [["proxy"], "rf.proxyOnly"], huggingface: [["proxy"], "rf.proxyOnly"], s3: [["hosted"], "rf.hostedOnly"] };
 const typesOf = (format) => (TYPE_LIMITS[format] ? TYPE_LIMITS[format][0] : TYPES);
 const RECIPES = RECIPE_FORMATS.flatMap(([label, format]) => typesOf(format).map((type) => ({ id: label + "-" + type, format, type })));
 const recipeOf = (format, type) => RECIPES.find((r) => r.format === format && r.type === type);
@@ -346,7 +346,7 @@ export async function viewRepoForm(view, o) {
       name: "", format: r.format, type: r.type, remote: r.format === "docker" && r.type === "proxy" ? REMOTE_EXAMPLE.docker : "", remoteAuth: null,
       metadataMaxAge: "24h", contentMaxAge: "-1", negativeCacheTTL: "10m",
       members: [], writeMember: "", versionPolicy: r.format === "maven" && r.type === "hosted" ? "release" : "",
-      writePolicy: r.type === "hosted" ? "allow_once" : "", anonymousRead: null,
+      writePolicy: r.type === "hosted" ? (r.format === "s3" ? "allow" : "allow_once") : "", anonymousRead: null,
       distribution: r.format === "apt" && r.type === "hosted" ? "stable" : "", component: r.format === "apt" && r.type === "hosted" ? "main" : "", depth: 0,
       strictContentTypeValidation: false, contentDisposition: "", blocked: false, autoBlock: r.type === "proxy",
       firewall: r.type === "proxy" && OSV_FORMATS.includes(r.format) ? { enabled: false, blockMalicious: true, blockSeverityAtLeast: "none", allowList: [] } : null,

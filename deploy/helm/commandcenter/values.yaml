@@ -166,6 +166,19 @@ service:
 #   nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
 #   nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
 #   nginx.ingress.kubernetes.io/proxy-request-buffering: "off" # not on the shared controller's disk
+# The S3 API: S3 clients (aws cli, mc, boto3, rclone) use the s3 repositories as buckets, signed
+# with the S3 access keys users create in the web UI (S3 Access Keys). Requests whose Host is
+# host go to the S3 API on the main port (path-style: https://<host>/<bucket>/<key>), and with
+# ingress.enabled the Ingress gets a rule for host too (add it to ingress.tls yourself). port, when
+# not 0, is a port of its own where every request is an S3 one (plain HTTP), also on the Service.
+# Proxies in front must keep Host and the path as the client sent them: a signature covers both.
+s3:
+  enabled: false
+  host: ""             # s3.repo.example.com
+  virtualHost: false   # also <bucket>.<host>: needs a wildcard DNS name and certificate
+  port: 0              # e.g. 9000
+  region: us-east-1    # the region clients sign for
+
 ingress:
   enabled: false
   className: ""

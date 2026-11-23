@@ -146,6 +146,9 @@ type Config struct {
 	// and write under (or COMMANDCENTER_EXPORT_ROOT); empty disables them.
 	ExportRoot string `yaml:"exportRoot"`
 
+	// S3 serves the S3 API for the s3 repositories (format/s3).
+	S3 S3 `yaml:"s3"`
+
 	// Present names the top-level keys the file sets, so the app can warn
 	// about keys that the database has superseded.
 	Present map[string]bool `yaml:"-"`
@@ -423,7 +426,7 @@ func validateFirewall(r Repository) error {
 func (r Repository) IsOnline() bool { return r.Online == nil || *r.Online }
 
 var (
-	knownFormats = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true, "swift": true, "cocoapods": true, "huggingface": true, "terraform": true}
+	knownFormats = map[string]bool{"maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "docker": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true, "swift": true, "cocoapods": true, "huggingface": true, "terraform": true, "s3": true}
 	// aptNameRE is a distribution or component name: path segments, as
 	// apt's sources.list takes them ("stable", "bookworm-updates", "main").
 	aptNameRE      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9][A-Za-z0-9._+-]*)*$`)
@@ -539,6 +542,10 @@ func (c *Config) applyDefaults() {
 	if c.MemoryLimitMiB == 0 {
 		c.MemoryLimitMiB = 80
 	}
+	if c.S3.Region == "" {
+		c.S3.Region = "us-east-1"
+	}
+	c.S3.Host = strings.ToLower(strings.TrimSuffix(c.S3.Host, "."))
 	for i := range c.Repositories {
 		ApplyRepositoryDefaults(&c.Repositories[i])
 	}
@@ -603,6 +610,9 @@ func ApplyRepositoryDefaults(r *Repository) {
 		r.AutoBlock = &yes
 	}
 	if r.Type == "hosted" {
+		if r.WritePolicy == "" && r.Format == "s3" {
+			r.WritePolicy = "allow" // S3 objects are replaced by a PUT of the same key
+		}
 		if r.WritePolicy == "" {
 			r.WritePolicy = "allow_once"
 		}
@@ -631,6 +641,9 @@ func (c *Config) validate() error {
 	}
 	if c.TaskRunTimeoutHours < 0 || c.TaskRunTimeoutHours > 720 {
 		add("taskRunTimeoutHours must be between 1 and 720 (0: the default, 6)")
+	}
+	if err := c.S3.validate(); err != nil {
+		errs = append(errs, err)
 	}
 	// baseURL and maxUploadMiB are import-only (plan 12): a problem is
 	// reported in SettingsErr and only matters before the first import.
@@ -935,6 +948,15 @@ func ValidateRepositories(list []Repository) error {
 		}
 		if r.Format == "gitlfs" && r.Type != "hosted" {
 			add("repository %q: gitlfs supports hosted repositories only", r.Name)
+		}
+		if r.Format == "s3" {
+			if r.Type != "hosted" {
+				add("repository %q: s3 supports hosted repositories only", r.Name)
+			}
+			if !ValidBucketName(r.Name) {
+				add("repository %q: an s3 repository is a bucket: its name must be 3 to 63 lower-case letters, digits, '-' and '.', "+
+					"start and end with a letter or digit, and not look like an IP address", r.Name)
+			}
 		}
 		if r.Format == "p2" && r.Type == "hosted" {
 			add("repository %q: p2 supports proxy and group repositories only", r.Name)

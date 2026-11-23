@@ -33,6 +33,7 @@ Command Center는 저메모리 패키지 저장소입니다. 에디션은 하나
 | CocoaPods | - | O | - |
 | HuggingFace | - | O | - |
 | Terraform | O | O | O |
+| S3 | O | - | - |
 
 - **hosted**: 직접 업로드한 패키지를 저장합니다.
 - **proxy**: 원격 저장소(Maven Central, npmjs, pypi.org, proxy.golang.org, crates.io 등)를 처음 요청할 때 가져와 캐시합니다.
@@ -2648,6 +2649,45 @@ curl -fsS -X PUT -H "$H" --data-binary @terraform-registry-manifest.json        
 
 Kubernetes에서는 `docker compose exec commandcenter` 대신 `kubectl -n <네임스페이스> exec commandcenter-0 --`를 씁니다("Kubernetes"의 "동작 방식" 참고).
 
+### S3 설정
+
+`s3` 형식 저장소는 S3 API로 쓰는 bucket입니다. 저장소 하나가 bucket 하나이고, 객체는 다른 포맷의 파일처럼 asset으로 저장되므로 blob store(파일·S3·Azure·GCS·그룹, 저장소별 볼륨), cleanup 정책, 둘러보기, 권한이 그대로 적용됩니다. hosted만 있습니다. 저장소 이름은 S3 bucket 이름 규칙(소문자·숫자·`-`·`.`, 3~63자, 영숫자로 시작·끝, IP 주소 형태 금지)을 따라야 하고, `writePolicy`의 기본값은 `allow`(같은 key에 PUT하면 바뀜)입니다. 아래는 실제 aws cli 2와 mc로 확인했습니다(`test/smoke/s3-smoke.sh`).
+
+**S3 API 켜기.** `config.yaml`의 `s3`에 둘 중 하나 이상을 적고 재시작합니다(Helm 차트는 `s3.enabled`, `s3.host`, `s3.port`).
+
+```yaml
+s3:
+  host: s3.cc.example.com   # 이 Host로 온 요청은 S3 API(path-style: https://s3.cc.example.com/<bucket>/<key>)
+  virtualHost: false        # 켜면 <bucket>.s3.cc.example.com도 받음(와일드카드 DNS·인증서 필요)
+  listen: ":9000"           # 전용 포트: 이 포트의 모든 요청이 S3 API(평문 HTTP)
+  region: us-east-1         # GetBucketLocation이 답하는 region
+```
+
+클라이언트가 서명한 region은 어떤 값이든 받습니다. 리버스 프록시는 `Host`와 경로를 클라이언트가 보낸 그대로 넘겨야 합니다(서명이 둘을 덮습니다). 큰 객체의 CompleteMultipartUpload는 part를 하나로 합치는 동안 10초마다 공백을 보내 연결을 유지하므로, 프록시의 응답 대기 시간은 그보다 길면 됩니다. 본문 크기 한도(`maxUploadMiB`)는 단일 PUT과 part 하나에 각각 적용됩니다.
+
+**액세스 키.** 웹 UI의 사용자 메뉴 "S3 액세스 키"(또는 `POST /-/api/s3keys`, 비밀번호·세션 로그인과 `X-Command-Center-UI: 1` 헤더)에서 만듭니다. 비밀 액세스 키는 만들 때 한 번만 보입니다. 사용자당 10개까지이고 만료일을 둘 수 있습니다. 키는 주인의 역할과 저장소 권한(read·add·edit·delete)으로 동작하고, 설정 변경이나 키 발급은 할 수 없습니다. 주인을 비활성화·삭제하면 키도 바로 막히고, "토큰 모두 폐기"는 S3 키도 지웁니다. 지운 키는 그 노드에서 바로, 다른 노드에서는 30초 안에 막힙니다. 비밀 키는 비밀값 키로 암호화해 저장합니다("저장된 비밀값 암호화" 참고).
+
+```bash
+aws configure set aws_access_key_id CCK...
+aws configure set aws_secret_access_key ...
+aws --endpoint-url https://s3.cc.example.com s3 cp ./build.tar.gz s3://artifacts/app/1.0/build.tar.gz
+aws --endpoint-url https://s3.cc.example.com s3 ls s3://artifacts/app/ --recursive
+aws --endpoint-url https://s3.cc.example.com s3 presign s3://artifacts/app/1.0/build.tar.gz --expires-in 3600
+
+mc alias set cc https://s3.cc.example.com CCK... <secret> --path on
+mc mirror ./site cc/artifacts/site
+```
+
+아래 두 클라이언트는 아직 실제로 돌려 보지 않았습니다. boto3는 `boto3.client("s3", endpoint_url="https://s3.cc.example.com", aws_access_key_id=..., aws_secret_access_key=...)`, Terraform S3 backend는 `endpoints = { s3 = "https://s3.cc.example.com" }`, `use_path_style = true`, `skip_credentials_validation = true`, `skip_requesting_account_id = true`, `skip_region_validation = true`와 잠금에 `use_lockfile = true`(조건부 PUT)를 씁니다.
+
+**지원하는 작업.** ListBuckets, HeadBucket, CreateBucket, DeleteBucket(비었을 때), GetBucketLocation, PutObject, GetObject(Range, 조건부 요청, presigned URL의 `response-*`), HeadObject, DeleteObject, DeleteObjects, CopyObject(같은 blob store면 바이트를 복사하지 않음), ListObjects(V1·V2, `delimiter`, `encoding-type=url`), Multipart Upload(Create, UploadPart, Complete, Abort, ListParts, ListMultipartUploads), 조건부 PUT(`If-None-Match: *`, `If-Match`). 서명은 SigV4의 헤더·presigned URL·`aws-chunked`(chunk 서명, trailer 체크섬 crc32·crc32c·crc64nvme·sha1·sha256)를 받습니다. 메타데이터는 `Content-Type`, `x-amz-meta-*`(2 KiB까지), `Cache-Control`, `Content-Disposition`, `Content-Encoding`, `Content-Language`, `Expires`를 저장합니다.
+
+**권한.** CreateBucket은 s3 저장소를 만들 권한(admin 또는 저장소 관리 위임), DeleteBucket은 그 저장소를 지울 관리 권한이 필요합니다. 객체는 read(GET·HEAD·목록), add(PUT·Multipart), edit(있는 key 덮어쓰기), delete(DELETE)입니다. 익명 요청은 그 저장소의 `anonymousRead`를 따릅니다. ListBuckets는 읽을 수 있는 s3 저장소만 보여 줍니다.
+
+**`/repository/<bucket>/`.** 같은 객체를 기존 URL로 읽을 수 있습니다(GET·HEAD·디렉터리 목록). 쓰기는 S3 API로만 받습니다.
+
+**Multipart 저장 위치.** 진행 중인 업로드의 part는 그 bucket의 blob store `tmp/mpu-<id>/`에 있고, Complete가 이를 이어 blob 하나로 저장합니다. 그래서 큰 객체는 part를 쓰는 IO와 합치는 IO가 한 번씩 듭니다. 일주일 넘게 part가 오지 않은 업로드는 서버가 한 시간마다 지웁니다. 여러 노드에서는 `tmp/`가 공유 볼륨이라 다른 노드로 part를 이어 올릴 수 있습니다.
+
 ### 로그
 
 표준 출력에 JSON 한 줄씩 기록합니다. 요청마다 `id`, `method`, `path`, `status`, `bytes`, `ms`, `user`, `remote` 필드가 있습니다.
@@ -3019,6 +3059,7 @@ docker compose start
 
 - 웹 UI로 저장소 만들기·편집·삭제, 사용자·역할·Realm(LDAP, OIDC)·Blob Store·일반 설정·이메일 관리, Maven, npm, PyPI 업로드를 할 수 있습니다. Go·Cargo 업로드 화면은 없습니다(클라이언트로 올립니다). 저장소 정의는 DB에 있고 `config.yaml`의 `repositories:`는 첫 시작에만 쓰입니다. 포맷 고유의 검색은 `npm search`, `pip search`, `conan search` 등 각 포맷 설명에 적은 것만 있습니다.
 - **Terraform의 알려진 제한**: Terraform은 레지스트리를 `https://<호스트>`로만 찾으므로 HTTPS가 필요하고, 한 호스트에는 기본 저장소(`terraformDefaultRepository`) 하나만 보입니다. Terraform은 모듈 아카이브·프로바이더 zip을 받을 때 `~/.terraformrc` 토큰을 보내지 않으므로(모듈은 `~/.netrc`만, 프로바이더의 `SHA256SUMS`·서명은 자격 증명 없이) 비공개 프로바이더는 그 저장소(또는 group)에 `anonymousRead: true`가 필요하고, 비공개 모듈은 `~/.netrc`가 필요합니다. 업스트림의 `git::` 모듈 소스는 캐시하지 않습니다("Terraform 설정" 참고).
+- **S3의 알려진 제한**: versioning, bucket policy, lifecycle 규칙(XML), ACL 쓰기, 태그, Object Lock, SSE-C, S3 Select, UploadPartCopy, SigV2가 없습니다(`NotImplemented` 또는 거부). ACL·versioning·policy를 읽는 요청에는 고정된 답을 줍니다. 수명 주기는 cleanup 정책으로, 접근 제어는 역할로 합니다("S3 설정" 참고).
 - **SAML의 알려진 제한**: Single Logout이 없어 로그아웃은 Command Center 세션만 끝냅니다. IdP-initiated 로그인은 `allowIdpInitiated`를 켰을 때만 받습니다("SAML 설정" 참고).
 - **방화벽(OSV)의 알려진 제한**: 격리는 파일을 받아 캐시한 뒤 내줄 때 거부하는 방식이라 메타데이터(npm packument, PyPI 인덱스, `maven-metadata.xml`)에는 격리된 버전이 그대로 나오고, 클라이언트가 그 버전을 고르면 403(일반 텍스트 본문)을 받습니다. 온라인 모드에서 각 버전의 첫 다운로드는 OSV API를 기다립니다(최대 15초, 그 뒤 fail open). conda, Docker, apt, yum, Helm, raw, Git LFS는 대상이 아닙니다("취약점 데이터와 방화벽(OSV)" 참고).
 - **스테이징의 알려진 제한**: 스테이징 이동은 maven, npm, raw, pypi, nuget, helm, yum만 되고 docker를 포함한 나머지 포맷은 거부합니다. npm은 대상의 `latest`만 갱신하고 다른 dist-tag는 옮기지 않습니다. 프로토콜 클라이언트로 지운 컴포넌트는 태그 연결이 남습니다("태그와 스테이징" 참고).

@@ -145,7 +145,11 @@ type querier interface {
 //	   deleting a task there still removes the task's history (the foreign key
 //	   cascades in the database). compat stays 7: 0.3.0 is schema 7, so it can
 //	   keep running through a rolling upgrade to the next release.
-const schemaVersion = 9
+//	10: s3_keys, s3_object_meta and s3_uploads (s3.go): expand-only, new
+//	   tables an older build never reads. The first repository of format
+//	   s3 raises compat to 10 (insertRepository): an older build does not
+//	   know the format.
+const schemaVersion = 10
 
 // schemaCompat is the oldest schemaVersion that may run on a database this
 // build upgraded, stamped in schema_version.compat. A change older builds

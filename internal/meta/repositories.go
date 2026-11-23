@@ -363,7 +363,7 @@ func dropRepoPrivileges(ctx context.Context, q querier, name string) ([]string, 
 }
 
 func purgeRepository(ctx context.Context, q querier, name string) error {
-	for _, table := range []string{"assets", "packages", "dist_tags", "negative_cache", "component_tags", "blob_store_moves", "vuln_findings", "firewall_quarantine", "repo_usage", "eval_components"} {
+	for _, table := range []string{"assets", "packages", "dist_tags", "negative_cache", "component_tags", "blob_store_moves", "vuln_findings", "firewall_quarantine", "repo_usage", "eval_components", "s3_uploads"} {
 		if _, err := q.ExecContext(ctx, `DELETE FROM `+table+` WHERE repo = ?`, name); err != nil {
 			return fmt.Errorf("purge %s of %q: %w", table, name, err)
 		}
@@ -375,6 +375,11 @@ func insertRepository(ctx context.Context, q querier, def config.Repository, gen
 	js, err := json.Marshal(def)
 	if err != nil {
 		return err
+	}
+	if def.Format == "s3" {
+		if err := raiseCompat(ctx, q, schemaS3); err != nil {
+			return err
+		}
 	}
 	now := toMs(time.Now())
 	_, err = q.ExecContext(ctx, `INSERT INTO repositories(name, format, type, config, created_at, updated_at, gen) VALUES(?,?,?,?,?,?,?)`,

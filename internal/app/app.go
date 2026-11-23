@@ -41,6 +41,7 @@ import (
 	"commandcenter/internal/format/r"
 	"commandcenter/internal/format/raw"
 	"commandcenter/internal/format/rubygems"
+	s3api "commandcenter/internal/format/s3"
 	"commandcenter/internal/format/swift"
 	"commandcenter/internal/format/terraform"
 	"commandcenter/internal/format/yum"
@@ -70,10 +71,14 @@ type App struct {
 	Auth     *auth.Authenticator
 	Registry *repo.Registry
 	Handler  http.Handler
-	Metrics  *metrics.Recorder // download and request counters; flushed by Serve
-	Mail     *mail.Sender      // failure and test e-mail; Close drains its queue
-	Events   *events.Recorder  // activity events; written by a goroutine that Close stops
-	Deleters *cleanup.Registry // per-format component deleters used by cleanup
+	// S3Handler serves the S3 API on the S3 listener (config s3.listen);
+	// S3 is the S3 API's handler, whose stale multipart uploads Serve sweeps.
+	S3Handler http.Handler
+	S3        *s3api.Handler
+	Metrics   *metrics.Recorder // download and request counters; flushed by Serve
+	Mail      *mail.Sender      // failure and test e-mail; Close drains its queue
+	Events    *events.Recorder  // activity events; written by a goroutine that Close stops
+	Deleters  *cleanup.Registry // per-format component deleters used by cleanup
 	// DockerKey signs the Docker registry's and Conan's bearer tokens: the
 	// key every node shares (meta.DB.TokenKey).
 	DockerKey []byte
@@ -488,6 +493,9 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	conanH := conan.New(store, conan.NewFetcher(store, maxConcurrentFetches), authn, baseURL, dockerKey)
 	authn.Bearers = append(authn.Bearers, conanH.VerifyToken) // Conan login tokens
 	handlers := map[string]repo.Handler{"go": goH, "maven": mavenH, "npm": npmH, "pypi": pypiH, "cargo": cargoH, "docker": dockerH, "raw": rawH, "helm": helmH, "nuget": nugetH, "yum": yumH, "apt": aptH, "composer": composerH, "conda": condaH, "rubygems": gemsH, "gitlfs": gitlfsH, "r": rH, "conan": conanH, "p2": p2H, "swift": swiftH, "cocoapods": podsH, "huggingface": hfH, "terraform": terraformH}
+	// The S3 API's handler; its registry is set below, once there is one.
+	s3H := s3api.New(store, nil, authn, cfg.S3)
+	handlers["s3"] = s3H
 	// Hosted deletes go through the format handlers, which share their locks
 	// with uploads; proxies of every format use the generic deleter.
 	deleters := cleanup.NewRegistry(store)
@@ -510,6 +518,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	deleters.Register("conan", "hosted", conanH)
 	deleters.Register("swift", "hosted", swiftH)
 	deleters.Register("terraform", "hosted", terraformH)
+	deleters.Register("s3", "hosted", s3H)
 	for _, r := range defs {
 		if handlers[r.Format] == nil {
 			return nil, fmt.Errorf("repository %q: format %q is not implemented yet", r.Name, r.Format)
@@ -541,6 +550,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 	// The registry's snapshot is the stored one, with each repository's gen;
 	// other nodes write the database too.
 	registry := repo.NewRegistry(db, defs)
+	s3H.Registry = registry
 	if err := registry.Reload(context.Background()); err != nil {
 		return nil, fmt.Errorf("load repositories: %w", err)
 	}
@@ -698,6 +708,7 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		Version:  Version,
 		Node:     node,
 		Started:  time.Now(),
+		S3:       cfg.S3,
 		Tasks:    a.Tasks,
 		Log:      log,
 		Events:   hooks,
@@ -736,6 +747,12 @@ func build(cfg *config.Config, log *slog.Logger, blobs map[string]*blob.Store, d
 		}
 		return fmt.Sprintf("blob store %q of this repository is not available on this node", name)
 	}
+	s3H.ReadOnly, s3H.Unavailable = srv.ReadOnly, srv.Unavailable
+	if cfg.S3.Enabled() {
+		srv.S3 = s3H
+	}
+	a.S3Handler = srv.S3Handler()
+	a.S3 = s3H
 	srv.TerraformDiscovery = func() []byte {
 		return terraform.RootDiscovery(registry.Snapshot().Sorted, authn.Snapshot().Settings().TerraformDefaultRepository, baseURL())
 	}
@@ -991,6 +1008,33 @@ func (a *App) Serve(ctx context.Context) error {
 		stopUsage()
 		<-usageDone
 	}()
+	// S3 multipart uploads no part arrived for in a week go, hourly.
+	sweepCtx, stopSweep := context.WithCancel(ctx)
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		if a.S3 == nil {
+			return
+		}
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for {
+			select {
+			case <-sweepCtx.Done():
+				return
+			case <-t.C:
+				if n, err := a.S3.SweepUploads(sweepCtx, s3api.UploadMaxAge); err != nil {
+					a.log.Warn("could not remove stale S3 multipart uploads", "err", logsafe.Err(err))
+				} else if n > 0 {
+					a.log.Info("removed stale S3 multipart uploads", "uploads", n)
+				}
+			}
+		}
+	}()
+	defer func() {
+		stopSweep()
+		<-sweepDone
+	}()
 	// What another process or node changed applies at once or within
 	// accessReloadEvery; the loop ends before Close closes the database.
 	rctx, stopReload := context.WithCancel(ctx)
@@ -1019,7 +1063,22 @@ func (a *App) Serve(ctx context.Context) error {
 		a.log.Info("connections limited by the container's memory limit", "connections", conns)
 	}
 	ln = server.LimitConns(srv, ln, conns)
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
+	// The S3 API's own port (s3.listen): every request there is an S3 one.
+	var s3srv *http.Server
+	if a.Config.S3.Listen != "" && a.S3Handler != nil {
+		s3ln, err := net.Listen("tcp", a.Config.S3.Listen)
+		if err != nil {
+			ln.Close()
+			return err
+		}
+		s3srv = newHTTPServer(a.S3Handler)
+		s3ln = server.LimitConns(s3srv, s3ln, conns)
+		go func() {
+			a.log.Info("listening for the S3 API", "addr", a.Config.S3.Listen)
+			errc <- s3srv.Serve(s3ln)
+		}()
+	}
 	go func() {
 		a.log.Info("listening", "addr", a.Config.Listen)
 		errc <- srv.Serve(ln)
@@ -1037,6 +1096,11 @@ func (a *App) Serve(ctx context.Context) error {
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+	if s3srv != nil {
+		if err := s3srv.Shutdown(sctx); err != nil {
+			s3srv.Close()
+		}
+	}
 	if err := srv.Shutdown(sctx); err != nil {
 		srv.Close()
 		return err

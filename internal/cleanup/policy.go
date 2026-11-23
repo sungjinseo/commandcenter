@@ -95,7 +95,7 @@ const (
 )
 
 var (
-	policyFormats = map[string]bool{"all": true, "maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true, "swift": true, "cocoapods": true, "huggingface": true, "terraform": true}
+	policyFormats = map[string]bool{"all": true, "maven": true, "npm": true, "go": true, "pypi": true, "cargo": true, "raw": true, "helm": true, "yum": true, "nuget": true, "apt": true, "composer": true, "conda": true, "rubygems": true, "gitlfs": true, "r": true, "conan": true, "p2": true, "swift": true, "cocoapods": true, "huggingface": true, "terraform": true, "s3": true}
 	releaseTypes  = map[string]bool{"any": true, "release": true, "prerelease": true}
 )
 
