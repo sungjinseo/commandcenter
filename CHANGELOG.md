@@ -204,6 +204,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the target with its real client.
 
 ### Changed
+- Built with Go 1.27.4, which fixes an HTTP/1 server crash from a header race in net/http's
+  `MaxBytesReader` (GO-2026-6859), and with pgx 5.13.0.
 - The request log's `user` and the monthly users now name the user of a Docker registry token; such
   requests were logged without one.
 - The script API paths (`/service/rest/v1/script`, `/script/{name}`, `/script/{name}/run`) answer as a Nexus
